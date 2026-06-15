@@ -71,6 +71,12 @@ enum Command {
         #[arg(long, default_value = "oracle-prod")]
         target: String,
     },
+    /// Yard-crane (RTG/ES) move stream from MCH_OPERATION → rtg_move_log (full work mix,
+    /// not just DS). Incremental via etl_watermark. Run ~every 5min.
+    RtgMoves {
+        #[arg(long, default_value = "oracle-prod")]
+        target: String,
+    },
 }
 
 fn parse_date(s: &str) -> Result<NaiveDate> {
@@ -169,6 +175,10 @@ async fn main() -> Result<()> {
         Command::Handover { target } => {
             let pool = db::pool().await?;
             wp_extractor::handover::tick_handover(&pool, &target).await?;
+        }
+        Command::RtgMoves { target } => {
+            let pool = db::pool().await?;
+            wp_extractor::rtg_moves::tick_rtg_moves(&pool, &target).await?;
         }
     }
     Ok(())

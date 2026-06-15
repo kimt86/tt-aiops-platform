@@ -1,0 +1,10 @@
+[Unit]
+Description=wp-tt yard-crane move stream every 5min (incremental MCH_OPERATION RTG/ES)
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=300s
+AccuracySec=20s
+
+[Install]
+WantedBy=timers.target
