@@ -493,6 +493,7 @@ td.mono { font-family: "JetBrains Mono", monospace; color: var(--text); }
 .llp-meta { width: 100%; margin-top: 4px; padding: 4px; font-size: 10px; font-weight: 600; color: var(--text-dim);
   background: var(--surface-2); border: 1px solid var(--border); border-radius: 4px; cursor: pointer; }
 .llp-meta:hover { color: var(--text); border-color: var(--border-strong); }
+.llp-hint { margin-top: 5px; font-size: 9.5px; line-height: 1.45; color: var(--text-mute); }
 
 /* TT page — candidate vehicle pool + job pool */
 .pool-body { display: flex; flex-direction: column; gap: 12px; }

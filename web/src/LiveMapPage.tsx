@@ -7,6 +7,7 @@ import maplibregl from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { type Lang } from "./i18n";
+import { api } from "./api";
 import { LiveVehicleDetail, type SelVeh } from "./LiveVehicleDetail";
 
 const ESRI = "https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}";
@@ -154,12 +155,33 @@ function addEquipIcons(map: maplibregl.Map) {
 // ── TOS layer toggles (mirrors wp-tt-data-center LiveLayerPanel) ──
 type LayerKey =
   | "areas" | "pointsQuay" | "pointsBlock" | "pointsGateIn" | "pointsGateOut" | "pointsOther"
-  | "linksStraight" | "linksTurn" | "linksLaneSwitch";
+  | "linksStraight" | "linksTurn" | "linksLaneSwitch"
+  | "learnTopos" | "learnLanes" | "demand";
 type Toggles = Record<LayerKey, boolean>;
 const DEFAULT_TOGGLES: Toggles = {
   areas: true, pointsQuay: false, pointsBlock: false, pointsGateIn: false, pointsGateOut: false,
   pointsOther: false, linksStraight: false, linksTurn: false, linksLaneSwitch: false,
+  learnTopos: false, learnLanes: false, demand: false,
 };
+const LAYER_TOTAL = 12; // toggle count shown in the panel header
+const EMPTY_FC: GeoJSON.FeatureCollection = { type: "FeatureCollection", features: [] };
+
+// heading-oriented line segments for the learned driving-lane field (geometry, no text glyphs).
+function laneSegments(
+  grid: { lat: number; lon: number; passes: number; heading_deg: number | null; directionality: number | null }[],
+): GeoJSON.Feature[] {
+  const L = 11; // meters, half-segment (~half a 22m lane cell)
+  return grid.map((c) => {
+    const th = ((c.heading_deg ?? 0) * Math.PI) / 180; // 0 = North
+    const dLat = (L / 111320) * Math.cos(th);
+    const dLon = (L / (111320 * Math.cos((c.lat * Math.PI) / 180))) * Math.sin(th);
+    return {
+      type: "Feature",
+      geometry: { type: "LineString", coordinates: [[c.lon - dLon, c.lat - dLat], [c.lon + dLon, c.lat + dLat]] },
+      properties: { dir: c.directionality ?? 0, passes: c.passes },
+    } as GeoJSON.Feature;
+  });
+}
 // toggle → maplibre layer ids + swatch color
 const NODE_LAYERS: Record<string, { key: LayerKey; cat: string; color: string; ko: string; en: string }> = {
   q: { key: "pointsQuay", cat: "quay", color: "#ffae6e", ko: "안벽 작업", en: "Quay" },
@@ -274,6 +296,37 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
       }
 
       // ── vehicles (top) ──
+      // ── learned-layout (② work-points · ③ lanes) + dispatch demand overlays ──
+      map.addSource("learn-topos", { type: "geojson", data: EMPTY_FC });
+      map.addLayer({
+        id: "lt-pt", type: "circle", source: "learn-topos", layout: { visibility: "none" },
+        paint: {
+          "circle-radius": ["interpolate", ["linear"], ["zoom"], 12, ["case", [">=", ["get", "n"], 30], 3, 1.6], 17, ["case", [">=", ["get", "n"], 30], 7, 4]],
+          "circle-color": ["case", ["get", "crane"], "#f59e0b", "#5eead4"],
+          "circle-opacity": ["case", [">=", ["get", "n"], 30], 0.85, 0.4],
+          "circle-stroke-width": ["case", [">=", ["get", "n"], 30], 1, 0], "circle-stroke-color": "#0a0f1d",
+        },
+      });
+      map.addSource("learn-lanes", { type: "geojson", data: EMPTY_FC });
+      map.addLayer({
+        id: "ll-seg", type: "line", source: "learn-lanes", layout: { visibility: "none", "line-cap": "round" },
+        paint: {
+          "line-color": ["step", ["get", "dir"], "#64748b", 0.5, "#f59e0b", 0.8, "#34d399"],
+          "line-width": ["interpolate", ["linear"], ["zoom"], 13, 1, 17, 2.6],
+          "line-opacity": 0.8,
+        },
+      });
+      map.addSource("demand", { type: "geojson", data: EMPTY_FC });
+      map.addLayer({
+        id: "dm-bub", type: "circle", source: "demand", layout: { visibility: "none" },
+        paint: {
+          "circle-radius": ["interpolate", ["linear"], ["sqrt", ["get", "n"]], 1, 5, 9, 24],
+          "circle-color": ["case", ["==", ["get", "jt"], "DS"], "#fb923c", "#22d3ee"],
+          "circle-opacity": 0.26,
+          "circle-stroke-width": 1.3, "circle-stroke-color": ["case", ["==", ["get", "jt"], "DS"], "#fb923c", "#22d3ee"],
+        },
+      });
+
       map.addSource("vehicles", { type: "geojson", data: { type: "FeatureCollection", features: [] } });
       addEquipIcons(map); // equipment shapes × state colors
       // marker shape = equipment (eq), color = state — icon name is "<eq>-<state>".
@@ -359,7 +412,59 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
     for (const id of AREA_LAYERS) if (map.getLayer(id)) map.setLayoutProperty(id, "visibility", vis(toggles.areas));
     for (const k of Object.keys(NODE_LAYERS)) if (map.getLayer(`nd-${k}`)) map.setLayoutProperty(`nd-${k}`, "visibility", vis(toggles[NODE_LAYERS[k].key]));
     for (const k of Object.keys(LINK_LAYERS)) if (map.getLayer(`lnk-${k}`)) map.setLayoutProperty(`lnk-${k}`, "visibility", vis(toggles[LINK_LAYERS[k].key]));
+    if (map.getLayer("lt-pt")) map.setLayoutProperty("lt-pt", "visibility", vis(toggles.learnTopos));
+    if (map.getLayer("ll-seg")) map.setLayoutProperty("ll-seg", "visibility", vis(toggles.learnLanes));
+    if (map.getLayer("dm-bub")) map.setLayoutProperty("dm-bub", "visibility", vis(toggles.demand));
   }, [toggles, ready]);
+
+  // learned-layout (②③) + dispatch demand overlays: fetch + build GeoJSON while toggled on.
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !ready) return;
+    const wantTopos = toggles.learnTopos || toggles.demand; // demand reuses topos coords
+    if (!wantTopos && !toggles.learnLanes) return;
+    let alive = true;
+    const load = async () => {
+      try {
+        if (wantTopos) {
+          const t = await api.learnTopos();
+          if (!alive) return;
+          if (toggles.learnTopos) {
+            const feats = t.points.map((p) => ({ type: "Feature", geometry: { type: "Point", coordinates: [p.lon, p.lat] }, properties: { crane: p.is_crane, n: p.n, topos: p.topos } } as GeoJSON.Feature));
+            (map.getSource("learn-topos") as maplibregl.GeoJSONSource | undefined)?.setData({ type: "FeatureCollection", features: feats });
+          }
+          if (toggles.demand) {
+            // resolve unassigned demand to learned coords: DS → its QC crane, LD → its source block.
+            const crane = new Map<string, [number, number]>();
+            const blk = new Map<string, { lon: number; lat: number; k: number }>();
+            for (const p of t.points) {
+              if (p.is_crane) crane.set(p.topos, [p.lon, p.lat]);
+              else { const pre = p.topos.split("-")[0]; const a = blk.get(pre) ?? { lon: 0, lat: 0, k: 0 }; a.lon += p.lon; a.lat += p.lat; a.k++; blk.set(pre, a); }
+            }
+            const wp = await api.workpool();
+            if (!alive) return;
+            const feats: GeoJSON.Feature[] = [];
+            for (const c of wp.candidates) {
+              let coord: [number, number] | null = null;
+              if (c.jobtype === "DS" && c.qc) coord = crane.get(c.qc) ?? null;
+              else if (c.src_block) { const a = blk.get(c.src_block); if (a && a.k) coord = [a.lon / a.k, a.lat / a.k]; }
+              if (!coord) continue;
+              feats.push({ type: "Feature", geometry: { type: "Point", coordinates: coord }, properties: { jt: c.jobtype ?? "?", n: c.n } } as GeoJSON.Feature);
+            }
+            (map.getSource("demand") as maplibregl.GeoJSONSource | undefined)?.setData({ type: "FeatureCollection", features: feats });
+          }
+        }
+        if (toggles.learnLanes) {
+          const l = await api.learnLanes();
+          if (!alive) return;
+          (map.getSource("learn-lanes") as maplibregl.GeoJSONSource | undefined)?.setData({ type: "FeatureCollection", features: laneSegments(l.grid) });
+        }
+      } catch { /* keep last good data */ }
+    };
+    load();
+    const iv = setInterval(load, 15000);
+    return () => { alive = false; clearInterval(iv); };
+  }, [toggles.learnTopos, toggles.learnLanes, toggles.demand, ready]);
 
   // render loop — prefers the live feed, falls back to the captured replay.
   useEffect(() => {
@@ -491,7 +596,7 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
       <aside className={`llp ${panelOpen ? "open" : "closed"}`}>
         <button className="llp-head" onClick={() => setPanelOpen((v) => !v)}>
           <span className="llp-title">{ko ? "레이어" : "Layers"}</span>
-          <span className="llp-count">{activeCount} / 9</span>
+          <span className="llp-count">{activeCount} / {LAYER_TOTAL}</span>
           <span className="llp-chev">{panelOpen ? "▾" : "▸"}</span>
         </button>
         {panelOpen && (
@@ -513,6 +618,13 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
                 <Row key={l.key} on={toggles[l.key]} color={l.color} label={ko ? l.ko : l.en} onChange={(v) => set(l.key, v)} />
               ))}
               <button className="llp-meta" onClick={() => setGroup(linkKeys, !allLinks)}>{allLinks ? (ko ? "모든 링크 OFF" : "All OFF") : (ko ? "모든 링크 ON" : "All ON")}</button>
+            </section>
+            <section className="llp-sec">
+              <header>{ko ? "학습·배차 (GPS·실시간)" : "Learned · Dispatch"}</header>
+              <Row on={toggles.learnTopos} color="#5eead4" label={ko ? "② 작업지점 좌표 (학습)" : "② Work-points (learned)"} onChange={(v) => set("learnTopos", v)} />
+              <Row on={toggles.learnLanes} color="#34d399" label={ko ? "③ 주행 차선 (학습)" : "③ Driving lanes (learned)"} onChange={(v) => set("learnLanes", v)} />
+              <Row on={toggles.demand} color="#fb923c" label={ko ? "작업 수요 · 미배정 (DS/LD)" : "Demand · unassigned"} onChange={(v) => set("demand", v)} />
+              <div className="llp-hint">{ko ? "②원: 채움=확신(n≥30)·청록=블록·주황=크레인 · ③선: 초록=일방·주황=양방 · 수요원: 크기=대수" : "② circles (filled=confident) · ③ lines (green=one-way) · demand bubbles sized by count"}</div>
             </section>
           </div>
         )}
