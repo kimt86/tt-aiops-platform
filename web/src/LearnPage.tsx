@@ -3,7 +3,7 @@
 // ③ 차량 주행 차선: 이동 TT의 GPS 트레이스를 격자에 집계 → 도로·방향.
 import { useEffect, useMemo, useState } from "react";
 import { type Lang } from "./i18n";
-import { api, type LearnTopos, type LearnToposPoint, type LanesData, type LaneCellOut, type TravelData, type TravelOd, type SoonIdleData } from "./api";
+import { api, type LearnTopos, type LearnToposPoint, type LanesData, type TravelData, type TravelOd, type SoonIdleData } from "./api";
 import { LineChart } from "./charts";
 
 const ko = (lang: Lang) => lang === "ko";
@@ -52,29 +52,6 @@ function OdRow({ o }: { o: TravelOd }) {
       <span className="mono">{mDist(o.dist_m)}</span>
       <span className="mono">{kmh(o.speed_kmh)}</span>
     </div>
-  );
-}
-
-// 학습된 차선망: 각 격자 셀을 진행방향으로 향한 짧은 선분으로, 방향성으로 색칠.
-function LaneMap({ grid, lang }: { grid: LaneCellOut[]; lang: Lang }) {
-  if (grid.length < 5) return <div className="cyc-empty">{ko(lang) ? "차선 데이터 수집 중" : "collecting lane data"}</div>;
-  const lats = grid.map((c) => c.lat), lons = grid.map((c) => c.lon);
-  const minLat = Math.min(...lats), maxLat = Math.max(...lats), minLon = Math.min(...lons), maxLon = Math.max(...lons);
-  const W = 640, H = 420, pad = 12;
-  const sx = (lon: number) => pad + (maxLon === minLon ? 0.5 : (lon - minLon) / (maxLon - minLon)) * (W - 2 * pad);
-  const sy = (lat: number) => pad + (maxLat === minLat ? 0.5 : 1 - (lat - minLat) / (maxLat - minLat)) * (H - 2 * pad);
-  const col = (d: number | null) => (d == null ? "#64748b" : d >= 0.8 ? "#34d399" : d >= 0.5 ? "#f59e0b" : "#64748b");
-  const top = grid.slice(0, 1500);
-  return (
-    <svg viewBox={`0 0 ${W} ${H}`} style={{ width: "100%", height: "auto", background: "var(--bg-soft)", borderRadius: 8 }}>
-      {top.map((c, i) => {
-        const x = sx(c.lon), y = sy(c.lat);
-        const th = ((c.heading_deg ?? 0) * Math.PI) / 180;
-        const dx = Math.sin(th), dy = -Math.cos(th);
-        const L = 3 + Math.min(5, Math.log2((c.passes || 1) + 1));
-        return <line key={i} x1={x - L * dx} y1={y - L * dy} x2={x + L * dx} y2={y + L * dy} stroke={col(c.directionality)} strokeWidth={1.3} strokeLinecap="round" opacity={0.82} />;
-      })}
-    </svg>
   );
 }
 
@@ -220,13 +197,8 @@ export default function LearnPage({ lang }: { lang: Lang }) {
           <div className="cyc-tp-box">{passVals.length > 1 ? <LineChart values={passVals} color="#60a5fa" axes /> : <div className="cyc-empty">{ko(lang) ? "수집 중" : "collecting"}</div>}</div>
         </div>
       </div>
-      <div className="cyc-tp">
-        <div className="cyc-sec-h">
-          {ko(lang) ? "학습된 차선망 (선=진행방향 · 초록=일방 · 주황=양방/혼합)" : "Learned lane network (line=heading · green=one-way · amber=two-way)"}
-        </div>
-        <div className="cyc-tp-box" style={{ height: "auto" }}>
-          {ln ? <LaneMap grid={ln.grid} lang={lang} /> : <div className="cyc-empty">{ko(lang) ? "수집 중" : "collecting"}</div>}
-        </div>
+      <div style={{ fontSize: 12, color: "var(--text-mute)", margin: "2px 2px 8px" }}>
+        {ko(lang) ? "차선망 지도는 라이브맵 → 레이어 → ③ 주행 차선에서 위성 위로 확인하세요." : "See the lane network on the live map → Layers → ③ Driving lanes."}
       </div>
 
       <div className="cyc-sec-h" style={{ marginTop: 22 }}>{ko(lang) ? "④ Soon-idle 예측 정확도 (그림자 — 예측 vs 실제 유휴 comp_ts)" : "④ Soon-idle prediction accuracy (shadow)"}</div>
