@@ -87,7 +87,16 @@ const kindChip = (jt: string | null) => (jt === "DS" ? "dsc" : jt === "LD" ? "lo
 const kindLabel = (jt: string | null) => (jt === "DS" ? "DSC" : jt === "LD" ? "LOD" : "SHF");
 
 // ───────────────────────── live vehicle pool ─────────────────────────
-type LiveTT = { id: string; cls: string; dispatch?: string; jobtype?: string; topos1?: string; dispatch_reason?: string; swappable?: boolean; dest_remaining_m?: number; nearest_rtg_m?: number };
+type LiveTT = { id: string; cls: string; dispatch?: string; jobtype?: string; topos1?: string; dispatch_reason?: string; swappable?: boolean; dest_remaining_m?: number; nearest_rtg_m?: number; free_eta_s?: number; free_eta_hi_s?: number };
+
+// "곧 빔 ~N분 (최대 M분)" — shadow ETA-to-free from the backend (free_eta_s), display-only.
+// Grounded in tt_cycle_v2 (도착→자유 중앙 8분, 운반중 17분); the p90 width conveys the RTG-wait tail.
+function etaLabel(d: LiveTT, lang: Lang): string | null {
+  if (d.free_eta_s == null) return null;
+  const m = Math.round(d.free_eta_s / 60);
+  const hi = d.free_eta_hi_s != null ? Math.round(d.free_eta_hi_s / 60) : null;
+  return ko(lang) ? `~${m}분${hi ? ` (최대 ${hi})` : ""}` : `~${m}m${hi ? ` (max ${hi})` : ""}`;
+}
 
 // localized "why" for a soon-idle TT (built from structured fields, not the
 // backend's Korean dispatch_reason — so EN mode shows no Korean).
@@ -156,7 +165,7 @@ function LiveDispatchPool({ lang, snap, err }: { lang: Lang; snap: Snap | null; 
           </div>
           <div className="lvp-col">
             <div className="lvp-col-h"><span className="sw" style={{ background: DSP_META.soon_idle.color }} />{ko(lang) ? "곧 유휴" : "Soon-idle"}<span className="lvp-cn">{soon.length}</span></div>
-            <div className="lvp-sub">{ko(lang) ? "임박(RTG 물리 관여) + 접근(RTG 활성·~12분)" : "imminent (RTG engaged) + approaching (RTG active ~12m)"}</div>
+            <div className="lvp-sub">{ko(lang) ? "임박(RTG 물리 관여·~2분) + 접근(블록 도착·~8분, 측정값)" : "imminent (RTG engaged ~2m) + approaching (at block ~8m, measured)"}</div>
             <div className="lvp-list">
               {soon.length === 0 && <div className="lvp-empty">{ko(lang) ? "없음" : "none"}</div>}
               {soon.map((d) => (
@@ -165,6 +174,7 @@ function LiveDispatchPool({ lang, snap, err }: { lang: Lang; snap: Snap | null; 
                   <span className="lvp-id mono">{d.id}</span>
                   {d.jobtype && <span className={`lvp-job type-${d.jobtype.toLowerCase()}`}>{d.jobtype}</span>}
                   {d.topos1 && <span className="lvp-dest mono">→{d.topos1}</span>}
+                  {etaLabel(d, lang) && <span className="lvp-eta" title={ko(lang) ? "곧 빔까지 추정(측정 중앙값·표시 전용, 배차 미연결)" : "estimated time-to-free (measured median · display-only, not yet wired to dispatch)"}>{etaLabel(d, lang)}</span>}
                   <span className="lvp-why">{soonWhy(d, lang)}</span>
                 </div>
               ))}

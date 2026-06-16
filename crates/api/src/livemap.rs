@@ -504,6 +504,12 @@ struct DeviceOut {
     dest_remaining_m: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     swappable: Option<bool>,
+    // SHADOW: display-only time-to-free estimate (median + p90 seconds), by state+jobtype.
+    // Not used in dispatch yet — see free_eta_s().
+    #[serde(skip_serializing_if = "Option::is_none")]
+    free_eta_s: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    free_eta_hi_s: Option<i64>,
 }
 
 /// Crane PLC state served alongside a crane's GPS fix.
@@ -793,6 +799,28 @@ fn classify_tt(
     }
 }
 
+/// Display-only estimate of time-to-free (median, p90) in seconds, by dispatch state + jobtype.
+/// SHADOW: shown in the API/UI for situational awareness; NOT wired into any dispatch cost or
+/// ranking yet (promotion happens only after the live-emitted ETAs are validated against actuals).
+///
+/// Grounded in `tt_cycle_v2` measurement (DS, last 36h, 2026-06-16, all from the same GPS clock so
+/// the tiers are internally consistent):
+///   - delivering (loaded, still driving): pickup_left→dropped  p50 17.2m / p90 40.3m  (n=7,264)
+///   - arrived at block (approaching/wait_rtg): laden_arrived→dropped  p50 8.0m / p90 27m (n=6,249)
+///   - soon_idle (RTG ≤30m engaged, or quay PLC): ~2m — least-grounded tier (no RTG-distance history),
+///     rough "handover in progress" value.
+/// Only DS is grounded; other jobtypes get None (their free-point differs and is unmeasured here).
+fn free_eta(state: &str, jobtype: Option<&str>) -> (Option<i64>, Option<i64>) {
+    let ds = jobtype == Some("DS");
+    match state {
+        "delivering" if ds => (Some(1030), Some(2420)),
+        "approaching" => (Some(480), Some(1620)), // approaching is DS-only by construction
+        "wait_rtg" if ds => (Some(480), Some(1620)),
+        "soon_idle" => (Some(120), Some(360)),    // imminent: DS RTG≤30m or LD quay handover
+        _ => (None, None),
+    }
+}
+
 /// `GET /api/livemap/positions` — active device fixes (age ≤ 120s).
 pub async fn positions(State(lm): State<Arc<LiveMap>>, State(pool): State<PgPool>) -> Json<PositionsOut> {
     let now = Utc::now().timestamp_millis();
@@ -832,6 +860,11 @@ pub async fn positions(State(lm): State<Arc<LiveMap>>, State(pool): State<PgPool
             let nearest_rtg_m = c.as_ref().and_then(|c| c.nearest_rtg_m);
             let dest_remaining_m = c.as_ref().and_then(|c| c.dest_remaining_m);
             let swappable = c.as_ref().and_then(|c| c.swappable);
+            // shadow ETA-to-free, derived from the classified state (display-only)
+            let (free_eta_s, free_eta_hi_s) = c
+                .as_ref()
+                .map(|c| free_eta(c.state, p.jobtype.as_deref()))
+                .unwrap_or((None, None));
             // attach crane PLC state (ctab zone) when fresh — id matches the crane id.
             let plc_out = plc.get(id).and_then(|c| {
                 let pa = (now - c.last_seen_ms) / 1000;
@@ -875,6 +908,8 @@ pub async fn positions(State(lm): State<Arc<LiveMap>>, State(pool): State<PgPool
                 nearest_rtg_m,
                 dest_remaining_m,
                 swappable,
+                free_eta_s,
+                free_eta_hi_s,
             })
         })
         .collect();
