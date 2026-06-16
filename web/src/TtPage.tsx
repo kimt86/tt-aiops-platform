@@ -288,9 +288,16 @@ function QcCol({ q, lang, ttState, working, mph }: { q: WpQc; lang: Lang; ttStat
               <div className="bot">
                 {m.jobtype === "DS" ? `${m.yt_topos ?? m.from_pos ?? "?"} → ${m.armgc ?? "RTG"}` : `${m.armgc ?? m.yt_topos ?? "?"} → ${q.qc}`}
                 {(() => { const e = etwLabel(m.etw_accurate, m.etw_expires, lang); return e && <span className={`jetw ${e.cls}`} style={{ marginLeft: 6 }} title={ko(lang) ? "TOS ETW RPC 기반 정확 ETW" : "accurate ETW from the TOS ETW RPC"}>ETW {e.text}</span>; })()}
-                {m.actv_ts && (() => {
+                {/* DS만 노출: ACTV는 QC 양하 물리 move 완료와 0초 일치(검증 n=3464, 위반0) → "트럭 적재" 확정,
+                    자유까지 중앙 ~12분의 카운트다운 시작점. LD의 ACTV는 RTG/블록측 활성으로 실제 픽업과
+                    느슨(±90초 내 34%뿐, n=435) + 적재 *시작*단(곧유휴의 반대 끝) + 어떤 dispatch 상태도
+                    안 먹임 → 표시하면 오해만 줌(검증 2026-06-16). LD 곧유휴는 QC PLC 쪽이 담당. */}
+                {m.actv_ts && m.jobtype === "DS" && (() => {
                   const mins = Math.max(0, Math.round((Date.now() - new Date(m.actv_ts).getTime()) / 60000));
-                  return <span className="jetw rtg-actv" style={{ marginLeft: 6 }} title={ko(lang) ? "TOS ACTV — 소스 크레인이 트럭에 적재 완료 후 경과(DS=QC양하·LD=RTG픽업, 검증: ACTV=크레인 move 완료 0초 일치). 자유까지 중앙 ~12분. 물리 집기 순간 아님." : "TOS ACTV — since the source crane loaded the truck (DS=QC discharge, verified ACTV==crane move complete). ~12m median to free."}>{ko(lang) ? `적재 ${mins}분` : `loaded ${mins}m`}</span>;
+                  const title = ko(lang)
+                    ? "TOS ACTV — QC 양하 완료(트럭 적재) 후 경과. 검증: ACTV==QC move 완료 0초 일치(n=3464). 자유까지 중앙 ~12분. 물리 집기 순간 아님."
+                    : "TOS ACTV — since QC discharged the box onto the truck. Verified ACTV==QC move complete (0s, n=3464). ~12m median to free.";
+                  return <span className="jetw rtg-actv" style={{ marginLeft: 6 }} title={title}>{ko(lang) ? `적재 ${mins}분` : `loaded ${mins}m`}</span>;
                 })()}
               </div>
             </div>

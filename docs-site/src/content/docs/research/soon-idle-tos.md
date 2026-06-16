@@ -40,7 +40,8 @@ sidebar:
 |---|---|---|
 | HISTORY가 대상 트럭ID를 직접 주는가 | **확정 — `JOB_HIST_YTNO` 실재**(DS 이력 87% 채움: 147,670/169,422) | [ORA] `all_tab_columns` + 집계 |
 | 워터마크용 datetime 인덱스 존재 여부 | **확정 — 존재.** `IDX_JOBHIST_DATETIME = (JOB_HIST_DATE‖JOB_HIST_TIME, JOBSTATUS)` (+ YTNO별·ARMGC별 datetime 인덱스) | [ORA] `all_ind_expressions` |
-| `ACTV_DT` 의미 | **✅ 확정 — QC 양하 완료(트럭 적재) 시점: ACTV==QC move 완료 0초 일치(위반 0/3464). RTG 물리 들어올림은 ACTV +~11분** | [ORA] JOB_ORDER_HISTORY⨝MCH_OPERATION |
+| `ACTV_DT` 의미 (DS) | **✅ 확정 — QC 양하 완료(트럭 적재) 시점: ACTV==QC move 완료 0초 일치(위반 0/3464). RTG 물리 들어올림은 ACTV +~11분** | [ORA] JOB_ORDER_HISTORY⨝MCH_OPERATION |
+| `ACTV_DT` 의미 (LD) — *2026-06-16 검증* | **⚠️ 비대칭: DS처럼 깔끔한 "소스 크레인=RTG 픽업" 등식이 아님.** ACTV는 RTG/블록측이긴 하나(QC적하 ±90초 매칭 2% vs RTG픽업 34%) RTG 픽업 완료와 **느슨**(±90초 내 34%뿐, n=435; RTG픽업 대비 중앙 −46초·IQR −21~+27분). → LD 칩은 "적재" 단언 불가 → **"활성 N분"** 으로 분리 표기. (이유: LD 박스는 픽업 전 재정리(RH)·재배치(MI/MO)를 거칠 수 있고 RTG move 타임스탬프가 거침 §3.) | [ORA] JOB_ORDER_HISTORY⨝MCH_OPERATION(LD) |
 | JOBSTATUS 코드 | **확정 — `C`=완료 `A`=활성 `Q`=대기 `P`=계획 `B`=차단** | [코드: workpool.sql 주석] |
 
 ### 새 핵심 발견 — 양하(DS) 곧유휴 신호가 TOS 라이브에 직접 존재
