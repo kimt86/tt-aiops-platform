@@ -1618,20 +1618,30 @@ pub fn spawn_travel_aggregator(pool: PgPool) {
                 "WITH legs AS (
                    SELECT v2.ytno, v2.dropped_at, e.ord,
                           e.val->>'target' AS target,
+                          (e.val->>'lat')::float8 AS lat,
+                          (e.val->>'lon')::float8 AS lon,
                           (e.val->>'left')::bigint AS left_ms,
                           (e.val->>'arrived')::bigint AS arr_ms
                      FROM tt_cycle_v2 v2,
                           jsonb_array_elements(v2.legs) WITH ORDINALITY e(val, ord)
                     WHERE v2.dropped_at > now() - interval '15 minutes'
                  )
-                 INSERT INTO learn_travel_sample (ytno, dropped_at, leg_ord, origin, dest, travel_s, dist_m, hour)
+                 INSERT INTO learn_travel_sample
+                   (ytno, dropped_at, leg_ord, origin, dest, travel_s, dist_m, hour,
+                    origin_zone, dest_zone, dow, congestion)
                  SELECT a.ytno, a.dropped_at, a.ord, a.target, b.target,
                         ((b.arr_ms - a.left_ms) / 1000)::int,
                         CASE WHEN po.topos IS NOT NULL AND pd.topos IS NOT NULL THEN
                           sqrt( power((pd.lat - po.lat) * 111320.0, 2)
                               + power((pd.lon - po.lon) * 111320.0 * cos(radians((po.lat + pd.lat) / 2)), 2) )
                         END,
-                        extract(hour FROM to_timestamp(b.arr_ms / 1000.0))::int
+                        extract(hour FROM to_timestamp(b.arr_ms / 1000.0))::int,
+                        travel_zone(a.target, a.lat, a.lon),
+                        travel_zone(b.target, b.lat, b.lon),
+                        extract(dow FROM to_timestamp(b.arr_ms / 1000.0))::int,
+                        (SELECT count(*) FROM tt_cycle_v2 cc
+                          WHERE cc.opened_at <= to_timestamp(b.arr_ms / 1000.0)
+                            AND cc.dropped_at >= to_timestamp(b.arr_ms / 1000.0))::int
                    FROM legs a
                    JOIN legs b ON a.ytno = b.ytno AND a.dropped_at = b.dropped_at AND b.ord = a.ord + 1
                    LEFT JOIN learn_topos_point po ON po.topos = a.target
@@ -1649,23 +1659,39 @@ pub fn spawn_travel_aggregator(pool: PgPool) {
                 "WITH cyc AS (
                    SELECT v2.ytno, v2.dropped_at, v2.empty_travel_start_at, v2.empty_arrived_at,
                           (v2.legs->0->>'target') AS pickup_topos,
-                          (v2.legs->(jsonb_array_length(v2.legs)-1)->>'target') AS drop_topos
+                          (v2.legs->0->>'lat')::float8 AS pickup_lat,
+                          (v2.legs->0->>'lon')::float8 AS pickup_lon,
+                          (v2.legs->(jsonb_array_length(v2.legs)-1)->>'target') AS drop_topos,
+                          (v2.legs->(jsonb_array_length(v2.legs)-1)->>'lat')::float8 AS drop_lat,
+                          (v2.legs->(jsonb_array_length(v2.legs)-1)->>'lon')::float8 AS drop_lon
                      FROM tt_cycle_v2 v2
                     WHERE v2.dropped_at > now() - interval '30 minutes'
                       AND jsonb_array_length(v2.legs) >= 1
                  ),
                  wp AS (
-                   SELECT *, lag(drop_topos) OVER (PARTITION BY ytno ORDER BY dropped_at) AS prev_drop
+                   SELECT *,
+                          lag(drop_topos) OVER w AS prev_drop,
+                          lag(drop_lat)   OVER w AS prev_drop_lat,
+                          lag(drop_lon)   OVER w AS prev_drop_lon
                      FROM cyc
+                   WINDOW w AS (PARTITION BY ytno ORDER BY dropped_at)
                  )
-                 INSERT INTO learn_travel_sample (ytno, dropped_at, leg_ord, origin, dest, travel_s, dist_m, hour)
+                 INSERT INTO learn_travel_sample
+                   (ytno, dropped_at, leg_ord, origin, dest, travel_s, dist_m, hour,
+                    origin_zone, dest_zone, dow, congestion)
                  SELECT wp.ytno, wp.dropped_at, 0, wp.prev_drop, wp.pickup_topos,
                         extract(epoch FROM wp.empty_arrived_at - wp.empty_travel_start_at)::int,
                         CASE WHEN po.topos IS NOT NULL AND pd.topos IS NOT NULL THEN
                           sqrt( power((pd.lat - po.lat) * 111320.0, 2)
                               + power((pd.lon - po.lon) * 111320.0 * cos(radians((po.lat + pd.lat) / 2)), 2) )
                         END,
-                        extract(hour FROM wp.empty_arrived_at)::int
+                        extract(hour FROM wp.empty_arrived_at)::int,
+                        travel_zone(wp.prev_drop, wp.prev_drop_lat, wp.prev_drop_lon),
+                        travel_zone(wp.pickup_topos, wp.pickup_lat, wp.pickup_lon),
+                        extract(dow FROM wp.empty_arrived_at)::int,
+                        (SELECT count(*) FROM tt_cycle_v2 cc
+                          WHERE cc.opened_at <= wp.empty_arrived_at
+                            AND cc.dropped_at >= wp.empty_arrived_at)::int
                    FROM wp
                    LEFT JOIN learn_topos_point po ON po.topos = wp.prev_drop
                    LEFT JOIN learn_topos_point pd ON pd.topos = wp.pickup_topos
