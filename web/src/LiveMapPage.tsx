@@ -31,6 +31,12 @@ type Dispatch = "idle" | "staging" | "empty_travel" | "delivering" | "soon_idle"
 type LiveDev = { id: string; cls: string; lat: number; lon: number; speed: number; engine: number; age_s: number; dispatch?: Dispatch; jobtype?: string; topos1?: string };
 type LiveSnap = { source: string; connected: boolean; count: number; as_of: string | null; dispatch_counts?: Record<string, number>; devices: LiveDev[] };
 
+// smooth (delayed) playback: show the map N minutes in the past so we can interpolate each
+// device between the GPS fixes that have arrived since — turning the sparse "teleporting" feed
+// into smooth motion. Presets in minutes (0 = realtime, no interpolation).
+const DELAY_OPTS = [0, 1, 3, 5] as const;
+const MAX_DELAY_MIN = 5;
+
 // dispatch-state highlight on the map (TT pool building)
 // dispatch pools — filter the map by vehicle-pool type (TT only)
 const DISPATCH_POOLS: { key: Dispatch; ko: string; en: string; color: string }[] = [
@@ -234,6 +240,10 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
   const [useLive, setUseLive] = useState(true);
   const useLiveRef = useRef(useLive);
   useLiveRef.current = useLive;
+  const [delayMin, setDelayMin] = useState(0); // smooth playback: render this many min in the past
+  const delayMinRef = useRef(0); delayMinRef.current = delayMin;
+  const histRef = useRef<Map<string, { cls: string; pts: Pt[] }>>(new Map()); // per-device fix buffer
+  const clockOffsetRef = useRef(0); // server(as_of) − client(Date.now): a continuous, skew-free time base
   const [liveInfo, setLiveInfo] = useState<{ connected: boolean; count: number; asOf: string | null }>({ connected: false, count: 0, asOf: null });
   const [dispatchCounts, setDispatchCounts] = useState<Record<string, number>>({});
 
@@ -375,6 +385,25 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
         const j: LiveSnap = await r.json();
         if (!alive) return;
         liveRef.current = j;
+        // buffer each device's DISTINCT fixes (keyed by fix time) for smooth delayed playback,
+        // and track the server clock so the render loop can advance a continuous display time.
+        {
+          const asOfMs = j.as_of ? Date.parse(j.as_of) : Date.now();
+          clockOffsetRef.current = asOfMs - Date.now();
+          const hist = histRef.current;
+          const keepMs = asOfMs - (MAX_DELAY_MIN * 60 + 30) * 1000;
+          for (const d of j.devices) {
+            const fixMs = asOfMs - Math.max(0, d.age_s) * 1000; // actual GPS fix time
+            let e = hist.get(d.id);
+            if (!e) { e = { cls: d.cls, pts: [] }; hist.set(d.id, e); }
+            const last = e.pts[e.pts.length - 1];
+            if (!last || fixMs > last[0] + 500) { // only on a NEW fix (dedupe stationary repeats)
+              e.pts.push([fixMs, d.lat, d.lon, d.speed, d.engine]);
+              while (e.pts.length > 1 && e.pts[0][0] < keepMs) e.pts.shift();
+            }
+          }
+          for (const [id, e] of hist) if (e.pts.length && e.pts[e.pts.length - 1][0] < keepMs) hist.delete(id);
+        }
         setLiveInfo({ connected: j.connected, count: j.count, asOf: j.as_of });
         setDispatchCounts(j.dispatch_counts ?? {});
         const ec: Record<string, number> = { TT: 0, RTG: 0, QC: 0, ETC: 0 };
@@ -479,7 +508,33 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
         let moving = 0, idle = 0, off = 0;
         const live = liveRef.current;
         const liveOn = useLiveRef.current && live != null && live.devices.length > 0;
-        if (liveOn) {
+        if (liveOn && delayMinRef.current > 0) {
+          // smooth playback: render at (server now − N min), interpolating each device's buffered track.
+          // displayMs advances every frame via the continuous client clock → motion is smooth, not stepped.
+          const hist = histRef.current;
+          const serverNow = Date.now() + clockOffsetRef.current;
+          let oldest = Infinity;
+          for (const e of hist.values()) if (e.pts.length) oldest = Math.min(oldest, e.pts[0][0]);
+          const displayMs = Math.max(serverNow - delayMinRef.current * 60000, oldest); // clamp → ramps up as buffer fills
+          const disp = new Map<string, Dispatch | undefined>();
+          for (const d of live!.devices) disp.set(d.id, d.dispatch);
+          for (const [id, e] of hist) {
+            const arr = e.pts;
+            if (arr.length === 0) continue;
+            const firstT = arr[0][0], lastT = arr[arr.length - 1][0];
+            if (displayMs < firstT - 60000 || displayMs > lastT + 60000) continue; // not present around this time
+            const t = Math.min(Math.max(displayMs, firstT), lastT);
+            const p = posAt({ id, cls: e.cls, pts: arr }, t);
+            if (!p) continue;
+            if (p.state === "moving") moving++; else if (p.state === "idle") idle++; else off++;
+            const eq = equip(e.cls);
+            if (!ef.has(eq)) continue;
+            const dsp = disp.get(id);
+            if (df && eq === "TT" && dsp !== df) continue;
+            if (sf && p.state !== sf) continue;
+            feats.push({ type: "Feature", geometry: { type: "Point", coordinates: [p.lon, p.lat] }, properties: { id, state: p.state, eq, speed: p.speed, dispatch: dsp ?? "" } });
+          }
+        } else if (liveOn) {
           // live GPS: place each device at its latest fix (no interpolation).
           for (const d of live!.devices) {
             const st = stateOf(d.speed, d.engine);
@@ -562,9 +617,19 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
           <span className="dot" />
           {liveActive ? (ko ? "라이브" : "LIVE") : (ko ? "리플레이" : "REPLAY")}
         </button>
+        {liveActive && (
+          <div className="map-delay" title={ko ? "지연 재생 — 그 사이 도착한 GPS로 차량 움직임을 부드럽게 보간" : "Delayed playback — interpolate motion from fixes that arrive during the delay"}>
+            <span className="mdl-lbl">{ko ? "부드럽게" : "Smooth"}</span>
+            {DELAY_OPTS.map((m) => (
+              <button key={m} className={`mdl${delayMin === m ? " on" : ""}`} onClick={() => setDelayMin(m)}>
+                {m === 0 ? (ko ? "실시간" : "live") : `${m}m`}
+              </button>
+            ))}
+          </div>
+        )}
         <span className="map-count mono">{counts.total} / {liveActive ? liveInfo.count : ndev}</span>
         {liveActive ? (
-          <span className="map-clock mono" title={liveInfo.asOf ?? ""}>⟳ {asOfAge != null ? `${asOfAge}s` : "—"}</span>
+          <span className="map-clock mono" title={liveInfo.asOf ?? ""}>⟳ {asOfAge != null ? `${asOfAge}s` : "—"}{delayMin > 0 ? ` · −${delayMin}m` : ""}</span>
         ) : (
           <span className="map-clock mono">▶ t+{tpos}s / {win}s</span>
         )}

@@ -436,6 +436,14 @@ td.mono { font-family: "JetBrains Mono", monospace; color: var(--text); }
 .map-rotate:hover { color: var(--brand); border-color: var(--brand); }
 .map-live.on { color: #86efac; border: 1px solid rgba(34,197,94,0.45); background: rgba(34,197,94,0.10); }
 .map-live.off { color: #fcd34d; border: 1px solid var(--warn-border); background: var(--warn-bg); }
+/* smooth (delayed) playback selector */
+.map-delay { display: inline-flex; align-items: center; gap: 3px; margin-left: 6px; padding: 2px 5px;
+  border-radius: 999px; background: var(--surface-2); border: 1px solid var(--border); }
+.map-delay .mdl-lbl { font-size: 10px; color: var(--text-mute); margin: 0 3px 0 1px; }
+.map-delay .mdl { font-size: 10px; font-weight: 700; cursor: pointer; padding: 2px 7px; border-radius: 999px;
+  color: var(--text-dim); background: transparent; border: 1px solid transparent; }
+.map-delay .mdl:hover { color: var(--text); }
+.map-delay .mdl.on { color: #7dd3fc; background: rgba(56,189,248,0.14); border-color: rgba(56,189,248,0.4); }
 .map-live .dot { width: 7px; height: 7px; border-radius: 999px; }
 .map-live.on .dot { background: var(--good); box-shadow: 0 0 8px var(--good); animation: blink 1.4s ease-in-out infinite; }
 .map-live.off .dot { background: #fcd34d; box-shadow: none; }
