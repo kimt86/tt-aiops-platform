@@ -1708,12 +1708,17 @@ pub fn spawn_travel_aggregator(pool: PgPool) {
                 .execute(&pool)
                 .await;
             let _ = sqlx::query(
-                "INSERT INTO learn_travel_metric (captured_at, samples, od_pairs, confident_pairs, median_speed_kmh)
+                "INSERT INTO learn_travel_metric
+                   (captured_at, samples, od_pairs, confident_pairs, median_speed_kmh,
+                    zone_pairs, confident_zone_pairs, quay_zoned_samples)
                  SELECT now(), count(*), count(DISTINCT (origin, dest)),
                         (SELECT count(*) FROM (SELECT 1 FROM learn_travel_sample GROUP BY origin, dest HAVING count(*) >= 10) q),
                         percentile_cont(0.5) WITHIN GROUP (
                           ORDER BY (dist_m / 1000.0) / nullif(travel_s / 3600.0, 0)
-                        ) FILTER (WHERE dist_m IS NOT NULL AND travel_s > 0)
+                        ) FILTER (WHERE dist_m IS NOT NULL AND travel_s > 0),
+                        count(DISTINCT (origin_zone, dest_zone)) FILTER (WHERE origin_zone IS NOT NULL AND dest_zone IS NOT NULL),
+                        (SELECT count(*) FROM (SELECT 1 FROM learn_travel_sample WHERE origin_zone IS NOT NULL AND dest_zone IS NOT NULL GROUP BY origin_zone, dest_zone HAVING count(*) >= 10) q),
+                        count(*) FILTER (WHERE origin_zone LIKE 'Q%' OR dest_zone LIKE 'Q%')
                    FROM learn_travel_sample
                   HAVING count(*) > 0
                  ON CONFLICT (captured_at) DO NOTHING",
