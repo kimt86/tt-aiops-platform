@@ -11,4 +11,5 @@ pub mod runner;
 pub mod shift;
 pub mod transform;
 pub mod vessel;
+pub mod weather;
 pub mod workpool;

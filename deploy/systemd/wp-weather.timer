@@ -1,0 +1,10 @@
+[Unit]
+Description=wp-tt terminal weather hourly (Open-Meteo, no Oracle)
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=3600s
+AccuracySec=60s
+
+[Install]
+WantedBy=timers.target

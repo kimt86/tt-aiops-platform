@@ -77,6 +77,9 @@ enum Command {
         #[arg(long, default_value = "oracle-prod")]
         target: String,
     },
+    /// Hourly terminal weather (Open-Meteo, no Oracle) → weather_hourly. A travel-time
+    /// feature (rain/wind/visibility). Run ~hourly.
+    Weather {},
 }
 
 fn parse_date(s: &str) -> Result<NaiveDate> {
@@ -179,6 +182,10 @@ async fn main() -> Result<()> {
         Command::RtgMoves { target } => {
             let pool = db::pool().await?;
             wp_extractor::rtg_moves::tick_rtg_moves(&pool, &target).await?;
+        }
+        Command::Weather {} => {
+            let pool = db::pool().await?;
+            wp_extractor::weather::tick_weather(&pool).await?;
         }
     }
     Ok(())
