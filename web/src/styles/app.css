@@ -444,6 +444,12 @@ td.mono { font-family: "JetBrains Mono", monospace; color: var(--text); }
   color: var(--text-dim); background: transparent; border: 1px solid transparent; }
 .map-delay .mdl:hover { color: var(--text); }
 .map-delay .mdl.on { color: #7dd3fc; background: rgba(56,189,248,0.14); border-color: rgba(56,189,248,0.4); }
+/* GPS-quality indicator (impossible-jump rate, last 5 min) */
+.map-gps { font-size: 10px; font-weight: 700; padding: 2px 8px; border-radius: 999px; margin-left: 4px; }
+.map-gps.ok { color: var(--text-mute); background: var(--surface-2); }
+.map-gps.warn { color: #fcd34d; background: var(--warn-bg); border: 1px solid var(--warn-border); }
+.map-gps.bad { color: #fca5a5; background: var(--bad-bg); border: 1px solid var(--bad-border); }
+.map-gps-n { opacity: 0.7; font-weight: 600; }
 .map-live .dot { width: 7px; height: 7px; border-radius: 999px; }
 .map-live.on .dot { background: var(--good); box-shadow: 0 0 8px var(--good); animation: blink 1.4s ease-in-out infinite; }
 .map-live.off .dot { background: #fcd34d; box-shadow: none; }

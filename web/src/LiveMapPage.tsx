@@ -36,6 +36,16 @@ type LiveSnap = { source: string; connected: boolean; count: number; as_of: stri
 // into smooth motion. Presets in minutes (0 = realtime, no interpolation).
 const DELAY_OPTS = [0, 1, 3, 5] as const;
 const MAX_DELAY_MIN = 5;
+// yard equipment tops out ~25-30 km/h; a fix implying faster than this (over its real fix-time
+// gap) is a GPS spike/teleport, not motion — reject it so smooth playback doesn't "fly".
+const MAX_PLAUSIBLE_KMH = 50;
+
+function metersBetween(la1: number, lo1: number, la2: number, lo2: number): number {
+  const R = 6371000, p = Math.PI / 180;
+  const dphi = (la2 - la1) * p, dl = (lo2 - lo1) * p;
+  const a = Math.sin(dphi / 2) ** 2 + Math.cos(la1 * p) * Math.cos(la2 * p) * Math.sin(dl / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(a));
+}
 
 // dispatch-state highlight on the map (TT pool building)
 // dispatch pools — filter the map by vehicle-pool type (TT only)
@@ -244,6 +254,8 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
   const delayMinRef = useRef(0); delayMinRef.current = delayMin;
   const histRef = useRef<Map<string, { cls: string; pts: Pt[] }>>(new Map()); // per-device fix buffer
   const clockOffsetRef = useRef(0); // server(as_of) − client(Date.now): a continuous, skew-free time base
+  const gpsEventsRef = useRef<Array<[number, boolean]>>([]); // [t, isOutlier] over a rolling window
+  const [gpsHealth, setGpsHealth] = useState({ outliers: 0, total: 0 }); // impossible-jump rate (5 min)
   const [liveInfo, setLiveInfo] = useState<{ connected: boolean; count: number; asOf: string | null }>({ connected: false, count: 0, asOf: null });
   const [dispatchCounts, setDispatchCounts] = useState<Record<string, number>>({});
 
@@ -390,19 +402,32 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
         {
           const asOfMs = j.as_of ? Date.parse(j.as_of) : Date.now();
           clockOffsetRef.current = asOfMs - Date.now();
+          const nowMs = Date.now();
           const hist = histRef.current;
+          const ev = gpsEventsRef.current;
           const keepMs = asOfMs - (MAX_DELAY_MIN * 60 + 30) * 1000;
           for (const d of j.devices) {
             const fixMs = asOfMs - Math.max(0, d.age_s) * 1000; // actual GPS fix time
             let e = hist.get(d.id);
             if (!e) { e = { cls: d.cls, pts: [] }; hist.set(d.id, e); }
             const last = e.pts[e.pts.length - 1];
-            if (!last || fixMs > last[0] + 500) { // only on a NEW fix (dedupe stationary repeats)
-              e.pts.push([fixMs, d.lat, d.lon, d.speed, d.engine]);
-              while (e.pts.length > 1 && e.pts[0][0] < keepMs) e.pts.shift();
-            }
+            if (!last) { e.pts.push([fixMs, d.lat, d.lon, d.speed, d.engine]); continue; } // first fix
+            if (fixMs <= last[0] + 500) continue; // stationary repeat — not a new fix
+            // NEW fix: reject physically-impossible jumps (GPS spikes) over the real fix-time gap.
+            const gapS = (fixMs - last[0]) / 1000;
+            const impliedKmh = gapS > 0 ? metersBetween(last[1], last[2], d.lat, d.lon) / gapS * 3.6 : Infinity;
+            const outlier = impliedKmh > MAX_PLAUSIBLE_KMH;
+            ev.push([nowMs, outlier]);
+            if (outlier) continue; // snap: hold the last good position, drop the spike (no "flying")
+            e.pts.push([fixMs, d.lat, d.lon, d.speed, d.engine]);
+            while (e.pts.length > 1 && e.pts[0][0] < keepMs) e.pts.shift();
           }
           for (const [id, e] of hist) if (e.pts.length && e.pts[e.pts.length - 1][0] < keepMs) hist.delete(id);
+          // GPS-quality indicator: impossible-jump rate over a rolling 5-minute window.
+          const cut = nowMs - 5 * 60000;
+          while (ev.length && ev[0][0] < cut) ev.shift();
+          let bad = 0; for (const [, o] of ev) if (o) bad++;
+          setGpsHealth({ outliers: bad, total: ev.length });
         }
         setLiveInfo({ connected: j.connected, count: j.count, asOf: j.as_of });
         setDispatchCounts(j.dispatch_counts ?? {});
@@ -633,6 +658,15 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
         ) : (
           <span className="map-clock mono">▶ t+{tpos}s / {win}s</span>
         )}
+        {liveActive && gpsHealth.total > 0 && (() => {
+          const pct = (gpsHealth.outliers / gpsHealth.total) * 100;
+          const cls = pct >= 2 ? "bad" : pct >= 0.5 ? "warn" : "ok";
+          return (
+            <span className={`map-gps mono ${cls}`} title={ko ? `물리적으로 불가능한 GPS 점프(>${MAX_PLAUSIBLE_KMH}km/h) 비율 — 최근 5분 ${gpsHealth.outliers}/${gpsHealth.total}건` : `Impossible GPS jumps (>${MAX_PLAUSIBLE_KMH}km/h), last 5 min: ${gpsHealth.outliers}/${gpsHealth.total}`}>
+              GPS튐 {pct.toFixed(1)}% <span className="map-gps-n">({gpsHealth.outliers})</span>
+            </span>
+          );
+        })()}
       </div>
 
       {/* TT dispatch-pool filter — narrows TTs only (other equipment unaffected) */}
