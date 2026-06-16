@@ -777,11 +777,13 @@ fn classify_tt(
             Classed { state: "soon_idle", reason: Some(format!("블록 RTG 근접 {d:.0}m")), nearest_rtg_m: Some(d), ..Default::default() }
         }
         (_, true) => {
+            // ACTV set but RTG not GPS-engaged: the order is in the RTG's active queue (~12 min
+            // median to free, verified) — "approaching", not the imminent (physically-engaged) tier.
             let reason = match d {
-                Some(d) => format!("TOS RTG 활성 (보정 · GPS {d:.0}m)"),
-                None => "TOS RTG 활성 (보정 · GPS 미관측)".into(),
+                Some(d) => format!("TOS RTG 활성 (접근 · GPS {d:.0}m)"),
+                None => "TOS RTG 활성 (접근 · GPS 미관측)".into(),
             };
-            Classed { state: "soon_idle", reason: Some(reason), nearest_rtg_m: d, ..Default::default() }
+            Classed { state: "approaching", reason: Some(reason), nearest_rtg_m: d, ..Default::default() }
         }
         (Some(d), false) => {
             Classed { state: "wait_rtg", reason: Some(format!("도착 · RTG 대기 (최근접 {d:.0}m)")), nearest_rtg_m: Some(d), ..Default::default() }
@@ -903,7 +905,7 @@ pub async fn positions(State(lm): State<Arc<LiveMap>>, State(pool): State<PgPool
     let active_trucks: usize = dispatch_counts.iter().filter(|(k, _)| **k != "idle").map(|(_, v)| *v).sum();
     // L for Little's law = trucks on a laden round-trip arc (en route to pick up, carrying,
     // or at handover). Exclude idle and wait_rtg (parked) so W = L/λ isn't biased high.
-    let cycling_trucks: usize = ["empty_travel", "delivering", "soon_idle"]
+    let cycling_trucks: usize = ["empty_travel", "delivering", "soon_idle", "approaching"]
         .iter()
         .map(|k| dispatch_counts.get(k).copied().unwrap_or(0))
         .sum();

@@ -19,7 +19,7 @@ export type SelVeh = {
   cur_loc?: string;
   topos1?: string;
   arrival?: string;
-  dispatch?: "idle" | "staging" | "empty_travel" | "delivering" | "soon_idle" | "wait_rtg";
+  dispatch?: "idle" | "staging" | "empty_travel" | "delivering" | "soon_idle" | "approaching" | "wait_rtg";
   dispatch_reason?: string;
   nearest_rtg_m?: number;
   fuel?: number;
@@ -44,7 +44,8 @@ export type SelVeh = {
 const DSP: Record<string, { ko: string; en: string; color: string; bg: string }> = {
   idle: { ko: "유휴 (배차 가능)", en: "Idle (available)", color: "#16a34a", bg: "rgba(34,197,94,0.12)" },
   staging: { ko: "배차됨 · 대기", en: "Assigned · staging", color: "#0284c7", bg: "rgba(14,165,233,0.12)" },
-  soon_idle: { ko: "곧 유휴", en: "Soon idle", color: "#d97706", bg: "rgba(245,158,11,0.14)" },
+  soon_idle: { ko: "곧유휴 · 임박", en: "Imminent", color: "#d97706", bg: "rgba(245,158,11,0.14)" },
+  approaching: { ko: "접근 · RTG 활성", en: "Approaching", color: "#ca8a04", bg: "rgba(252,211,77,0.16)" },
   wait_rtg: { ko: "도착 · RTG 대기", en: "Arrived · waiting RTG", color: "#dc2626", bg: "rgba(239,68,68,0.12)" },
   delivering: { ko: "적재 이동 중", en: "Delivering", color: "#475569", bg: "rgba(100,116,139,0.12)" },
   empty_travel: { ko: "공차 주행 중", en: "Empty traveling", color: "#475569", bg: "rgba(100,116,139,0.12)" },
@@ -53,6 +54,9 @@ const DSP: Record<string, { ko: string; en: string; color: string; bg: string }>
 // localized dispatch detail, built from structured fields (not the backend's Korean
 // dispatch_reason). The state label already conveys the gist; this adds RTG distance.
 function dispatchWhy(v: SelVeh, ko: boolean): string | null {
+  if (v.dispatch === "approaching") {
+    return ko ? "RTG 활성 (큐 진입 · ~12분, 물리 집기 아님)" : "RTG active (queued ~12m, not the lift)";
+  }
   if (v.dispatch === "soon_idle") {
     if (v.nearest_rtg_m != null) {
       const m = Math.round(v.nearest_rtg_m);

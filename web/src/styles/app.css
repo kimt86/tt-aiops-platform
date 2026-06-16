@@ -716,6 +716,7 @@ td.mono { font-family: "JetBrains Mono", monospace; color: var(--text); }
 .lvp-list { display: flex; flex-direction: column; gap: 4px; max-height: 230px; overflow-y: auto; }
 .lvp-row { display: flex; align-items: center; gap: 7px; font-size: 12px; padding: 4px 6px; border-radius: 6px; background: var(--surface); }
 .lvp-id { font-weight: 700; color: var(--text); }
+.lvp-tier { font-size: 9px; font-weight: 800; padding: 1px 5px; border-radius: 999px; border: 1px solid currentColor; opacity: 0.9; }
 .lvp-job { font-size: 9px; font-weight: 800; padding: 1px 5px; border-radius: 3px; }
 .type-ld, .lvp-job.type-ld { background: rgba(34,197,94,0.15); color: #86efac; }
 .type-ds, .lvp-job.type-ds { background: rgba(56,189,248,0.15); color: #7dd3fc; }

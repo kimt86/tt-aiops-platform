@@ -59,12 +59,13 @@ function useWorkpool(ms = 15000) {
 const DSP_META: Record<string, { ko: string; en: string; color: string }> = {
   idle: { ko: "유휴 (배차 가능)", en: "Idle (available)", color: "#22c55e" },
   staging: { ko: "배차·대기", en: "Assigned·staging", color: "#0ea5e9" },
-  soon_idle: { ko: "곧 유휴", en: "Soon idle", color: "#f59e0b" },
+  soon_idle: { ko: "곧유휴·임박", en: "Imminent", color: "#f59e0b" },
+  approaching: { ko: "접근·RTG활성", en: "Approaching", color: "#fcd34d" },
   delivering: { ko: "적재 이동", en: "Delivering", color: "#64748b" },
   wait_rtg: { ko: "도착·RTG 대기", en: "Arrived·wait RTG", color: "#ef4444" },
   empty_travel: { ko: "공차 주행 중", en: "Empty traveling", color: "#94a3b8" },
 };
-const DSP_ORDER = ["idle", "staging", "soon_idle", "delivering", "wait_rtg", "empty_travel"];
+const DSP_ORDER = ["idle", "staging", "soon_idle", "approaching", "delivering", "wait_rtg", "empty_travel"];
 
 // ETW countdown from the accurate TOS ETW RPC (qc_etw_utc via the tos_etw_gateway). The
 // snapshot has a TTL (expires); past it, the value is stale and shown dimmed.
@@ -91,6 +92,9 @@ type LiveTT = { id: string; cls: string; dispatch?: string; jobtype?: string; to
 // localized "why" for a soon-idle TT (built from structured fields, not the
 // backend's Korean dispatch_reason — so EN mode shows no Korean).
 function soonWhy(d: LiveTT, lang: Lang): string {
+  if (d.dispatch === "approaching") {
+    return ko(lang) ? "RTG 활성 (큐 진입 · ~12분)" : "RTG active (queued ~12m)";
+  }
   if (d.nearest_rtg_m != null) {
     const m = Math.round(d.nearest_rtg_m);
     return ko(lang) ? `블록 RTG 근접 ${m}m` : `block RTG ${m}m`;
@@ -106,7 +110,9 @@ function dspTitle(dispatch: string | undefined, lang: Lang): string | undefined 
 function LiveDispatchPool({ lang, snap, err }: { lang: Lang; snap: Snap | null; err: boolean }) {
   const tts = ((snap?.devices ?? []) as LiveTT[]).filter((d) => d.cls === "TT");
   const counts = snap?.dispatch_counts ?? {};
-  const soon = tts.filter((d) => d.dispatch === "soon_idle").sort((a, b) => a.id.localeCompare(b.id));
+  const tierRank = (s?: string) => (s === "soon_idle" ? 0 : 1); // 임박 먼저, 접근 다음
+  const soon = tts.filter((d) => d.dispatch === "soon_idle" || d.dispatch === "approaching")
+    .sort((a, b) => tierRank(a.dispatch) - tierRank(b.dispatch) || a.id.localeCompare(b.id));
   const idle = tts.filter((d) => d.dispatch === "idle").sort((a, b) => a.id.localeCompare(b.id));
   const empties = tts.filter((d) => d.dispatch === "empty_travel");
   // swap pool: empty trucks still far enough from their pickup, EXCLUDING yard moves (MI/MO)
@@ -150,11 +156,12 @@ function LiveDispatchPool({ lang, snap, err }: { lang: Lang; snap: Snap | null; 
           </div>
           <div className="lvp-col">
             <div className="lvp-col-h"><span className="sw" style={{ background: DSP_META.soon_idle.color }} />{ko(lang) ? "곧 유휴" : "Soon-idle"}<span className="lvp-cn">{soon.length}</span></div>
-            <div className="lvp-sub">{ko(lang) ? "마지막 핸드오버 진행" : "at final handover"}</div>
+            <div className="lvp-sub">{ko(lang) ? "임박(RTG 물리 관여) + 접근(RTG 활성·~12분)" : "imminent (RTG engaged) + approaching (RTG active ~12m)"}</div>
             <div className="lvp-list">
               {soon.length === 0 && <div className="lvp-empty">{ko(lang) ? "없음" : "none"}</div>}
               {soon.map((d) => (
                 <div className="lvp-row" key={d.id}>
+                  {d.dispatch && DSP_META[d.dispatch] && <span className="lvp-tier" style={{ color: DSP_META[d.dispatch].color, borderColor: DSP_META[d.dispatch].color }}>{d.dispatch === "soon_idle" ? (ko(lang) ? "임박" : "now") : (ko(lang) ? "접근" : "~")}</span>}
                   <span className="lvp-id mono">{d.id}</span>
                   {d.jobtype && <span className={`lvp-job type-${d.jobtype.toLowerCase()}`}>{d.jobtype}</span>}
                   {d.topos1 && <span className="lvp-dest mono">→{d.topos1}</span>}
