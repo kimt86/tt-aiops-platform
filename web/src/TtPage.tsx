@@ -87,14 +87,14 @@ const kindChip = (jt: string | null) => (jt === "DS" ? "dsc" : jt === "LD" ? "lo
 const kindLabel = (jt: string | null) => (jt === "DS" ? "DSC" : jt === "LD" ? "LOD" : "SHF");
 
 // ───────────────────────── live vehicle pool ─────────────────────────
-type LiveTT = { id: string; cls: string; dispatch?: string; jobtype?: string; topos1?: string; dispatch_reason?: string; swappable?: boolean; dest_remaining_m?: number; nearest_rtg_m?: number; free_eta_s?: number; free_eta_hi_s?: number };
+type LiveTT = { id: string; cls: string; dispatch?: string; jobtype?: string; topos1?: string; dispatch_reason?: string; swappable?: boolean; dest_remaining_m?: number; nearest_rtg_m?: number; free_in_s?: number; free_in_hi_s?: number };
 
-// "곧 빔 ~N분 (최대 M분)" — shadow ETA-to-free from the backend (free_eta_s), display-only.
+// "곧 빔 ~N분 (최대 M분)" — shadow time-to-free from the backend (free_in_s), display-only.
 // Grounded in tt_cycle_v2 (도착→자유 중앙 8분, 운반중 17분); the p90 width conveys the RTG-wait tail.
-function etaLabel(d: LiveTT, lang: Lang): string | null {
-  if (d.free_eta_s == null) return null;
-  const m = Math.round(d.free_eta_s / 60);
-  const hi = d.free_eta_hi_s != null ? Math.round(d.free_eta_hi_s / 60) : null;
+function freeInLabel(d: LiveTT, lang: Lang): string | null {
+  if (d.free_in_s == null) return null;
+  const m = Math.round(d.free_in_s / 60);
+  const hi = d.free_in_hi_s != null ? Math.round(d.free_in_hi_s / 60) : null;
   return ko(lang) ? `~${m}분${hi ? ` (최대 ${hi})` : ""}` : `~${m}m${hi ? ` (max ${hi})` : ""}`;
 }
 
@@ -174,7 +174,7 @@ function LiveDispatchPool({ lang, snap, err }: { lang: Lang; snap: Snap | null; 
                   <span className="lvp-id mono">{d.id}</span>
                   {d.jobtype && <span className={`lvp-job type-${d.jobtype.toLowerCase()}`}>{d.jobtype}</span>}
                   {d.topos1 && <span className="lvp-dest mono">→{d.topos1}</span>}
-                  {etaLabel(d, lang) && <span className="lvp-eta" title={ko(lang) ? "곧 빔까지 추정(측정 중앙값·표시 전용, 배차 미연결)" : "estimated time-to-free (measured median · display-only, not yet wired to dispatch)"}>{etaLabel(d, lang)}</span>}
+                  {freeInLabel(d, lang) && <span className="lvp-freein" title={ko(lang) ? "곧 빔까지 추정(측정 중앙값·표시 전용, 배차 미연결)" : "estimated time-to-free (measured median · display-only, not yet wired to dispatch)"}>{freeInLabel(d, lang)}</span>}
                   <span className="lvp-why">{soonWhy(d, lang)}</span>
                 </div>
               ))}

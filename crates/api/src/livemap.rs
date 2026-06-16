@@ -505,11 +505,11 @@ struct DeviceOut {
     #[serde(skip_serializing_if = "Option::is_none")]
     swappable: Option<bool>,
     // SHADOW: display-only time-to-free estimate (median + p90 seconds), by state+jobtype.
-    // Not used in dispatch yet — see free_eta_s().
+    // Not used in dispatch yet — see free_in().
     #[serde(skip_serializing_if = "Option::is_none")]
-    free_eta_s: Option<i64>,
+    free_in_s: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    free_eta_hi_s: Option<i64>,
+    free_in_hi_s: Option<i64>,
 }
 
 /// Crane PLC state served alongside a crane's GPS fix.
@@ -810,7 +810,7 @@ fn classify_tt(
 ///   - soon_idle (RTG ≤30m engaged, or quay PLC): ~2m — least-grounded tier (no RTG-distance history),
 ///     rough "handover in progress" value.
 /// Only DS is grounded; other jobtypes get None (their free-point differs and is unmeasured here).
-fn free_eta(state: &str, jobtype: Option<&str>) -> (Option<i64>, Option<i64>) {
+fn free_in(state: &str, jobtype: Option<&str>) -> (Option<i64>, Option<i64>) {
     let ds = jobtype == Some("DS");
     match state {
         "delivering" if ds => (Some(1030), Some(2420)),
@@ -860,10 +860,10 @@ pub async fn positions(State(lm): State<Arc<LiveMap>>, State(pool): State<PgPool
             let nearest_rtg_m = c.as_ref().and_then(|c| c.nearest_rtg_m);
             let dest_remaining_m = c.as_ref().and_then(|c| c.dest_remaining_m);
             let swappable = c.as_ref().and_then(|c| c.swappable);
-            // shadow ETA-to-free, derived from the classified state (display-only)
-            let (free_eta_s, free_eta_hi_s) = c
+            // shadow time-to-free, derived from the classified state (display-only)
+            let (free_in_s, free_in_hi_s) = c
                 .as_ref()
-                .map(|c| free_eta(c.state, p.jobtype.as_deref()))
+                .map(|c| free_in(c.state, p.jobtype.as_deref()))
                 .unwrap_or((None, None));
             // attach crane PLC state (ctab zone) when fresh — id matches the crane id.
             let plc_out = plc.get(id).and_then(|c| {
@@ -908,8 +908,8 @@ pub async fn positions(State(lm): State<Arc<LiveMap>>, State(pool): State<PgPool
                 nearest_rtg_m,
                 dest_remaining_m,
                 swappable,
-                free_eta_s,
-                free_eta_hi_s,
+                free_in_s,
+                free_in_hi_s,
             })
         })
         .collect();

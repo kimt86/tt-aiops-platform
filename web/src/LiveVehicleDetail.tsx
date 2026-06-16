@@ -22,8 +22,8 @@ export type SelVeh = {
   dispatch?: "idle" | "staging" | "empty_travel" | "delivering" | "soon_idle" | "approaching" | "wait_rtg";
   dispatch_reason?: string;
   nearest_rtg_m?: number;
-  free_eta_s?: number;
-  free_eta_hi_s?: number;
+  free_in_s?: number;
+  free_in_hi_s?: number;
   fuel?: number;
   accuracy?: number;
   userid?: string;
@@ -121,10 +121,10 @@ export function LiveVehicleDetail({ v, lang, onClose }: { v: SelVeh; lang: Lang;
             {ko ? dsp.ko : dsp.en}{dispatchWhy(v, ko) ? <span className="lvd-dsp-why"> · {dispatchWhy(v, ko)}</span> : null}
           </div>
         )}
-        {v.free_eta_s != null && (
+        {v.free_in_s != null && (
           <div className="lvd-rel" title={ko ? "곧 빔까지 추정 (측정 중앙값·표시 전용, 배차 미연결)" : "estimated time-to-free (measured median · display-only)"}>
-            {ko ? "곧 빔 추정" : "free in"} ~{Math.round(v.free_eta_s / 60)}{ko ? "분" : "m"}
-            {v.free_eta_hi_s != null ? (ko ? ` (최대 ${Math.round(v.free_eta_hi_s / 60)}분)` : ` (max ${Math.round(v.free_eta_hi_s / 60)}m)`) : ""}
+            {ko ? "곧 빔 추정" : "free in"} ~{Math.round(v.free_in_s / 60)}{ko ? "분" : "m"}
+            {v.free_in_hi_s != null ? (ko ? ` (최대 ${Math.round(v.free_in_hi_s / 60)}분)` : ` (max ${Math.round(v.free_in_hi_s / 60)}m)`) : ""}
           </div>
         )}
         <div className="lvd-rel mono">{relTime(v.age_s, ko)}</div>
