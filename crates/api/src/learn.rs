@@ -158,8 +158,8 @@ pub async fn lanes(State(pool): State<PgPool>) -> Result<Json<LanesResp>, AppErr
 
 #[derive(Serialize, sqlx::FromRow)]
 struct TravelOd {
-    origin: String,
-    dest: String,
+    origin: String, // origin_zone (block+bay or quay GPS-grid)
+    dest: String,   // dest_zone
     n: i64,
     median_s: Option<f64>,
     dist_m: Option<f64>,
@@ -178,23 +178,29 @@ struct TravelMetricPoint {
 #[derive(Serialize)]
 pub struct TravelResp {
     samples: i64,
-    od_pairs: i64,
-    confident_pairs: i64, // (origin,dest) pairs with n ≥ 10
-    median_speed_kmh: Option<f64>,
+    od_pairs: i64,                  // distinct ZONE pairs (block+bay / quay GPS-grid)
+    confident_pairs: i64,           // zone pairs with n ≥ 10 (the usable model)
+    confident_pairs_fullcode: i64,  // raw-code pairs n ≥ 10 (before-zoning, for comparison)
+    median_speed_kmh: Option<f64>,  // distance ÷ speed fallback for sparse pairs
+    weather_wet_median_s: Option<f64>, // median empty/laden leg in precip > 0.1mm …
+    weather_dry_median_s: Option<f64>, // … vs dry — quick weather-feature signal
     od: Vec<TravelOd>,
     metric_series: Vec<TravelMetricPoint>,
 }
 
-/// GET /api/learn/travel — per (origin→dest) travel-time model (v0 baseline) + quality series.
+/// GET /api/learn/travel — per (origin_zone→dest_zone) travel-time model (v1: zone keys +
+/// distance fallback) + a quick weather signal + the quality series. See research/travel-time.
 pub async fn travel(State(pool): State<PgPool>) -> Result<Json<TravelResp>, AppError> {
+    // zone-pair model: median travel + distance + implied speed, densest pairs first.
     let od: Vec<TravelOd> = sqlx::query_as(
-        "SELECT origin, dest, count(*) AS n,
+        "SELECT origin_zone AS origin, dest_zone AS dest, count(*) AS n,
                 percentile_cont(0.5) WITHIN GROUP (ORDER BY travel_s) AS median_s,
                 avg(dist_m) AS dist_m,
                 percentile_cont(0.5) WITHIN GROUP (ORDER BY (dist_m/1000.0)/nullif(travel_s/3600.0,0))
                   FILTER (WHERE dist_m IS NOT NULL AND travel_s > 0) AS speed_kmh
            FROM learn_travel_sample
-          GROUP BY origin, dest
+          WHERE origin_zone IS NOT NULL AND dest_zone IS NOT NULL
+          GROUP BY origin_zone, dest_zone
          HAVING count(*) >= 3
           ORDER BY count(*) DESC LIMIT 500",
     )
@@ -210,9 +216,11 @@ pub async fn travel(State(pool): State<PgPool>) -> Result<Json<TravelResp>, AppE
     .fetch_all(&pool)
     .await?;
 
-    let (samples, od_pairs, confident_pairs, median_speed_kmh): (i64, i64, i64, Option<f64>) =
+    let (samples, od_pairs, confident_pairs, confident_pairs_fullcode, median_speed_kmh): (i64, i64, i64, i64, Option<f64>) =
         sqlx::query_as(
-            "SELECT count(*), count(DISTINCT (origin, dest)),
+            "SELECT count(*),
+                    count(DISTINCT (origin_zone, dest_zone)) FILTER (WHERE origin_zone IS NOT NULL AND dest_zone IS NOT NULL),
+                    (SELECT count(*) FROM (SELECT 1 FROM learn_travel_sample WHERE origin_zone IS NOT NULL AND dest_zone IS NOT NULL GROUP BY origin_zone, dest_zone HAVING count(*) >= 10) q),
                     (SELECT count(*) FROM (SELECT 1 FROM learn_travel_sample GROUP BY origin, dest HAVING count(*) >= 10) q),
                     percentile_cont(0.5) WITHIN GROUP (ORDER BY (dist_m/1000.0)/nullif(travel_s/3600.0,0))
                       FILTER (WHERE dist_m IS NOT NULL AND travel_s > 0)
@@ -221,7 +229,22 @@ pub async fn travel(State(pool): State<PgPool>) -> Result<Json<TravelResp>, AppE
         .fetch_one(&pool)
         .await?;
 
-    Ok(Json(TravelResp { samples, od_pairs, confident_pairs, median_speed_kmh, od, metric_series }))
+    // weather signal: median travel in wet vs dry hours (joined by hour bucket of dropped_at).
+    let (weather_wet_median_s, weather_dry_median_s): (Option<f64>, Option<f64>) = sqlx::query_as(
+        "SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY travel_s) FILTER (WHERE w.precip_mm > 0.1),
+                percentile_cont(0.5) WITHIN GROUP (ORDER BY travel_s) FILTER (WHERE w.precip_mm <= 0.1)
+           FROM learn_travel_sample s
+           JOIN weather_hourly w ON w.ts = date_trunc('hour', s.dropped_at)
+          WHERE s.travel_s BETWEEN 10 AND 3600",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap_or((None, None));
+
+    Ok(Json(TravelResp {
+        samples, od_pairs, confident_pairs, confident_pairs_fullcode,
+        median_speed_kmh, weather_wet_median_s, weather_dry_median_s, od, metric_series,
+    }))
 }
 
 // ───────────────────────── soon-idle accuracy (④, shadow) ─────────────────────────
