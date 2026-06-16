@@ -40,7 +40,7 @@ sidebar:
 |---|---|---|
 | HISTORY가 대상 트럭ID를 직접 주는가 | **확정 — `JOB_HIST_YTNO` 실재**(DS 이력 87% 채움: 147,670/169,422) | [ORA] `all_tab_columns` + 집계 |
 | 워터마크용 datetime 인덱스 존재 여부 | **확정 — 존재.** `IDX_JOBHIST_DATETIME = (JOB_HIST_DATE‖JOB_HIST_TIME, JOBSTATUS)` (+ YTNO별·ARMGC별 datetime 인덱스) | [ORA] `all_ind_expressions` |
-| `ACTV_DT` 의미 | **부분 확정 — '주문/RTG 활성화'이지 ±1초 물리집기 아님**(활성 경과 11~18분 사례 다수) | [ORA] 라이브 샘플·집계 |
+| `ACTV_DT` 의미 | **✅ 확정 — 주문 활성(RTG 큐-진입)이지 물리집기 아님: 물리 RTG 들어올림(59s)은 ACTV +~11분(median)** | [ORA] JOB_ORDER_HISTORY⨝MCH_OPERATION n=3270 |
 | JOBSTATUS 코드 | **확정 — `C`=완료 `A`=활성 `Q`=대기 `P`=계획 `B`=차단** | [코드: workpool.sql 주석] |
 
 ### 새 핵심 발견 — 양하(DS) 곧유휴 신호가 TOS 라이브에 직접 존재
@@ -180,7 +180,7 @@ QC가 **move 기반**이면 RTG는 **대기 기반**입니다. 깨끗한 시작/
 핵심 파생값: `K_CRANE_Q = (ACTV_DT − YT_DIS_DT) × 86400`초 = "TT 하차 → 야드 크레인 활성까지 대기"(0..1800s) **[코드: c08]**. **이것이 RTG/블록측 신호임을 DB가 증명:** `raw_k_crane_q_daily` in-range 이벤트의 **97.1%가 DS** **[DB]**.
 
 :::caution[존재하되 약하다]
-`ACTV_DT`는 "활성화 시각"이지 RTG가 물리적으로 집은 순간이 아닙니다(±수 초, PLC보다 약함). `ACTV_DT`의 정확한 의미('물리 집기' vs '스케줄 활성')는 **(미검증)**.
+`ACTV_DT`는 "활성화 시각"이지 RTG가 물리적으로 집은 순간이 아닙니다 — **TOS 직접 조인으로 확정(2026-06-16): 물리 RTG 들어올림(`MCH_OPERATION` ST_DT→완료, 중앙 59s)은 `ACTV_DT`보다 중앙 ~11분 늦음**(n=3270). 즉 `ACTV_DT` = 주문이 RTG 작업 대기열에 활성으로 진입한 시점(블록-준비), 물리 집기 아님. (DIS→ACTV ~7분, ACTV→물리시작 ~11분, 물리 59s.)
 :::
 
 #### 2.3 분리·결합 키
@@ -282,7 +282,7 @@ WHERE (JOB_HIST_DATE||SUBSTR(JOB_HIST_TIME,1,6)) > {{last_watermark}}
 |---|---|---|
 | DS 물리 순간 부재 | RTG PLC 없음 → "정확히 언제 비었나"는 GPS dwell/ACTV_DT 근사만 | 구조적, 해소 불가 |
 | 워터마크 인덱스 | `JOB_HIST_DATE‖JOB_HIST_TIME` 위 인덱스 존재 | **✅ 해소(2차)** — `IDX_JOBHIST_DATETIME` 확정 **[ORA]** |
-| `ACTV_DT` 의미 | '물리 집기' vs '활성화' | **부분해소(2차)** — '주문/RTG 활성화'로 확정(±초 물리집기 아님; 활성 경과 11~18분 사례) **[ORA]** |
+| `ACTV_DT` 의미 | '물리 집기' vs '활성화' | **✅ 확정(3차)** — 활성=RTG 큐-진입, 물리 들어올림은 ACTV +~11분(n=3270, JOB_HIST⨝MCH_OP) **[ORA]** |
 | HISTORY 트럭ID | `JOB_ORDER_HISTORY`가 대상 트럭ID를 직접 주는지 | **✅ 해소(2차)** — `JOB_HIST_YTNO` 실재(DS 87% 채움) **[ORA]** |
 | prod Oracle 부하 | 신규 폴링의 실제 실행계획·서버 CPU/IO | **(미검증)** — 단 권장안은 추가쿼리 0 / 인덱스 레인지로 무시 수준. EXPLAIN PLAN 미실행 |
 | 안 A(RTG 예측) | 관여 *전* 예측(예측기 ⑤)은 미구현 | 미구현 |
