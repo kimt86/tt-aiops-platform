@@ -158,6 +158,11 @@ struct V2Leg {
     arrived_ms: i64,
     arr_src: &'static str, // arr_dtime|arrived|cur_loc|gps|pre_positioned
     left_ms: i64,
+    // truck GPS where this leg's arrival was recorded (0.0 = uncaptured). For quay-zone
+    // gridding: a QC id is not a fixed location (cranes roam the rail), so the physical
+    // handover coordinate is the stable anchor. Block legs use logical codes instead.
+    arrived_lat: f64,
+    arrived_lon: f64,
 }
 const V2_LEGS_MAX: usize = 6;
 
@@ -1830,6 +1835,8 @@ pub fn spawn_cycle_flusher(lm: Arc<LiveMap>, pool: PgPool) {
                 let legs_json = serde_json::json!(c.legs.iter().map(|l| serde_json::json!({
                     "target": l.target, "crane": l.crane, "assigned": l.assigned_ms,
                     "arrived": l.arrived_ms, "arr_src": l.arr_src, "left": l.left_ms,
+                    "lat": (l.arrived_lat != 0.0).then_some(l.arrived_lat),
+                    "lon": (l.arrived_lon != 0.0).then_some(l.arrived_lon),
                 })).collect::<Vec<_>>());
                 let opt = |s: &str| (!s.is_empty()).then(|| s.to_string());
                 // v2.4: backfill a block arrival the leg model missed (or correct a coarse
@@ -2456,6 +2463,12 @@ async fn ingest_text(lm: &Arc<LiveMap>, text: &str) {
                                 leg.left_ms = 0;
                             }
                         }
+                        // capture/refresh the handover coordinate at arrival (refresh on a
+                        // coarse→precise upgrade) for quay-zone gridding (QC id ≠ fixed location)
+                        if leg.arrived_ms > 0 && (leg.arrived_lat == 0.0 || upgraded) {
+                            leg.arrived_lat = pos.lat;
+                            leg.arrived_lon = pos.lon;
+                        }
                     }
                     if leg.arrived_ms > 0
                         && leg.left_ms == 0
@@ -2492,6 +2505,8 @@ async fn ingest_text(lm: &Arc<LiveMap>, text: &str) {
                                 arrived_ms: now,
                                 arr_src: "container1",
                                 left_ms: 0,
+                                arrived_lat: pos.lat, // arrived at construction (container1 edge)
+                                arrived_lon: pos.lon,
                             });
                         }
                     }
@@ -2568,6 +2583,8 @@ async fn ingest_text(lm: &Arc<LiveMap>, text: &str) {
                                     arrived_ms: if prepos { now } else { 0 },
                                     arr_src: if prepos { "pre_positioned" } else { "" },
                                     left_ms: 0,
+                                    arrived_lat: if prepos { pos.lat } else { 0.0 },
+                                    arrived_lon: if prepos { pos.lon } else { 0.0 },
                                 });
                             }
                         }
@@ -2604,6 +2621,8 @@ async fn ingest_text(lm: &Arc<LiveMap>, text: &str) {
                         arrived_ms: if prepos { now } else { 0 },
                         arr_src: if prepos { "pre_positioned" } else { "" },
                         left_ms: 0,
+                        arrived_lat: if prepos { pos.lat } else { 0.0 },
+                        arrived_lon: if prepos { pos.lon } else { 0.0 },
                     });
                 } else if pos.v2.opened_ms == 0 && !new_c1.is_empty() && old_c1.is_empty() {
                     pos.v2.opened_ms = now; // assignment observed via container1 only
