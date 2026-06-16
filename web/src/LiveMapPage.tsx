@@ -53,7 +53,7 @@ const DISPATCH_POOLS: { key: Dispatch; ko: string; en: string; color: string }[]
   { key: "idle", ko: "유휴", en: "Idle", color: "#22c55e" },
   { key: "staging", ko: "배차·대기", en: "Staging", color: "#0ea5e9" },
   { key: "soon_idle", ko: "곧유휴·임박", en: "Imminent", color: "#f59e0b" },
-  { key: "approaching", ko: "접근·RTG활성", en: "Approaching", color: "#fcd34d" },
+  { key: "approaching", ko: "접근·적재됨", en: "Approaching", color: "#fcd34d" },
   { key: "delivering", ko: "적재이동", en: "Deliver", color: "#38bdf8" },
   { key: "wait_rtg", ko: "RTG대기", en: "Wait RTG", color: "#ef4444" },
   { key: "empty_travel", ko: "공차 주행 중", en: "Empty traveling", color: "#94a3b8" },

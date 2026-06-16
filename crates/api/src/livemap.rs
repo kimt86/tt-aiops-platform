@@ -777,11 +777,12 @@ fn classify_tt(
             Classed { state: "soon_idle", reason: Some(format!("블록 RTG 근접 {d:.0}m")), nearest_rtg_m: Some(d), ..Default::default() }
         }
         (_, true) => {
-            // ACTV set but RTG not GPS-engaged: the order is in the RTG's active queue (~12 min
-            // median to free, verified) — "approaching", not the imminent (physically-engaged) tier.
+            // ACTV set = the QC already discharged this box onto the truck (verified: ACTV_DT ==
+            // QC move complete, 0s). The truck is at/near the block waiting for the RTG (not yet
+            // GPS-engaged) — "approaching", ~12 min median from QC-handover to free.
             let reason = match d {
-                Some(d) => format!("TOS RTG 활성 (접근 · GPS {d:.0}m)"),
-                None => "TOS RTG 활성 (접근 · GPS 미관측)".into(),
+                Some(d) => format!("QC 양하 완료 · RTG 대기 (GPS {d:.0}m)"),
+                None => "QC 양하 완료 · RTG 대기 (GPS 미관측)".into(),
             };
             Classed { state: "approaching", reason: Some(reason), nearest_rtg_m: d, ..Default::default() }
         }

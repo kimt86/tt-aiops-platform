@@ -60,7 +60,7 @@ const DSP_META: Record<string, { ko: string; en: string; color: string }> = {
   idle: { ko: "유휴 (배차 가능)", en: "Idle (available)", color: "#22c55e" },
   staging: { ko: "배차·대기", en: "Assigned·staging", color: "#0ea5e9" },
   soon_idle: { ko: "곧유휴·임박", en: "Imminent", color: "#f59e0b" },
-  approaching: { ko: "접근·RTG활성", en: "Approaching", color: "#fcd34d" },
+  approaching: { ko: "접근·적재됨", en: "Approaching", color: "#fcd34d" },
   delivering: { ko: "적재 이동", en: "Delivering", color: "#64748b" },
   wait_rtg: { ko: "도착·RTG 대기", en: "Arrived·wait RTG", color: "#ef4444" },
   empty_travel: { ko: "공차 주행 중", en: "Empty traveling", color: "#94a3b8" },
@@ -93,7 +93,7 @@ type LiveTT = { id: string; cls: string; dispatch?: string; jobtype?: string; to
 // backend's Korean dispatch_reason — so EN mode shows no Korean).
 function soonWhy(d: LiveTT, lang: Lang): string {
   if (d.dispatch === "approaching") {
-    return ko(lang) ? "RTG 활성 (큐 진입 · ~12분)" : "RTG active (queued ~12m)";
+    return ko(lang) ? "QC 양하 완료 · RTG 대기 (~12분 후 유휴)" : "QC discharged · waiting RTG (~12m to free)";
   }
   if (d.nearest_rtg_m != null) {
     const m = Math.round(d.nearest_rtg_m);
@@ -290,8 +290,7 @@ function QcCol({ q, lang, ttState, working, mph }: { q: WpQc; lang: Lang; ttStat
                 {(() => { const e = etwLabel(m.etw_accurate, m.etw_expires, lang); return e && <span className={`jetw ${e.cls}`} style={{ marginLeft: 6 }} title={ko(lang) ? "TOS ETW RPC 기반 정확 ETW" : "accurate ETW from the TOS ETW RPC"}>ETW {e.text}</span>; })()}
                 {m.actv_ts && (() => {
                   const mins = Math.max(0, Math.round((Date.now() - new Date(m.actv_ts).getTime()) / 60000));
-                  const crane = m.jobtype === "DS" ? "RTG" : "QC";
-                  return <span className="jetw rtg-actv" style={{ marginLeft: 6 }} title={ko(lang) ? "TOS: 크레인이 이 주문에 활성 (곧유휴 신호). 활성화 시각이며 ±1초 물리 집기는 아님." : "TOS: crane active on this order (soon-idle signal). Activation, not the ±1s physical lift."}>{ko(lang) ? `${crane}활성 ${mins}분` : `${crane} ${mins}m`}</span>;
+                  return <span className="jetw rtg-actv" style={{ marginLeft: 6 }} title={ko(lang) ? "TOS ACTV — 소스 크레인이 트럭에 적재 완료 후 경과(DS=QC양하·LD=RTG픽업, 검증: ACTV=크레인 move 완료 0초 일치). 자유까지 중앙 ~12분. 물리 집기 순간 아님." : "TOS ACTV — since the source crane loaded the truck (DS=QC discharge, verified ACTV==crane move complete). ~12m median to free."}>{ko(lang) ? `적재 ${mins}분` : `loaded ${mins}m`}</span>;
                 })()}
               </div>
             </div>

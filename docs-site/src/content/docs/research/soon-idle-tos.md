@@ -15,7 +15,7 @@ sidebar:
 
 | 핵심 질문 | 선적(LD) — 안벽 QC | 양하(DS) — 야드 RTG |
 |---|---|---|
-| **(1) 핸드오버 "시작 시점"** | 권위(사후): `MCH_OPERATION.ST_DT` **[코드/문서]** · 라이브 임박: QC PLC `ctab` load 전이(~1초) **[코드/문서]** · 라이브 예측: `JOB_ORDER_LIST.JOB_ODR_ETW_DT` **[코드/DB]** | **TOS 라이브로 직접 관측됨(2차)** — `JOB_ORDER_LIST.JOB_ODR_ACTV_DT`(RTG/주문 활성, in-flight) **[ORA: DS 활성주문 113건 보유]** · 권위: `JOB_HIST_ACTV_DT` · 웹소켓 보조: RTG GPS ≤30m(`RTG_BAY_M`) **[코드]**. 단 `ACTV_DT`=활성화이지 ±1초 물리집기 아님 |
+| **(1) 핸드오버 "시작 시점"** | 권위(사후): `MCH_OPERATION.ST_DT` **[코드/문서]** · 라이브 임박: QC PLC `ctab` load 전이(~1초) **[코드/문서]** · 라이브 예측: `JOB_ORDER_LIST.JOB_ODR_ETW_DT` **[코드/DB]** | **TOS 라이브로 직접 관측됨(2차)** — `JOB_ORDER_LIST.JOB_ODR_ACTV_DT`(=QC 양하 완료·트럭 적재, in-flight) **[ORA: DS 활성주문 113건 보유]** · 권위: `JOB_HIST_ACTV_DT` · 웹소켓 보조: RTG GPS ≤30m(`RTG_BAY_M`) **[코드]**. 단 `ACTV_DT`=QC 적재 시점이지 RTG 물리집기 아님(RTG 들기는 +~11분) |
 | **(2) 핸드오버 "대상 차량"** | 사후: `MCH_OPERATION.TRK_ID` **[코드/문서]** · 라이브: `JOB_ORDER_LIST.JOB_ODR_YTNO`(=`TT####`, GPS device id와 동일) **[코드/DB]** | 라이브: `JOB_ODR_YTNO` **[ORA]** · **이력도 `JOB_HIST_YTNO` 보유(DS 87% 채움) — 2차 확정**(이전 미검증 해소) · 담당 RTG `JOB_ODR_ARMGC`/`JOB_HIST_ARMGC` **[ORA]** |
 
 **핵심 비대칭(실측):** 차를 비우는 핸드오버가 LD는 PLC 있는 **QC**에서, DS는 PLC 없는 **RTG**에서 일어납니다. 라이브 DB `tt_cycle_log`(61,279 사이클, 2026-06-10~14)에서 **드롭측 크레인 도착 포착 = LD 50.1% vs DS 0.0%** **[DB]** — DS 23,219건 중 단 4건만 PLC로 잡힘. 그래서 "선적 곧유휴는 풀리고, 양하 곧유휴는 구조적으로 어렵다".
@@ -40,7 +40,7 @@ sidebar:
 |---|---|---|
 | HISTORY가 대상 트럭ID를 직접 주는가 | **확정 — `JOB_HIST_YTNO` 실재**(DS 이력 87% 채움: 147,670/169,422) | [ORA] `all_tab_columns` + 집계 |
 | 워터마크용 datetime 인덱스 존재 여부 | **확정 — 존재.** `IDX_JOBHIST_DATETIME = (JOB_HIST_DATE‖JOB_HIST_TIME, JOBSTATUS)` (+ YTNO별·ARMGC별 datetime 인덱스) | [ORA] `all_ind_expressions` |
-| `ACTV_DT` 의미 | **✅ 확정 — 주문 활성(RTG 큐-진입)이지 물리집기 아님: 물리 RTG 들어올림(59s)은 ACTV +~11분(median)** | [ORA] JOB_ORDER_HISTORY⨝MCH_OPERATION n=3270 |
+| `ACTV_DT` 의미 | **✅ 확정 — QC 양하 완료(트럭 적재) 시점: ACTV==QC move 완료 0초 일치(위반 0/3464). RTG 물리 들어올림은 ACTV +~11분** | [ORA] JOB_ORDER_HISTORY⨝MCH_OPERATION |
 | JOBSTATUS 코드 | **확정 — `C`=완료 `A`=활성 `Q`=대기 `P`=계획 `B`=차단** | [코드: workpool.sql 주석] |
 
 ### 새 핵심 발견 — 양하(DS) 곧유휴 신호가 TOS 라이브에 직접 존재
@@ -64,7 +64,7 @@ sidebar:
 ### 타이밍 실측 (라이브 DS 활성 n=121) [ORA]
 
 - **블록 대기(DIS→ACTV) 중앙값 461초**(≈7.7분), p75 788초(≈13분) — "DS 도착 ≠ 곧유휴"를 정량 확인(RTG 대기가 길고 가변).
-- **ACTV 경과(진행중 주문) 중앙값 361초** + 롱테일(11~18분) → **`ACTV_DT`는 느슨한 활성 신호**(±초 물리집기 아님). 따라서 "30초 카운트다운"이 아니라 **"이 트럭이 RTG 활성 서비스 구간에 들어왔고 대상이 누구인지"** 를 주는 신호 — 그래도 웹소켓-무신호보다 압도적.
+- **ACTV 경과(진행중 주문) 중앙값 361초** + 롱테일(11~18분) → **`ACTV_DT`는 느슨한 활성 신호**(±초 물리집기 아님). 따라서 "30초 카운트다운"이 아니라 **"이 트럭이 QC 양하를 마치고(적재 완료) 풀릴 방향으로 가는 중이며(자유까지 ~12분) 대상이 누구인지"** 를 주는 신호 — 그래도 웹소켓-무신호보다 압도적. (ACTV=QC 양하 완료 확정은 §리스크표·3차 검증.)
 
 ### 스키마·인덱스 사실 [ORA]
 
@@ -180,7 +180,7 @@ QC가 **move 기반**이면 RTG는 **대기 기반**입니다. 깨끗한 시작/
 핵심 파생값: `K_CRANE_Q = (ACTV_DT − YT_DIS_DT) × 86400`초 = "TT 하차 → 야드 크레인 활성까지 대기"(0..1800s) **[코드: c08]**. **이것이 RTG/블록측 신호임을 DB가 증명:** `raw_k_crane_q_daily` in-range 이벤트의 **97.1%가 DS** **[DB]**.
 
 :::caution[존재하되 약하다]
-`ACTV_DT`는 "활성화 시각"이지 RTG가 물리적으로 집은 순간이 아닙니다 — **TOS 직접 조인으로 확정(2026-06-16): 물리 RTG 들어올림(`MCH_OPERATION` ST_DT→완료, 중앙 59s)은 `ACTV_DT`보다 중앙 ~11분 늦음**(n=3270). 즉 `ACTV_DT` = 주문이 RTG 작업 대기열에 활성으로 진입한 시점(블록-준비), 물리 집기 아님. (DIS→ACTV ~7분, ACTV→물리시작 ~11분, 물리 59s.)
+`ACTV_DT`는 RTG가 물리적으로 집은 순간이 아닙니다. **TOS 직접 조인으로 확정(2026-06-16): `ACTV_DT` = QC 양하 완료(트럭 적재) 시점** — `ACTV_DT`가 QC 물리 move(`MCH_OPERATION`, MACHNO `^C[0-9]`) 완료시각과 **0초 일치(위반 0/3464)**. 즉 RTG-측이 아니라 **QC-측 핸드오버(적재 시작)**이고, RTG 물리 들어올림(ST_DT→완료 59s)은 그보다 **~11분 뒤**. (DIS→QC양하 ~7분, QC양하=ACTV→자유 ~12분.)
 :::
 
 #### 2.3 분리·결합 키
@@ -282,7 +282,7 @@ WHERE (JOB_HIST_DATE||SUBSTR(JOB_HIST_TIME,1,6)) > {{last_watermark}}
 |---|---|---|
 | DS 물리 순간 부재 | RTG PLC 없음 → "정확히 언제 비었나"는 GPS dwell/ACTV_DT 근사만 | 구조적, 해소 불가 |
 | 워터마크 인덱스 | `JOB_HIST_DATE‖JOB_HIST_TIME` 위 인덱스 존재 | **✅ 해소(2차)** — `IDX_JOBHIST_DATETIME` 확정 **[ORA]** |
-| `ACTV_DT` 의미 | '물리 집기' vs '활성화' | **✅ 확정(3차)** — 활성=RTG 큐-진입, 물리 들어올림은 ACTV +~11분(n=3270, JOB_HIST⨝MCH_OP) **[ORA]** |
+| `ACTV_DT` 의미 | '물리 집기' vs '활성화' | **✅ 확정** — ACTV = **QC 양하 완료(트럭 적재)**, QC move 완료와 0초 일치(위반 0/3464). RTG 들어올림은 ACTV +~11분 **[ORA]** |
 | HISTORY 트럭ID | `JOB_ORDER_HISTORY`가 대상 트럭ID를 직접 주는지 | **✅ 해소(2차)** — `JOB_HIST_YTNO` 실재(DS 87% 채움) **[ORA]** |
 | prod Oracle 부하 | 신규 폴링의 실제 실행계획·서버 CPU/IO | **(미검증)** — 단 권장안은 추가쿼리 0 / 인덱스 레인지로 무시 수준. EXPLAIN PLAN 미실행 |
 | 안 A(RTG 예측) | 관여 *전* 예측(예측기 ⑤)은 미구현 | 미구현 |
@@ -291,7 +291,7 @@ WHERE (JOB_HIST_DATE||SUBSTR(JOB_HIST_TIME,1,6)) > {{last_watermark}}
 ## 다음 단계(제안) — 2차 검증 반영
 
 1. **✅ 구현 완료(2026-06-14):** 90초 `workpool.sql`에 `JOB_ODR_ACTV_DT` 추가 → `live_workpool.actv_ts`/`actv_raw`에 적재(Oracle 추가쿼리 0, mig `0029`). **검증: DS 활성 103건 전부(100%) `actv_ts`+`ytno`+`armgc` 보유** — DS 곧유휴(RTG 핸드오버 시작+대상트럭) 라이브 수집 가동.
-2. **✅ 구현 완료(2026-06-14):** `classify_tt()` DS 분기에 **TOS 보정 훅** — 배정 캐시(`AssignedJob.rtg_active`)로 활성주문 `actv_ts`를 받아, GPS RTG 미근접(>30m)이어도 TOS RTG 활성이면 `soon_idle`로 보정(웹소켓 GPS ∪ TOS). 사유에 GPS 거리 병기로 감사 가능. **검증: soon_idle 28 중 18이 TOS 보정(GPS 56~118m) — DS 곧유휴 GPS단독 4 → 22로 ~5.5배.** `actv_ts`는 `/api/workpool`·대시보드 TT카드(`RTG활성 N분` 배지)에도 노출.
+2. **✅ 구현 완료(2026-06-14):** `classify_tt()` DS 분기에 **TOS 보정 훅** — 배정 캐시(`AssignedJob.rtg_active`)로 활성주문 `actv_ts`를 받아, GPS RTG 미근접(>30m)이어도 TOS ACTV(=QC 양하 완료)면 `soon_idle`(이후 `approaching` 티어로 분리)로 보정(웹소켓 GPS ∪ TOS). 사유에 GPS 거리 병기로 감사 가능. **검증: soon_idle 28 중 18이 TOS 보정(GPS 56~118m) — DS 곧유휴 GPS단독 4 → 22로 ~5.5배.** `actv_ts`는 `/api/workpool`·대시보드 TT카드(`적재 N분` 배지)에도 노출.
 3. **✅ 라벨 수집 구현(2026-06-14):** `extractor handover` 서브커맨드 + `wp-handover.timer`(60초)가 `JOB_ORDER_HISTORY` 완료(`JOBSTATUS='C'`)를 `etl_watermark`(`IDX_JOBHIST_DATETIME` 워터마크) **증분 폴링** → `tos_handover_label`(mig `0030`)에 적재. `comp_ts`=실제 유휴 시각(정답), `actv_ts`/`dis_ts` 동반. **검증: 증분 동작(첫 폴 211 → 이후 폴 ~수십), 빈 `etl_watermark` 가동.** 권위 호라이즌(DS, n≈99): **ACTV→실제유휴 중앙 ~10.2분 · 블록대기(DIS→ACTV) ~12.3분** — 라이브 검열 추정(≈6분)을 정답 데이터가 교정.
 4. **✅ 정확도 하니스 구현(2026-06-14):** 백그라운드 샘플러 `spawn_soon_idle_logger`(30초)가 `classify_tt`를 읽기 호출해 트립당 soon_idle **첫 진입**을 `tt_soon_idle_pred`(mig `0031`)에 적재 — `source`(gps_rtg/tos_actv/qc_plc/both)와 **`gps_would_fire`**(GPS단독이면 잡혔을지=반사실) 동반. `learn.rs` `/api/learn/soon-idle`이 예측↔`comp_ts`를 **DS=(ytno,container)·LD=시간창(nearest-Δt)**로 매칭해 precision·recall·리드타임을 **GPS단독 vs TOS보정**으로 분리 산출(`spawn_learn_persist`가 개선곡선 스냅샷). 대시보드 학습센터 **④ 섹션** 노출. **검증(라이브 적재 직후):** 예측 60건 중 **DS 38의 34가 tos_only**(GPS단독이면 89% 놓침), matched 누적 시작. **남은 일(자연 누적):** 하루치 쌓인 뒤 §승격 게이트(G1 recall≥0.85·G2 타이밍·G3 ΔRecall_TOS≥0.10) 측정 → DS 우선 라이브 승격, LD 타이밍 꼬리 재캘리브레이션.
 
