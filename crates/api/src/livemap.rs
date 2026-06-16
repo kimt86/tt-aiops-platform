@@ -1628,7 +1628,8 @@ pub fn spawn_travel_aggregator(pool: PgPool) {
                  )
                  INSERT INTO learn_travel_sample
                    (ytno, dropped_at, leg_ord, origin, dest, travel_s, dist_m, hour,
-                    origin_zone, dest_zone, dow, congestion)
+                    origin_zone, dest_zone, dow, congestion,
+                    origin_lat, origin_lon, dest_lat, dest_lon)
                  SELECT a.ytno, a.dropped_at, a.ord, a.target, b.target,
                         ((b.arr_ms - a.left_ms) / 1000)::int,
                         CASE WHEN po.topos IS NOT NULL AND pd.topos IS NOT NULL THEN
@@ -1641,7 +1642,8 @@ pub fn spawn_travel_aggregator(pool: PgPool) {
                         extract(dow FROM to_timestamp(b.arr_ms / 1000.0))::int,
                         (SELECT count(*) FROM tt_cycle_v2 cc
                           WHERE cc.opened_at <= to_timestamp(b.arr_ms / 1000.0)
-                            AND cc.dropped_at >= to_timestamp(b.arr_ms / 1000.0))::int
+                            AND cc.dropped_at >= to_timestamp(b.arr_ms / 1000.0))::int,
+                        a.lat, a.lon, b.lat, b.lon
                    FROM legs a
                    JOIN legs b ON a.ytno = b.ytno AND a.dropped_at = b.dropped_at AND b.ord = a.ord + 1
                    LEFT JOIN learn_topos_point po ON po.topos = a.target
@@ -1678,7 +1680,8 @@ pub fn spawn_travel_aggregator(pool: PgPool) {
                  )
                  INSERT INTO learn_travel_sample
                    (ytno, dropped_at, leg_ord, origin, dest, travel_s, dist_m, hour,
-                    origin_zone, dest_zone, dow, congestion)
+                    origin_zone, dest_zone, dow, congestion,
+                    origin_lat, origin_lon, dest_lat, dest_lon)
                  SELECT wp.ytno, wp.dropped_at, 0, wp.prev_drop, wp.pickup_topos,
                         extract(epoch FROM wp.empty_arrived_at - wp.empty_travel_start_at)::int,
                         CASE WHEN po.topos IS NOT NULL AND pd.topos IS NOT NULL THEN
@@ -1691,7 +1694,8 @@ pub fn spawn_travel_aggregator(pool: PgPool) {
                         extract(dow FROM wp.empty_arrived_at)::int,
                         (SELECT count(*) FROM tt_cycle_v2 cc
                           WHERE cc.opened_at <= wp.empty_arrived_at
-                            AND cc.dropped_at >= wp.empty_arrived_at)::int
+                            AND cc.dropped_at >= wp.empty_arrived_at)::int,
+                        wp.prev_drop_lat, wp.prev_drop_lon, wp.pickup_lat, wp.pickup_lon
                    FROM wp
                    LEFT JOIN learn_topos_point po ON po.topos = wp.prev_drop
                    LEFT JOIN learn_topos_point pd ON pd.topos = wp.pickup_topos
