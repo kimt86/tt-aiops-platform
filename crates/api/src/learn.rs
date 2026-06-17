@@ -275,6 +275,17 @@ struct SiRecall {
     recall_gps_pct: Option<f64>, // GPS-only recall; (recall_pct − this) = TOS hook's gain
 }
 
+// per-jobtype lead time: of predicted-soon-idle trucks that DID go idle, how long after the
+// prediction did they actually become idle (comp_ts − predicted_at). Answers "몇 분 후 유휴".
+#[derive(Serialize, sqlx::FromRow)]
+struct SiLead {
+    jobtype: String,
+    matched: i64,
+    lead_p10_s: Option<f64>,
+    lead_p50_s: Option<f64>,
+    lead_p90_s: Option<f64>,
+}
+
 #[derive(Serialize, sqlx::FromRow)]
 struct SiMetricPoint {
     captured_at: DateTime<Utc>,
@@ -294,6 +305,7 @@ pub struct SoonIdleResp {
     precision_pct: Option<f64>,
     by_source: Vec<SiSource>,
     by_jobtype: Vec<SiRecall>,
+    lead_by_jobtype: Vec<SiLead>,
     metric_series: Vec<SiMetricPoint>,
 }
 
@@ -351,6 +363,29 @@ pub async fn soon_idle(State(pool): State<PgPool>) -> Result<Json<SoonIdleResp>,
     .fetch_all(&pool)
     .await?;
 
+    // per-jobtype lead time over ALL matched predictions (every source), DS and LD alike.
+    let lead_by_jobtype: Vec<SiLead> = sqlx::query_as(
+        "WITH m AS (
+           SELECT p.jobtype, EXTRACT(EPOCH FROM (h.comp_ts - p.predicted_at)) AS lead_s
+             FROM tt_soon_idle_pred p
+             JOIN LATERAL (
+               SELECT comp_ts FROM tos_handover_label h
+                WHERE h.ytno = p.ytno AND (p.jobtype <> 'DS' OR h.contno = p.container)
+                  AND h.comp_ts >= p.predicted_at - interval '60 seconds'
+                  AND h.comp_ts <  p.predicted_at + interval '20 minutes'
+                ORDER BY abs(EXTRACT(EPOCH FROM (h.comp_ts - p.predicted_at))) LIMIT 1
+             ) h ON true
+            WHERE p.predicted_at > now() - interval '7 days'
+         )
+         SELECT jobtype, count(*) FILTER (WHERE lead_s >= 0) AS matched,
+                percentile_cont(0.1) WITHIN GROUP (ORDER BY lead_s) FILTER (WHERE lead_s >= 0) AS lead_p10_s,
+                percentile_cont(0.5) WITHIN GROUP (ORDER BY lead_s) FILTER (WHERE lead_s >= 0) AS lead_p50_s,
+                percentile_cont(0.9) WITHIN GROUP (ORDER BY lead_s) FILTER (WHERE lead_s >= 0) AS lead_p90_s
+           FROM m GROUP BY jobtype ORDER BY jobtype",
+    )
+    .fetch_all(&pool)
+    .await?;
+
     let metric_series: Vec<SiMetricPoint> = sqlx::query_as(
         "SELECT captured_at, jobtype, source, predictions, matched, precision_pct, recall_pct, lead_p50_s
            FROM tt_soon_idle_metric WHERE captured_at > now() - interval '30 days' ORDER BY captured_at",
@@ -368,6 +403,7 @@ pub async fn soon_idle(State(pool): State<PgPool>) -> Result<Json<SoonIdleResp>,
         precision_pct,
         by_source,
         by_jobtype,
+        lead_by_jobtype,
         metric_series,
     }))
 }

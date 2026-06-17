@@ -876,6 +876,18 @@ td.mono { font-family: "JetBrains Mono", monospace; color: var(--text); }
 .ls-detail > summary { font-size: 11px; color: var(--text-dim); cursor: pointer; user-select: none; padding: 3px 0; }
 .ls-detail > summary:hover { color: var(--text); }
 @media (max-width: 720px) { .ls-hero { flex-direction: column; } .ls-hero-metric { width: auto; } .ls-hero-chart { height: 84px; } }
+/* soon-idle lead-time cards (DS / LD) — "예측 후 실제 몇 분 뒤 유휴" */
+.ls-leads { display: flex; gap: 12px; }
+.ls-lead { flex: 1; min-width: 0; background: var(--surface-2); border: 1px solid var(--border-soft); border-top: 2px solid var(--border-strong); border-radius: var(--radius-md); padding: 10px 13px; }
+.ls-lead-jt { font-weight: 700; font-size: 12px; }
+.ls-lead-v { font-size: 26px; font-weight: 800; line-height: 1.1; margin-top: 3px; }
+.ls-lead-u { font-size: 11px; font-weight: 600; color: var(--text-dim); margin-left: 4px; }
+.ls-lead-track { position: relative; height: 6px; background: var(--surface-3); border-radius: 999px; margin: 9px 0 6px; }
+.ls-lead-iqr { position: absolute; height: 100%; border-radius: 999px; }
+.ls-lead-med { position: absolute; width: 2px; height: 12px; top: -3px; border-radius: 1px; }
+.ls-lead-sub { font-size: 10.5px; color: var(--text-mute); }
+.ls-lead-q { font-size: 11px; color: var(--text-dim); margin-top: 5px; }
+@media (max-width: 720px) { .ls-leads { flex-direction: column; } }
 .learn-od-cols, .learn-od-row { display: grid; grid-template-columns: 1.3fr 1.3fr 0.5fr 0.8fr 0.9fr 0.6fr; gap: 8px; align-items: center; }
 .learn-od-cols { font-size: 11px; color: var(--text-dim); padding: 6px 8px; border-bottom: 1px solid var(--border); }
 .learn-od-row { font-size: 12px; padding: 5px 8px; border-bottom: 1px solid var(--border); }

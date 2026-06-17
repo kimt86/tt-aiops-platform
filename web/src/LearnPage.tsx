@@ -3,7 +3,7 @@
 // 각 세션: 핵심 품질지표(현재값) + 추세 배지(개선/안정/악화) + 품질 추이 차트 + 보조 칩 + 해석 + 상세(접이식).
 import { useEffect, useMemo, useState } from "react";
 import { type Lang } from "./i18n";
-import { api, type LearnTopos, type LearnToposPoint, type LanesData, type TravelData, type TravelOd, type SoonIdleData } from "./api";
+import { api, type LearnTopos, type LearnToposPoint, type LanesData, type TravelData, type TravelOd, type SoonIdleData, type SoonIdleLead } from "./api";
 import { LineChart } from "./charts";
 
 const ko = (lang: Lang) => lang === "ko";
@@ -97,6 +97,27 @@ function OdRow({ o }: { o: TravelOd }) {
   );
 }
 
+// "예측 후 실제 몇 분 뒤 유휴가 됐나" — per jobtype: median lead + p10~p90 range bar + recall/precision.
+function LeadCard({ jt, accent, lead, recall, recallGps, precision, lang }: { jt: string; accent: string; lead: SoonIdleLead | undefined; recall: number | null; recallGps: number | null; precision: number | null; lang: Lang }) {
+  const k = ko(lang);
+  const MAXM = 20; // lead window is 20min, so scale the range bar 0..20
+  const toMin = (s: number | null | undefined) => (s == null ? null : s / 60);
+  const p10 = toMin(lead?.lead_p10_s), p50 = toMin(lead?.lead_p50_s), p90 = toMin(lead?.lead_p90_s);
+  const clamp = (m: number) => Math.max(0, Math.min(100, (m / MAXM) * 100));
+  return (
+    <div className="ls-lead" style={{ borderTopColor: accent }}>
+      <div className="ls-lead-jt" style={{ color: accent }}>{jt} {jt === "DS" ? (k ? "· 양하" : "· discharge") : (k ? "· 적하" : "· load")}</div>
+      <div className="ls-lead-v">{p50 != null ? p50.toFixed(1) : "—"}<span className="ls-lead-u">{k ? "분 후 유휴 (중앙)" : "min to idle (median)"}</span></div>
+      <div className="ls-lead-track">
+        {p10 != null && p90 != null && <div className="ls-lead-iqr" style={{ left: `${clamp(p10)}%`, width: `${Math.max(1, clamp(p90) - clamp(p10))}%`, background: accent + "55" }} />}
+        {p50 != null && <div className="ls-lead-med" style={{ left: `${clamp(p50)}%`, background: accent }} />}
+      </div>
+      <div className="ls-lead-sub">{k ? "범위 p10~p90" : "p10~p90"} {p10 != null ? p10.toFixed(1) : "—"}~{p90 != null ? p90.toFixed(1) : "—"}{k ? "분" : "m"} · {k ? "적중" : "matched"} {lead?.matched ?? 0}{k ? "건" : ""}</div>
+      <div className="ls-lead-q">{k ? "재현율" : "recall"} <b style={{ color: "#34d399" }}>{recall != null ? `${recall.toFixed(0)}%` : "—"}</b>{recallGps != null && recall != null ? ` (GPS ${recallGps.toFixed(0)}→+${(recall - recallGps).toFixed(0)}%p)` : ""} · {k ? "정밀도" : "prec"} <b>{precision != null ? `${precision.toFixed(0)}%` : "—"}</b></div>
+    </div>
+  );
+}
+
 export default function LearnPage({ lang }: { lang: Lang }) {
   const k = ko(lang);
   const [d, setD] = useState<LearnTopos | null>(null);
@@ -130,10 +151,16 @@ export default function LearnPage({ lang }: { lang: Lang }) {
   const lms = ln?.metric_series ?? [];
   const roadVals = lms.map((p) => p.road_cells);
   // ④ soon-idle — quality = DS recall over time
-  const dsRecall = si?.by_jobtype.find((j) => j.jobtype === "DS");
-  const dsDelta = dsRecall && dsRecall.recall_pct != null && dsRecall.recall_gps_pct != null ? dsRecall.recall_pct - dsRecall.recall_gps_pct : null;
-  const dsLeadP50 = si?.by_source.find((s) => s.jobtype === "DS" && s.source === "tos_actv")?.lead_p50_s ?? null;
+  const jobAgg = (jt: string) => {
+    const rows = (si?.by_source ?? []).filter((s) => s.jobtype === jt);
+    const pred = rows.reduce((a, s) => a + s.predictions, 0);
+    const matched = rows.reduce((a, s) => a + s.matched, 0);
+    const rec = si?.by_jobtype.find((j) => j.jobtype === jt);
+    return { precision: pred ? (100 * matched) / pred : null, recall: rec?.recall_pct ?? null, recallGps: rec?.recall_gps_pct ?? null, lead: si?.lead_by_jobtype.find((l) => l.jobtype === jt) };
+  };
+  const dsJob = jobAgg("DS"), ldJob = jobAgg("LD");
   const siRecallSeries = (si?.metric_series ?? []).filter((p) => p.jobtype === "DS" && p.source === "ALL").map((p) => p.recall_pct ?? 0);
+  const ldRecallSeries = (si?.metric_series ?? []).filter((p) => p.jobtype === "LD" && p.source === "ALL").map((p) => p.recall_pct ?? 0);
   const siGrid = "50px 84px 56px 64px 64px 72px";
 
   const points = useMemo(() => {
@@ -216,16 +243,29 @@ export default function LearnPage({ lang }: { lang: Lang }) {
 
       {/* ④ Soon-idle 예측 정확도 */}
       <Session n={4} accent="#a78bfa" title={k ? "Soon-idle 예측 정확도" : "Soon-idle prediction"} sub={k ? "그림자: 예측 vs 권위 정답(comp_ts, 실제 유휴 시각)" : "shadow: prediction vs authoritative idle"}>
-        <Hero series={siRecallSeries} fmt={(v) => `${Math.round(v)}%`} label={k ? "DS 예측 재현율 (24h 스냅샷)" : "DS recall (24h snapshots)"} color="#34d399" higherBetter lang={lang} />
+        <div className="ls-note" style={{ margin: "0 0 9px" }}>{k ? "곧유휴로 예측한 차량이 실제로 몇 분 뒤 유휴가 됐나 — 예측 적중분 기준 (예측 시점 → 실제 유휴까지)" : "of predicted-soon-idle trucks that did go idle — minutes from prediction to actual idle"}</div>
+        <div className="ls-leads">
+          <LeadCard jt="DS" accent="#fb923c" lead={dsJob.lead} recall={dsJob.recall} recallGps={dsJob.recallGps} precision={dsJob.precision} lang={lang} />
+          <LeadCard jt="LD" accent="#22d3ee" lead={ldJob.lead} recall={ldJob.recall} recallGps={ldJob.recallGps} precision={ldJob.precision} lang={lang} />
+        </div>
         <div className="ls-chips">
           <Chip label={k ? "예측 (7일)" : "predictions (7d)"} value={si ? fmtN(si.predictions) : "—"} />
-          <Chip label={k ? "정밀도" : "precision"} value={si?.precision_pct != null ? `${si.precision_pct.toFixed(0)}%` : "—"} />
-          <Chip label={k ? "ΔRecall · TOS 기여" : "ΔRecall · TOS"} value={dsDelta != null ? `+${dsDelta.toFixed(0)}%p` : "—"} accent="#a78bfa" />
-          <Chip label={k ? "DS 리드 p50" : "DS lead p50"} value={mmss(dsLeadP50)} />
+          <Chip label={k ? "적중" : "matched"} value={si ? fmtN(si.matched) : "—"} />
+          <Chip label={k ? "전체 정밀도" : "precision"} value={si?.precision_pct != null ? `${si.precision_pct.toFixed(0)}%` : "—"} />
         </div>
-        <div className="ls-note">{k ? "정답=실제 유휴(comp_ts). 예측이 완료를 지나야 채점됨(갓 적재분은 0). TOS 보정(②)이 GPS단독 대비 재현율을 +ΔRecall만큼 끌어올린 순이득." : "Ground truth = comp_ts. ΔRecall = the gain the TOS hook added over GPS-alone."}</div>
+        <div className="learn-charts" style={{ marginTop: 6 }}>
+          <div className="cyc-tp">
+            <div className="cyc-sec-h">{k ? "DS 재현율 추이 (24h)" : "DS recall trend"} <TrendBadge series={siRecallSeries} higherBetter lang={lang} /></div>
+            <div className="cyc-tp-box">{siRecallSeries.length > 1 ? <LineChart values={siRecallSeries} color="#fb923c" axes /> : <div className="cyc-empty">{k ? "수집 중" : "collecting"}</div>}</div>
+          </div>
+          <div className="cyc-tp">
+            <div className="cyc-sec-h">{k ? "LD 재현율 추이 (24h)" : "LD recall trend"} <TrendBadge series={ldRecallSeries} higherBetter lang={lang} /></div>
+            <div className="cyc-tp-box">{ldRecallSeries.length > 1 ? <LineChart values={ldRecallSeries} color="#22d3ee" axes /> : <div className="cyc-empty">{k ? "수집 중" : "collecting"}</div>}</div>
+          </div>
+        </div>
+        <div className="ls-note">{k ? "정답=실제 유휴(comp_ts). 예측이 완료를 지나야 채점됨(갓 적재분 제외). DS는 ACTV 보정, LD는 안벽 QC PLC가 주 신호 — 리드타임 카드에 GPS단독→TOS 순이득(+%p) 병기." : "Ground truth = comp_ts. DS uses the ACTV hook; LD uses quay QC PLC. Lead cards show the GPS→TOS recall gain."}</div>
         <details className="ls-detail">
-          <summary>{k ? "상세 — 신호별 정밀도 + 작업별 재현율" : "detail — precision by signal + recall by job"}</summary>
+          <summary>{k ? "상세 — 신호별 정밀도·리드타임" : "detail — precision & lead by signal"}</summary>
           <div className="learn-list" style={{ marginTop: 8 }}>
             <div style={{ display: "grid", gridTemplateColumns: siGrid, gap: 8, padding: "3px 6px", fontWeight: 600, color: "var(--text-dim)", fontSize: 12 }}>
               <span>{k ? "작업" : "job"}</span><span>{k ? "신호" : "signal"}</span><span>{k ? "예측" : "pred"}</span><span>{k ? "적중" : "match"}</span><span>{k ? "정밀도" : "prec"}</span><span>{k ? "리드p50" : "lead"}</span>
@@ -240,14 +280,6 @@ export default function LearnPage({ lang }: { lang: Lang }) {
               </div>
             ))}
             {(si?.by_source?.length ?? 0) === 0 && <div className="cyc-empty">{k ? "예측 수집 중" : "collecting"}</div>}
-          </div>
-          <div style={{ display: "flex", flexDirection: "column", gap: 5, padding: "8px 6px 0" }}>
-            {(si?.by_jobtype ?? []).map((j) => (
-              <div key={j.jobtype} style={{ fontSize: 12.5 }}>
-                <span className="mono" style={{ fontWeight: 600 }}>{j.jobtype}</span>{" "}{k ? "재현율" : "recall"} <b style={{ color: "#34d399" }}>{j.recall_pct != null ? `${j.recall_pct.toFixed(0)}%` : "—"}</b>{" "}
-                ({k ? "GPS단독" : "GPS"} {j.recall_gps_pct != null ? `${j.recall_gps_pct.toFixed(0)}%` : "—"} → <b style={{ color: "#a78bfa" }}>TOS +{j.recall_pct != null && j.recall_gps_pct != null ? (j.recall_pct - j.recall_gps_pct).toFixed(0) : "—"}%p</b>)
-              </div>
-            ))}
           </div>
         </details>
       </Session>
