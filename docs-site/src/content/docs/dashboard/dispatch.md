@@ -15,10 +15,15 @@ TT Dispatch 페이지는 **"지금 이 순간 트럭들이 어디서 무엇을 �
 
 각 트럭은 매 스냅샷마다 6개 상태 중 하나로 분류됩니다(`classify_tt`). 분류는 **GPS 신호만으로** 합니다(작업 풀 배정 여부는 idle/staging 구분에만 사용).
 
-```
-                        트럭 1대의 상태 흐름
-  유휴 → (배차받음) → 공차주행 → 받기 → 적재이동 → 도착 → 곧유휴 → 빔(유휴)
-  idle    staging?   empty_travel       delivering  wait_rtg  soon_idle
+```mermaid
+flowchart LR
+  idle["유휴<br/>idle"] -->|"배차받음"| staging["대기<br/>staging"]
+  staging --> et["공차주행<br/>empty_travel"]
+  et --> P["받기"]
+  P --> del["적재이동<br/>delivering"]
+  del --> wr["도착·RTG대기<br/>wait_rtg"]
+  wr -->|"크레인 관여"| si["곧유휴<br/>soon_idle"]
+  si -->|"넘기기 완료"| idle
 ```
 
 | 상태 | 한국어 | 신호(websocket) | 쉬운 뜻 |

@@ -1,5 +1,6 @@
 // @ts-check
 import { defineConfig } from 'astro/config';
+import mermaid from 'astro-mermaid';
 import starlight from '@astrojs/starlight';
 
 // 지식센터는 Rust API가 정적 빌드(dist)를 `/kc/`로 서빙한다 → base를 '/kc'로 둬야
@@ -8,6 +9,8 @@ import starlight from '@astrojs/starlight';
 export default defineConfig({
 	base: '/kc',
 	integrations: [
+		// mermaid는 starlight보다 먼저 — ```mermaid 코드펜스를 클라이언트에서 SVG로 렌더(브라우저 빌드 불필요)
+		mermaid({ theme: 'dark', autoTheme: true }),
 		starlight({
 			title: 'WP-TT 지식센터',
 			description:

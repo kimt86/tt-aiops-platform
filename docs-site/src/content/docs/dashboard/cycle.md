@@ -43,9 +43,12 @@ Cycle 페이지는 트럭의 **한 바퀴(사이클)** 가 **어디서 시간을
 | laden leg | **부하 이동** | 픽업 출발 → 하역지 도착 | 김 |
 | (handover) | **주기(넘기기)** | 하역 도착 → 인도 완료 | 짧음 |
 
-```
-배정 ──[공차이동]──▶ 픽업도착 ──[받기]──▶ 픽업출발 ──[부하이동]──▶ 하역도착 ──[주기]──▶ 인도(빔)
-assigned_at        pickup_arrived  pickup_left          arrived_at        dropped_at
+```mermaid
+flowchart LR
+  A["배정<br/>assigned_at"] -->|"① 공차이동"| PA["픽업도착<br/>pickup_arrived_at"]
+  PA -->|"② 받기"| PL["픽업출발<br/>pickup_left_at"]
+  PL -->|"③ 부하이동"| AR["하역도착<br/>arrived_at"]
+  AR -->|"④ 주기(넘기기)"| DR["인도 = 빔<br/>dropped_at"]
 ```
 
 **픽업/드롭 측 규칙** (목적지 `topos1`이 크레인 코드 C/M/Z냐 블록 코드냐로 판정):
