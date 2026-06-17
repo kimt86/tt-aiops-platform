@@ -14,6 +14,8 @@ const stamp = (iso: string | null | undefined) =>
 const mmss = (s: number | null | undefined) => (s == null ? "—" : `${Math.floor(s / 60)}:${String(Math.round(s % 60)).padStart(2, "0")}`);
 const mDist = (m: number | null | undefined) => (m == null ? "—" : m >= 1000 ? `${(m / 1000).toFixed(2)}km` : `${Math.round(m)}m`);
 const kmh = (v: number | null | undefined) => (v == null ? "—" : `${v.toFixed(1)}`);
+const mins = (s: number | null | undefined) => (s == null ? "—" : `${(s / 60).toFixed(1)}`);
+const distLabel = (b: number, k: boolean) => (b === 0 ? "≤30m" : b === 1 ? "30–80m" : b === 2 ? "80–150m" : b === 3 ? ">150m" : k ? "RTG없음" : "no-RTG");
 
 // first→last change of a quality series. `higherBetter` decides what counts as "improving".
 function trend(series: number[], higherBetter: boolean): { dir: 1 | -1 | 0; pct: number; improving: boolean } | null {
@@ -168,6 +170,7 @@ export default function LearnPage({ lang }: { lang: Lang }) {
   const siRecallSeries = (si?.metric_series ?? []).filter((p) => p.jobtype === "DS" && p.source === "ALL").map((p) => p.recall_pct ?? 0);
   const ldRecallSeries = (si?.metric_series ?? []).filter((p) => p.jobtype === "LD" && p.source === "ALL").map((p) => p.recall_pct ?? 0);
   const siGrid = "50px 84px 56px 64px 64px 72px";
+  const dse = si?.ds_eta; // ⑤ DS minutes-to-idle feature model
 
   const points = useMemo(() => {
     let pts = d?.points ?? [];
@@ -318,6 +321,33 @@ export default function LearnPage({ lang }: { lang: Lang }) {
             {(si?.by_source?.length ?? 0) === 0 && <div className="cyc-empty">{k ? "예측 수집 중" : "collecting"}</div>}
           </div>
         </details>
+      </Session>
+
+      {/* ⑤ DS 유휴 분 예측 (거리·신호 정밀화) */}
+      <Session n={5} accent="#fb923c" title={k ? "DS 유휴 분 예측 — 거리·신호" : "DS minutes-to-idle — distance × signal"} sub={k ? "양하 트럭이 몇 분 뒤 빌지: RTG 거리·발화 신호로 ④의 분 예측 정밀화 (차량별 가변)" : "refine ④'s DS minutes prediction with RTG distance + firing signal"}>
+        <div className="ls-cols">
+          <Panel test tag={k ? "정밀화 결과 — 거리·신호 vs 평균 baseline" : "result — features vs flat baseline"}>
+            <div className="ls-pv">{dse?.feat_mape_pct != null ? `${dse.feat_mape_pct.toFixed(0)}%` : "—"}<span className="ls-lead-u" style={{ marginLeft: 6 }}>MAPE</span></div>
+            <div className="ls-plabel">{k ? "평균 baseline" : "flat"} {dse?.flat_mape_pct != null ? `${dse.flat_mape_pct.toFixed(0)}%` : "—"} → {k ? "거리·신호" : "features"} <b style={{ color: "#fb923c" }}>{dse?.feat_mape_pct != null ? `${dse.feat_mape_pct.toFixed(0)}%` : "—"}</b> · ±30% {dse?.within_30pct != null ? `${dse.within_30pct.toFixed(0)}%` : "—"} · {k ? "평가" : "n"} {dse ? fmtN(dse.evaluated) : "—"}</div>
+            <div className="ls-paside">{k ? "거리는 중앙 예측을 밀어주나(≤30m 4분 → >150m 6.7분) RTG 큐 변동으로 per-건 오차는 천장(~54%) — 점이 아닌 분포로 사용." : "Distance shifts the central estimate but per-prediction error is irreducible (~54%) — use as a distribution."}</div>
+          </Panel>
+          <Panel tag={k ? "예측기 — 거리×신호별 예측(중앙)" : "predictor — median by distance × signal"}>
+            <div className="ds-cells">
+              <div className="ds-cell hd"><span>{k ? "RTG거리" : "dist"}</span><span>{k ? "신호" : "signal"}</span><span>{k ? "예측" : "pred"}</span><span>p10~p90</span><span>n</span></div>
+              {(si?.ds_eta_cells ?? []).map((c) => (
+                <div className="ds-cell" key={`${c.dist_bin}-${c.source}`}>
+                  <span className="mono">{distLabel(c.dist_bin, k)}</span>
+                  <span className="mono" style={{ fontSize: 11 }}>{c.source}</span>
+                  <span className="mono" style={{ color: "#fb923c", fontWeight: 700 }}>{mins(c.pred_s)}{k ? "분" : "m"}</span>
+                  <span className="mono" style={{ fontSize: 11, color: "var(--text-mute)" }}>{mins(c.p10_s)}~{mins(c.p90_s)}</span>
+                  <span className="mono">{c.n}</span>
+                </div>
+              ))}
+              {(si?.ds_eta_cells?.length ?? 0) === 0 && <div className="cyc-empty">{k ? "수집 중" : "collecting"}</div>}
+            </div>
+          </Panel>
+        </div>
+        <div className="ls-note">{k ? "예측기 = (RTG 거리 구간 × 발화 신호)별 학습 중앙 리드. 차량마다 거리·신호로 예측이 달라져 평균 한 값보다 informative하나, 홀드아웃 검증상 정확도 이득은 작음(56%→54%) — DS 유휴는 RTG 큐 확률성이 지배. 정답=실제 유휴(comp_ts), 7일." : "Predictor = learned median lead per (RTG-distance bin × firing signal). Held-out gain is small (56%→54%) — DS idle is dominated by RTG-queue stochasticity."}</div>
       </Session>
     </div>
   );

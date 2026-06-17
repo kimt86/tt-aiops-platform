@@ -185,9 +185,16 @@ export interface SoonIdleLead {
   jobtype: string; matched: number; lead_p10_s: number | null; lead_p50_s: number | null; lead_p90_s: number | null;
   mape_pct: number | null; within_30pct: number | null;
 }
+export interface SoonIdleEtaCell {
+  dist_bin: number; source: string; n: number; pred_s: number | null; p10_s: number | null; p90_s: number | null;
+}
+export interface SoonIdleEtaModel {
+  evaluated: number; feat_mape_pct: number | null; flat_mape_pct: number | null; within_30pct: number | null;
+}
 export interface SoonIdleData {
   predictions: number; matched: number; precision_pct: number | null;
-  by_source: SoonIdleSource[]; by_jobtype: SoonIdleRecall[]; lead_by_jobtype: SoonIdleLead[]; metric_series: SoonIdleMetricPoint[];
+  by_source: SoonIdleSource[]; by_jobtype: SoonIdleRecall[]; lead_by_jobtype: SoonIdleLead[];
+  ds_eta: SoonIdleEtaModel; ds_eta_cells: SoonIdleEtaCell[]; metric_series: SoonIdleMetricPoint[];
 }
 
 async function get<T>(path: string): Promise<T> {

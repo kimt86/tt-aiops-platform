@@ -336,6 +336,25 @@ struct SiMetricPoint {
     lead_p50_s: Option<f64>,
 }
 
+// DS minutes-to-idle feature model: predict the median lead within (distance-bin × firing-signal)
+// cells. dist_bin: 0=≤30m 1=30–80m 2=80–150m 3=>150m 4=RTG없음. pred_s = the cell's prediction.
+#[derive(Serialize, sqlx::FromRow)]
+struct DsEtaCell {
+    dist_bin: i32,
+    source: String,
+    n: i64,
+    pred_s: Option<f64>,
+    p10_s: Option<f64>,
+    p90_s: Option<f64>,
+}
+#[derive(Serialize, sqlx::FromRow)]
+struct DsEtaModel {
+    evaluated: i64,
+    feat_mape_pct: Option<f64>, // error of the feature-binned prediction
+    flat_mape_pct: Option<f64>, // error of the flat jobtype-median baseline (for comparison)
+    within_30pct: Option<f64>,
+}
+
 #[derive(Serialize)]
 pub struct SoonIdleResp {
     predictions: i64, // overall, last 7d
@@ -344,6 +363,8 @@ pub struct SoonIdleResp {
     by_source: Vec<SiSource>,
     by_jobtype: Vec<SiRecall>,
     lead_by_jobtype: Vec<SiLead>,
+    ds_eta: DsEtaModel,             // DS feature-model accuracy (distance × signal)
+    ds_eta_cells: Vec<DsEtaCell>,   // the predictor: per-cell median lead
     metric_series: Vec<SiMetricPoint>,
 }
 
@@ -439,6 +460,48 @@ pub async fn soon_idle(State(pool): State<PgPool>) -> Result<Json<SoonIdleResp>,
     .fetch_all(&pool)
     .await?;
 
+    // DS minutes-to-idle feature predictor — the cells (distance-bin × signal → median lead).
+    // dist_bin: 0=≤30m 1=30–80m 2=80–150m 3=>150m 4=RTG없음. Only cells with ≥20 matched shown.
+    const DS_ETA_M: &str = "SELECT
+           (CASE WHEN p.nearest_rtg_m IS NULL THEN 4 WHEN p.nearest_rtg_m <= 30 THEN 0
+                 WHEN p.nearest_rtg_m <= 80 THEN 1 WHEN p.nearest_rtg_m <= 150 THEN 2 ELSE 3 END) AS dist_bin,
+           p.source, EXTRACT(EPOCH FROM (h.comp_ts - p.predicted_at)) AS lead_s
+         FROM tt_soon_idle_pred p
+         JOIN LATERAL (
+           SELECT comp_ts FROM tos_handover_label h
+            WHERE h.ytno = p.ytno AND h.contno = p.container
+              AND h.comp_ts >= p.predicted_at - interval '60 seconds'
+              AND h.comp_ts <  p.predicted_at + interval '20 minutes'
+            ORDER BY abs(EXTRACT(EPOCH FROM (h.comp_ts - p.predicted_at))) LIMIT 1
+         ) h ON true
+        WHERE p.jobtype = 'DS' AND p.predicted_at > now() - interval '7 days'";
+    let ds_eta_cells: Vec<DsEtaCell> = sqlx::query_as(&format!(
+        "WITH m AS ({DS_ETA_M})
+         SELECT dist_bin, source, count(*) AS n,
+                percentile_cont(0.5) WITHIN GROUP (ORDER BY lead_s) AS pred_s,
+                percentile_cont(0.1) WITHIN GROUP (ORDER BY lead_s) AS p10_s,
+                percentile_cont(0.9) WITHIN GROUP (ORDER BY lead_s) AS p90_s
+           FROM m WHERE lead_s >= 0 GROUP BY dist_bin, source HAVING count(*) >= 20 ORDER BY dist_bin, source"
+    ))
+    .fetch_all(&pool)
+    .await
+    .unwrap_or_default();
+    // feature-model accuracy vs the flat baseline (both in-sample; held-out confirmed dist×source
+    // doesn't overfit — large cells). feat = error vs cell median, flat = error vs jobtype median.
+    let ds_eta: DsEtaModel = sqlx::query_as(&format!(
+        "WITH m AS ({DS_ETA_M}),
+              f AS (SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY lead_s) FILTER (WHERE lead_s >= 0) AS med FROM m),
+              g AS (SELECT dist_bin, source, percentile_cont(0.5) WITHIN GROUP (ORDER BY lead_s) FILTER (WHERE lead_s >= 0) AS med FROM m GROUP BY dist_bin, source)
+         SELECT count(*) FILTER (WHERE m.lead_s > 0) AS evaluated,
+                (percentile_cont(0.5) WITHIN GROUP (ORDER BY abs(m.lead_s - g.med) / nullif(m.lead_s, 0)) FILTER (WHERE m.lead_s > 0) * 100)::float8 AS feat_mape_pct,
+                (percentile_cont(0.5) WITHIN GROUP (ORDER BY abs(m.lead_s - f.med) / nullif(m.lead_s, 0)) FILTER (WHERE m.lead_s > 0) * 100)::float8 AS flat_mape_pct,
+                (avg(((abs(m.lead_s - g.med) / nullif(m.lead_s, 0)) <= 0.30)::int) FILTER (WHERE m.lead_s > 0) * 100)::float8 AS within_30pct
+           FROM m JOIN g USING (dist_bin, source) CROSS JOIN f"
+    ))
+    .fetch_one(&pool)
+    .await
+    .unwrap_or(DsEtaModel { evaluated: 0, feat_mape_pct: None, flat_mape_pct: None, within_30pct: None });
+
     let predictions: i64 = by_source.iter().map(|s| s.predictions).sum();
     let matched: i64 = by_source.iter().map(|s| s.matched).sum();
     let precision_pct = (predictions > 0).then(|| 100.0 * matched as f64 / predictions as f64);
@@ -450,6 +513,8 @@ pub async fn soon_idle(State(pool): State<PgPool>) -> Result<Json<SoonIdleResp>,
         by_source,
         by_jobtype,
         lead_by_jobtype,
+        ds_eta,
+        ds_eta_cells,
         metric_series,
     }))
 }
