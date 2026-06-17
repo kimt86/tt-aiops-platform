@@ -851,6 +851,31 @@ td.mono { font-family: "JetBrains Mono", monospace; color: var(--text); }
 .learn-list { max-height: 420px; overflow-y: auto; }
 .learn-row { font-size: 12px; padding: 5px 8px; border-bottom: 1px solid var(--border); }
 .learn-row.conf { background: rgba(52, 211, 153, 0.08); }
+
+/* Learning Center — model session cards (quality-trend centric) */
+.ls-card { background: var(--surface); border: 1px solid var(--border); border-top: 2px solid var(--border-strong); border-radius: var(--radius-lg); padding: 14px 16px; margin-bottom: 14px; }
+.ls-head { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
+.ls-n { width: 26px; height: 26px; border-radius: 999px; background: var(--surface-2); display: flex; align-items: center; justify-content: center; font-weight: 800; font-size: 13px; flex: none; }
+.ls-head h3 { font-size: 15px; margin: 0; }
+.ls-sub { font-size: 11px; color: var(--text-mute); }
+.ls-hero { display: flex; gap: 16px; align-items: stretch; }
+.ls-hero-metric { flex: none; width: 156px; display: flex; flex-direction: column; justify-content: center; }
+.ls-hero-v { font-size: 30px; font-weight: 800; line-height: 1.05; }
+.ls-hero-l { font-size: 11px; color: var(--text-dim); margin-top: 7px; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.ls-hero-chart { flex: 1; height: 96px; min-width: 0; }
+.ls-tb { font-weight: 700; font-size: 10.5px; padding: 1px 7px; border-radius: 999px; white-space: nowrap; }
+.ls-tb.up { color: var(--good); background: var(--good-bg); }
+.ls-tb.bad { color: #fca5a5; background: var(--bad-bg); }
+.ls-tb.flat { color: var(--text-mute); background: var(--surface-2); }
+.ls-chips { display: flex; flex-wrap: wrap; gap: 8px; margin: 13px 0 9px; }
+.ls-chip { background: var(--surface-2); border: 1px solid var(--border-soft); border-radius: var(--radius-md); padding: 5px 11px; min-width: 76px; }
+.ls-chip-l { font-size: 10px; color: var(--text-mute); }
+.ls-chip-v { font-size: 14px; font-weight: 700; font-family: JetBrains Mono, monospace; }
+.ls-note { font-size: 11.5px; color: var(--text-mute); line-height: 1.55; }
+.ls-detail { margin-top: 9px; }
+.ls-detail > summary { font-size: 11px; color: var(--text-dim); cursor: pointer; user-select: none; padding: 3px 0; }
+.ls-detail > summary:hover { color: var(--text); }
+@media (max-width: 720px) { .ls-hero { flex-direction: column; } .ls-hero-metric { width: auto; } .ls-hero-chart { height: 84px; } }
 .learn-od-cols, .learn-od-row { display: grid; grid-template-columns: 1.3fr 1.3fr 0.5fr 0.8fr 0.9fr 0.6fr; gap: 8px; align-items: center; }
 .learn-od-cols { font-size: 11px; color: var(--text-dim); padding: 6px 8px; border-bottom: 1px solid var(--border); }
 .learn-od-row { font-size: 12px; padding: 5px 8px; border-bottom: 1px solid var(--border); }

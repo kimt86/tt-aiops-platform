@@ -1,6 +1,6 @@
-// 학습 센터 — 축적되는 학습데이터와 모델 성능·개선 추이.
-// ② 블록 작업지점 좌표: TT가 topos 타깃에 ARRIVED한 GPS를 누적 → 좌표.
-// ③ 차량 주행 차선: 이동 TT의 GPS 트레이스를 격자에 집계 → 도로·방향.
+// 학습 센터 — 4개 학습 모델을 "세션 카드"로, 품질이 시간이 갈수록 좋아지는지(품질 추이)를 주인공으로.
+//   ① TT 이동시간  ② 작업지점 좌표  ③ 주행 차선  ④ Soon-idle 예측 정확도
+// 각 세션: 핵심 품질지표(현재값) + 추세 배지(개선/안정/악화) + 품질 추이 차트 + 보조 칩 + 해석 + 상세(접이식).
 import { useEffect, useMemo, useState } from "react";
 import { type Lang } from "./i18n";
 import { api, type LearnTopos, type LearnToposPoint, type LanesData, type TravelData, type TravelOd, type SoonIdleData } from "./api";
@@ -16,15 +16,61 @@ const mmss = (s: number | null | undefined) => (s == null ? "—" : `${Math.floo
 const mDist = (m: number | null | undefined) => (m == null ? "—" : m >= 1000 ? `${(m / 1000).toFixed(2)}km` : `${Math.round(m)}m`);
 const kmh = (v: number | null | undefined) => (v == null ? "—" : `${v.toFixed(1)}`);
 
-function Tile({ label, value, unit, accent }: { label: string; value: string; unit?: string; accent?: string }) {
+// first→last change of a quality series. `higherBetter` decides what counts as "improving".
+function trend(series: number[], higherBetter: boolean): { dir: 1 | -1 | 0; pct: number; improving: boolean } | null {
+  const v = series.filter((x) => x != null && !Number.isNaN(x));
+  if (v.length < 2) return null;
+  const first = v[0], last = v[v.length - 1];
+  const delta = last - first;
+  const p = first !== 0 ? (delta / Math.abs(first)) * 100 : delta !== 0 ? 100 : 0;
+  const dir = Math.abs(p) < 2 ? 0 : delta > 0 ? 1 : -1;
+  return { dir, pct: Math.abs(p), improving: higherBetter ? delta > 0 : delta < 0 };
+}
+
+function TrendBadge({ series, higherBetter, lang }: { series: number[]; higherBetter: boolean; lang: Lang }) {
+  const t = trend(series, higherBetter);
+  if (!t) return <span className="ls-tb flat">{ko(lang) ? "수집 중" : "collecting"}</span>;
+  if (t.dir === 0) return <span className="ls-tb flat">→ {ko(lang) ? "안정" : "stable"}</span>;
+  const arrow = t.dir === 1 ? "↑" : "↓";
+  return <span className={`ls-tb ${t.improving ? "up" : "bad"}`}>{arrow} {t.pct.toFixed(0)}% {t.improving ? (ko(lang) ? "개선" : "better") : (ko(lang) ? "악화" : "worse")}</span>;
+}
+
+// hero headline = the LAST value of its own trend series (so the number always matches its chart),
+// formatted via `fmt`. Avoids live-summary vs metric-series mismatches.
+function Hero({ series, fmt, label, color, higherBetter, lang }: { series: number[]; fmt: (v: number) => string; label: string; color: string; higherBetter: boolean; lang: Lang }) {
+  const v = series.filter((x) => x != null && !Number.isNaN(x));
+  const last = v.length ? v[v.length - 1] : null;
   return (
-    <div className="cyc-tile" style={accent ? { borderTopColor: accent } : undefined}>
-      <div className="cyc-tile-l">{label}</div>
-      <div className="cyc-tile-v">
-        {value}
-        {unit && <span className="cyc-tile-u">{unit}</span>}
+    <div className="ls-hero">
+      <div className="ls-hero-metric">
+        <div className="ls-hero-v">{last != null ? fmt(last) : "—"}</div>
+        <div className="ls-hero-l">{label} <TrendBadge series={series} higherBetter={higherBetter} lang={lang} /></div>
+      </div>
+      <div className="ls-hero-chart">
+        {series.length > 1 ? <LineChart values={series} color={color} axes /> : <div className="cyc-empty">{ko(lang) ? "스냅샷 수집 중" : "collecting snapshots"}</div>}
       </div>
     </div>
+  );
+}
+
+function Chip({ label, value, accent }: { label: string; value: string; accent?: string }) {
+  return (
+    <div className="ls-chip">
+      <div className="ls-chip-l">{label}</div>
+      <div className="ls-chip-v" style={accent ? { color: accent } : undefined}>{value}</div>
+    </div>
+  );
+}
+
+function Session({ n, title, sub, accent, children }: { n: number; title: string; sub: string; accent: string; children: React.ReactNode }) {
+  return (
+    <section className="ls-card" style={{ borderTopColor: accent }}>
+      <div className="ls-head">
+        <span className="ls-n" style={{ color: accent }}>{n}</span>
+        <div><h3>{title}</h3><span className="ls-sub">{sub}</span></div>
+      </div>
+      {children}
+    </section>
   );
 }
 
@@ -45,17 +91,14 @@ function PointRow({ p, lang }: { p: LearnToposPoint; lang: Lang }) {
 function OdRow({ o }: { o: TravelOd }) {
   return (
     <div className={`learn-od-row${o.n >= 10 ? " conf" : ""}`}>
-      <span className="mono">{o.origin}</span>
-      <span className="mono">{o.dest}</span>
-      <span className="mono">{o.n}</span>
-      <span className="mono">{mmss(o.median_s)}</span>
-      <span className="mono">{mDist(o.dist_m)}</span>
-      <span className="mono">{kmh(o.speed_kmh)}</span>
+      <span className="mono">{o.origin}</span><span className="mono">{o.dest}</span><span className="mono">{o.n}</span>
+      <span className="mono">{mmss(o.median_s)}</span><span className="mono">{mDist(o.dist_m)}</span><span className="mono">{kmh(o.speed_kmh)}</span>
     </div>
   );
 }
 
 export default function LearnPage({ lang }: { lang: Lang }) {
+  const k = ko(lang);
   const [d, setD] = useState<LearnTopos | null>(null);
   const [ln, setLn] = useState<LanesData | null>(null);
   const [tv, setTv] = useState<TravelData | null>(null);
@@ -77,19 +120,17 @@ export default function LearnPage({ lang }: { lang: Lang }) {
     return () => { alive = false; clearInterval(id); };
   }, []);
 
+  // ① travel — accumulating learning samples (consistent live↔series; coverage proxy)
+  const tms = tv?.metric_series ?? [];
+  const sampVals = tms.map((p) => Number(p.samples));
+  // ② topos — confident learned points (n≥30), growing
   const ms = d?.metric_series ?? [];
-  const covVals = ms.map((p) => p.confident_topos);
-  const spreadVals = ms.map((p) => p.median_spread_m ?? 0).filter((v) => v > 0);
-  const obsVals = ms.map((p) => Number(p.total_obs));
+  const confTopoVals = ms.map((p) => p.confident_topos);
+  // ③ lanes — learned road cells (coverage)
   const lms = ln?.metric_series ?? [];
   const roadVals = lms.map((p) => p.road_cells);
-  const passVals = lms.map((p) => Number(p.total_passes));
-  const tms = tv?.metric_series ?? [];
-  const odVals = tms.map((p) => p.od_pairs);
-  const sampVals = tms.map((p) => Number(p.samples));
-  // ④ soon-idle accuracy
+  // ④ soon-idle — quality = DS recall over time
   const dsRecall = si?.by_jobtype.find((j) => j.jobtype === "DS");
-  const dsRecallPct = dsRecall?.recall_pct ?? null;
   const dsDelta = dsRecall && dsRecall.recall_pct != null && dsRecall.recall_gps_pct != null ? dsRecall.recall_pct - dsRecall.recall_gps_pct : null;
   const dsLeadP50 = si?.by_source.find((s) => s.jobtype === "DS" && s.source === "tos_actv")?.lead_p50_s ?? null;
   const siRecallSeries = (si?.metric_series ?? []).filter((p) => p.jobtype === "DS" && p.source === "ALL").map((p) => p.recall_pct ?? 0);
@@ -106,148 +147,110 @@ export default function LearnPage({ lang }: { lang: Lang }) {
     <div className="content cyc-page">
       <div className="cyc-head">
         <div className="cyc-title">
-          <h2>{ko(lang) ? "학습 센터" : "Learning Center"}</h2>
-          <span className="cyc-title-sub">{ko(lang) ? "① TT 이동시간 · ② 블록 좌표 · ③ 주행 차선 · ④ Soon-idle 정확도(그림자)" : "① travel time · ② block coords · ③ lanes · ④ soon-idle accuracy"}{err && <span className="cyc-err">{ko(lang) ? " · 연결 오류" : " · offline"}</span>}</span>
+          <h2>{k ? "학습 센터" : "Learning Center"}</h2>
+          <span className="cyc-title-sub">{k ? "4개 학습 모델 · 시간이 갈수록 품질이 좋아지는가 (품질 추이 중심)" : "4 learning models · is quality improving over time"}{err && <span className="cyc-err">{k ? " · 연결 오류" : " · offline"}</span>}</span>
         </div>
       </div>
 
-      <div className="cyc-sec-h" style={{ marginTop: 4 }}>{ko(lang) ? "① TT 이동시간 (출발→도착 · v0 베이스라인=중앙값)" : "① TT travel time (origin→dest · v0 baseline)"}</div>
-      <div className="cyc-tiles">
-        <Tile label={ko(lang) ? "학습 표본" : "Samples"} value={tv ? fmtN(tv.samples) : "—"} accent="#60a5fa" />
-        <Tile label={ko(lang) ? "구간(O→D) 쌍" : "O→D pairs"} value={tv ? fmtN(tv.od_pairs) : "—"} accent="#0ea5e9" />
-        <Tile label={ko(lang) ? "확신 쌍 (n≥10)" : "Confident (n≥10)"} value={tv ? fmtN(tv.confident_pairs) : "—"} accent="#34d399" />
-        <Tile label={ko(lang) ? "중앙 속도" : "Median speed"} value={tv ? kmh(tv.median_speed_kmh) : "—"} unit="km/h" accent="#f59e0b" />
-      </div>
-      <div className="learn-charts">
-        <div className="cyc-tp">
-          <div className="cyc-sec-h">{ko(lang) ? "개선 — 구간 쌍 수 (↑ 커버리지)" : "Improving — O→D pairs (↑)"}</div>
-          <div className="cyc-tp-box">{odVals.length > 1 ? <LineChart values={odVals} color="#34d399" axes /> : <div className="cyc-empty">{ko(lang) ? "스냅샷 수집 중" : "collecting"}</div>}</div>
+      {/* ① TT 이동시간 */}
+      <Session n={1} accent="#60a5fa" title={k ? "TT 이동시간" : "TT travel time"} sub={k ? "사이클에서 수확한 출발→도착 trip + 피처(경로거리·존·밀도·날씨)" : "trips harvested from cycles + features"}>
+        <Hero series={sampVals} fmt={fmtN} label={k ? "누적 학습 표본 (커버리지)" : "accumulating samples (coverage)"} color="#60a5fa" higherBetter lang={lang} />
+        <div className="ls-chips">
+          <Chip label={k ? "신뢰 OD쌍 (n≥10)" : "confident O→D"} value={tv ? fmtN(tv.confident_pairs) : "—"} accent="#34d399" />
+          <Chip label={k ? "OD쌍" : "O→D pairs"} value={tv ? fmtN(tv.od_pairs) : "—"} />
+          <Chip label={k ? "중앙 속도" : "median speed"} value={tv ? `${kmh(tv.median_speed_kmh)} km/h` : "—"} />
         </div>
-        <div className="cyc-tp">
-          <div className="cyc-sec-h">{ko(lang) ? "누적 학습 표본" : "Accumulating samples"}</div>
-          <div className="cyc-tp-box">{sampVals.length > 1 ? <LineChart values={sampVals} color="#60a5fa" axes /> : <div className="cyc-empty">{ko(lang) ? "수집 중" : "collecting"}</div>}</div>
-        </div>
-      </div>
-      <div className="cyc-board" style={{ marginTop: 4 }}>
-        <div className="cyc-board-head"><span>{ko(lang) ? "구간별 이동시간 (표본 많은 순)" : "Travel time by O→D (by samples)"}</span></div>
-        <div className="learn-od-cols">
-          <span>{ko(lang) ? "출발" : "origin"}</span><span>{ko(lang) ? "도착" : "dest"}</span><span>n</span><span>{ko(lang) ? "중앙시간" : "median"}</span><span>{ko(lang) ? "거리" : "dist"}</span><span>km/h</span>
-        </div>
-        <div className="learn-list">
-          {(tv?.od ?? []).length === 0 && <div className="cyc-empty">{ko(lang) ? "아직 구간 표본 없음 (사이클에서 수확 중)" : "none yet (harvesting from cycles)"}</div>}
-          {(tv?.od ?? []).slice(0, 250).map((o) => <OdRow key={o.origin + "→" + o.dest} o={o} />)}
-        </div>
-      </div>
-
-      <div className="cyc-sec-h" style={{ marginTop: 4 }}>{ko(lang) ? "② 블록 작업지점 좌표" : "② Block work-point coordinates"}</div>
-      <div className="cyc-tiles">
-        <Tile label={ko(lang) ? "누적 관측" : "Observations"} value={d ? fmtN(d.total_obs) : "—"} accent="#60a5fa" />
-        <Tile label={ko(lang) ? "학습된 작업지점" : "Learned points"} value={d ? fmtN(d.distinct_topos) : "—"} accent="#0ea5e9" />
-        <Tile label={ko(lang) ? "확신 (n≥30)" : "Confident (n≥30)"} value={d ? fmtN(d.confident_topos) : "—"} accent="#34d399" />
-        <Tile label={ko(lang) ? "블록 작업지점" : "Block points"} value={d ? fmtN(d.block_points) : "—"} accent="#a78bfa" />
-        <Tile label={ko(lang) ? "중앙 정밀도" : "Median precision"} value={d ? mPrec(d.median_spread_m) : "—"} accent="#f59e0b" />
-      </div>
-      <div className="learn-charts">
-        <div className="cyc-tp">
-          <div className="cyc-sec-h">{ko(lang) ? "개선 — 확신 지점 수 (↑)" : "Improving — confident points (↑)"}</div>
-          <div className="cyc-tp-box">{covVals.length > 1 ? <LineChart values={covVals} color="#34d399" axes /> : <div className="cyc-empty">{ko(lang) ? "스냅샷 수집 중" : "collecting"}</div>}</div>
-        </div>
-        <div className="cyc-tp">
-          <div className="cyc-sec-h">{ko(lang) ? "개선 — 중앙 정밀도 (↓ m)" : "Improving — precision (↓ m)"}</div>
-          <div className="cyc-tp-box">{spreadVals.length > 1 ? <LineChart values={spreadVals} color="#f59e0b" axes /> : <div className="cyc-empty">{ko(lang) ? "수집 중" : "collecting"}</div>}</div>
-        </div>
-      </div>
-      <div className="cyc-tp">
-        <div className="cyc-sec-h">{ko(lang) ? "누적 학습데이터 — 관측 수" : "Accumulating data — observations"}</div>
-        <div className="cyc-tp-box">{obsVals.length > 1 ? <LineChart values={obsVals} color="#60a5fa" axes /> : <div className="cyc-empty">{ko(lang) ? "수집 중" : "collecting"}</div>}</div>
-      </div>
-      <div className="cyc-board" style={{ marginTop: 14 }}>
-        <div className="cyc-board-head">
-          <span>{ko(lang) ? "학습된 작업지점 (관측 많은 순)" : "Learned work-points (by observations)"}</span>
-          <span style={{ display: "flex", gap: 10, alignItems: "center" }}>
-            <label style={{ fontSize: 11, color: "var(--text-dim)", cursor: "pointer" }}>
-              <input type="checkbox" checked={onlyBlock} onChange={(e) => setOnlyBlock(e.target.checked)} /> {ko(lang) ? "블록만" : "blocks only"}
-            </label>
-            <input className="cyc-search mono" placeholder={ko(lang) ? "topos 검색" : "find topos"} value={q} onChange={(e) => setQ(e.target.value)} />
-          </span>
-        </div>
-        <div className="learn-cols">
-          <span>topos</span><span>{ko(lang) ? "종류" : "kind"}</span><span>n</span><span>{ko(lang) ? "누적" : "obs"}</span><span>{ko(lang) ? "정밀도" : "prec"}</span><span>{ko(lang) ? "좌표" : "coord"}</span><span>{ko(lang) ? "갱신" : "updated"}</span>
-        </div>
-        <div className="learn-list">
-          {points.length === 0 && <div className="cyc-empty">{ko(lang) ? "아직 학습된 지점 없음 (적재 중)" : "none yet (accumulating)"}</div>}
-          {points.slice(0, 300).map((p) => <PointRow key={p.topos} p={p} lang={lang} />)}
-        </div>
-      </div>
-
-      <div className="cyc-sec-h" style={{ marginTop: 22 }}>{ko(lang) ? "③ 차량 주행 차선 (GPS 트레이스 → 도로·방향)" : "③ Driving lanes (GPS traces → roads·direction)"}</div>
-      <div className="cyc-tiles">
-        <Tile label={ko(lang) ? "누적 통과" : "Passes"} value={ln ? fmtN(ln.total_passes) : "—"} accent="#60a5fa" />
-        <Tile label={ko(lang) ? "도로 셀 (통과≥20)" : "Road cells (≥20)"} value={ln ? fmtN(ln.road_cells) : "—"} accent="#34d399" />
-        <Tile label={ko(lang) ? "전체 셀" : "Total cells"} value={ln ? fmtN(ln.cells) : "—"} accent="#0ea5e9" />
-        <Tile label={ko(lang) ? "일방통행 비율" : "One-way frac"} value={ln ? pct(ln.oneway_frac) : "—"} accent="#a78bfa" />
-      </div>
-      <div className="learn-charts">
-        <div className="cyc-tp">
-          <div className="cyc-sec-h">{ko(lang) ? "개선 — 도로 셀 수 (↑ 커버리지)" : "Improving — road cells (↑)"}</div>
-          <div className="cyc-tp-box">{roadVals.length > 1 ? <LineChart values={roadVals} color="#34d399" axes /> : <div className="cyc-empty">{ko(lang) ? "스냅샷 수집 중" : "collecting"}</div>}</div>
-        </div>
-        <div className="cyc-tp">
-          <div className="cyc-sec-h">{ko(lang) ? "누적 통과 수" : "Accumulating passes"}</div>
-          <div className="cyc-tp-box">{passVals.length > 1 ? <LineChart values={passVals} color="#60a5fa" axes /> : <div className="cyc-empty">{ko(lang) ? "수집 중" : "collecting"}</div>}</div>
-        </div>
-      </div>
-      <div style={{ fontSize: 12, color: "var(--text-mute)", margin: "2px 2px 8px" }}>
-        {ko(lang) ? "차선망 지도는 라이브맵 → 레이어 → ③ 주행 차선에서 위성 위로 확인하세요." : "See the lane network on the live map → Layers → ③ Driving lanes."}
-      </div>
-
-      <div className="cyc-sec-h" style={{ marginTop: 22 }}>{ko(lang) ? "④ Soon-idle 예측 정확도 (그림자 — 예측 vs 실제 유휴 comp_ts)" : "④ Soon-idle prediction accuracy (shadow)"}</div>
-      <div className="cyc-tiles">
-        <Tile label={ko(lang) ? "예측 (7일)" : "Predictions (7d)"} value={si ? fmtN(si.predictions) : "—"} accent="#60a5fa" />
-        <Tile label={ko(lang) ? "DS 재현율" : "DS recall"} value={dsRecallPct != null ? `${dsRecallPct.toFixed(0)}%` : "—"} accent="#34d399" />
-        <Tile label={ko(lang) ? "ΔRecall · TOS 기여" : "ΔRecall · TOS"} value={dsDelta != null ? `+${dsDelta.toFixed(0)}%p` : "—"} accent="#a78bfa" />
-        <Tile label={ko(lang) ? "DS 리드타임 p50" : "DS lead p50"} value={mmss(dsLeadP50)} accent="#f59e0b" />
-      </div>
-      <div style={{ fontSize: 12, color: "var(--text-mute)", margin: "2px 2px 8px" }}>
-        {ko(lang)
-          ? "정답 = tos_handover_label.comp_ts(실제 유휴). 예측이 완료를 지나야 채워짐 — 갓 적재분은 정확도 0(수집 중). DS 예측의 gps_would_fire=false는 GPS단독이면 놓쳤을 건 → ΔRecall이 ② TOS 보정의 순이득."
-          : "Ground truth = comp_ts. Accuracy fills once predictions age past completion. ΔRecall = recall the TOS hook added over GPS-alone."}
-      </div>
-      <div className="learn-list">
-        <div style={{ display: "grid", gridTemplateColumns: siGrid, gap: 8, padding: "3px 6px", fontWeight: 600, color: "var(--text-dim)", fontSize: 12 }}>
-          <span>{ko(lang) ? "작업" : "job"}</span><span>{ko(lang) ? "신호" : "signal"}</span><span>{ko(lang) ? "예측" : "pred"}</span><span>{ko(lang) ? "적중" : "match"}</span><span>{ko(lang) ? "정밀도" : "prec"}</span><span>{ko(lang) ? "리드p50" : "lead"}</span>
-        </div>
-        {(si?.by_source ?? []).map((s, i) => (
-          <div key={i} style={{ display: "grid", gridTemplateColumns: siGrid, gap: 8, padding: "3px 6px" }}>
-            <span className="mono">{s.jobtype}</span>
-            <span className="mono" style={{ color: s.source === "tos_actv" ? "#a78bfa" : s.source === "gps_rtg" ? "#34d399" : s.source === "qc_plc" ? "#0ea5e9" : s.source === "both" ? "#22d3ee" : "#94a3b8" }}>{s.source}</span>
-            <span className="mono">{s.predictions}</span>
-            <span className="mono">{s.matched}</span>
-            <span className="mono">{s.precision_pct != null ? `${s.precision_pct.toFixed(0)}%` : "—"}</span>
-            <span className="mono">{mmss(s.lead_p50_s)}</span>
+        <div className="ls-note">{k ? "표본·신뢰 OD쌍이 늘며 커버리지는 개선됨. 단 같은 OD의 시간 변동(±50%)은 야드 확률성에 의한 본질적 천장 — 점예측보다 분포로 사용." : "Coverage grows with samples; but within-OD variance (±50%) is a structural ceiling — use as a distribution."}</div>
+        <details className="ls-detail">
+          <summary>{k ? "상세 — 구간별 이동시간 (표본 많은 순)" : "detail — travel time by O→D"}</summary>
+          <div className="learn-od-cols" style={{ marginTop: 8 }}>
+            <span>{k ? "출발" : "origin"}</span><span>{k ? "도착" : "dest"}</span><span>n</span><span>{k ? "중앙시간" : "median"}</span><span>{k ? "거리" : "dist"}</span><span>km/h</span>
           </div>
-        ))}
-        {(si?.by_source?.length ?? 0) === 0 && <div className="cyc-empty">{ko(lang) ? "예측 수집 중" : "collecting predictions"}</div>}
-      </div>
-      <div className="learn-charts" style={{ marginTop: 10 }}>
-        <div className="cyc-tp">
-          <div className="cyc-sec-h">{ko(lang) ? "GPS 단독 vs TOS 보정 — 재현율" : "GPS-only vs TOS-corrected — recall"}</div>
-          <div className="cyc-tp-box" style={{ height: "auto", display: "flex", flexDirection: "column", gap: 6, padding: 10 }}>
-            {(si?.by_jobtype ?? []).map((j) => (
-              <div key={j.jobtype} style={{ fontSize: 13 }}>
-                <span className="mono" style={{ fontWeight: 600 }}>{j.jobtype}</span>{" "}
-                {ko(lang) ? "정답" : "truth"} {j.truth_idles} · {ko(lang) ? "재현율" : "recall"} <b style={{ color: "#34d399" }}>{j.recall_pct != null ? `${j.recall_pct.toFixed(0)}%` : "—"}</b>{" "}
-                ({ko(lang) ? "GPS단독" : "GPS"} {j.recall_gps_pct != null ? `${j.recall_gps_pct.toFixed(0)}%` : "—"} → <b style={{ color: "#a78bfa" }}>TOS +{j.recall_pct != null && j.recall_gps_pct != null ? (j.recall_pct - j.recall_gps_pct).toFixed(0) : "—"}%p</b>)
+          <div className="learn-list">
+            {(tv?.od ?? []).length === 0 && <div className="cyc-empty">{k ? "아직 구간 표본 없음 (사이클에서 수확 중)" : "none yet"}</div>}
+            {(tv?.od ?? []).slice(0, 250).map((o) => <OdRow key={o.origin + "→" + o.dest} o={o} />)}
+          </div>
+        </details>
+      </Session>
+
+      {/* ② 작업지점 좌표 */}
+      <Session n={2} accent="#0ea5e9" title={k ? "작업지점 좌표" : "Work-point coordinates"} sub={k ? "TT가 작업점에 도착한 GPS를 누적 → 블록·크레인 중심좌표" : "GPS at arrival accumulated → centroid coords"}>
+        <Hero series={confTopoVals} fmt={fmtN} label={k ? "확신 작업지점 (n≥30) — 잘 학습된 점 수" : "confident points (n≥30)"} color="#34d399" higherBetter lang={lang} />
+        <div className="ls-chips">
+          <Chip label={k ? "중앙 정밀도" : "median precision"} value={d ? mPrec(d.median_spread_m) : "—"} accent="#f59e0b" />
+          <Chip label={k ? "학습 지점" : "learned points"} value={d ? fmtN(d.distinct_topos) : "—"} />
+          <Chip label={k ? "블록 지점" : "block points"} value={d ? fmtN(d.block_points) : "—"} />
+          <Chip label={k ? "누적 관측" : "observations"} value={d ? fmtN(d.total_obs) : "—"} />
+        </div>
+        <div className="ls-note">{k ? "GPS가 쌓일수록 좌표 군집이 좁아져(±m↓) 더 정밀해지고 확신 지점이 늘어납니다. 라이브맵에서 신뢰도 색으로 확인." : "More GPS → tighter clusters (±m↓) + more confident points."}</div>
+        <details className="ls-detail">
+          <summary>{k ? "상세 — 학습된 작업지점 (관측 많은 순)" : "detail — learned work-points"}</summary>
+          <div className="cyc-board-head" style={{ marginTop: 8, border: 0 }}>
+            <span style={{ display: "flex", gap: 10, alignItems: "center" }}>
+              <label style={{ fontSize: 11, color: "var(--text-dim)", cursor: "pointer" }}>
+                <input type="checkbox" checked={onlyBlock} onChange={(e) => setOnlyBlock(e.target.checked)} /> {k ? "블록만" : "blocks only"}
+              </label>
+              <input className="cyc-search mono" placeholder={k ? "topos 검색" : "find topos"} value={q} onChange={(e) => setQ(e.target.value)} />
+            </span>
+          </div>
+          <div className="learn-cols">
+            <span>topos</span><span>{k ? "종류" : "kind"}</span><span>n</span><span>{k ? "누적" : "obs"}</span><span>{k ? "정밀도" : "prec"}</span><span>{k ? "좌표" : "coord"}</span><span>{k ? "갱신" : "updated"}</span>
+          </div>
+          <div className="learn-list">
+            {points.length === 0 && <div className="cyc-empty">{k ? "아직 학습된 지점 없음" : "none yet"}</div>}
+            {points.slice(0, 300).map((p) => <PointRow key={p.topos} p={p} lang={lang} />)}
+          </div>
+        </details>
+      </Session>
+
+      {/* ③ 주행 차선 */}
+      <Session n={3} accent="#34d399" title={k ? "주행 차선" : "Driving lanes"} sub={k ? "이동 TT의 GPS 트레이스를 22m 격자에 집계 → 도로·방향" : "moving-TT traces aggregated to a 22m grid → roads & direction"}>
+        <Hero series={roadVals} fmt={fmtN} label={k ? "학습된 도로 셀 (통과≥20) — 커버리지" : "learned road cells (passes≥20)"} color="#34d399" higherBetter lang={lang} />
+        <div className="ls-chips">
+          <Chip label={k ? "일방통행 비율" : "one-way frac"} value={ln ? pct(ln.oneway_frac) : "—"} accent="#a78bfa" />
+          <Chip label={k ? "전체 셀" : "total cells"} value={ln ? fmtN(ln.cells) : "—"} />
+          <Chip label={k ? "누적 통과" : "passes"} value={ln ? fmtN(ln.total_passes) : "—"} />
+        </div>
+        <div className="ls-note">{k ? "트럭 GPS가 쌓일수록 더 많은 도로 셀이 학습되고 방향이 또렷(일방 비율↑)해집니다. 차선망은 라이브맵 → 레이어 → 주행 차선에서 화살표로 확인." : "More GPS → more road cells + clearer directions. See arrows on the live map."}</div>
+      </Session>
+
+      {/* ④ Soon-idle 예측 정확도 */}
+      <Session n={4} accent="#a78bfa" title={k ? "Soon-idle 예측 정확도" : "Soon-idle prediction"} sub={k ? "그림자: 예측 vs 권위 정답(comp_ts, 실제 유휴 시각)" : "shadow: prediction vs authoritative idle"}>
+        <Hero series={siRecallSeries} fmt={(v) => `${Math.round(v)}%`} label={k ? "DS 예측 재현율 (24h 스냅샷)" : "DS recall (24h snapshots)"} color="#34d399" higherBetter lang={lang} />
+        <div className="ls-chips">
+          <Chip label={k ? "예측 (7일)" : "predictions (7d)"} value={si ? fmtN(si.predictions) : "—"} />
+          <Chip label={k ? "정밀도" : "precision"} value={si?.precision_pct != null ? `${si.precision_pct.toFixed(0)}%` : "—"} />
+          <Chip label={k ? "ΔRecall · TOS 기여" : "ΔRecall · TOS"} value={dsDelta != null ? `+${dsDelta.toFixed(0)}%p` : "—"} accent="#a78bfa" />
+          <Chip label={k ? "DS 리드 p50" : "DS lead p50"} value={mmss(dsLeadP50)} />
+        </div>
+        <div className="ls-note">{k ? "정답=실제 유휴(comp_ts). 예측이 완료를 지나야 채점됨(갓 적재분은 0). TOS 보정(②)이 GPS단독 대비 재현율을 +ΔRecall만큼 끌어올린 순이득." : "Ground truth = comp_ts. ΔRecall = the gain the TOS hook added over GPS-alone."}</div>
+        <details className="ls-detail">
+          <summary>{k ? "상세 — 신호별 정밀도 + 작업별 재현율" : "detail — precision by signal + recall by job"}</summary>
+          <div className="learn-list" style={{ marginTop: 8 }}>
+            <div style={{ display: "grid", gridTemplateColumns: siGrid, gap: 8, padding: "3px 6px", fontWeight: 600, color: "var(--text-dim)", fontSize: 12 }}>
+              <span>{k ? "작업" : "job"}</span><span>{k ? "신호" : "signal"}</span><span>{k ? "예측" : "pred"}</span><span>{k ? "적중" : "match"}</span><span>{k ? "정밀도" : "prec"}</span><span>{k ? "리드p50" : "lead"}</span>
+            </div>
+            {(si?.by_source ?? []).map((s) => (
+              <div key={`${s.jobtype}-${s.source}`} style={{ display: "grid", gridTemplateColumns: siGrid, gap: 8, padding: "3px 6px" }}>
+                <span className="mono">{s.jobtype}</span>
+                <span className="mono" style={{ color: s.source === "tos_actv" ? "#a78bfa" : s.source === "gps_rtg" ? "#34d399" : s.source === "qc_plc" ? "#0ea5e9" : s.source === "both" ? "#22d3ee" : "#94a3b8" }}>{s.source}</span>
+                <span className="mono">{s.predictions}</span><span className="mono">{s.matched}</span>
+                <span className="mono">{s.precision_pct != null ? `${s.precision_pct.toFixed(0)}%` : "—"}</span>
+                <span className="mono">{mmss(s.lead_p50_s)}</span>
               </div>
             ))}
-            {(si?.by_jobtype?.length ?? 0) === 0 && <div className="cyc-empty">{ko(lang) ? "정답 매칭 대기 (예측이 완료를 지나면 채워짐)" : "awaiting label matches"}</div>}
+            {(si?.by_source?.length ?? 0) === 0 && <div className="cyc-empty">{k ? "예측 수집 중" : "collecting"}</div>}
           </div>
-        </div>
-        <div className="cyc-tp">
-          <div className="cyc-sec-h">{ko(lang) ? "개선 — DS 재현율 (↑)" : "Improving — DS recall (↑)"}</div>
-          <div className="cyc-tp-box">{siRecallSeries.length > 1 ? <LineChart values={siRecallSeries} color="#34d399" axes /> : <div className="cyc-empty">{ko(lang) ? "스냅샷 수집 중" : "collecting"}</div>}</div>
-        </div>
-      </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 5, padding: "8px 6px 0" }}>
+            {(si?.by_jobtype ?? []).map((j) => (
+              <div key={j.jobtype} style={{ fontSize: 12.5 }}>
+                <span className="mono" style={{ fontWeight: 600 }}>{j.jobtype}</span>{" "}{k ? "재현율" : "recall"} <b style={{ color: "#34d399" }}>{j.recall_pct != null ? `${j.recall_pct.toFixed(0)}%` : "—"}</b>{" "}
+                ({k ? "GPS단독" : "GPS"} {j.recall_gps_pct != null ? `${j.recall_gps_pct.toFixed(0)}%` : "—"} → <b style={{ color: "#a78bfa" }}>TOS +{j.recall_pct != null && j.recall_gps_pct != null ? (j.recall_pct - j.recall_gps_pct).toFixed(0) : "—"}%p</b>)
+              </div>
+            ))}
+          </div>
+        </details>
+      </Session>
     </div>
   );
 }
