@@ -183,6 +183,24 @@ const DEFAULT_TOGGLES: Toggles = {
 const LAYER_TOTAL = 12; // toggle count shown in the panel header
 const EMPTY_FC: GeoJSON.FeatureCollection = { type: "FeatureCollection", features: [] };
 
+// 150m uniform density-zoning grid. Cell = (round(lat/GRID_DEG), round(lon/GRID_DEG)) — same
+// definition the density collector will use, so the drawn lines ARE the future zone boundaries
+// (cell boundaries sit at (k+0.5)·GRID_DEG). Covers the whole terminal incl. haul roads.
+const GRID_DEG = 150 / 111320; // ≈0.001347 (≈150m)
+function buildGrid(): GeoJSON.FeatureCollection {
+  const latMin = 2.903, latMax = 2.952, lonMin = 101.277, lonMax = 101.308;
+  const feats: GeoJSON.Feature[] = [];
+  for (let k = Math.round(latMin / GRID_DEG); k <= Math.round(latMax / GRID_DEG); k++) {
+    const lat = (k + 0.5) * GRID_DEG;
+    feats.push({ type: "Feature", properties: {}, geometry: { type: "LineString", coordinates: [[lonMin, lat], [lonMax, lat]] } });
+  }
+  for (let k = Math.round(lonMin / GRID_DEG); k <= Math.round(lonMax / GRID_DEG); k++) {
+    const lon = (k + 0.5) * GRID_DEG;
+    feats.push({ type: "Feature", properties: {}, geometry: { type: "LineString", coordinates: [[lon, latMin], [lon, latMax]] } });
+  }
+  return { type: "FeatureCollection", features: feats };
+}
+
 // heading-oriented line segments for the learned driving-lane field (geometry, no text glyphs).
 function laneSegments(
   grid: { lat: number; lon: number; passes: number; heading_deg: number | null; directionality: number | null }[],
@@ -239,6 +257,7 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
   const [stateFilter, setStateFilter] = useState<string | null>(null);
   const [dispatchFilter, setDispatchFilter] = useState<Dispatch | null>(null);
   const [toggles, setToggles] = useState<Toggles>(DEFAULT_TOGGLES);
+  const [showGrid, setShowGrid] = useState(false); // 150m density-zoning grid overlay
   const [panelOpen, setPanelOpen] = useState(true);
   const [counts, setCounts] = useState({ total: 0, moving: 0, idle: 0, off: 0 });
   const [tpos, setTpos] = useState(0);
@@ -287,6 +306,12 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
     const iv = setInterval(poll, 60000);
     return () => clearInterval(iv);
   }, []);
+
+  // density-grid overlay visibility
+  useEffect(() => {
+    const m = mapRef.current;
+    if (m && m.getLayer("grid-line")) m.setLayoutProperty("grid-line", "visibility", showGrid ? "visible" : "none");
+  }, [showGrid, ready]);
 
   // init map once
   useEffect(() => {
@@ -357,6 +382,13 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
           "circle-opacity": 0.26,
           "circle-stroke-width": 1.3, "circle-stroke-color": ["case", ["==", ["get", "jt"], "DS"], "#fb923c", "#22d3ee"],
         },
+      });
+
+      // density zoning grid (150m uniform; same cell def as the planned density collector)
+      map.addSource("grid", { type: "geojson", data: buildGrid() });
+      map.addLayer({
+        id: "grid-line", type: "line", source: "grid", layout: { visibility: "none" },
+        paint: { "line-color": "#64748b", "line-opacity": 0.35, "line-width": 0.5 },
       });
 
       map.addSource("vehicles", { type: "geojson", data: { type: "FeatureCollection", features: [] } });
@@ -727,6 +759,7 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
             <section className="llp-sec">
               <header>{ko ? "영역" : "Areas"}</header>
               <Row on={toggles.areas} color="#7eb6ff" label={ko ? "도로/블록 영역" : "Road/Block"} onChange={(v) => set("areas", v)} />
+              <Row on={showGrid} color="#64748b" label={ko ? "밀도 격자 (150m)" : "Density grid (150m)"} onChange={setShowGrid} />
             </section>
             <section className="llp-sec">
               <header>{ko ? "포인트 (노드)" : "Points (nodes)"}</header>
