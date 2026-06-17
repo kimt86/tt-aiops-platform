@@ -50,6 +50,7 @@ fn app(state: AppState) -> Router {
         .route("/api/live/vessels", get(live::vessels))
         .route("/api/livemap/positions", get(livemap::positions))
         .route("/api/livemap/health", get(livemap::health))
+        .route("/api/weather", get(livemap::weather))
         .route("/api/workpool", get(workpool::workpool))
         .route("/api/tt-cycles/summary", get(cycles::summary))
         .route("/api/tt-cycles/detail", get(cycles::detail))

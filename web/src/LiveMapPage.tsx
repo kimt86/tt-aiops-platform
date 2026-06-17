@@ -257,6 +257,7 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
   const clockOffsetRef = useRef(0); // server(as_of) − client(Date.now): a continuous, skew-free time base
   const gpsEventsRef = useRef<Array<[number, boolean]>>([]); // [t, isOutlier] over a rolling window
   const [gpsHealth, setGpsHealth] = useState({ outliers: 0, total: 0 }); // impossible-jump rate (5 min)
+  const [wx, setWx] = useState<{ precip_mm_hr: number | null; visibility_km: number | null; wind_ms: number | null; weather_code: number | null; age_s: number } | null>(null);
   const [liveInfo, setLiveInfo] = useState<{ connected: boolean; count: number; asOf: string | null }>({ connected: false, count: 0, asOf: null });
   const [dispatchCounts, setDispatchCounts] = useState<Record<string, number>>({});
 
@@ -278,6 +279,14 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
     w.__wpPick = (id: string) => pickRef.current(id, 0, 0, 0);
     w.__wpmap = mapRef.current;
   }
+
+  // live weather chip (Tomorrow.io 1-min → /api/weather); null until the collector has a key
+  useEffect(() => {
+    const poll = () => fetch("/api/weather").then((r) => r.json()).then(setWx).catch(() => {});
+    poll();
+    const iv = setInterval(poll, 60000);
+    return () => clearInterval(iv);
+  }, []);
 
   // init map once
   useEffect(() => {
@@ -665,6 +674,20 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
           return (
             <span className={`map-gps mono ${cls}`} title={ko ? `물리적으로 불가능한 GPS 점프(>${MAX_PLAUSIBLE_KMH}km/h) 비율 — 최근 5분 ${gpsHealth.outliers}/${gpsHealth.total}건` : `Impossible GPS jumps (>${MAX_PLAUSIBLE_KMH}km/h), last 5 min: ${gpsHealth.outliers}/${gpsHealth.total}`}>
               GPS튐 {pct.toFixed(1)}% <span className="map-gps-n">({gpsHealth.outliers})</span>
+            </span>
+          );
+        })()}
+        {wx && wx.age_s < 1800 && (() => {
+          const rain = wx.precip_mm_hr ?? 0;
+          const vis = wx.visibility_km;
+          const squall = rain >= 2 || (vis != null && vis < 2); // heavy rain or crashed visibility
+          const icon = rain >= 2 ? "⛈" : rain >= 0.1 ? "🌧" : "☀";
+          return (
+            <span className={`map-gps mono ${squall ? "bad" : "ok"}`}
+              title={ko
+                ? `날씨 ${wx.age_s}s 전 · 강수 ${rain.toFixed(1)}mm/h · 시정 ${vis?.toFixed(1) ?? "—"}km · 바람 ${wx.wind_ms?.toFixed(0) ?? "—"}m/s${squall ? " · 스콜" : ""}`
+                : `weather ${wx.age_s}s ago · rain ${rain.toFixed(1)}mm/h · vis ${vis?.toFixed(1) ?? "—"}km${squall ? " · SQUALL" : ""}`}>
+              {icon} {rain >= 0.1 ? `${rain.toFixed(1)}mm/h` : (ko ? "맑음" : "clear")}{vis != null && vis < 5 ? ` · ${vis.toFixed(1)}km` : ""}
             </span>
           );
         })()}

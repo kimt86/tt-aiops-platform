@@ -71,3 +71,57 @@ pub async fn tick_weather(pool: &PgPool) -> Result<()> {
     .await?;
     Ok(())
 }
+
+/// Live 1-minute weather from Tomorrow.io (free, NO credit card; 500/day·25/hr). One POST to
+/// /v4/timelines (timestep 1m over a short past window) returns a 1-minute series, so polling
+/// ~every 3 min (≈480/day, 20/hr — under both caps) gives full 1-minute coverage AND a fresh
+/// value for the live map. Targets intermittent squalls that hourly/15-min averages miss. Needs
+/// env TOMORROW_API_KEY. Model nowcast (not a gauge). Idempotent upsert. See research/travel-time.
+pub async fn tick_weather_live(pool: &PgPool) -> Result<()> {
+    let run_date = wp_core::shift::terminal_now().date_naive();
+    run_logged(pool, "WEATHER_1MIN", run_date, |_| async move {
+        let key = std::env::var("TOMORROW_API_KEY").context("TOMORROW_API_KEY not set")?;
+        let url = format!("https://api.tomorrow.io/v4/timelines?apikey={key}");
+        // short past window at 1-min resolution; overlap heals missed polls (upsert dedups).
+        let body = format!(
+            r#"{{"location":[{LAT},{LON}],"fields":["precipitationIntensity","visibility","windSpeed","weatherCode"],"timesteps":["1m"],"startTime":"nowMinus10m","endTime":"now","units":"metric","timezone":"UTC"}}"#
+        );
+        let out = tokio::process::Command::new("curl")
+            .args(["-fsS", "-m", "15", "-X", "POST", "-H", "Content-Type: application/json", "-d", &body, &url])
+            .output()
+            .await
+            .context("curl tomorrow.io")?;
+        anyhow::ensure!(out.status.success(), "tomorrow.io fetch failed (curl status / key / quota)");
+        let v: serde_json::Value = serde_json::from_slice(&out.stdout).context("parse tomorrow.io json")?;
+        let intervals = v
+            .pointer("/data/timelines/0/intervals")
+            .and_then(|x| x.as_array())
+            .context("tomorrow.io: no intervals (check key/quota)")?;
+        let mut tx = pool.begin().await?;
+        let mut n = 0u64;
+        for it in intervals {
+            let Some(ts_str) = it.get("startTime").and_then(|x| x.as_str()) else { continue };
+            let Ok(ts) = chrono::DateTime::parse_from_rfc3339(ts_str) else { continue };
+            let val = |k: &str| it.pointer("/values").and_then(|vv| vv.get(k)).and_then(|x| x.as_f64());
+            sqlx::query(
+                "INSERT INTO weather_1min (ts, precip_mm_hr, visibility_km, wind_ms, weather_code)
+                 VALUES ($1,$2,$3,$4,$5)
+                 ON CONFLICT (ts) DO UPDATE SET
+                   precip_mm_hr = EXCLUDED.precip_mm_hr, visibility_km = EXCLUDED.visibility_km,
+                   wind_ms = EXCLUDED.wind_ms, weather_code = EXCLUDED.weather_code, captured_at = now()",
+            )
+            .bind(ts.with_timezone(&chrono::Utc))
+            .bind(val("precipitationIntensity"))
+            .bind(val("visibility"))
+            .bind(val("windSpeed"))
+            .bind(val("weatherCode").map(|x| x as i32))
+            .execute(&mut *tx)
+            .await?;
+            n += 1;
+        }
+        tx.commit().await?;
+        Ok(n)
+    })
+    .await?;
+    Ok(())
+}

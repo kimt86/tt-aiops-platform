@@ -80,6 +80,9 @@ enum Command {
     /// Hourly terminal weather (Open-Meteo, no Oracle) → weather_hourly. A travel-time
     /// feature (rain/wind/visibility). Run ~hourly.
     Weather {},
+    /// Live 1-minute weather (Tomorrow.io, no card) → weather_1min. Powers the live-map
+    /// weather chip + the squall feature. Needs TOMORROW_API_KEY. Run ~every 3min.
+    WeatherLive {},
 }
 
 fn parse_date(s: &str) -> Result<NaiveDate> {
@@ -186,6 +189,10 @@ async fn main() -> Result<()> {
         Command::Weather {} => {
             let pool = db::pool().await?;
             wp_extractor::weather::tick_weather(&pool).await?;
+        }
+        Command::WeatherLive {} => {
+            let pool = db::pool().await?;
+            wp_extractor::weather::tick_weather_live(&pool).await?;
         }
     }
     Ok(())

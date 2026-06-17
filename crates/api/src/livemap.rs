@@ -1114,6 +1114,37 @@ pub struct HealthOut {
 }
 
 /// `GET /api/livemap/health` — feed health for the WS-data monitoring page.
+/// `GET /api/weather` — latest live 1-minute weather (Tomorrow.io → weather_1min) for the
+/// live-map chip. Returns null until the collector has data (needs TOMORROW_API_KEY).
+#[derive(Serialize)]
+pub struct WeatherOut {
+    ts: DateTime<Utc>,
+    precip_mm_hr: Option<f64>,
+    visibility_km: Option<f64>,
+    wind_ms: Option<f64>,
+    weather_code: Option<i32>,
+    age_s: i64,
+}
+pub async fn weather(State(pool): State<PgPool>) -> Json<Option<WeatherOut>> {
+    let row: Option<(DateTime<Utc>, Option<f64>, Option<f64>, Option<f64>, Option<i32>)> =
+        sqlx::query_as(
+            "SELECT ts, precip_mm_hr, visibility_km, wind_ms, weather_code
+               FROM weather_1min ORDER BY ts DESC LIMIT 1",
+        )
+        .fetch_optional(&pool)
+        .await
+        .ok()
+        .flatten();
+    Json(row.map(|(ts, precip_mm_hr, visibility_km, wind_ms, weather_code)| WeatherOut {
+        age_s: (Utc::now() - ts).num_seconds().max(0),
+        ts,
+        precip_mm_hr,
+        visibility_km,
+        wind_ms,
+        weather_code,
+    }))
+}
+
 pub async fn health(State(lm): State<Arc<LiveMap>>) -> Json<HealthOut> {
     let now = Utc::now().timestamp_millis();
     let now_min = now / 60_000;
