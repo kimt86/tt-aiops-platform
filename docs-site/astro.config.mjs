@@ -23,6 +23,7 @@ export default defineConfig({
 			// Starlight 0.39+ : label이 있는 자동생성 그룹은 반드시 items로 감쌀 것.
 			sidebar: [
 				{ label: '시작하기', items: [{ autogenerate: { directory: 'start' } }] },
+				{ label: '대시보드 해설', items: [{ autogenerate: { directory: 'dashboard' } }] },
 				{ label: '기획', items: [{ autogenerate: { directory: 'planning' } }] },
 				{ label: '리서치', items: [{ autogenerate: { directory: 'research' } }] },
 				{ label: '아키텍처', items: [{ autogenerate: { directory: 'architecture' } }] },
