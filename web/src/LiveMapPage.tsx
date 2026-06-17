@@ -202,18 +202,29 @@ function buildGrid(m: number): GeoJSON.FeatureCollection {
   return { type: "FeatureCollection", features: feats };
 }
 
-// heading-oriented line segments for the learned driving-lane field (geometry, no text glyphs).
+// heading-oriented ARROWS for the learned driving-lane field — pure geometry (shaft + 2 barbs at
+// the head), no text glyphs. The arrowhead shows which way traffic actually flows through the cell.
 function laneSegments(
   grid: { lat: number; lon: number; passes: number; heading_deg: number | null; directionality: number | null }[],
 ): GeoJSON.Feature[] {
-  const L = 11; // meters, half-segment (~half a 22m lane cell)
+  const L = 11; // half-shaft (m) — ~22m arrow per 22m cell
+  const B = 6;  // arrowhead barb length (m)
+  // step `m` metres from (lat,lon) along compass bearing `degB` (0=N, 90=E) → [lon, lat]
+  const step = (lat: number, lon: number, degB: number, m: number): [number, number] => {
+    const b = (degB * Math.PI) / 180;
+    const dLat = (m / 111320) * Math.cos(b);
+    const dLon = (m / (111320 * Math.cos((lat * Math.PI) / 180))) * Math.sin(b);
+    return [lon + dLon, lat + dLat];
+  };
   return grid.map((c) => {
-    const th = ((c.heading_deg ?? 0) * Math.PI) / 180; // 0 = North
-    const dLat = (L / 111320) * Math.cos(th);
-    const dLon = (L / (111320 * Math.cos((c.lat * Math.PI) / 180))) * Math.sin(th);
+    const h = c.heading_deg ?? 0;
+    const tail = step(c.lat, c.lon, h, -L);
+    const head = step(c.lat, c.lon, h, L);
+    const barbA = step(head[1], head[0], h + 145, B); // barbs splay backward from the head
+    const barbB = step(head[1], head[0], h - 145, B);
     return {
       type: "Feature",
-      geometry: { type: "LineString", coordinates: [[c.lon - dLon, c.lat - dLat], [c.lon + dLon, c.lat + dLat]] },
+      geometry: { type: "MultiLineString", coordinates: [[tail, head], [barbA, head, barbB]] },
       properties: { dir: c.directionality ?? 0, passes: c.passes },
     } as GeoJSON.Feature;
   });
