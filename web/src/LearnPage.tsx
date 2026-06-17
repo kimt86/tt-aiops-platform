@@ -1,6 +1,6 @@
-// 학습 센터 — 4개 학습 모델을 "세션 카드"로, 품질이 시간이 갈수록 좋아지는지(품질 추이)를 주인공으로.
+// 학습 센터 — 4개 학습 모델을 "세션 카드"로. 각 카드는 가로 2단:
+//   📈 학습 추이(품질이 시간이 갈수록 좋아지나) | 🧪 최신 테스트(예측 vs 실제, 최근 결과)
 //   ① TT 이동시간  ② 작업지점 좌표  ③ 주행 차선  ④ Soon-idle 예측 정확도
-// 각 세션: 핵심 품질지표(현재값) + 추세 배지(개선/안정/악화) + 품질 추이 차트 + 보조 칩 + 해석 + 상세(접이식).
 import { useEffect, useMemo, useState } from "react";
 import { type Lang } from "./i18n";
 import { api, type LearnTopos, type LearnToposPoint, type LanesData, type TravelData, type TravelOd, type SoonIdleData, type SoonIdleLead } from "./api";
@@ -9,7 +9,6 @@ import { LineChart } from "./charts";
 const ko = (lang: Lang) => lang === "ko";
 const fmtN = (n: number) => n.toLocaleString();
 const mPrec = (m: number | null | undefined) => (m == null ? "—" : `${m.toFixed(1)}m`);
-const pct = (f: number | null | undefined) => (f == null ? "—" : `${Math.round(f * 100)}%`);
 const stamp = (iso: string | null | undefined) =>
   iso ? new Date(iso).toLocaleString([], { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false }) : "—";
 const mmss = (s: number | null | undefined) => (s == null ? "—" : `${Math.floor(s / 60)}:${String(Math.round(s % 60)).padStart(2, "0")}`);
@@ -35,21 +34,26 @@ function TrendBadge({ series, higherBetter, lang }: { series: number[]; higherBe
   return <span className={`ls-tb ${t.improving ? "up" : "bad"}`}>{arrow} {t.pct.toFixed(0)}% {t.improving ? (ko(lang) ? "개선" : "better") : (ko(lang) ? "악화" : "worse")}</span>;
 }
 
-// hero headline = the LAST value of its own trend series (so the number always matches its chart),
-// formatted via `fmt`. Avoids live-summary vs metric-series mismatches.
-function Hero({ series, fmt, label, color, higherBetter, lang }: { series: number[]; fmt: (v: number) => string; label: string; color: string; higherBetter: boolean; lang: Lang }) {
+// one panel (a column inside a card): a tag (📈 learning / 🧪 test) + content.
+function Panel({ tag, test, children }: { tag: string; test?: boolean; children: React.ReactNode }) {
+  return (
+    <div className={`ls-panel${test ? " test" : ""}`}>
+      <div className="ls-ptag">{test ? "🧪 " : "📈 "}{tag}</div>
+      {children}
+    </div>
+  );
+}
+
+// a metric block: headline = last value of its trend series (always matches the chart) + badge + chart.
+function Metric({ series, fmt, label, color, higherBetter, lang }: { series: number[]; fmt: (v: number) => string; label: string; color: string; higherBetter: boolean; lang: Lang }) {
   const v = series.filter((x) => x != null && !Number.isNaN(x));
   const last = v.length ? v[v.length - 1] : null;
   return (
-    <div className="ls-hero">
-      <div className="ls-hero-metric">
-        <div className="ls-hero-v">{last != null ? fmt(last) : "—"}</div>
-        <div className="ls-hero-l">{label} <TrendBadge series={series} higherBetter={higherBetter} lang={lang} /></div>
-      </div>
-      <div className="ls-hero-chart">
-        {series.length > 1 ? <LineChart values={series} color={color} axes /> : <div className="cyc-empty">{ko(lang) ? "스냅샷 수집 중" : "collecting snapshots"}</div>}
-      </div>
-    </div>
+    <>
+      <div className="ls-pv">{last != null ? fmt(last) : "—"} <TrendBadge series={series} higherBetter={higherBetter} lang={lang} /></div>
+      <div className="ls-plabel">{label}</div>
+      <div className="ls-pchart">{series.length > 1 ? <LineChart values={series} color={color} axes /> : <div className="cyc-empty">{ko(lang) ? "스냅샷 수집 중" : "collecting snapshots"}</div>}</div>
+    </>
   );
 }
 
@@ -141,16 +145,17 @@ export default function LearnPage({ lang }: { lang: Lang }) {
     return () => { alive = false; clearInterval(id); };
   }, []);
 
-  // ① travel — accumulating learning samples (consistent live↔series; coverage proxy)
-  const tms = tv?.metric_series ?? [];
-  const sampVals = tms.map((p) => Number(p.samples));
-  // ② topos — confident learned points (n≥30), growing
+  // ① travel — learning = accumulating samples; test = predicted-vs-actual (accuracy block)
+  const sampVals = (tv?.metric_series ?? []).map((p) => Number(p.samples));
+  // ② topos — learning = confident points (n≥30); test = positional residual (median spread ↓)
   const ms = d?.metric_series ?? [];
   const confTopoVals = ms.map((p) => p.confident_topos);
-  // ③ lanes — learned road cells (coverage)
+  const spreadVals = ms.map((p) => p.median_spread_m ?? 0).filter((v) => v > 0);
+  // ③ lanes — learning = road cells; test = directional consistency (one-way fraction ↑)
   const lms = ln?.metric_series ?? [];
   const roadVals = lms.map((p) => p.road_cells);
-  // ④ soon-idle — quality = DS recall over time
+  const onewayVals = lms.map((p) => (p.oneway_frac ?? 0) * 100);
+  // ④ soon-idle — per jobtype recall/precision/lead (DS + LD)
   const jobAgg = (jt: string) => {
     const rows = (si?.by_source ?? []).filter((s) => s.jobtype === jt);
     const pred = rows.reduce((a, s) => a + s.predictions, 0);
@@ -170,35 +175,41 @@ export default function LearnPage({ lang }: { lang: Lang }) {
     return pts;
   }, [d, onlyBlock, q]);
 
+  const acc = tv?.accuracy;
+
   return (
     <div className="content cyc-page">
       <div className="cyc-head">
         <div className="cyc-title">
           <h2>{k ? "학습 센터" : "Learning Center"}</h2>
-          <span className="cyc-title-sub">{k ? "4개 학습 모델 · 시간이 갈수록 품질이 좋아지는가 (품질 추이 중심)" : "4 learning models · is quality improving over time"}{err && <span className="cyc-err">{k ? " · 연결 오류" : " · offline"}</span>}</span>
+          <span className="cyc-title-sub">{k ? "4개 학습 모델 · 📈 학습 추이 + 🧪 최신 테스트(예측 vs 실제)" : "4 models · 📈 learning trend + 🧪 latest test"}{err && <span className="cyc-err">{k ? " · 연결 오류" : " · offline"}</span>}</span>
         </div>
       </div>
 
       {/* ① TT 이동시간 */}
       <Session n={1} accent="#60a5fa" title={k ? "TT 이동시간" : "TT travel time"} sub={k ? "사이클에서 수확한 출발→도착 trip + 피처(경로거리·존·밀도·날씨)" : "trips harvested from cycles + features"}>
-        <Hero series={sampVals} fmt={fmtN} label={k ? "누적 학습 표본 (커버리지)" : "accumulating samples (coverage)"} color="#60a5fa" higherBetter lang={lang} />
+        <div className="ls-cols">
+          <Panel tag={k ? "학습 추이 — 누적 학습 표본" : "learning — samples"}>
+            <Metric series={sampVals} fmt={fmtN} label={k ? "누적 학습 표본 (커버리지)" : "accumulating samples"} color="#60a5fa" higherBetter lang={lang} />
+          </Panel>
+          <Panel test tag={k ? "최신 테스트 — 예측(OD 중앙값) vs 실제 (지난 2일·신뢰 OD)" : "test — OD median vs actual (2d)"}>
+            {acc && acc.evaluated > 0 ? (
+              <div className="ls-testchips">
+                <Chip label={k ? "중앙 오차율 (MAPE)" : "MAPE"} value={acc.mape_pct != null ? `${acc.mape_pct.toFixed(0)}%` : "—"} accent="#f59e0b" />
+                <Chip label={k ? "±30% 적중률" : "within ±30%"} value={acc.within_30pct != null ? `${acc.within_30pct.toFixed(0)}%` : "—"} accent="#34d399" />
+                <Chip label={k ? "중앙 절대오차" : "median abs err"} value={mmss(acc.median_abs_err_s)} />
+                <Chip label={k ? "평가 trip" : "evaluated"} value={fmtN(acc.evaluated)} />
+              </div>
+            ) : <div className="cyc-empty">{k ? "trip 완료 대기 중" : "awaiting trips"}</div>}
+            <div className="ls-paside">{k ? "trip 완료마다 갱신. 처음 예측(OD 중앙값)과 실제 시간의 차이." : "updates per completed trip — predicted vs actual."}</div>
+          </Panel>
+        </div>
         <div className="ls-chips">
           <Chip label={k ? "신뢰 OD쌍 (n≥10)" : "confident O→D"} value={tv ? fmtN(tv.confident_pairs) : "—"} accent="#34d399" />
           <Chip label={k ? "OD쌍" : "O→D pairs"} value={tv ? fmtN(tv.od_pairs) : "—"} />
           <Chip label={k ? "중앙 속도" : "median speed"} value={tv ? `${kmh(tv.median_speed_kmh)} km/h` : "—"} />
         </div>
-        {tv && tv.accuracy.evaluated > 0 && (
-          <>
-            <div className="cyc-sec-h" style={{ marginTop: 6 }}>{k ? "최신 예측 테스트 — 예측(OD 중앙값) vs 실제 (지난 2일, 신뢰 OD)" : "latest prediction test — OD median vs actual (last 2d)"}</div>
-            <div className="ls-chips">
-              <Chip label={k ? "중앙 오차율(MAPE)" : "MAPE"} value={tv.accuracy.mape_pct != null ? `${tv.accuracy.mape_pct.toFixed(0)}%` : "—"} accent="#f59e0b" />
-              <Chip label={k ? "중앙 절대오차" : "median abs err"} value={tv.accuracy.median_abs_err_s != null ? mmss(tv.accuracy.median_abs_err_s) : "—"} />
-              <Chip label={k ? "±30% 적중률" : "within ±30%"} value={tv.accuracy.within_30pct != null ? `${tv.accuracy.within_30pct.toFixed(0)}%` : "—"} accent="#34d399" />
-              <Chip label={k ? "평가 trip" : "evaluated"} value={fmtN(tv.accuracy.evaluated)} />
-            </div>
-          </>
-        )}
-        <div className="ls-note">{k ? "표본·신뢰 OD쌍이 늘며 커버리지는 개선됨. 단 같은 OD의 시간 변동(±50%)은 야드 확률성에 의한 본질적 천장 — 점예측보다 분포로 사용." : "Coverage grows with samples; but within-OD variance (±50%) is a structural ceiling — use as a distribution."}</div>
+        <div className="ls-note">{k ? "표본·신뢰 OD쌍이 늘며 커버리지는 개선됨. 단 같은 OD의 시간 변동(±50%)은 야드 확률성에 의한 본질적 천장 — 점예측보다 분포로 사용." : "Coverage grows with samples; within-OD variance (±50%) is a structural ceiling — use as a distribution."}</div>
         <details className="ls-detail">
           <summary>{k ? "상세 — 구간별 이동시간 (표본 많은 순)" : "detail — travel time by O→D"}</summary>
           <div className="learn-od-cols" style={{ marginTop: 8 }}>
@@ -213,14 +224,20 @@ export default function LearnPage({ lang }: { lang: Lang }) {
 
       {/* ② 작업지점 좌표 */}
       <Session n={2} accent="#0ea5e9" title={k ? "작업지점 좌표" : "Work-point coordinates"} sub={k ? "TT가 작업점에 도착한 GPS를 누적 → 블록·크레인 중심좌표" : "GPS at arrival accumulated → centroid coords"}>
-        <Hero series={confTopoVals} fmt={fmtN} label={k ? "확신 작업지점 (n≥30) — 잘 학습된 점 수" : "confident points (n≥30)"} color="#34d399" higherBetter lang={lang} />
+        <div className="ls-cols">
+          <Panel tag={k ? "학습 추이 — 확신 작업지점 (n≥30)" : "learning — confident points"}>
+            <Metric series={confTopoVals} fmt={fmtN} label={k ? "잘 학습된 점 수" : "confident points (n≥30)"} color="#34d399" higherBetter lang={lang} />
+          </Panel>
+          <Panel test tag={k ? "최신 테스트 — 위치 잔차 (학습좌표 vs 실제 GPS)" : "test — positional residual"}>
+            <Metric series={spreadVals} fmt={mPrec} label={k ? "중앙 잔차 ±m (낮을수록 정확)" : "median residual ±m (lower better)"} color="#f59e0b" higherBetter={false} lang={lang} />
+          </Panel>
+        </div>
         <div className="ls-chips">
-          <Chip label={k ? "중앙 정밀도" : "median precision"} value={d ? mPrec(d.median_spread_m) : "—"} accent="#f59e0b" />
           <Chip label={k ? "학습 지점" : "learned points"} value={d ? fmtN(d.distinct_topos) : "—"} />
           <Chip label={k ? "블록 지점" : "block points"} value={d ? fmtN(d.block_points) : "—"} />
           <Chip label={k ? "누적 관측" : "observations"} value={d ? fmtN(d.total_obs) : "—"} />
         </div>
-        <div className="ls-note">{k ? "GPS가 쌓일수록 좌표 군집이 좁아져(±m↓) 더 정밀해지고 확신 지점이 늘어납니다. 라이브맵에서 신뢰도 색으로 확인." : "More GPS → tighter clusters (±m↓) + more confident points."}</div>
+        <div className="ls-note">{k ? "GPS가 쌓일수록 좌표 군집이 좁아져(잔차 ±m↓) 더 정밀해지고 확신 지점이 늘어납니다. 라이브맵에서 신뢰도 색으로 확인." : "More GPS → tighter clusters (residual ±m↓) + more confident points."}</div>
         <details className="ls-detail">
           <summary>{k ? "상세 — 학습된 작업지점 (관측 많은 순)" : "detail — learned work-points"}</summary>
           <div className="cyc-board-head" style={{ marginTop: 8, border: 0 }}>
@@ -243,18 +260,24 @@ export default function LearnPage({ lang }: { lang: Lang }) {
 
       {/* ③ 주행 차선 */}
       <Session n={3} accent="#34d399" title={k ? "주행 차선" : "Driving lanes"} sub={k ? "이동 TT의 GPS 트레이스를 22m 격자에 집계 → 도로·방향" : "moving-TT traces aggregated to a 22m grid → roads & direction"}>
-        <Hero series={roadVals} fmt={fmtN} label={k ? "학습된 도로 셀 (통과≥20) — 커버리지" : "learned road cells (passes≥20)"} color="#34d399" higherBetter lang={lang} />
+        <div className="ls-cols">
+          <Panel tag={k ? "학습 추이 — 학습된 도로 셀 (통과≥20)" : "learning — road cells"}>
+            <Metric series={roadVals} fmt={fmtN} label={k ? "도로 커버리지 (셀 수)" : "road coverage (cells)"} color="#34d399" higherBetter lang={lang} />
+          </Panel>
+          <Panel test tag={k ? "최신 테스트 — 방향 일관성 (학습 방향 vs 실제)" : "test — directional consistency"}>
+            <Metric series={onewayVals} fmt={(v) => `${v.toFixed(0)}%`} label={k ? "일방통행으로 또렷한 셀 비율" : "clearly one-way cells"} color="#a78bfa" higherBetter lang={lang} />
+          </Panel>
+        </div>
         <div className="ls-chips">
-          <Chip label={k ? "일방통행 비율" : "one-way frac"} value={ln ? pct(ln.oneway_frac) : "—"} accent="#a78bfa" />
           <Chip label={k ? "전체 셀" : "total cells"} value={ln ? fmtN(ln.cells) : "—"} />
           <Chip label={k ? "누적 통과" : "passes"} value={ln ? fmtN(ln.total_passes) : "—"} />
         </div>
-        <div className="ls-note">{k ? "트럭 GPS가 쌓일수록 더 많은 도로 셀이 학습되고 방향이 또렷(일방 비율↑)해집니다. 차선망은 라이브맵 → 레이어 → 주행 차선에서 화살표로 확인." : "More GPS → more road cells + clearer directions. See arrows on the live map."}</div>
+        <div className="ls-note">{k ? "트럭 GPS가 쌓일수록 더 많은 도로 셀이 학습되고, 셀 방향이 한쪽으로 또렷(일방 비율↑)해집니다 = 학습 방향이 실제 흐름과 일치. 차선망은 라이브맵 → 레이어 → 주행 차선에서 화살표로 확인." : "More GPS → more road cells + clearer per-cell direction (one-way↑). See arrows on the live map."}</div>
       </Session>
 
       {/* ④ Soon-idle 예측 정확도 */}
-      <Session n={4} accent="#a78bfa" title={k ? "Soon-idle 예측 정확도" : "Soon-idle prediction"} sub={k ? "그림자: 예측 vs 권위 정답(comp_ts, 실제 유휴 시각)" : "shadow: prediction vs authoritative idle"}>
-        <div className="ls-note" style={{ margin: "0 0 9px" }}>{k ? "곧유휴로 예측한 차량이 실제로 몇 분 뒤 유휴가 됐나 — 예측 적중분 기준 (예측 시점 → 실제 유휴까지)" : "of predicted-soon-idle trucks that did go idle — minutes from prediction to actual idle"}</div>
+      <Session n={4} accent="#a78bfa" title={k ? "Soon-idle 예측 정확도" : "Soon-idle prediction"} sub={k ? "그림자: 예측 vs 권위 정답(comp_ts, 실제 유휴 시각) · DS·LD" : "shadow: prediction vs authoritative idle · DS & LD"}>
+        <div className="ls-ptag test" style={{ marginBottom: 8 }}>🧪 {k ? "최신 테스트 — 곧유휴 예측 차량이 실제 몇 분 뒤 유휴가 됐나 (적중분)" : "test — minutes from prediction to actual idle (matched)"}</div>
         <div className="ls-leads">
           <LeadCard jt="DS" accent="#fb923c" lead={dsJob.lead} recall={dsJob.recall} recallGps={dsJob.recallGps} precision={dsJob.precision} lang={lang} />
           <LeadCard jt="LD" accent="#22d3ee" lead={ldJob.lead} recall={ldJob.recall} recallGps={ldJob.recallGps} precision={ldJob.precision} lang={lang} />
@@ -264,17 +287,18 @@ export default function LearnPage({ lang }: { lang: Lang }) {
           <Chip label={k ? "적중" : "matched"} value={si ? fmtN(si.matched) : "—"} />
           <Chip label={k ? "전체 정밀도" : "precision"} value={si?.precision_pct != null ? `${si.precision_pct.toFixed(0)}%` : "—"} />
         </div>
-        <div className="learn-charts" style={{ marginTop: 6 }}>
+        <div className="ls-ptag" style={{ margin: "10px 0 4px" }}>📈 {k ? "학습 추이 — DS·LD 재현율 (24h 스냅샷)" : "learning — DS·LD recall trend"}</div>
+        <div className="learn-charts">
           <div className="cyc-tp">
-            <div className="cyc-sec-h">{k ? "DS 재현율 추이 (24h)" : "DS recall trend"} <TrendBadge series={siRecallSeries} higherBetter lang={lang} /></div>
+            <div className="cyc-sec-h">{k ? "DS 재현율" : "DS recall"} <TrendBadge series={siRecallSeries} higherBetter lang={lang} /></div>
             <div className="cyc-tp-box">{siRecallSeries.length > 1 ? <LineChart values={siRecallSeries} color="#fb923c" axes /> : <div className="cyc-empty">{k ? "수집 중" : "collecting"}</div>}</div>
           </div>
           <div className="cyc-tp">
-            <div className="cyc-sec-h">{k ? "LD 재현율 추이 (24h)" : "LD recall trend"} <TrendBadge series={ldRecallSeries} higherBetter lang={lang} /></div>
+            <div className="cyc-sec-h">{k ? "LD 재현율" : "LD recall"} <TrendBadge series={ldRecallSeries} higherBetter lang={lang} /></div>
             <div className="cyc-tp-box">{ldRecallSeries.length > 1 ? <LineChart values={ldRecallSeries} color="#22d3ee" axes /> : <div className="cyc-empty">{k ? "수집 중" : "collecting"}</div>}</div>
           </div>
         </div>
-        <div className="ls-note">{k ? "정답=실제 유휴(comp_ts). 예측이 완료를 지나야 채점됨(갓 적재분 제외). DS는 ACTV 보정, LD는 안벽 QC PLC가 주 신호 — 리드타임 카드에 GPS단독→TOS 순이득(+%p) 병기." : "Ground truth = comp_ts. DS uses the ACTV hook; LD uses quay QC PLC. Lead cards show the GPS→TOS recall gain."}</div>
+        <div className="ls-note">{k ? "정답=실제 유휴(comp_ts). 예측이 완료를 지나야 채점됨(갓 적재분 제외). DS는 ACTV 보정, LD는 안벽 QC PLC가 주 신호 — 리드 카드에 GPS단독→TOS 순이득(+%p) 병기." : "Ground truth = comp_ts. DS uses the ACTV hook; LD uses quay QC PLC."}</div>
         <details className="ls-detail">
           <summary>{k ? "상세 — 신호별 정밀도·리드타임" : "detail — precision & lead by signal"}</summary>
           <div className="learn-list" style={{ marginTop: 8 }}>
