@@ -183,19 +183,20 @@ const DEFAULT_TOGGLES: Toggles = {
 const LAYER_TOTAL = 12; // toggle count shown in the panel header
 const EMPTY_FC: GeoJSON.FeatureCollection = { type: "FeatureCollection", features: [] };
 
-// 150m uniform density-zoning grid. Cell = (round(lat/GRID_DEG), round(lon/GRID_DEG)) — same
+// Uniform density-zoning grid at `m` meters. Cell = (round(lat/deg), round(lon/deg)) — the same
 // definition the density collector will use, so the drawn lines ARE the future zone boundaries
-// (cell boundaries sit at (k+0.5)·GRID_DEG). Covers the whole terminal incl. haul roads.
-const GRID_DEG = 150 / 111320; // ≈0.001347 (≈150m)
-function buildGrid(): GeoJSON.FeatureCollection {
+// (boundaries sit at (k+0.5)·deg). Covers the whole terminal incl. haul roads.
+const GRID_SIZES = [50, 100, 150, 200] as const;
+function buildGrid(m: number): GeoJSON.FeatureCollection {
+  const deg = m / 111320;
   const latMin = 2.903, latMax = 2.952, lonMin = 101.277, lonMax = 101.308;
   const feats: GeoJSON.Feature[] = [];
-  for (let k = Math.round(latMin / GRID_DEG); k <= Math.round(latMax / GRID_DEG); k++) {
-    const lat = (k + 0.5) * GRID_DEG;
+  for (let k = Math.round(latMin / deg); k <= Math.round(latMax / deg); k++) {
+    const lat = (k + 0.5) * deg;
     feats.push({ type: "Feature", properties: {}, geometry: { type: "LineString", coordinates: [[lonMin, lat], [lonMax, lat]] } });
   }
-  for (let k = Math.round(lonMin / GRID_DEG); k <= Math.round(lonMax / GRID_DEG); k++) {
-    const lon = (k + 0.5) * GRID_DEG;
+  for (let k = Math.round(lonMin / deg); k <= Math.round(lonMax / deg); k++) {
+    const lon = (k + 0.5) * deg;
     feats.push({ type: "Feature", properties: {}, geometry: { type: "LineString", coordinates: [[lon, latMin], [lon, latMax]] } });
   }
   return { type: "FeatureCollection", features: feats };
@@ -257,7 +258,8 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
   const [stateFilter, setStateFilter] = useState<string | null>(null);
   const [dispatchFilter, setDispatchFilter] = useState<Dispatch | null>(null);
   const [toggles, setToggles] = useState<Toggles>(DEFAULT_TOGGLES);
-  const [showGrid, setShowGrid] = useState(false); // 150m density-zoning grid overlay
+  const [showGrid, setShowGrid] = useState(false); // density-zoning grid overlay
+  const [gridM, setGridM] = useState(100); // grid cell size (m), live-switchable
   const [panelOpen, setPanelOpen] = useState(true);
   const [counts, setCounts] = useState({ total: 0, moving: 0, idle: 0, off: 0 });
   const [tpos, setTpos] = useState(0);
@@ -307,11 +309,13 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
     return () => clearInterval(iv);
   }, []);
 
-  // density-grid overlay visibility
+  // density-grid overlay: rebuild on size change + apply visibility
   useEffect(() => {
     const m = mapRef.current;
-    if (m && m.getLayer("grid-line")) m.setLayoutProperty("grid-line", "visibility", showGrid ? "visible" : "none");
-  }, [showGrid, ready]);
+    if (!m || !m.getLayer("grid-line")) return;
+    (m.getSource("grid") as maplibregl.GeoJSONSource | undefined)?.setData(buildGrid(gridM));
+    m.setLayoutProperty("grid-line", "visibility", showGrid ? "visible" : "none");
+  }, [showGrid, gridM, ready]);
 
   // init map once
   useEffect(() => {
@@ -385,7 +389,7 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
       });
 
       // density zoning grid (150m uniform; same cell def as the planned density collector)
-      map.addSource("grid", { type: "geojson", data: buildGrid() });
+      map.addSource("grid", { type: "geojson", data: buildGrid(gridM) });
       map.addLayer({
         id: "grid-line", type: "line", source: "grid", layout: { visibility: "none" },
         paint: {
@@ -763,7 +767,14 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
             <section className="llp-sec">
               <header>{ko ? "영역" : "Areas"}</header>
               <Row on={toggles.areas} color="#7eb6ff" label={ko ? "도로/블록 영역" : "Road/Block"} onChange={(v) => set("areas", v)} />
-              <Row on={showGrid} color="#64748b" label={ko ? "밀도 격자 (150m)" : "Density grid (150m)"} onChange={setShowGrid} />
+              <Row on={showGrid} color="#38bdf8" label={ko ? `밀도 격자 (${gridM}m)` : `Density grid (${gridM}m)`} onChange={setShowGrid} />
+              {showGrid && (
+                <div className="llp-gridsz" style={{ display: "flex", gap: 4, padding: "2px 0 4px 18px" }}>
+                  {GRID_SIZES.map((m) => (
+                    <button key={m} className={`mdl${gridM === m ? " on" : ""}`} onClick={() => setGridM(m)}>{m}m</button>
+                  ))}
+                </div>
+              )}
             </section>
             <section className="llp-sec">
               <header>{ko ? "포인트 (노드)" : "Points (nodes)"}</header>
