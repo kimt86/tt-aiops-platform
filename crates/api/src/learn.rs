@@ -175,6 +175,16 @@ struct TravelMetricPoint {
     median_speed_kmh: Option<f64>,
 }
 
+// "test result": recent completed trips vs what we'd have predicted (their OD median) — how far
+// off were we. Answers "이동 완료마다 예측한 시간과 얼마나 차이나나". Honest (shows the ~50% ceiling).
+#[derive(Serialize, sqlx::FromRow)]
+struct TravelAccuracy {
+    evaluated: i64,               // recent trips on a confident OD (n≥10), last 2 days
+    mape_pct: Option<f64>,        // median |actual − pred| / actual
+    median_abs_err_s: Option<f64>,
+    within_30pct: Option<f64>,    // % of trips predicted within ±30%
+}
+
 #[derive(Serialize)]
 pub struct TravelResp {
     samples: i64,
@@ -184,6 +194,7 @@ pub struct TravelResp {
     median_speed_kmh: Option<f64>,  // distance ÷ speed fallback for sparse pairs
     weather_wet_median_s: Option<f64>, // median empty/laden leg in precip > 0.1mm …
     weather_dry_median_s: Option<f64>, // … vs dry — quick weather-feature signal
+    accuracy: TravelAccuracy,       // latest predicted-vs-actual test
     od: Vec<TravelOd>,
     metric_series: Vec<TravelMetricPoint>,
 }
@@ -241,9 +252,32 @@ pub async fn travel(State(pool): State<PgPool>) -> Result<Json<TravelResp>, AppE
     .await
     .unwrap_or((None, None));
 
+    // predicted-vs-actual test: recent trips on a confident OD (n≥10), error vs the OD median.
+    let accuracy: TravelAccuracy = sqlx::query_as(
+        "WITH od AS (
+           SELECT origin, dest, percentile_cont(0.5) WITHIN GROUP (ORDER BY travel_s) AS pred
+             FROM learn_travel_sample WHERE travel_s BETWEEN 10 AND 3600
+            GROUP BY origin, dest HAVING count(*) >= 10
+         ),
+         e AS (
+           SELECT abs(s.travel_s - o.pred) AS abs_err,
+                  abs(s.travel_s - o.pred) / nullif(s.travel_s, 0)::float8 AS ape
+             FROM learn_travel_sample s JOIN od o ON o.origin = s.origin AND o.dest = s.dest
+            WHERE s.travel_s BETWEEN 10 AND 3600 AND s.captured_at > now() - interval '2 days'
+         )
+         SELECT count(*) AS evaluated,
+                (percentile_cont(0.5) WITHIN GROUP (ORDER BY ape) * 100)::float8 AS mape_pct,
+                percentile_cont(0.5) WITHIN GROUP (ORDER BY abs_err) AS median_abs_err_s,
+                (avg(CASE WHEN ape <= 0.30 THEN 1.0 ELSE 0.0 END) * 100)::float8 AS within_30pct
+           FROM e",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap_or(TravelAccuracy { evaluated: 0, mape_pct: None, median_abs_err_s: None, within_30pct: None });
+
     Ok(Json(TravelResp {
         samples, od_pairs, confident_pairs, confident_pairs_fullcode,
-        median_speed_kmh, weather_wet_median_s, weather_dry_median_s, od, metric_series,
+        median_speed_kmh, weather_wet_median_s, weather_dry_median_s, accuracy, od, metric_series,
     }))
 }
 

@@ -187,6 +187,17 @@ export default function LearnPage({ lang }: { lang: Lang }) {
           <Chip label={k ? "OD쌍" : "O→D pairs"} value={tv ? fmtN(tv.od_pairs) : "—"} />
           <Chip label={k ? "중앙 속도" : "median speed"} value={tv ? `${kmh(tv.median_speed_kmh)} km/h` : "—"} />
         </div>
+        {tv && tv.accuracy.evaluated > 0 && (
+          <>
+            <div className="cyc-sec-h" style={{ marginTop: 6 }}>{k ? "최신 예측 테스트 — 예측(OD 중앙값) vs 실제 (지난 2일, 신뢰 OD)" : "latest prediction test — OD median vs actual (last 2d)"}</div>
+            <div className="ls-chips">
+              <Chip label={k ? "중앙 오차율(MAPE)" : "MAPE"} value={tv.accuracy.mape_pct != null ? `${tv.accuracy.mape_pct.toFixed(0)}%` : "—"} accent="#f59e0b" />
+              <Chip label={k ? "중앙 절대오차" : "median abs err"} value={tv.accuracy.median_abs_err_s != null ? mmss(tv.accuracy.median_abs_err_s) : "—"} />
+              <Chip label={k ? "±30% 적중률" : "within ±30%"} value={tv.accuracy.within_30pct != null ? `${tv.accuracy.within_30pct.toFixed(0)}%` : "—"} accent="#34d399" />
+              <Chip label={k ? "평가 trip" : "evaluated"} value={fmtN(tv.accuracy.evaluated)} />
+            </div>
+          </>
+        )}
         <div className="ls-note">{k ? "표본·신뢰 OD쌍이 늘며 커버리지는 개선됨. 단 같은 OD의 시간 변동(±50%)은 야드 확률성에 의한 본질적 천장 — 점예측보다 분포로 사용." : "Coverage grows with samples; but within-OD variance (±50%) is a structural ceiling — use as a distribution."}</div>
         <details className="ls-detail">
           <summary>{k ? "상세 — 구간별 이동시간 (표본 많은 순)" : "detail — travel time by O→D"}</summary>

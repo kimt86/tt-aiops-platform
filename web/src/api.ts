@@ -160,9 +160,12 @@ export interface TravelOd {
 export interface TravelMetricPoint {
   captured_at: string; samples: number; od_pairs: number; confident_pairs: number; median_speed_kmh: number | null;
 }
+export interface TravelAccuracy {
+  evaluated: number; mape_pct: number | null; median_abs_err_s: number | null; within_30pct: number | null;
+}
 export interface TravelData {
   samples: number; od_pairs: number; confident_pairs: number; median_speed_kmh: number | null;
-  od: TravelOd[]; metric_series: TravelMetricPoint[];
+  accuracy: TravelAccuracy; od: TravelOd[]; metric_series: TravelMetricPoint[];
 }
 
 // 학습 센터 ④ — Soon-idle 예측 정확도 (그림자: 예측 vs 권위 정답 comp_ts)
