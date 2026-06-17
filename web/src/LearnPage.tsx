@@ -302,7 +302,7 @@ export default function LearnPage({ lang }: { lang: Lang }) {
             <div className="cyc-tp-box">{ldRecallSeries.length > 1 ? <LineChart values={ldRecallSeries} color="#22d3ee" axes /> : <div className="cyc-empty">{k ? "수집 중" : "collecting"}</div>}</div>
           </div>
         </div>
-        <div className="ls-note">{k ? "정답 = '트럭이 실제로 빈 순간': LD=YT 하차(dis_ts, QC가 트럭에서 들어냄) · DS=작업완료(comp_ts; DS의 dis_ts는 trip 시작이라 부적합). ⚠ comp_ts(TOS 'C')는 LD 실제 빔보다 ~8분 늦는 행정 스탬프라 과거 12.8분→교정 3.5분. 분 예측=작업유형별 학습 중앙값이나 per-건은 QC/RTG 큐 변동으로 오차 큼(분포로 사용). DS는 ACTV·LD는 QC PLC가 발화 신호." : "Ground truth = physical truck-freed: LD=YT discharge (dis_ts), DS=job complete (comp_ts). comp_ts lags LD's real free by ~8min (12.8→3.5min corrected). Per-truck error is large (QC/RTG queue)."}</div>
+        <div className="ls-note">{k ? "정답 = '트럭이 실제로 빈 순간': LD=YT 하차(dis_ts, QC가 트럭에서 들어냄) · DS=작업완료(comp_ts; DS의 dis_ts는 trip 시작이라 부적합). ✓ 둘 다 트럭 GPS 도출 빔(tt_cycle_v2.dropped_at)과 ~0.5분 내 일치 — 교차검증됨. ⚠ comp_ts(TOS 'C')는 LD 실제 빔보다 ~8.8분 늦는 행정 스탬프(완료=배 적재)라 과거 12.8분→교정 3.5분. 분 예측=작업유형별 학습 중앙값이나 per-건은 QC/RTG 큐 변동으로 오차 큼(분포로 사용)." : "Ground truth = physical truck-freed: LD=YT discharge (dis_ts), DS=job complete (comp_ts). ✓ Both match the truck's GPS-derived free (tt_cycle_v2.dropped_at) within ~0.5min — cross-validated. comp_ts lags LD's real free by ~8.8min (12.8→3.5min corrected). Per-truck error is large (QC/RTG queue)."}</div>
         <details className="ls-detail">
           <summary>{k ? "상세 — 신호별 정밀도·리드타임" : "detail — precision & lead by signal"}</summary>
           <div className="learn-list" style={{ marginTop: 8 }}>
@@ -347,7 +347,7 @@ export default function LearnPage({ lang }: { lang: Lang }) {
             </div>
           </Panel>
         </div>
-        <div className="ls-note">{k ? "예측기 = (RTG 거리 구간 × 발화 신호)별 학습 중앙 리드. 차량마다 거리·신호로 예측이 달라져 평균 한 값보다 informative하나, 홀드아웃 검증상 정확도 이득은 작음(56%→54%) — DS 유휴는 RTG 큐 확률성이 지배. 정답=실제 유휴(comp_ts), 7일." : "Predictor = learned median lead per (RTG-distance bin × firing signal). Held-out gain is small (56%→54%) — DS idle is dominated by RTG-queue stochasticity."}</div>
+        <div className="ls-note">{k ? "예측기 = (RTG 거리 구간 × 발화 신호)별 학습 중앙 리드. 차량마다 거리·신호로 예측이 달라져 평균 한 값보다 informative하나, 홀드아웃 검증상 정확도 이득은 작음(56%→54%) — DS 유휴는 RTG 큐 확률성이 지배. 정답=실제 유휴(comp_ts, GPS dropped_at과 0.5분 일치·검증), 7일." : "Predictor = learned median lead per (RTG-distance bin × firing signal). Held-out gain is small (56%→54%) — DS idle is dominated by RTG-queue stochasticity. Truth=comp_ts (GPS-validated)."}</div>
       </Session>
     </div>
   );
