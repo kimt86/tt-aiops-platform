@@ -1640,6 +1640,66 @@ pub fn spawn_learn_persist(lm: Arc<LiveMap>, pool: PgPool) {
 /// Every 5 min, harvest TT travel-time labels (①) from validated cycles: for each pair of
 /// consecutive legs, (origin→dest) travel = depart(left) → arrive(arrived). Distance from
 /// learned topos coords (②). Idempotent (PK ytno,dropped_at,leg_ord). DB→DB; no LiveMap.
+/// Every 60s, snapshot live TT density per cell at 4 grid sizes (50/100/150/200m) → zone_density.
+/// Internal (reads in-memory positions; no external call). Rolling buffer pruned to 4 days. Feeds
+/// the travel-time congestion feature (which resolution predicts trip time best — TBD). DB→DB.
+pub fn spawn_density_sampler(lm: Arc<LiveMap>, pool: PgPool) {
+    tokio::spawn(async move {
+        const SIZES: [i32; 4] = [50, 100, 150, 200];
+        let mut ticker = tokio::time::interval(Duration::from_secs(60));
+        let mut tick = 0u64;
+        loop {
+            ticker.tick().await;
+            tick += 1;
+            let now = Utc::now().timestamp_millis();
+            let mut counts: HashMap<(i32, i32, i32), i32> = HashMap::new(); // (grid_m, cx, cy) -> n
+            {
+                let devices = lm.devices.read().await;
+                for p in devices.values() {
+                    if p.cls != "TT" || (now - p.last_seen_ms) / 1000 > STALE_AFTER_S {
+                        continue;
+                    }
+                    for &m in &SIZES {
+                        let deg = m as f64 / 111320.0;
+                        let cx = (p.lat / deg).round() as i32;
+                        let cy = (p.lon / deg).round() as i32;
+                        *counts.entry((m, cx, cy)).or_insert(0) += 1;
+                    }
+                }
+            }
+            if counts.is_empty() {
+                continue;
+            }
+            let ts = Utc::now();
+            let (mut gm, mut cxs, mut cys, mut ns) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+            for ((m, cx, cy), n) in &counts {
+                gm.push(*m);
+                cxs.push(*cx);
+                cys.push(*cy);
+                ns.push(*n);
+            }
+            let _ = sqlx::query(
+                "INSERT INTO zone_density (ts, grid_m, cx, cy, n)
+                 SELECT $1, g, x, y, c
+                   FROM UNNEST($2::int4[], $3::int4[], $4::int4[], $5::int4[]) AS t(g, x, y, c)
+                 ON CONFLICT (ts, grid_m, cx, cy) DO NOTHING",
+            )
+            .bind(ts)
+            .bind(&gm)
+            .bind(&cxs)
+            .bind(&cys)
+            .bind(&ns)
+            .execute(&pool)
+            .await;
+            if tick % 10 == 0 {
+                let _ = sqlx::query("DELETE FROM zone_density WHERE ts < now() - interval '4 days'")
+                    .execute(&pool)
+                    .await;
+            }
+        }
+    });
+}
+
 pub fn spawn_travel_aggregator(pool: PgPool) {
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(Duration::from_secs(300));
