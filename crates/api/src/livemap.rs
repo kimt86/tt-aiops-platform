@@ -1720,7 +1720,7 @@ pub fn spawn_travel_aggregator(pool: PgPool) {
                  INSERT INTO learn_travel_sample
                    (ytno, dropped_at, leg_ord, origin, dest, travel_s, dist_m, hour,
                     origin_zone, dest_zone, dow, congestion,
-                    origin_lat, origin_lon, dest_lat, dest_lon)
+                    origin_lat, origin_lon, dest_lat, dest_lon, trip_ts)
                  SELECT a.ytno, a.dropped_at, a.ord, a.target, b.target,
                         ((b.arr_ms - a.left_ms) / 1000)::int,
                         CASE WHEN po.topos IS NOT NULL AND pd.topos IS NOT NULL THEN
@@ -1734,7 +1734,8 @@ pub fn spawn_travel_aggregator(pool: PgPool) {
                         (SELECT count(*) FROM tt_cycle_v2 cc
                           WHERE cc.opened_at <= to_timestamp(b.arr_ms / 1000.0)
                             AND cc.dropped_at >= to_timestamp(b.arr_ms / 1000.0))::int,
-                        a.lat, a.lon, b.lat, b.lon
+                        a.lat, a.lon, b.lat, b.lon,
+                        to_timestamp((a.left_ms + b.arr_ms) / 2.0 / 1000.0)
                    FROM legs a
                    JOIN legs b ON a.ytno = b.ytno AND a.dropped_at = b.dropped_at AND b.ord = a.ord + 1
                    LEFT JOIN learn_topos_point po ON po.topos = a.target
@@ -1772,7 +1773,7 @@ pub fn spawn_travel_aggregator(pool: PgPool) {
                  INSERT INTO learn_travel_sample
                    (ytno, dropped_at, leg_ord, origin, dest, travel_s, dist_m, hour,
                     origin_zone, dest_zone, dow, congestion,
-                    origin_lat, origin_lon, dest_lat, dest_lon)
+                    origin_lat, origin_lon, dest_lat, dest_lon, trip_ts)
                  SELECT wp.ytno, wp.dropped_at, 0, wp.prev_drop, wp.pickup_topos,
                         extract(epoch FROM wp.empty_arrived_at - wp.empty_travel_start_at)::int,
                         CASE WHEN po.topos IS NOT NULL AND pd.topos IS NOT NULL THEN
@@ -1786,7 +1787,8 @@ pub fn spawn_travel_aggregator(pool: PgPool) {
                         (SELECT count(*) FROM tt_cycle_v2 cc
                           WHERE cc.opened_at <= wp.empty_arrived_at
                             AND cc.dropped_at >= wp.empty_arrived_at)::int,
-                        wp.prev_drop_lat, wp.prev_drop_lon, wp.pickup_lat, wp.pickup_lon
+                        wp.prev_drop_lat, wp.prev_drop_lon, wp.pickup_lat, wp.pickup_lon,
+                        wp.empty_travel_start_at + (wp.empty_arrived_at - wp.empty_travel_start_at) * 0.5
                    FROM wp
                    LEFT JOIN learn_topos_point po ON po.topos = wp.prev_drop
                    LEFT JOIN learn_topos_point pd ON pd.topos = wp.pickup_topos
@@ -1796,6 +1798,50 @@ pub fn spawn_travel_aggregator(pool: PgPool) {
                     AND wp.empty_arrived_at > wp.empty_travel_start_at
                     AND extract(epoch FROM wp.empty_arrived_at - wp.empty_travel_start_at) BETWEEN 10 AND 7200
                  ON CONFLICT (ytno, dropped_at, leg_ord) DO NOTHING",
+            )
+            .execute(&pool)
+            .await;
+            // per-trip corridor density (4 grid sizes) for samples missing it: 5 points along the
+            // O→D line, each point's cell density from the zone_density snapshot in the trip's
+            // minute, averaged → density_{50..200}. Only within zone_density coverage; bounded.
+            let _ = sqlx::query(
+                "WITH todo AS (
+                   SELECT ytno, dropped_at, leg_ord, origin_lat, origin_lon, dest_lat, dest_lon, trip_ts
+                     FROM learn_travel_sample
+                    WHERE density_150 IS NULL AND trip_ts IS NOT NULL
+                      AND origin_lat IS NOT NULL AND dest_lat IS NOT NULL
+                      AND trip_ts >= (SELECT min(ts) FROM zone_density)
+                    LIMIT 5000
+                 ),
+                 cells AS (
+                   SELECT t.ytno, t.dropped_at, t.leg_ord, t.trip_ts, g.m AS grid_m,
+                          round((t.origin_lat + f*(t.dest_lat - t.origin_lat)) / (g.m/111320.0))::int AS cx,
+                          round((t.origin_lon + f*(t.dest_lon - t.origin_lon)) / (g.m/111320.0))::int AS cy
+                     FROM todo t,
+                          unnest(ARRAY[0, 0.25, 0.5, 0.75, 1.0]::float8[]) AS f,
+                          unnest(ARRAY[50, 100, 150, 200]) AS g(m)
+                 ),
+                 dens AS (
+                   SELECT c.ytno, c.dropped_at, c.leg_ord, c.grid_m, avg(COALESCE(zd.n, 0))::real AS d
+                     FROM cells c
+                     LEFT JOIN zone_density zd
+                       ON zd.grid_m = c.grid_m AND zd.cx = c.cx AND zd.cy = c.cy
+                      AND zd.ts >= date_trunc('minute', c.trip_ts)
+                      AND zd.ts <  date_trunc('minute', c.trip_ts) + interval '1 minute'
+                    GROUP BY c.ytno, c.dropped_at, c.leg_ord, c.grid_m
+                 ),
+                 w AS (
+                   SELECT ytno, dropped_at, leg_ord,
+                          max(d) FILTER (WHERE grid_m = 50)  AS d50,
+                          max(d) FILTER (WHERE grid_m = 100) AS d100,
+                          max(d) FILTER (WHERE grid_m = 150) AS d150,
+                          max(d) FILTER (WHERE grid_m = 200) AS d200
+                     FROM dens GROUP BY ytno, dropped_at, leg_ord
+                 )
+                 UPDATE learn_travel_sample s
+                    SET density_50 = w.d50, density_100 = w.d100, density_150 = w.d150, density_200 = w.d200
+                   FROM w
+                  WHERE s.ytno = w.ytno AND s.dropped_at = w.dropped_at AND s.leg_ord = w.leg_ord",
             )
             .execute(&pool)
             .await;
