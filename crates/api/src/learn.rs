@@ -371,13 +371,16 @@ pub struct SoonIdleResp {
 /// GET /api/learn/soon-idle — soon_idle prediction accuracy vs authoritative idle (shadow).
 pub async fn soon_idle(State(pool): State<PgPool>) -> Result<Json<SoonIdleResp>, AppError> {
     // forward match: each prediction → nearest comp_ts within [−60s, +20min]; precision + lead.
+    // lead = to the PHYSICAL idle moment: LD = YT_DIS_DT (QC lifts the box off the truck → free);
+    // DS = comp_ts (DS's dis_ts is the QC load = trip START, not free; no cleaner RTG-side signal).
+    // comp_ts (JOBSTATUS='C') lags the physical free by ~8min for LD, so using it overstated lead.
     let by_source: Vec<SiSource> = sqlx::query_as(
         "WITH m AS (
            SELECT p.jobtype, p.source, h.comp_ts,
-                  EXTRACT(EPOCH FROM (h.comp_ts - p.predicted_at)) AS lead_s
+                  EXTRACT(EPOCH FROM ((CASE WHEN p.jobtype = 'LD' THEN coalesce(h.dis_ts, h.comp_ts) ELSE h.comp_ts END) - p.predicted_at)) AS lead_s
              FROM tt_soon_idle_pred p
              LEFT JOIN LATERAL (
-               SELECT comp_ts FROM tos_handover_label h
+               SELECT comp_ts, dis_ts FROM tos_handover_label h
                 WHERE h.ytno = p.ytno AND (p.jobtype <> 'DS' OR h.contno = p.container)
                   AND h.comp_ts >= p.predicted_at - interval '60 seconds'
                   AND h.comp_ts <  p.predicted_at + interval '20 minutes'
@@ -425,10 +428,11 @@ pub async fn soon_idle(State(pool): State<PgPool>) -> Result<Json<SoonIdleResp>,
     // per-jobtype lead time over ALL matched predictions (every source), DS and LD alike.
     let lead_by_jobtype: Vec<SiLead> = sqlx::query_as(
         "WITH m AS (
-           SELECT p.jobtype, EXTRACT(EPOCH FROM (h.comp_ts - p.predicted_at)) AS lead_s
+           SELECT p.jobtype,
+                  EXTRACT(EPOCH FROM ((CASE WHEN p.jobtype = 'LD' THEN coalesce(h.dis_ts, h.comp_ts) ELSE h.comp_ts END) - p.predicted_at)) AS lead_s
              FROM tt_soon_idle_pred p
              JOIN LATERAL (
-               SELECT comp_ts FROM tos_handover_label h
+               SELECT comp_ts, dis_ts FROM tos_handover_label h
                 WHERE h.ytno = p.ytno AND (p.jobtype <> 'DS' OR h.contno = p.container)
                   AND h.comp_ts >= p.predicted_at - interval '60 seconds'
                   AND h.comp_ts <  p.predicted_at + interval '20 minutes'

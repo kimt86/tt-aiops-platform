@@ -280,7 +280,7 @@ export default function LearnPage({ lang }: { lang: Lang }) {
       </Session>
 
       {/* ④ Soon-idle 예측 정확도 */}
-      <Session n={4} accent="#a78bfa" title={k ? "Soon-idle 예측 정확도" : "Soon-idle prediction"} sub={k ? "그림자: 예측 vs 권위 정답(comp_ts, 실제 유휴 시각) · DS·LD" : "shadow: prediction vs authoritative idle · DS & LD"}>
+      <Session n={4} accent="#a78bfa" title={k ? "Soon-idle 예측 정확도" : "Soon-idle prediction"} sub={k ? "그림자: 예측 vs 실제 트럭 빔(LD=dis_ts·DS=comp_ts) · DS·LD" : "shadow: prediction vs physical truck-freed · DS & LD"}>
         <div className="ls-ptag test" style={{ marginBottom: 8 }}>🧪 {k ? "최신 테스트 — '몇 분 후 유휴' 예측(학습 중앙값) vs 실제 (적중분)" : "test — 'minutes-to-idle' prediction (learned median) vs actual"}</div>
         <div className="ls-leads">
           <LeadCard jt="DS" accent="#fb923c" lead={dsJob.lead} recall={dsJob.recall} recallGps={dsJob.recallGps} precision={dsJob.precision} lang={lang} />
@@ -302,7 +302,7 @@ export default function LearnPage({ lang }: { lang: Lang }) {
             <div className="cyc-tp-box">{ldRecallSeries.length > 1 ? <LineChart values={ldRecallSeries} color="#22d3ee" axes /> : <div className="cyc-empty">{k ? "수집 중" : "collecting"}</div>}</div>
           </div>
         </div>
-        <div className="ls-note">{k ? "분 예측 = 작업유형별 학습 중앙값(곧 차량별 거리·신호 피처로 정밀화 예정). 정답=실제 유휴(comp_ts). LD는 안벽 QC PLC라 예측 가능(MAPE↓), DS는 RTG 큐 변동이 커 어려움. DS는 ACTV 보정 신호 — GPS단독→TOS 순이득(+%p) 병기." : "Minutes prediction = learned median per jobtype. LD (quay PLC) is predictable; DS (RTG queue) is noisier. DS uses the ACTV hook."}</div>
+        <div className="ls-note">{k ? "정답 = '트럭이 실제로 빈 순간': LD=YT 하차(dis_ts, QC가 트럭에서 들어냄) · DS=작업완료(comp_ts; DS의 dis_ts는 trip 시작이라 부적합). ⚠ comp_ts(TOS 'C')는 LD 실제 빔보다 ~8분 늦는 행정 스탬프라 과거 12.8분→교정 3.5분. 분 예측=작업유형별 학습 중앙값이나 per-건은 QC/RTG 큐 변동으로 오차 큼(분포로 사용). DS는 ACTV·LD는 QC PLC가 발화 신호." : "Ground truth = physical truck-freed: LD=YT discharge (dis_ts), DS=job complete (comp_ts). comp_ts lags LD's real free by ~8min (12.8→3.5min corrected). Per-truck error is large (QC/RTG queue)."}</div>
         <details className="ls-detail">
           <summary>{k ? "상세 — 신호별 정밀도·리드타임" : "detail — precision & lead by signal"}</summary>
           <div className="learn-list" style={{ marginTop: 8 }}>
