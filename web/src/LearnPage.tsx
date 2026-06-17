@@ -325,13 +325,12 @@ export default function LearnPage({ lang }: { lang: Lang }) {
 
       {/* ⑤ 유휴 분 예측 — 피처 정밀화 (DS·LD 통합) */}
       <Session n={5} accent="#fb923c" title={k ? "유휴 분 예측 — 피처 정밀화 (DS·LD)" : "minutes-to-idle — feature refinement (DS·LD)"} sub={k ? "'몇 분 후 유휴'를 피처로 더 맞출 수 있나 — DS=RTG거리·신호 / LD=안벽이라 피처 없음 (정답 GPS-우선)" : "can features sharpen 'minutes-to-idle' — DS uses RTG distance×signal; LD is quay-side"}>
+        <div className="ls-ptag" style={{ marginBottom: 8 }}>📈 {k ? "예측기 — 작업유형별 '몇 분 후 유휴'" : "predictor — minutes-to-idle per jobtype"}</div>
         <div className="ls-cols">
-          {/* DS — distance × signal feature model */}
+          {/* DS predictor — distance × signal cells */}
           <div className="ls-panel" style={{ borderTop: "2px solid #fb923c" }}>
             <div className="ls-ptag" style={{ color: "#fb923c" }}>DS · {k ? "양하 — RTG 거리 × 신호" : "discharge — RTG dist × signal"}</div>
-            <div className="ls-pv">{dse?.feat_mape_pct != null ? `${dse.feat_mape_pct.toFixed(0)}%` : "—"}<span className="ls-lead-u" style={{ marginLeft: 6 }}>MAPE</span></div>
-            <div className="ls-plabel">{k ? "평균" : "flat"} {dse?.flat_mape_pct != null ? `${dse.flat_mape_pct.toFixed(0)}%` : "—"} → {k ? "거리·신호" : "features"} <b style={{ color: "#fb923c" }}>{dse?.feat_mape_pct != null ? `${dse.feat_mape_pct.toFixed(0)}%` : "—"}</b> · ±30% {dse?.within_30pct != null ? `${dse.within_30pct.toFixed(0)}%` : "—"} · n {dse ? fmtN(dse.evaluated) : "—"}</div>
-            <div className="ds-cells" style={{ marginTop: 8 }}>
+            <div className="ds-cells">
               <div className="ds-cell hd"><span>{k ? "RTG거리" : "dist"}</span><span>{k ? "신호" : "signal"}</span><span>{k ? "예측" : "pred"}</span><span>p10~p90</span><span>n</span></div>
               {(si?.ds_eta_cells ?? []).map((c) => (
                 <div className="ds-cell" key={`${c.dist_bin}-${c.source}`}>
@@ -344,14 +343,29 @@ export default function LearnPage({ lang }: { lang: Lang }) {
               ))}
               {(si?.ds_eta_cells?.length ?? 0) === 0 && <div className="cyc-empty">{k ? "수집 중" : "collecting"}</div>}
             </div>
-            <div className="ls-paside">{k ? "거리가 중앙 예측을 밀어줌(≤30m 4분 → >150m 6.7분)·정확도 이득은 작음(58→57%)." : "Distance shifts the central estimate; accuracy gain small (58→57%)."}</div>
+            <div className="ls-paside">{k ? "거리가 중앙 예측을 밀어줌(≤30m 4분 → >150m 6.7분)." : "Distance shifts the central estimate."}</div>
           </div>
-          {/* LD — no useful feature (quay-side); flat median prediction */}
+          {/* LD predictor — flat median (no useful feature, quay-side) */}
           <div className="ls-panel" style={{ borderTop: "2px solid #22d3ee" }}>
             <div className="ls-ptag" style={{ color: "#22d3ee" }}>LD · {k ? "적하 — 유효 피처 없음" : "load — no useful feature"}</div>
+            <div className="ls-pv">{ldJob.lead?.lead_p50_s != null ? mins(ldJob.lead.lead_p50_s) : "—"}<span className="ls-lead-u">{k ? "분 후 유휴 (중앙)" : "min (median)"}</span></div>
+            <div className="ls-plabel">p10~p90 {mins(ldJob.lead?.lead_p10_s)}~{mins(ldJob.lead?.lead_p90_s)}{k ? "분" : "m"} · n {ldJob.lead?.matched ?? "—"}</div>
+            <div className="ls-paside">{k ? "안벽이라 RTG 거리=NULL·신호=qc_plc 고정. QC·시간대·큐 모두 홀드아웃 검증했으나 flat과 동일(~65%) — QC 큐 확률성 지배. 예측=학습 중앙값(분포 p10~p90로 사용)." : "Quay-side: RTG dist=NULL, signal fixed. QC/hour/queue all tested held-out ≈ flat (~65%). Predict the learned median."}</div>
+          </div>
+        </div>
+        <div className="ls-ptag test" style={{ margin: "12px 0 8px" }}>🧪 {k ? "최신 테스트 — 예측 vs 실제 (GPS-우선 정답, 7일)" : "test — predicted vs actual (GPS-first truth, 7d)"}</div>
+        <div className="ls-cols">
+          {/* DS test */}
+          <div className="ls-panel" style={{ borderTop: "2px solid #fb923c" }}>
+            <div className="ls-ptag" style={{ color: "#fb923c" }}>DS</div>
+            <div className="ls-pv">{dse?.feat_mape_pct != null ? `${dse.feat_mape_pct.toFixed(0)}%` : "—"}<span className="ls-lead-u" style={{ marginLeft: 6 }}>MAPE</span></div>
+            <div className="ls-plabel">{k ? "평균" : "flat"} {dse?.flat_mape_pct != null ? `${dse.flat_mape_pct.toFixed(0)}%` : "—"} → {k ? "거리·신호" : "features"} <b style={{ color: "#fb923c" }}>{dse?.feat_mape_pct != null ? `${dse.feat_mape_pct.toFixed(0)}%` : "—"}</b> · ±30% {k ? "적중" : ""} {dse?.within_30pct != null ? `${dse.within_30pct.toFixed(0)}%` : "—"} · {k ? "평가" : "n"} {dse ? fmtN(dse.evaluated) : "—"}</div>
+          </div>
+          {/* LD test */}
+          <div className="ls-panel" style={{ borderTop: "2px solid #22d3ee" }}>
+            <div className="ls-ptag" style={{ color: "#22d3ee" }}>LD</div>
             <div className="ls-pv">{ldJob.lead?.mape_pct != null ? `${ldJob.lead.mape_pct.toFixed(0)}%` : "—"}<span className="ls-lead-u" style={{ marginLeft: 6 }}>MAPE</span></div>
-            <div className="ls-plabel">{k ? "예측(중앙)" : "predict (median)"} <b style={{ color: "#22d3ee" }}>{ldJob.lead?.lead_p50_s != null ? `${mins(ldJob.lead.lead_p50_s)}${k ? "분" : "m"}` : "—"}</b> · p10~p90 {mins(ldJob.lead?.lead_p10_s)}~{mins(ldJob.lead?.lead_p90_s)} · ±30% {ldJob.lead?.within_30pct != null ? `${ldJob.lead.within_30pct.toFixed(0)}%` : "—"} · n {ldJob.lead?.matched ?? "—"}</div>
-            <div className="ls-paside">{k ? "안벽이라 RTG 거리=NULL·신호=qc_plc 고정. QC·시간대·큐 모두 홀드아웃 검증했으나 flat과 동일(~65%) — QC 큐 확률성 지배. 예측=학습 중앙값(분포 p10~p90로 사용)." : "Quay-side: RTG dist=NULL, signal fixed. QC/hour/queue all tested held-out ≈ flat (~65%) — QC-queue stochasticity dominates. Predict the learned median."}</div>
+            <div className="ls-plabel">±30% {k ? "적중" : ""} <b style={{ color: "#22d3ee" }}>{ldJob.lead?.within_30pct != null ? `${ldJob.lead.within_30pct.toFixed(0)}%` : "—"}</b> · {k ? "평가" : "n"} {ldJob.lead?.matched ?? "—"}</div>
           </div>
         </div>
         <div className="ls-note">{k ? "예측기 = 작업유형별 학습 중앙(+DS는 거리·신호 셀). 정답=GPS-우선 빔(tt_cycle_v2.dropped_at·TOS 폴백), 7일. 둘 다 per-건 오차는 QC/RTG 큐 변동으로 큼 — 점이 아닌 분포로 사용." : "Predictor = learned median per jobtype (DS adds distance×signal cells). Truth=GPS-first. Per-truck error is large (queue stochasticity) — use as a distribution."}</div>
