@@ -388,7 +388,11 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
       map.addSource("grid", { type: "geojson", data: buildGrid() });
       map.addLayer({
         id: "grid-line", type: "line", source: "grid", layout: { visibility: "none" },
-        paint: { "line-color": "#64748b", "line-opacity": 0.35, "line-width": 0.5 },
+        paint: {
+          "line-color": "#38bdf8",
+          "line-opacity": 0.6,
+          "line-width": ["interpolate", ["linear"], ["zoom"], 11, 0.8, 14, 1.4, 17, 2.4],
+        },
       });
 
       map.addSource("vehicles", { type: "geojson", data: { type: "FeatureCollection", features: [] } });
