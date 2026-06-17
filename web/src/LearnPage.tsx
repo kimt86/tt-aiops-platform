@@ -281,17 +281,7 @@ export default function LearnPage({ lang }: { lang: Lang }) {
 
       {/* ④ Soon-idle 예측 정확도 */}
       <Session n={4} accent="#a78bfa" title={k ? "Soon-idle 예측 정확도" : "Soon-idle prediction"} sub={k ? "그림자: 예측 vs 실제 트럭 빔 — GPS 우선(사이클 dropped_at)·TOS 폴백 · DS·LD" : "shadow: prediction vs physical truck-freed — GPS-first (cycle dropped_at), TOS fallback"}>
-        <div className="ls-ptag test" style={{ marginBottom: 8 }}>🧪 {k ? "최신 테스트 — '몇 분 후 유휴' 예측(학습 중앙값) vs 실제 (적중분)" : "test — 'minutes-to-idle' prediction (learned median) vs actual"}</div>
-        <div className="ls-leads">
-          <LeadCard jt="DS" accent="#fb923c" lead={dsJob.lead} recall={dsJob.recall} recallGps={dsJob.recallGps} precision={dsJob.precision} lang={lang} />
-          <LeadCard jt="LD" accent="#22d3ee" lead={ldJob.lead} recall={ldJob.recall} recallGps={ldJob.recallGps} precision={ldJob.precision} lang={lang} />
-        </div>
-        <div className="ls-chips">
-          <Chip label={k ? "예측 (7일)" : "predictions (7d)"} value={si ? fmtN(si.predictions) : "—"} />
-          <Chip label={k ? "적중" : "matched"} value={si ? fmtN(si.matched) : "—"} />
-          <Chip label={k ? "전체 정밀도" : "precision"} value={si?.precision_pct != null ? `${si.precision_pct.toFixed(0)}%` : "—"} />
-        </div>
-        <div className="ls-ptag" style={{ margin: "10px 0 4px" }}>📈 {k ? "학습 추이 — DS·LD 재현율 (24h 스냅샷)" : "learning — DS·LD recall trend"}</div>
+        <div className="ls-ptag" style={{ marginBottom: 8 }}>📈 {k ? "학습 추이 — DS·LD 재현율 (24h 스냅샷)" : "learning — DS·LD recall trend"}</div>
         <div className="learn-charts">
           <div className="cyc-tp">
             <div className="cyc-sec-h">{k ? "DS 재현율" : "DS recall"} <TrendBadge series={siRecallSeries} higherBetter lang={lang} /></div>
@@ -301,6 +291,16 @@ export default function LearnPage({ lang }: { lang: Lang }) {
             <div className="cyc-sec-h">{k ? "LD 재현율" : "LD recall"} <TrendBadge series={ldRecallSeries} higherBetter lang={lang} /></div>
             <div className="cyc-tp-box">{ldRecallSeries.length > 1 ? <LineChart values={ldRecallSeries} color="#22d3ee" axes /> : <div className="cyc-empty">{k ? "수집 중" : "collecting"}</div>}</div>
           </div>
+        </div>
+        <div className="ls-ptag test" style={{ margin: "12px 0 8px" }}>🧪 {k ? "최신 테스트 — '몇 분 후 유휴' 예측(학습 중앙값) vs 실제 (적중분)" : "test — 'minutes-to-idle' prediction (learned median) vs actual"}</div>
+        <div className="ls-leads">
+          <LeadCard jt="DS" accent="#fb923c" lead={dsJob.lead} recall={dsJob.recall} recallGps={dsJob.recallGps} precision={dsJob.precision} lang={lang} />
+          <LeadCard jt="LD" accent="#22d3ee" lead={ldJob.lead} recall={ldJob.recall} recallGps={ldJob.recallGps} precision={ldJob.precision} lang={lang} />
+        </div>
+        <div className="ls-chips">
+          <Chip label={k ? "예측 (7일)" : "predictions (7d)"} value={si ? fmtN(si.predictions) : "—"} />
+          <Chip label={k ? "적중" : "matched"} value={si ? fmtN(si.matched) : "—"} />
+          <Chip label={k ? "전체 정밀도" : "precision"} value={si?.precision_pct != null ? `${si.precision_pct.toFixed(0)}%` : "—"} />
         </div>
         <div className="ls-note">{k ? "정답 = 트럭 GPS가 잡은 '실제 빈 순간'(tt_cycle_v2.dropped_at) 우선 — TOS 라벨보다 커버리지 넓고(LD 적중 6.4k→11.3k) 물리적 빔과 0.5분 일치. GPS 공백 시 TOS 폴백(LD=dis_ts·DS=comp_ts). 리드·정밀도는 이 GPS-우선 정답, 재현율은 TOS 권위 완료(DS 컨테이너 키 필요) 기준. comp_ts는 LD 실제 빔보다 ~8.8분 늦어(완료=배 적재) 부적합. 분 예측=학습 중앙값이나 per-건은 QC/RTG 큐 변동으로 오차 큼(분포로 사용)." : "Ground truth = GPS-first physical free (tt_cycle_v2.dropped_at) — broader coverage than TOS (LD 6.4k→11.3k matched), within 0.5min of real free. TOS fallback on GPS gaps (LD=dis_ts, DS=comp_ts). Lead/precision use GPS-first; recall stays on TOS authoritative completions (container key)."}</div>
         <details className="ls-detail">
