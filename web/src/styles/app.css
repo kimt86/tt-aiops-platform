@@ -886,6 +886,7 @@ td.mono { font-family: "JetBrains Mono", monospace; color: var(--text); }
 .ls-lead-iqr { position: absolute; height: 100%; border-radius: 999px; }
 .ls-lead-med { position: absolute; width: 2px; height: 12px; top: -3px; border-radius: 1px; }
 .ls-lead-sub { font-size: 10.5px; color: var(--text-mute); }
+.ls-lead-acc { font-size: 11px; color: var(--text-dim); margin-top: 6px; padding-top: 6px; border-top: 1px solid var(--border-soft); }
 .ls-lead-q { font-size: 11px; color: var(--text-dim); margin-top: 5px; }
 @media (max-width: 720px) { .ls-leads { flex-direction: column; } }
 /* card 2-column panels — 📈 learning trend | 🧪 latest test */

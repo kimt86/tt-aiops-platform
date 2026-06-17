@@ -183,6 +183,7 @@ export interface SoonIdleMetricPoint {
 }
 export interface SoonIdleLead {
   jobtype: string; matched: number; lead_p10_s: number | null; lead_p50_s: number | null; lead_p90_s: number | null;
+  mape_pct: number | null; within_30pct: number | null;
 }
 export interface SoonIdleData {
   predictions: number; matched: number; precision_pct: number | null;

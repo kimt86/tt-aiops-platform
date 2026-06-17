@@ -318,6 +318,10 @@ struct SiLead {
     lead_p10_s: Option<f64>,
     lead_p50_s: Option<f64>,
     lead_p90_s: Option<f64>,
+    // minutes-to-idle prediction test: predict the learned median (= lead_p50_s) for every truck of
+    // this jobtype; how far off was the actual lead. mape = median |actual−pred|/actual.
+    mape_pct: Option<f64>,
+    within_30pct: Option<f64>, // % of trucks whose actual idle landed within ±30% of the prediction
 }
 
 #[derive(Serialize, sqlx::FromRow)]
@@ -410,12 +414,20 @@ pub async fn soon_idle(State(pool): State<PgPool>) -> Result<Json<SoonIdleResp>,
                 ORDER BY abs(EXTRACT(EPOCH FROM (h.comp_ts - p.predicted_at))) LIMIT 1
              ) h ON true
             WHERE p.predicted_at > now() - interval '7 days'
+         ),
+         g AS ( -- per-jobtype predicted minutes-to-idle = the learned median lead
+           SELECT jobtype, percentile_cont(0.5) WITHIN GROUP (ORDER BY lead_s) FILTER (WHERE lead_s >= 0) AS med
+             FROM m GROUP BY jobtype
          )
-         SELECT jobtype, count(*) FILTER (WHERE lead_s >= 0) AS matched,
-                percentile_cont(0.1) WITHIN GROUP (ORDER BY lead_s) FILTER (WHERE lead_s >= 0) AS lead_p10_s,
-                percentile_cont(0.5) WITHIN GROUP (ORDER BY lead_s) FILTER (WHERE lead_s >= 0) AS lead_p50_s,
-                percentile_cont(0.9) WITHIN GROUP (ORDER BY lead_s) FILTER (WHERE lead_s >= 0) AS lead_p90_s
-           FROM m GROUP BY jobtype ORDER BY jobtype",
+         SELECT m.jobtype, count(*) FILTER (WHERE m.lead_s >= 0) AS matched,
+                percentile_cont(0.1) WITHIN GROUP (ORDER BY m.lead_s) FILTER (WHERE m.lead_s >= 0) AS lead_p10_s,
+                percentile_cont(0.5) WITHIN GROUP (ORDER BY m.lead_s) FILTER (WHERE m.lead_s >= 0) AS lead_p50_s,
+                percentile_cont(0.9) WITHIN GROUP (ORDER BY m.lead_s) FILTER (WHERE m.lead_s >= 0) AS lead_p90_s,
+                (percentile_cont(0.5) WITHIN GROUP (ORDER BY abs(m.lead_s - g.med) / nullif(m.lead_s, 0))
+                   FILTER (WHERE m.lead_s > 0) * 100)::float8 AS mape_pct,
+                (avg(((abs(m.lead_s - g.med) / nullif(m.lead_s, 0)) <= 0.30)::int)
+                   FILTER (WHERE m.lead_s > 0) * 100)::float8 AS within_30pct
+           FROM m JOIN g USING (jobtype) GROUP BY m.jobtype ORDER BY m.jobtype",
     )
     .fetch_all(&pool)
     .await?;

@@ -111,12 +111,13 @@ function LeadCard({ jt, accent, lead, recall, recallGps, precision, lang }: { jt
   return (
     <div className="ls-lead" style={{ borderTopColor: accent }}>
       <div className="ls-lead-jt" style={{ color: accent }}>{jt} {jt === "DS" ? (k ? "· 양하" : "· discharge") : (k ? "· 적하" : "· load")}</div>
-      <div className="ls-lead-v">{p50 != null ? p50.toFixed(1) : "—"}<span className="ls-lead-u">{k ? "분 후 유휴 (중앙)" : "min to idle (median)"}</span></div>
+      <div className="ls-lead-v">{p50 != null ? p50.toFixed(1) : "—"}<span className="ls-lead-u">{k ? "분 후 유휴 (예측·중앙)" : "min to idle (predicted)"}</span></div>
       <div className="ls-lead-track">
         {p10 != null && p90 != null && <div className="ls-lead-iqr" style={{ left: `${clamp(p10)}%`, width: `${Math.max(1, clamp(p90) - clamp(p10))}%`, background: accent + "55" }} />}
         {p50 != null && <div className="ls-lead-med" style={{ left: `${clamp(p50)}%`, background: accent }} />}
       </div>
       <div className="ls-lead-sub">{k ? "범위 p10~p90" : "p10~p90"} {p10 != null ? p10.toFixed(1) : "—"}~{p90 != null ? p90.toFixed(1) : "—"}{k ? "분" : "m"} · {k ? "적중" : "matched"} {lead?.matched ?? 0}{k ? "건" : ""}</div>
+      <div className="ls-lead-acc">🎯 {k ? "분 예측 정확도" : "minutes accuracy"} — MAPE <b style={{ color: lead?.mape_pct != null && lead.mape_pct <= 35 ? "#34d399" : "#f59e0b" }}>{lead?.mape_pct != null ? `${lead.mape_pct.toFixed(0)}%` : "—"}</b> · {k ? "±30% 적중" : "within ±30%"} <b>{lead?.within_30pct != null ? `${lead.within_30pct.toFixed(0)}%` : "—"}</b></div>
       <div className="ls-lead-q">{k ? "재현율" : "recall"} <b style={{ color: "#34d399" }}>{recall != null ? `${recall.toFixed(0)}%` : "—"}</b>{recallGps != null && recall != null ? ` (GPS ${recallGps.toFixed(0)}→+${(recall - recallGps).toFixed(0)}%p)` : ""} · {k ? "정밀도" : "prec"} <b>{precision != null ? `${precision.toFixed(0)}%` : "—"}</b></div>
     </div>
   );
@@ -277,7 +278,7 @@ export default function LearnPage({ lang }: { lang: Lang }) {
 
       {/* ④ Soon-idle 예측 정확도 */}
       <Session n={4} accent="#a78bfa" title={k ? "Soon-idle 예측 정확도" : "Soon-idle prediction"} sub={k ? "그림자: 예측 vs 권위 정답(comp_ts, 실제 유휴 시각) · DS·LD" : "shadow: prediction vs authoritative idle · DS & LD"}>
-        <div className="ls-ptag test" style={{ marginBottom: 8 }}>🧪 {k ? "최신 테스트 — 곧유휴 예측 차량이 실제 몇 분 뒤 유휴가 됐나 (적중분)" : "test — minutes from prediction to actual idle (matched)"}</div>
+        <div className="ls-ptag test" style={{ marginBottom: 8 }}>🧪 {k ? "최신 테스트 — '몇 분 후 유휴' 예측(학습 중앙값) vs 실제 (적중분)" : "test — 'minutes-to-idle' prediction (learned median) vs actual"}</div>
         <div className="ls-leads">
           <LeadCard jt="DS" accent="#fb923c" lead={dsJob.lead} recall={dsJob.recall} recallGps={dsJob.recallGps} precision={dsJob.precision} lang={lang} />
           <LeadCard jt="LD" accent="#22d3ee" lead={ldJob.lead} recall={ldJob.recall} recallGps={ldJob.recallGps} precision={ldJob.precision} lang={lang} />
@@ -298,7 +299,7 @@ export default function LearnPage({ lang }: { lang: Lang }) {
             <div className="cyc-tp-box">{ldRecallSeries.length > 1 ? <LineChart values={ldRecallSeries} color="#22d3ee" axes /> : <div className="cyc-empty">{k ? "수집 중" : "collecting"}</div>}</div>
           </div>
         </div>
-        <div className="ls-note">{k ? "정답=실제 유휴(comp_ts). 예측이 완료를 지나야 채점됨(갓 적재분 제외). DS는 ACTV 보정, LD는 안벽 QC PLC가 주 신호 — 리드 카드에 GPS단독→TOS 순이득(+%p) 병기." : "Ground truth = comp_ts. DS uses the ACTV hook; LD uses quay QC PLC."}</div>
+        <div className="ls-note">{k ? "분 예측 = 작업유형별 학습 중앙값(곧 차량별 거리·신호 피처로 정밀화 예정). 정답=실제 유휴(comp_ts). LD는 안벽 QC PLC라 예측 가능(MAPE↓), DS는 RTG 큐 변동이 커 어려움. DS는 ACTV 보정 신호 — GPS단독→TOS 순이득(+%p) 병기." : "Minutes prediction = learned median per jobtype. LD (quay PLC) is predictable; DS (RTG queue) is noisier. DS uses the ACTV hook."}</div>
         <details className="ls-detail">
           <summary>{k ? "상세 — 신호별 정밀도·리드타임" : "detail — precision & lead by signal"}</summary>
           <div className="learn-list" style={{ marginTop: 8 }}>
