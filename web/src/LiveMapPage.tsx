@@ -183,21 +183,34 @@ const DEFAULT_TOGGLES: Toggles = {
 const LAYER_TOTAL = 12; // toggle count shown in the panel header
 const EMPTY_FC: GeoJSON.FeatureCollection = { type: "FeatureCollection", features: [] };
 
-// Uniform density-zoning grid at `m` meters. Cell = (round(lat/deg), round(lon/deg)) — the same
-// definition the density collector will use, so the drawn lines ARE the future zone boundaries
-// (boundaries sit at (k+0.5)·deg). Covers the whole terminal incl. haul roads.
-const GRID_SIZES = [50, 100, 150, 200] as const;
-function buildGrid(m: number): GeoJSON.FeatureCollection {
+// Metric grid: terminal split into uniform `m`-metre cells; each occupied cell becomes a filled
+// polygon colored by a chosen live metric (avg speed / vehicle count). Cell = (round(lat/deg),
+// round(lon/deg)) — same cell def as the density collector. Computed client-side from the live feed.
+const GRID_MIN = 50, GRID_MAX = 200; // adjustable cell size (m)
+// fill-color ramps (module consts so addLayer + the metric switch stay in sync)
+const SPEED_COLOR: maplibregl.ExpressionSpecification = // slow=red → fast=green (congestion view)
+  ["interpolate", ["linear"], ["get", "speed"], 0, "#ef4444", 8, "#f59e0b", 18, "#22c55e"];
+const COUNT_COLOR: maplibregl.ExpressionSpecification = // few=blue → many=red (density view)
+  ["interpolate", ["linear"], ["get", "count"], 1, "#1e3a8a", 4, "#22d3ee", 7, "#f59e0b", 12, "#ef4444"];
+function buildMetricGrid(devs: { cls: string; lat: number; lon: number; speed: number }[], m: number): GeoJSON.FeatureCollection {
   const deg = m / 111320;
-  const latMin = 2.903, latMax = 2.952, lonMin = 101.277, lonMax = 101.308;
-  const feats: GeoJSON.Feature[] = [];
-  for (let k = Math.round(latMin / deg); k <= Math.round(latMax / deg); k++) {
-    const lat = (k + 0.5) * deg;
-    feats.push({ type: "Feature", properties: {}, geometry: { type: "LineString", coordinates: [[lonMin, lat], [lonMax, lat]] } });
+  const agg = new Map<string, { cx: number; cy: number; count: number; sumSpeed: number }>();
+  for (const d of devs) {
+    if (d.cls !== "TT" || !d.lat || !d.lon) continue; // road traffic = trucks
+    const cx = Math.round(d.lat / deg), cy = Math.round(d.lon / deg);
+    const key = `${cx},${cy}`;
+    const a = agg.get(key) ?? { cx, cy, count: 0, sumSpeed: 0 };
+    a.count++; a.sumSpeed += d.speed ?? 0; agg.set(key, a);
   }
-  for (let k = Math.round(lonMin / deg); k <= Math.round(lonMax / deg); k++) {
-    const lon = (k + 0.5) * deg;
-    feats.push({ type: "Feature", properties: {}, geometry: { type: "LineString", coordinates: [[lon, latMin], [lon, latMax]] } });
+  const feats: GeoJSON.Feature[] = [];
+  for (const a of agg.values()) {
+    const latLo = (a.cx - 0.5) * deg, latHi = (a.cx + 0.5) * deg;
+    const lonLo = (a.cy - 0.5) * deg, lonHi = (a.cy + 0.5) * deg;
+    feats.push({
+      type: "Feature",
+      properties: { count: a.count, speed: Math.round((a.sumSpeed / a.count) * 10) / 10 },
+      geometry: { type: "Polygon", coordinates: [[[lonLo, latLo], [lonHi, latLo], [lonHi, latHi], [lonLo, latHi], [lonLo, latLo]]] },
+    });
   }
   return { type: "FeatureCollection", features: feats };
 }
@@ -205,7 +218,7 @@ function buildGrid(m: number): GeoJSON.FeatureCollection {
 // heading-oriented ARROWS for the learned driving-lane field — pure geometry (shaft + 2 barbs at
 // the head), no text glyphs. The arrowhead shows which way traffic actually flows through the cell.
 function laneSegments(
-  grid: { lat: number; lon: number; passes: number; heading_deg: number | null; directionality: number | null }[],
+  grid: { lat: number; lon: number; passes: number; heading_deg: number | null; directionality: number | null; mean_speed: number | null }[],
 ): GeoJSON.Feature[] {
   const L = 11; // half-shaft (m) — ~22m arrow per 22m cell
   const B = 6;  // arrowhead barb length (m)
@@ -225,7 +238,11 @@ function laneSegments(
     return {
       type: "Feature",
       geometry: { type: "MultiLineString", coordinates: [[tail, head], [barbA, head, barbB]] },
-      properties: { dir: c.directionality ?? 0, passes: c.passes },
+      properties: {
+        dir: c.directionality ?? 0, passes: c.passes,
+        heading: Math.round(c.heading_deg ?? 0),
+        speed: c.mean_speed != null ? Math.round(c.mean_speed * 10) / 10 : null,
+      },
     } as GeoJSON.Feature;
   });
 }
@@ -269,8 +286,9 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
   const [stateFilter, setStateFilter] = useState<string | null>(null);
   const [dispatchFilter, setDispatchFilter] = useState<Dispatch | null>(null);
   const [toggles, setToggles] = useState<Toggles>(DEFAULT_TOGGLES);
-  const [showGrid, setShowGrid] = useState(false); // density-zoning grid overlay
-  const [gridM, setGridM] = useState(100); // grid cell size (m), live-switchable
+  const [showGrid, setShowGrid] = useState(false); // metric grid overlay
+  const [gridM, setGridM] = useState(100); // grid cell size (m), adjustable
+  const [gridMetric, setGridMetric] = useState<"speed" | "count">("speed"); // what the cell color shows
   const [panelOpen, setPanelOpen] = useState(true);
   const [counts, setCounts] = useState({ total: 0, moving: 0, idle: 0, off: 0 });
   const [tpos, setTpos] = useState(0);
@@ -296,6 +314,8 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
   // clicked-vehicle detail panel
   const [selDev, setSelDev] = useState<SelVeh | null>(null);
   const selRef = useRef<string | null>(null);
+  const koRef = useRef(ko); koRef.current = ko;        // fresh lang for once-bound map click handlers
+  const gridMRef = useRef(gridM); gridMRef.current = gridM;
   const pickRef = useRef<(id: string, lon: number, lat: number, speed: number) => void>(() => {});
   pickRef.current = (id, lon, lat, speed) => {
     selRef.current = id;
@@ -320,13 +340,24 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
     return () => clearInterval(iv);
   }, []);
 
-  // density-grid overlay: rebuild on size change + apply visibility
+  // metric grid overlay: apply color (by metric) + visibility, and rebuild cells from the live
+  // feed (current TT density / avg speed per cell) on a timer + on any control change.
   useEffect(() => {
     const m = mapRef.current;
-    if (!m || !m.getLayer("grid-line")) return;
-    (m.getSource("grid") as maplibregl.GeoJSONSource | undefined)?.setData(buildGrid(gridM));
-    m.setLayoutProperty("grid-line", "visibility", showGrid ? "visible" : "none");
-  }, [showGrid, gridM, ready]);
+    if (!m || !m.getLayer("mgrid-fill")) return;
+    m.setPaintProperty("mgrid-fill", "fill-color", gridMetric === "speed" ? SPEED_COLOR : COUNT_COLOR);
+    const vis = showGrid ? "visible" : "none";
+    m.setLayoutProperty("mgrid-fill", "visibility", vis);
+    m.setLayoutProperty("mgrid-line", "visibility", vis);
+    if (!showGrid) return;
+    const rebuild = () =>
+      (m.getSource("mgrid") as maplibregl.GeoJSONSource | undefined)?.setData(
+        buildMetricGrid(liveRef.current?.devices ?? [], gridM),
+      );
+    rebuild();
+    const iv = setInterval(rebuild, 2500);
+    return () => clearInterval(iv);
+  }, [showGrid, gridM, gridMetric, ready]);
 
   // init map once
   useEffect(() => {
@@ -368,15 +399,16 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
       }
 
       // ── vehicles (top) ──
-      // ── learned-layout (② work-points · ③ lanes) + dispatch demand overlays ──
+      // ── learned-layout (work-points · driving lanes) + dispatch demand overlays ──
       map.addSource("learn-topos", { type: "geojson", data: EMPTY_FC });
       map.addLayer({
         id: "lt-pt", type: "circle", source: "learn-topos", layout: { visibility: "none" },
         paint: {
           "circle-radius": ["interpolate", ["linear"], ["zoom"], 12, ["case", [">=", ["get", "n"], 30], 3, 1.6], 17, ["case", [">=", ["get", "n"], 30], 7, 4]],
-          "circle-color": ["case", ["get", "crane"], "#f59e0b", "#5eead4"],
-          "circle-opacity": ["case", [">=", ["get", "n"], 30], 0.85, 0.4],
-          "circle-stroke-width": ["case", [">=", ["get", "n"], 30], 1, 0], "circle-stroke-color": "#0a0f1d",
+          // fill = learned accuracy/confidence (green high · amber med · red low); ring = block/crane
+          "circle-color": ["match", ["get", "conf"], "high", "#22c55e", "med", "#f59e0b", "#ef4444"],
+          "circle-opacity": 0.9,
+          "circle-stroke-width": 1.4, "circle-stroke-color": ["case", ["get", "crane"], "#f59e0b", "#5eead4"],
         },
       });
       map.addSource("learn-lanes", { type: "geojson", data: EMPTY_FC });
@@ -399,16 +431,10 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
         },
       });
 
-      // density zoning grid (150m uniform; same cell def as the planned density collector)
-      map.addSource("grid", { type: "geojson", data: buildGrid(gridM) });
-      map.addLayer({
-        id: "grid-line", type: "line", source: "grid", layout: { visibility: "none" },
-        paint: {
-          "line-color": "#38bdf8",
-          "line-opacity": 0.6,
-          "line-width": ["interpolate", ["linear"], ["zoom"], 11, 0.8, 14, 1.4, 17, 2.4],
-        },
-      });
+      // metric grid: filled cells colored by a live metric (avg speed / density), client-side.
+      map.addSource("mgrid", { type: "geojson", data: EMPTY_FC });
+      map.addLayer({ id: "mgrid-fill", type: "fill", source: "mgrid", layout: { visibility: "none" }, paint: { "fill-color": SPEED_COLOR, "fill-opacity": 0.45 } });
+      map.addLayer({ id: "mgrid-line", type: "line", source: "mgrid", layout: { visibility: "none" }, paint: { "line-color": "#334155", "line-opacity": 0.35, "line-width": 0.5 } });
 
       map.addSource("vehicles", { type: "geojson", data: { type: "FeatureCollection", features: [] } });
       addEquipIcons(map); // equipment shapes × state colors
@@ -431,6 +457,45 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
       });
       map.on("mouseenter", "veh", () => { map.getCanvas().style.cursor = "pointer"; });
       map.on("mouseleave", "veh", () => { map.getCanvas().style.cursor = ""; });
+
+      // click popups for learned overlays + metric-grid cells (koRef/gridMRef = fresh values)
+      const lpop = new maplibregl.Popup({ closeButton: true, closeOnClick: true, maxWidth: "240px", className: "lm-popup" });
+      const showPopup = (at: [number, number] | maplibregl.LngLat, html: string) => lpop.setLngLat(at).setHTML(html).addTo(map);
+      map.on("click", "lt-pt", (e) => {
+        const f = e.features?.[0]; if (!f) return; const k = koRef.current;
+        const p = f.properties as { topos: string; crane: boolean; n: number; obs: number; spread: number | null; conf: string };
+        const kind = p.crane ? (k ? "안벽 크레인" : "quay crane") : (k ? "블록 작업점" : "block");
+        const cf: Record<string, string> = k ? { high: "높음", med: "보통", low: "낮음" } : { high: "high", med: "med", low: "low" };
+        showPopup((f.geometry as GeoJSON.Point).coordinates as [number, number],
+          `<div class="lmp-t">${p.topos}</div>`
+          + `<div class="lmp-r">${k ? "종류" : "kind"}: ${kind}</div>`
+          + `<div class="lmp-r">${k ? "표본" : "samples"}: n=${p.n} · obs ${p.obs}</div>`
+          + `<div class="lmp-r">${k ? "위치 정확도" : "precision"}: ${p.spread != null ? "±" + p.spread + "m" : "—"}</div>`
+          + `<div class="lmp-r">${k ? "신뢰도" : "confidence"}: <b>${cf[p.conf] ?? p.conf}</b></div>`);
+      });
+      map.on("click", "ll-seg", (e) => {
+        const f = e.features?.[0]; if (!f) return; const k = koRef.current;
+        const p = f.properties as { dir: number; passes: number; heading: number; speed: number | null };
+        const flow = p.dir >= 0.8 ? (k ? "일방통행" : "one-way") : p.dir >= 0.5 ? (k ? "대체로 일방" : "mostly one-way") : (k ? "양방/혼재" : "two-way/mixed");
+        showPopup(e.lngLat,
+          `<div class="lmp-t">${k ? "학습 차선" : "learned lane"}</div>`
+          + `<div class="lmp-r">${k ? "방향" : "heading"}: ${p.heading}° (${flow})</div>`
+          + `<div class="lmp-r">${k ? "방향성" : "directionality"}: ${(p.dir ?? 0).toFixed(2)}</div>`
+          + `<div class="lmp-r">${k ? "평균속도" : "avg speed"}: ${p.speed != null ? p.speed + " km/h" : "—"}</div>`
+          + `<div class="lmp-r">${k ? "통과 수" : "passes"}: ${p.passes}</div>`);
+      });
+      map.on("click", "mgrid-fill", (e) => {
+        const f = e.features?.[0]; if (!f) return; const k = koRef.current;
+        const p = f.properties as { count: number; speed: number };
+        showPopup(e.lngLat,
+          `<div class="lmp-t">${k ? "격자 셀" : "grid cell"} (${gridMRef.current}m)</div>`
+          + `<div class="lmp-r">${k ? "트럭" : "trucks"}: ${p.count}${k ? "대" : ""}</div>`
+          + `<div class="lmp-r">${k ? "평균속도" : "avg speed"}: ${p.speed} km/h</div>`);
+      });
+      for (const id of ["lt-pt", "ll-seg", "mgrid-fill"]) {
+        map.on("mouseenter", id, () => { map.getCanvas().style.cursor = "pointer"; });
+        map.on("mouseleave", id, () => { map.getCanvas().style.cursor = ""; });
+      }
       setReady(true);
     });
     return () => { ro.disconnect(); map.remove(); mapRef.current = null; };
@@ -532,7 +597,7 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
     if (map.getLayer("dm-bub")) map.setLayoutProperty("dm-bub", "visibility", vis(toggles.demand));
   }, [toggles, ready]);
 
-  // learned-layout (②③) + dispatch demand overlays: fetch + build GeoJSON while toggled on.
+  // learned-layout (work-points / lanes) + dispatch demand overlays: fetch + build GeoJSON while toggled on.
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !ready) return;
@@ -545,7 +610,16 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
           const t = await api.learnTopos();
           if (!alive) return;
           if (toggles.learnTopos) {
-            const feats = t.points.map((p) => ({ type: "Feature", geometry: { type: "Point", coordinates: [p.lon, p.lat] }, properties: { crane: p.is_crane, n: p.n, topos: p.topos } } as GeoJSON.Feature));
+            const feats = t.points.map((p) => {
+            // accuracy/confidence: tight cluster + enough samples = high. spread_m = positional precision.
+            const sp = p.spread_m ?? 99;
+            const conf = p.n >= 30 && sp <= 8 ? "high" : p.n >= 10 && sp <= 20 ? "med" : "low";
+            return {
+              type: "Feature",
+              geometry: { type: "Point", coordinates: [p.lon, p.lat] },
+              properties: { crane: p.is_crane, n: p.n, topos: p.topos, obs: p.obs, spread: p.spread_m != null ? Math.round(p.spread_m * 10) / 10 : null, conf },
+            } as GeoJSON.Feature;
+          });
             (map.getSource("learn-topos") as maplibregl.GeoJSONSource | undefined)?.setData({ type: "FeatureCollection", features: feats });
           }
           if (toggles.demand) {
@@ -778,12 +852,20 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
             <section className="llp-sec">
               <header>{ko ? "영역" : "Areas"}</header>
               <Row on={toggles.areas} color="#7eb6ff" label={ko ? "도로/블록 영역" : "Road/Block"} onChange={(v) => set("areas", v)} />
-              <Row on={showGrid} color="#38bdf8" label={ko ? `밀도 격자 (${gridM}m)` : `Density grid (${gridM}m)`} onChange={setShowGrid} />
+              <Row on={showGrid} color={gridMetric === "speed" ? "#22c55e" : "#22d3ee"} label={ko ? `메트릭 격자 (${gridM}m)` : `Metric grid (${gridM}m)`} onChange={setShowGrid} />
               {showGrid && (
-                <div className="llp-gridsz" style={{ display: "flex", gap: 4, padding: "2px 0 4px 18px" }}>
-                  {GRID_SIZES.map((m) => (
-                    <button key={m} className={`mdl${gridM === m ? " on" : ""}`} onClick={() => setGridM(m)}>{m}m</button>
-                  ))}
+                <div className="llp-gridctl" style={{ padding: "2px 0 6px 18px", display: "flex", flexDirection: "column", gap: 5 }}>
+                  <div style={{ display: "flex", gap: 4 }}>
+                    <button className={`mdl${gridMetric === "speed" ? " on" : ""}`} onClick={() => setGridMetric("speed")}>{ko ? "평균속도" : "Avg speed"}</button>
+                    <button className={`mdl${gridMetric === "count" ? " on" : ""}`} onClick={() => setGridMetric("count")}>{ko ? "차량 수" : "Density"}</button>
+                  </div>
+                  <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11, color: "var(--text-dim)" }}>
+                    <input type="range" min={GRID_MIN} max={GRID_MAX} step={25} value={gridM} onChange={(e) => setGridM(Number(e.target.value))} style={{ flex: 1 }} />
+                    <span className="mono" style={{ minWidth: 34, textAlign: "right" }}>{gridM}m</span>
+                  </label>
+                  <div style={{ fontSize: 10, color: "var(--text-mute)" }}>
+                    {gridMetric === "speed" ? (ko ? "느림 🔴 → 빠름 🟢 (정체 구간)" : "slow 🔴 → fast 🟢") : (ko ? "적음 🔵 → 많음 🔴 (혼잡 구간)" : "few 🔵 → many 🔴")}
+                  </div>
                 </div>
               )}
             </section>
@@ -803,10 +885,10 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
             </section>
             <section className="llp-sec">
               <header>{ko ? "학습·배차 (GPS·실시간)" : "Learned · Dispatch"}</header>
-              <Row on={toggles.learnTopos} color="#5eead4" label={ko ? "② 작업지점 좌표 (학습)" : "② Work-points (learned)"} onChange={(v) => set("learnTopos", v)} />
-              <Row on={toggles.learnLanes} color="#34d399" label={ko ? "③ 주행 차선 (학습)" : "③ Driving lanes (learned)"} onChange={(v) => set("learnLanes", v)} />
+              <Row on={toggles.learnTopos} color="#5eead4" label={ko ? "작업지점 좌표 (학습)" : "Work-points (learned)"} onChange={(v) => set("learnTopos", v)} />
+              <Row on={toggles.learnLanes} color="#34d399" label={ko ? "주행 차선 (학습)" : "Driving lanes (learned)"} onChange={(v) => set("learnLanes", v)} />
               <Row on={toggles.demand} color="#fb923c" label={ko ? "작업 수요 · 미배정 (DS/LD)" : "Demand · unassigned"} onChange={(v) => set("demand", v)} />
-              <div className="llp-hint">{ko ? "②원: 채움=확신(n≥30)·청록=블록·주황=크레인 · ③선: 초록=일방·주황=양방 · 수요원: 크기=대수" : "② circles (filled=confident) · ③ lines (green=one-way) · demand bubbles sized by count"}</div>
+              <div className="llp-hint">{ko ? "작업점: 채움=신뢰도(🟢높음·🟠보통·🔴낮음)·테두리=블록(청록)/크레인(주황) · 차선: 화살표=흐름·초록=일방·회색=양방 · 수요: 크기=대수(주황 DS·청록 LD) · 클릭=상세" : "work-points: fill=confidence (🟢🟠🔴), ring=block/crane · lanes: arrow=flow, green=one-way · demand: size=count · click for details"}</div>
             </section>
           </div>
         )}
