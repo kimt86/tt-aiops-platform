@@ -370,31 +370,45 @@ pub struct SoonIdleResp {
 
 /// GET /api/learn/soon-idle — soon_idle prediction accuracy vs authoritative idle (shadow).
 pub async fn soon_idle(State(pool): State<PgPool>) -> Result<Json<SoonIdleResp>, AppError> {
-    // forward match: each prediction → nearest comp_ts within [−60s, +20min]; precision + lead.
-    // lead = to the PHYSICAL idle moment: LD = YT_DIS_DT (QC lifts the box off the truck → free);
-    // DS = comp_ts (DS's dis_ts is the QC load = trip START, not free; no cleaner RTG-side signal).
-    // comp_ts (JOBSTATUS='C') lags the physical free by ~8min for LD, so using it overstated lead.
-    let by_source: Vec<SiSource> = sqlx::query_as(
-        "WITH m AS (
-           SELECT p.jobtype, p.source, h.comp_ts,
-                  EXTRACT(EPOCH FROM ((CASE WHEN p.jobtype = 'LD' THEN coalesce(h.dis_ts, h.comp_ts) ELSE h.comp_ts END) - p.predicted_at)) AS lead_s
-             FROM tt_soon_idle_pred p
-             LEFT JOIN LATERAL (
-               SELECT comp_ts, dis_ts FROM tos_handover_label h
-                WHERE h.ytno = p.ytno AND (p.jobtype <> 'DS' OR h.contno = p.container)
-                  AND h.comp_ts >= p.predicted_at - interval '60 seconds'
-                  AND h.comp_ts <  p.predicted_at + interval '20 minutes'
-                ORDER BY abs(EXTRACT(EPOCH FROM (h.comp_ts - p.predicted_at))) LIMIT 1
-             ) h ON true
+    // ── GPS-first ground truth ──────────────────────────────────────────────────────────────
+    // Physical "truck freed" = the truck's own next GPS cycle-close (tt_cycle_v2.dropped_at), which
+    // we cross-validated to within ~0.5min of the real free AND covers more trips than the TOS label.
+    // Fall back to the TOS label only where GPS has a gap (LD = YT_DIS_DT; DS = comp_ts — for LD,
+    // comp_ts='box on ship' lags the truck-free by ~8min so dis_ts is preferred). Used for the
+    // forward match (precision + lead). Recall below stays on TOS authoritative completions: they
+    // carry the container key DS needs, and GPS-by-(ytno,time) would inflate DS recall.
+    const IDLE_JOINS: &str = "
+       LEFT JOIN LATERAL (
+         SELECT dropped_at FROM tt_cycle_v2 c
+          WHERE c.ytno = p.ytno AND c.jobtype = p.jobtype
+            AND c.dropped_at >= p.predicted_at - interval '90 seconds'
+            AND c.dropped_at <  p.predicted_at + interval '20 minutes'
+          ORDER BY c.dropped_at LIMIT 1
+       ) g ON true
+       LEFT JOIN LATERAL (
+         SELECT dis_ts, comp_ts FROM tos_handover_label h
+          WHERE h.ytno = p.ytno AND (p.jobtype <> 'DS' OR h.contno = p.container)
+            AND h.comp_ts >= p.predicted_at - interval '60 seconds'
+            AND h.comp_ts <  p.predicted_at + interval '20 minutes'
+          ORDER BY abs(EXTRACT(EPOCH FROM (h.comp_ts - p.predicted_at))) LIMIT 1
+       ) t ON true";
+    const IDLE_EXPR: &str =
+        "coalesce(g.dropped_at, CASE WHEN p.jobtype = 'LD' THEN coalesce(t.dis_ts, t.comp_ts) ELSE t.comp_ts END)";
+
+    let by_source: Vec<SiSource> = sqlx::query_as(&format!(
+        "WITH j AS (
+           SELECT p.jobtype, p.source, p.predicted_at, {IDLE_EXPR} AS idle_ts
+             FROM tt_soon_idle_pred p {IDLE_JOINS}
             WHERE p.predicted_at > now() - interval '7 days'
-         )
-         SELECT jobtype, source, count(*) AS predictions, count(comp_ts) AS matched,
-                (100.0*count(comp_ts)/nullif(count(*),0))::float8 AS precision_pct,
+         ),
+         m AS (SELECT jobtype, source, idle_ts, EXTRACT(EPOCH FROM (idle_ts - predicted_at)) AS lead_s FROM j)
+         SELECT jobtype, source, count(*) AS predictions, count(idle_ts) AS matched,
+                (100.0*count(idle_ts)/nullif(count(*),0))::float8 AS precision_pct,
                 percentile_cont(0.1) WITHIN GROUP (ORDER BY lead_s) FILTER (WHERE lead_s >= 0) AS lead_p10_s,
                 percentile_cont(0.5) WITHIN GROUP (ORDER BY lead_s) FILTER (WHERE lead_s >= 0) AS lead_p50_s,
                 percentile_cont(0.9) WITHIN GROUP (ORDER BY lead_s) FILTER (WHERE lead_s >= 0) AS lead_p90_s
-           FROM m GROUP BY jobtype, source ORDER BY jobtype, source",
-    )
+           FROM m GROUP BY jobtype, source ORDER BY jobtype, source"
+    ))
     .fetch_all(&pool)
     .await?;
 
@@ -425,35 +439,26 @@ pub async fn soon_idle(State(pool): State<PgPool>) -> Result<Json<SoonIdleResp>,
     .fetch_all(&pool)
     .await?;
 
-    // per-jobtype lead time over ALL matched predictions (every source), DS and LD alike.
-    let lead_by_jobtype: Vec<SiLead> = sqlx::query_as(
-        "WITH m AS (
-           SELECT p.jobtype,
-                  EXTRACT(EPOCH FROM ((CASE WHEN p.jobtype = 'LD' THEN coalesce(h.dis_ts, h.comp_ts) ELSE h.comp_ts END) - p.predicted_at)) AS lead_s
-             FROM tt_soon_idle_pred p
-             JOIN LATERAL (
-               SELECT comp_ts, dis_ts FROM tos_handover_label h
-                WHERE h.ytno = p.ytno AND (p.jobtype <> 'DS' OR h.contno = p.container)
-                  AND h.comp_ts >= p.predicted_at - interval '60 seconds'
-                  AND h.comp_ts <  p.predicted_at + interval '20 minutes'
-                ORDER BY abs(EXTRACT(EPOCH FROM (h.comp_ts - p.predicted_at))) LIMIT 1
-             ) h ON true
+    // per-jobtype lead time (GPS-first idle) over ALL matched predictions. minutes-to-idle prediction
+    // = the learned median lead (gm.med); mape/within_30 measure that prediction vs actual.
+    let lead_by_jobtype: Vec<SiLead> = sqlx::query_as(&format!(
+        "WITH j AS (
+           SELECT p.jobtype, p.predicted_at, {IDLE_EXPR} AS idle_ts
+             FROM tt_soon_idle_pred p {IDLE_JOINS}
             WHERE p.predicted_at > now() - interval '7 days'
          ),
-         g AS ( -- per-jobtype predicted minutes-to-idle = the learned median lead
-           SELECT jobtype, percentile_cont(0.5) WITHIN GROUP (ORDER BY lead_s) FILTER (WHERE lead_s >= 0) AS med
-             FROM m GROUP BY jobtype
-         )
+         m AS (SELECT jobtype, EXTRACT(EPOCH FROM (idle_ts - predicted_at)) AS lead_s FROM j),
+         gm AS (SELECT jobtype, percentile_cont(0.5) WITHIN GROUP (ORDER BY lead_s) FILTER (WHERE lead_s >= 0) AS med FROM m GROUP BY jobtype)
          SELECT m.jobtype, count(*) FILTER (WHERE m.lead_s >= 0) AS matched,
                 percentile_cont(0.1) WITHIN GROUP (ORDER BY m.lead_s) FILTER (WHERE m.lead_s >= 0) AS lead_p10_s,
                 percentile_cont(0.5) WITHIN GROUP (ORDER BY m.lead_s) FILTER (WHERE m.lead_s >= 0) AS lead_p50_s,
                 percentile_cont(0.9) WITHIN GROUP (ORDER BY m.lead_s) FILTER (WHERE m.lead_s >= 0) AS lead_p90_s,
-                (percentile_cont(0.5) WITHIN GROUP (ORDER BY abs(m.lead_s - g.med) / nullif(m.lead_s, 0))
+                (percentile_cont(0.5) WITHIN GROUP (ORDER BY abs(m.lead_s - gm.med) / nullif(m.lead_s, 0))
                    FILTER (WHERE m.lead_s > 0) * 100)::float8 AS mape_pct,
-                (avg(((abs(m.lead_s - g.med) / nullif(m.lead_s, 0)) <= 0.30)::int)
+                (avg(((abs(m.lead_s - gm.med) / nullif(m.lead_s, 0)) <= 0.30)::int)
                    FILTER (WHERE m.lead_s > 0) * 100)::float8 AS within_30pct
-           FROM m JOIN g USING (jobtype) GROUP BY m.jobtype ORDER BY m.jobtype",
-    )
+           FROM m JOIN gm USING (jobtype) GROUP BY m.jobtype ORDER BY m.jobtype"
+    ))
     .fetch_all(&pool)
     .await?;
 
@@ -464,23 +469,18 @@ pub async fn soon_idle(State(pool): State<PgPool>) -> Result<Json<SoonIdleResp>,
     .fetch_all(&pool)
     .await?;
 
-    // DS minutes-to-idle feature predictor — the cells (distance-bin × signal → median lead).
-    // dist_bin: 0=≤30m 1=30–80m 2=80–150m 3=>150m 4=RTG없음. Only cells with ≥20 matched shown.
-    const DS_ETA_M: &str = "SELECT
+    // DS minutes-to-idle feature predictor — the cells (distance-bin × signal → median lead), using
+    // the same GPS-first idle. dist_bin: 0=≤30m 1=30–80m 2=80–150m 3=>150m 4=RTG없음. ≥20 matched.
+    let ds_eta_m = format!(
+        "SELECT
            (CASE WHEN p.nearest_rtg_m IS NULL THEN 4 WHEN p.nearest_rtg_m <= 30 THEN 0
                  WHEN p.nearest_rtg_m <= 80 THEN 1 WHEN p.nearest_rtg_m <= 150 THEN 2 ELSE 3 END) AS dist_bin,
-           p.source, EXTRACT(EPOCH FROM (h.comp_ts - p.predicted_at)) AS lead_s
-         FROM tt_soon_idle_pred p
-         JOIN LATERAL (
-           SELECT comp_ts FROM tos_handover_label h
-            WHERE h.ytno = p.ytno AND h.contno = p.container
-              AND h.comp_ts >= p.predicted_at - interval '60 seconds'
-              AND h.comp_ts <  p.predicted_at + interval '20 minutes'
-            ORDER BY abs(EXTRACT(EPOCH FROM (h.comp_ts - p.predicted_at))) LIMIT 1
-         ) h ON true
-        WHERE p.jobtype = 'DS' AND p.predicted_at > now() - interval '7 days'";
+           p.source, EXTRACT(EPOCH FROM ({IDLE_EXPR} - p.predicted_at)) AS lead_s
+         FROM tt_soon_idle_pred p {IDLE_JOINS}
+        WHERE p.jobtype = 'DS' AND p.predicted_at > now() - interval '7 days'"
+    );
     let ds_eta_cells: Vec<DsEtaCell> = sqlx::query_as(&format!(
-        "WITH m AS ({DS_ETA_M})
+        "WITH m AS ({ds_eta_m})
          SELECT dist_bin, source, count(*) AS n,
                 percentile_cont(0.5) WITHIN GROUP (ORDER BY lead_s) AS pred_s,
                 percentile_cont(0.1) WITHIN GROUP (ORDER BY lead_s) AS p10_s,
@@ -493,14 +493,14 @@ pub async fn soon_idle(State(pool): State<PgPool>) -> Result<Json<SoonIdleResp>,
     // feature-model accuracy vs the flat baseline (both in-sample; held-out confirmed dist×source
     // doesn't overfit — large cells). feat = error vs cell median, flat = error vs jobtype median.
     let ds_eta: DsEtaModel = sqlx::query_as(&format!(
-        "WITH m AS ({DS_ETA_M}),
+        "WITH m AS ({ds_eta_m}),
               f AS (SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY lead_s) FILTER (WHERE lead_s >= 0) AS med FROM m),
-              g AS (SELECT dist_bin, source, percentile_cont(0.5) WITHIN GROUP (ORDER BY lead_s) FILTER (WHERE lead_s >= 0) AS med FROM m GROUP BY dist_bin, source)
+              cg AS (SELECT dist_bin, source, percentile_cont(0.5) WITHIN GROUP (ORDER BY lead_s) FILTER (WHERE lead_s >= 0) AS med FROM m GROUP BY dist_bin, source)
          SELECT count(*) FILTER (WHERE m.lead_s > 0) AS evaluated,
-                (percentile_cont(0.5) WITHIN GROUP (ORDER BY abs(m.lead_s - g.med) / nullif(m.lead_s, 0)) FILTER (WHERE m.lead_s > 0) * 100)::float8 AS feat_mape_pct,
+                (percentile_cont(0.5) WITHIN GROUP (ORDER BY abs(m.lead_s - cg.med) / nullif(m.lead_s, 0)) FILTER (WHERE m.lead_s > 0) * 100)::float8 AS feat_mape_pct,
                 (percentile_cont(0.5) WITHIN GROUP (ORDER BY abs(m.lead_s - f.med) / nullif(m.lead_s, 0)) FILTER (WHERE m.lead_s > 0) * 100)::float8 AS flat_mape_pct,
-                (avg(((abs(m.lead_s - g.med) / nullif(m.lead_s, 0)) <= 0.30)::int) FILTER (WHERE m.lead_s > 0) * 100)::float8 AS within_30pct
-           FROM m JOIN g USING (dist_bin, source) CROSS JOIN f"
+                (avg(((abs(m.lead_s - cg.med) / nullif(m.lead_s, 0)) <= 0.30)::int) FILTER (WHERE m.lead_s > 0) * 100)::float8 AS within_30pct
+           FROM m JOIN cg USING (dist_bin, source) CROSS JOIN f"
     ))
     .fetch_one(&pool)
     .await

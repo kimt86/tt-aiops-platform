@@ -280,7 +280,7 @@ export default function LearnPage({ lang }: { lang: Lang }) {
       </Session>
 
       {/* ④ Soon-idle 예측 정확도 */}
-      <Session n={4} accent="#a78bfa" title={k ? "Soon-idle 예측 정확도" : "Soon-idle prediction"} sub={k ? "그림자: 예측 vs 실제 트럭 빔(LD=dis_ts·DS=comp_ts) · DS·LD" : "shadow: prediction vs physical truck-freed · DS & LD"}>
+      <Session n={4} accent="#a78bfa" title={k ? "Soon-idle 예측 정확도" : "Soon-idle prediction"} sub={k ? "그림자: 예측 vs 실제 트럭 빔 — GPS 우선(사이클 dropped_at)·TOS 폴백 · DS·LD" : "shadow: prediction vs physical truck-freed — GPS-first (cycle dropped_at), TOS fallback"}>
         <div className="ls-ptag test" style={{ marginBottom: 8 }}>🧪 {k ? "최신 테스트 — '몇 분 후 유휴' 예측(학습 중앙값) vs 실제 (적중분)" : "test — 'minutes-to-idle' prediction (learned median) vs actual"}</div>
         <div className="ls-leads">
           <LeadCard jt="DS" accent="#fb923c" lead={dsJob.lead} recall={dsJob.recall} recallGps={dsJob.recallGps} precision={dsJob.precision} lang={lang} />
@@ -302,7 +302,7 @@ export default function LearnPage({ lang }: { lang: Lang }) {
             <div className="cyc-tp-box">{ldRecallSeries.length > 1 ? <LineChart values={ldRecallSeries} color="#22d3ee" axes /> : <div className="cyc-empty">{k ? "수집 중" : "collecting"}</div>}</div>
           </div>
         </div>
-        <div className="ls-note">{k ? "정답 = '트럭이 실제로 빈 순간': LD=YT 하차(dis_ts, QC가 트럭에서 들어냄) · DS=작업완료(comp_ts; DS의 dis_ts는 trip 시작이라 부적합). ✓ 둘 다 트럭 GPS 도출 빔(tt_cycle_v2.dropped_at)과 ~0.5분 내 일치 — 교차검증됨. ⚠ comp_ts(TOS 'C')는 LD 실제 빔보다 ~8.8분 늦는 행정 스탬프(완료=배 적재)라 과거 12.8분→교정 3.5분. 분 예측=작업유형별 학습 중앙값이나 per-건은 QC/RTG 큐 변동으로 오차 큼(분포로 사용)." : "Ground truth = physical truck-freed: LD=YT discharge (dis_ts), DS=job complete (comp_ts). ✓ Both match the truck's GPS-derived free (tt_cycle_v2.dropped_at) within ~0.5min — cross-validated. comp_ts lags LD's real free by ~8.8min (12.8→3.5min corrected). Per-truck error is large (QC/RTG queue)."}</div>
+        <div className="ls-note">{k ? "정답 = 트럭 GPS가 잡은 '실제 빈 순간'(tt_cycle_v2.dropped_at) 우선 — TOS 라벨보다 커버리지 넓고(LD 적중 6.4k→11.3k) 물리적 빔과 0.5분 일치. GPS 공백 시 TOS 폴백(LD=dis_ts·DS=comp_ts). 리드·정밀도는 이 GPS-우선 정답, 재현율은 TOS 권위 완료(DS 컨테이너 키 필요) 기준. comp_ts는 LD 실제 빔보다 ~8.8분 늦어(완료=배 적재) 부적합. 분 예측=학습 중앙값이나 per-건은 QC/RTG 큐 변동으로 오차 큼(분포로 사용)." : "Ground truth = GPS-first physical free (tt_cycle_v2.dropped_at) — broader coverage than TOS (LD 6.4k→11.3k matched), within 0.5min of real free. TOS fallback on GPS gaps (LD=dis_ts, DS=comp_ts). Lead/precision use GPS-first; recall stays on TOS authoritative completions (container key)."}</div>
         <details className="ls-detail">
           <summary>{k ? "상세 — 신호별 정밀도·리드타임" : "detail — precision & lead by signal"}</summary>
           <div className="learn-list" style={{ marginTop: 8 }}>
@@ -347,7 +347,7 @@ export default function LearnPage({ lang }: { lang: Lang }) {
             </div>
           </Panel>
         </div>
-        <div className="ls-note">{k ? "예측기 = (RTG 거리 구간 × 발화 신호)별 학습 중앙 리드. 차량마다 거리·신호로 예측이 달라져 평균 한 값보다 informative하나, 홀드아웃 검증상 정확도 이득은 작음(56%→54%) — DS 유휴는 RTG 큐 확률성이 지배. 정답=실제 유휴(comp_ts, GPS dropped_at과 0.5분 일치·검증), 7일." : "Predictor = learned median lead per (RTG-distance bin × firing signal). Held-out gain is small (56%→54%) — DS idle is dominated by RTG-queue stochasticity. Truth=comp_ts (GPS-validated)."}</div>
+        <div className="ls-note">{k ? "예측기 = (RTG 거리 구간 × 발화 신호)별 학습 중앙 리드. 차량마다 거리·신호로 예측이 달라져 평균 한 값보다 informative하나, 홀드아웃 검증상 정확도 이득은 작음(56%→54%) — DS 유휴는 RTG 큐 확률성이 지배. 정답=GPS-우선 빔(tt_cycle_v2.dropped_at, comp_ts 폴백), 7일." : "Predictor = learned median lead per (RTG-distance bin × firing signal). Held-out gain is small (56%→54%) — DS idle is dominated by RTG-queue stochasticity. Truth=GPS-first (dropped_at, comp_ts fallback)."}</div>
       </Session>
     </div>
   );
