@@ -1530,28 +1530,39 @@ pub fn spawn_learn_persist(lm: Arc<LiveMap>, pool: PgPool) {
 
             // ── soon-idle accuracy snapshot (④): precision/lead per (jobtype,source) + recall ──
             // per jobtype (source='ALL'), over a 24h window. Powers the GPS-vs-TOS improvement
-            // curve. Forward = predictions matched to a comp_ts; reverse = censored truth labels
-            // covered by a prediction. HAVING skips empty windows; 30d retention.
+            // curve. GPS-FIRST ground truth (matches /api/learn/soon-idle): idle = the truck's own
+            // cycle close (tt_cycle_v2.dropped_at, physical free, broad coverage), TOS label fallback
+            // (LD=dis_ts·DS=comp_ts) on a GPS gap. Recall (below) stays on TOS authoritative truth
+            // (container-keyed for DS). HAVING skips empty windows; 30d retention.
             let _ = sqlx::query(
                 "INSERT INTO tt_soon_idle_metric
                    (captured_at, jobtype, source, window_h, predictions, matched, precision_pct, lead_p10_s, lead_p50_s, lead_p90_s)
-                 SELECT now(), m.jobtype, m.source, 24, count(*), count(m.comp_ts),
-                        (100.0*count(m.comp_ts)/nullif(count(*),0))::float8,
+                 SELECT now(), m.jobtype, m.source, 24, count(*), count(m.idle_ts),
+                        (100.0*count(m.idle_ts)/nullif(count(*),0))::float8,
                         percentile_cont(0.1) WITHIN GROUP (ORDER BY m.lead_s) FILTER (WHERE m.lead_s >= 0),
                         percentile_cont(0.5) WITHIN GROUP (ORDER BY m.lead_s) FILTER (WHERE m.lead_s >= 0),
                         percentile_cont(0.9) WITHIN GROUP (ORDER BY m.lead_s) FILTER (WHERE m.lead_s >= 0)
                    FROM (
-                     SELECT p.jobtype, p.source, h.comp_ts,
-                            EXTRACT(EPOCH FROM (h.comp_ts - p.predicted_at)) AS lead_s
-                       FROM tt_soon_idle_pred p
-                       LEFT JOIN LATERAL (
-                         SELECT comp_ts FROM tos_handover_label h
-                          WHERE h.ytno = p.ytno AND (p.jobtype <> 'DS' OR h.contno = p.container)
-                            AND h.comp_ts >= p.predicted_at - interval '60 seconds'
-                            AND h.comp_ts <  p.predicted_at + interval '20 minutes'
-                          ORDER BY abs(EXTRACT(EPOCH FROM (h.comp_ts - p.predicted_at))) LIMIT 1
-                       ) h ON true
-                      WHERE p.predicted_at > now() - interval '24 hours'
+                     SELECT j.jobtype, j.source, j.idle_ts, EXTRACT(EPOCH FROM (j.idle_ts - j.predicted_at)) AS lead_s FROM (
+                       SELECT p.jobtype, p.source, p.predicted_at,
+                              coalesce(g.dropped_at, CASE WHEN p.jobtype = 'LD' THEN coalesce(t.dis_ts, t.comp_ts) ELSE t.comp_ts END) AS idle_ts
+                         FROM tt_soon_idle_pred p
+                         LEFT JOIN LATERAL (
+                           SELECT dropped_at FROM tt_cycle_v2 c
+                            WHERE c.ytno = p.ytno AND c.jobtype = p.jobtype
+                              AND c.dropped_at >= p.predicted_at - interval '90 seconds'
+                              AND c.dropped_at <  p.predicted_at + interval '20 minutes'
+                            ORDER BY c.dropped_at LIMIT 1
+                         ) g ON true
+                         LEFT JOIN LATERAL (
+                           SELECT dis_ts, comp_ts FROM tos_handover_label h
+                            WHERE h.ytno = p.ytno AND (p.jobtype <> 'DS' OR h.contno = p.container)
+                              AND h.comp_ts >= p.predicted_at - interval '60 seconds'
+                              AND h.comp_ts <  p.predicted_at + interval '20 minutes'
+                            ORDER BY abs(EXTRACT(EPOCH FROM (h.comp_ts - p.predicted_at))) LIMIT 1
+                         ) t ON true
+                        WHERE p.predicted_at > now() - interval '24 hours'
+                     ) j
                    ) m
                   GROUP BY m.jobtype, m.source
                  HAVING count(*) > 0
