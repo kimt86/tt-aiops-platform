@@ -324,7 +324,11 @@ function QcCol({ q, lang, ttState, working, mph, pastN, futureN }: { q: WpQc; la
   const past = pastN > 0 ? doneList.slice(-pastN) : [];
   const future = notDone.slice(0, futureN);
   const futureMore = notDone.length - future.length;
-  const assignedCount = q.moves.filter(assigned).length;
+  // trucks currently serving this QC — SAME GPS definition as the top "Trucks Assigned per QC"
+  // card (distinct devices whose destination topos1 = this crane, non-idle), so the two agree.
+  // Counting q.moves would double-count twin-lift (1 truck = 2 container moves) and include
+  // DS trucks already discharged (carrying to the yard), which the top card excludes.
+  const trucked = [...ttState.values()].filter((d) => d.topos1 === q.qc && d.dispatch && d.dispatch !== "idle").length;
 
   const row = (m: WpMove, role: "past" | "now" | "future") => {
     const tt = assigned(m) ? ttState.get((m.ytno as string).trim()) : undefined;
@@ -339,9 +343,10 @@ function QcCol({ q, lang, ttState, working, mph, pastN, futureN }: { q: WpQc; la
             <span className={`type-${kindChip(m.jobtype)}`}>{kindLabel(m.jobtype)}</span> {m.contno ?? "—"}{m.twintandem ? ` · ${m.twintandem}` : ""}
             {m.queuename && <span className="qc-baytag mono" title={k ? "작업 베이/큐" : "work bay/queue"}>{m.queuename}</span>}
           </div>
-          <div className="bot">{wpLoc(m.jobtype, m.vessel ?? "?", q.qc, m.yt_topos ?? "?", m.armgc ?? "RTG")}
-            {(() => { const e = etwLabel(m.etw_accurate, m.etw_expires, lang); return e && role !== "past" && <span className={`jetw ${e.cls}`} style={{ marginLeft: 6 }} title={k ? "TOS ETW RPC 기반 정확 ETW" : "accurate ETW from the TOS ETW RPC"}>ETW {e.text}</span>; })()}
-            {role === "past" && m.actv_ts && <span className="jetw rtg-actv" style={{ marginLeft: 6 }} title={k ? "TOS ACTV — QC 양하 완료(트럭 적재). 검증 ACTV==QC move 완료 0초(n=3464)." : "TOS ACTV — QC discharged onto the truck (verified, n=3464)."}>{k ? "양하완료" : "discharged"}</span>}
+          <div className="bot">
+            <span className="wp-loc">{wpLoc(m.jobtype, m.vessel ?? "?", q.qc, m.yt_topos ?? "?", m.armgc ?? "RTG")}</span>
+            {(() => { const e = etwLabel(m.etw_accurate, m.etw_expires, lang); return e && role !== "past" && <span className={`jetw ${e.cls}`} title={k ? `작업예정(ETW) ${e.text}` : `ETW ${e.text}`}>{e.text}</span>; })()}
+            {role === "past" && m.actv_ts && <span className="jetw rtg-actv" title={k ? "TOS ACTV — QC 양하 완료(트럭 적재). 검증 ACTV==QC move 완료 0초(n=3464)." : "TOS ACTV — QC discharged onto the truck (verified, n=3464)."}>{k ? "양하완료" : "discharged"}</span>}
           </div>
         </div>
         <div className="assign">
@@ -361,7 +366,7 @@ function QcCol({ q, lang, ttState, working, mph, pastN, futureN }: { q: WpQc; la
           ? <span className="mph" title={k ? "PLC 실시간 처리량 (최근 1시간 move)" : "live throughput from PLC (moves in last hour)"}>⚡<span className="v">{mph}</span>/h</span>
           : <span className="mph">{k ? "잔여" : "rem"} <span className="v">{q.remaining}</span></span>}
       </div>
-      <div className="qc-progress"><span>{assignedCount} {k ? "배차중" : "trucked"}{working ? (k ? " · PLC 가동" : " · PLC live") : ""}</span><span className="mono">{done.toLocaleString()} / {tot.toLocaleString()}</span></div>
+      <div className="qc-progress"><span>{trucked} {k ? "배차중" : "trucked"}{working ? (k ? " · PLC 가동" : " · PLC live") : ""}</span><span className="mono">{done.toLocaleString()} / {tot.toLocaleString()}</span></div>
       <div className="qc-progress-bar"><div className="fill" style={{ width: `${pct}%` }} /></div>
 
       {past.length > 0 && <div className="qc-seqlabel">{k ? `방금 처리 ${past.length}` : `recent ${past.length}`}</div>}
