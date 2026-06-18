@@ -29,12 +29,12 @@ sidebar:
 | **K_EMPTY_R** 공차비율 | % · 낮을수록↑ | Σ공차m / Σ(공차+적재)m (JOB_ORDER_HISTORY) | 미터 |
 | **K_CYCLE** 사이클타임 | s · 낮을수록↑ | 작업 첫~마지막 이벤트 간격의 jobs-가중평균 (JOB_ORDER_HISTORY) | jobs |
 | **K_UTIL** TT 가동률 | % · 높을수록↑ | **TT별 min(1, 가동분/경과분)의 평균**·100 — avg-of-ratios (MCH_WORKTIME/STOP) | (평균) |
-| **K_QC_Q** QC 대기 | s · 낮을수록↑ | QC 병합 active 구간 사이 유휴 갭 평균 (MCH_OPERATION C##) | idle_periods |
+| **K_QC_NOMOVE** QC 대기 | s · 낮을수록↑ | QC 병합 active 구간 사이 유휴 갭 평균 (MCH_OPERATION C##) | idle_periods |
 | **K_MPH** QC 처리량 | move/hr · 높을수록↑ | QC move/active-hour의 active_hours-가중평균 (MCH_OPERATION) | active_hours |
 | **K_RTG_Q** 야드 핸드오버 대기 (숨김) | s · 낮을수록↑ | (ACTV_DT − YT_DIS_DT) — TT 하차→야드 핸드오버 (JOB_ORDER_HISTORY) | in_range |
 
-:::caution[K_QC_Q ≠ K_RTG_Q]
-**K_QC_Q**(표시) = "QC가 트럭을 기다림"(안벽 크레인 유휴 갭). **K_RTG_Q**(숨김) = "TT가 야드에서 핸드오버를 기다림"(ARMGC=RTG). 둘은 다른 대기입니다. 자세한 TOS 컬럼은 [TOS DB 레퍼런스](/kc/architecture/tos-db-reference/).
+:::caution[K_QC_NOMOVE ≠ K_RTG_Q]
+**K_QC_NOMOVE**(표시) = "QC가 트럭을 기다림"(안벽 크레인 유휴 갭). **K_RTG_Q**(숨김) = "TT가 야드에서 핸드오버를 기다림"(ARMGC=RTG). 둘은 다른 대기입니다. 자세한 TOS 컬럼은 [TOS DB 레퍼런스](/kc/architecture/tos-db-reference/).
 :::
 
 ## KPI별 추출·가공·적재 상세
@@ -202,7 +202,7 @@ sample_n = count(*)                          -- 그날 TT 수
 주/월·"오늘"은 분자/분모 합으로 결합할 수 없어, 오늘분은 `util_tt_shift`(TT별 `productive_min` + 교대 `elapsed_min`)에서 **TT별 day_util = min(1, Σ가동분/Σ경과분)**을 만들고 그 평균×100으로 **정확 재조합**합니다(`agg.rs`). 그래서 `kpi_shift.agg_weight=NULL`이고, 야간 권위 런이 최종 채웁니다.
 :::
 
-### K_QC_Q — QC(안벽 크레인) 대기 (표시)
+### K_QC_NOMOVE — QC(안벽 크레인) 대기 (표시)
 
 #### ① 소스
 
@@ -228,7 +228,7 @@ HAVING COUNT(*) >= {{QCQ_HAVING}}             -- day=10, shift=2
 ```
 
 :::note[왜 move를 병합해 갭을 보나]
-한 컨테이너 작업은 여러 move 행으로 쪼개져 있어, 인접 move를 **하나의 active 구간으로 병합**해야 "크레인이 실제로 멈춰 있던 시간"이 드러납니다. 그 구간 사이의 갭이 곧 **QC가 다음 트럭을 기다린 유휴**(K_QC_Q)입니다. 30분(1800초) 초과 갭은 작업 종료/교대 공백으로 보고 평균에서 제외합니다.
+한 컨테이너 작업은 여러 move 행으로 쪼개져 있어, 인접 move를 **하나의 active 구간으로 병합**해야 "크레인이 실제로 멈춰 있던 시간"이 드러납니다. 그 구간 사이의 갭이 곧 **QC가 다음 트럭을 기다린 유휴**(K_QC_NOMOVE)입니다. 30분(1800초) 초과 갭은 작업 종료/교대 공백으로 보고 평균에서 제외합니다.
 :::
 
 :::note[왜 HAVING ≥ N 갭인가]
@@ -304,18 +304,18 @@ in_range = COUNT(WHERE crane_q_sec BETWEEN 0 AND 1800)
 k_crane_q_avg_sec = AVG(crane_q_sec WHERE 0..1800)  -- ARMGC=RTG, 음수/30분초과는 이상
 ```
 
-컬럼 `YT_DIS_DT`(TT 하차 시각) · `JOB_HIST_ACTV_DT`(야드 크레인 활성) · `JOB_HIST_ARMGC` · `JOB_HIST_JOBTYPE`. 0~1800초로 거르는 이유는 K_QC_Q와 같음(음수=시각 역전 오류, 30분 초과=핸드오버 아닌 공백).
+컬럼 `YT_DIS_DT`(TT 하차 시각) · `JOB_HIST_ACTV_DT`(야드 크레인 활성) · `JOB_HIST_ARMGC` · `JOB_HIST_JOBTYPE`. 0~1800초로 거르는 이유는 K_QC_NOMOVE와 같음(음수=시각 역전 오류, 30분 초과=핸드오버 아닌 공백).
 
 #### ③ 적재 · ④ 롤업
 
 대상: `raw_k_crane_q_daily` · PK `(work_date, jobtype)` (`k_crane_q_daily.rs`; 시간별은 `e5`→`raw_k_crane_q_hour`). 롤업: `value = round(sum(k_crane_q_avg_sec*in_range)/nullif(sum(in_range),0), 1)`, `sample_n = sum(in_range)`, 가중치=`in_range`.
 
-:::caution[K_QC_Q ≠ K_RTG_Q]
-**K_QC_Q**(표시) = MCH_OPERATION의 안벽 크레인(C##) 유휴 갭 = "QC가 트럭을 기다림". **K_RTG_Q**(숨김) = JOB_ORDER_HISTORY의 `ACTV_DT−YT_DIS_DT` = "TT가 야드 핸드오버를 기다림"(ARMGC=RTG). 서로 다른 대기입니다.
+:::caution[K_QC_NOMOVE ≠ K_RTG_Q]
+**K_QC_NOMOVE**(표시) = MCH_OPERATION의 안벽 크레인(C##) 유휴 갭 = "QC가 트럭을 기다림". **K_RTG_Q**(숨김) = JOB_ORDER_HISTORY의 `ACTV_DT−YT_DIS_DT` = "TT가 야드 핸드오버를 기다림"(ARMGC=RTG). 서로 다른 대기입니다.
 :::
 
 :::note[정리 — 분자·분모 보존의 일관성]
-6개 표시 KPI는 모두 **가중치(=진짜 분모)**를 `raw_*`와 `kpi_shift.agg_weight`에 보존합니다: K_EMPTY=jobs, K_EMPTY_R=Σ미터, K_CYCLE=jobs, K_MPH=active_hours, K_QC_Q=idle_periods, K_RTG_Q=in_range. 덕분에 일·주·월 어떤 구간도 `Σ(value·weight)/Σweight`로 정확히 결합되고(§4), K_UTIL만 avg-of-ratios라 `util_tt_shift`로 재조합합니다.
+6개 표시 KPI는 모두 **가중치(=진짜 분모)**를 `raw_*`와 `kpi_shift.agg_weight`에 보존합니다: K_EMPTY=jobs, K_EMPTY_R=Σ미터, K_CYCLE=jobs, K_MPH=active_hours, K_QC_NOMOVE=idle_periods, K_RTG_Q=in_range. 덕분에 일·주·월 어떤 구간도 `Σ(value·weight)/Σweight`로 정확히 결합되고(§4), K_UTIL만 avg-of-ratios라 `util_tt_shift`로 재조합합니다.
 :::
 
 ## 3계층 — 원천에서 화면까지
@@ -386,5 +386,5 @@ K_UTIL은 avg-of-ratios(TT별 비율의 평균)라 단순 합산이 안 됩니�
 |---|---|
 | K_UTIL avg-of-ratios | 단순 평균 금지 — 주/월은 일 단위 raw에서 재계산, 오늘은 util_tt_shift에서 재조합(§3). |
 | 시간대 MYT vs KST | 서버=KST(UTC+9)지만 터미널/Oracle=**MYT(UTC+8)**. 교대·기간 경계는 반드시 터미널 시간 사용. 안 그러면 1h 오판·창이 데이터를 놓쳐 0행. |
-| 잠정(provisional) | 오늘/현재 기간은 잠정 — 야간 확정 전까지. K_QC_Q는 교대 중 과소(임계 미달)일 수 있음. |
+| 잠정(provisional) | 오늘/현재 기간은 잠정 — 야간 확정 전까지. K_QC_NOMOVE는 교대 중 과소(임계 미달)일 수 있음. |
 | 보존 한계 | 깊은 과거(예 1월)는 Oracle에서 삭제되어 백필 불가. [TOS 레퍼런스 §2](/kc/architecture/tos-db-reference/). |

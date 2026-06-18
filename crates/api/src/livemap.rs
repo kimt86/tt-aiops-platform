@@ -582,7 +582,7 @@ pub struct PositionsOut {
     /// shift-to-date TIME-BASED utilization (%) — mean of the 60s assignment samples this
     /// shift (assigned/on-duty). The history-bearing figure; live value is the instant.
     tt_util_shift_avg: Option<i64>,
-    /// live K_QC_Q — quay cranes currently starving (idle, no truck) + their avg wait (s)
+    /// live QC starvation (K_QC_TT_WAIT_GPS basis) — quay cranes idle with NO truck + their avg wait (s)
     qc_starving: usize,
     qc_wait_live_s: Option<i64>,
     devices: Vec<DeviceOut>,
@@ -1017,9 +1017,10 @@ pub async fn positions(State(lm): State<Arc<LiveMap>>, State(pool): State<PgPool
     .flatten()
     .map(|v| v as i64);
 
-    // ── live K_QC_Q (QC waiting for a truck) ── direct starvation: a working quay crane
-    // that's been idle past a normal inter-move gap with NO assigned TT arrived at it.
-    // Fixes the TOS HAVING-≥10 intra-shift undercount. Conservative (60s gap); quay only.
+    // ── live QC starvation (QC waiting for a truck; = K_QC_TT_WAIT_GPS basis) ── a working quay
+    // crane that's been idle past a normal inter-move gap with NO assigned TT arrived at it.
+    // GPS+PLC verified (truck under crane?). Conservative (60s gap); quay only. (Distinct from the
+    // TOS K_QC_NOMOVE KPI = all no-move gaps incl. bay-move/hatch.)
     let cranes_with_tt: std::collections::HashSet<&str> = map
         .values()
         .filter(|p| p.cls == "TT" && p.arrival.as_deref() == Some("ARRIVED"))

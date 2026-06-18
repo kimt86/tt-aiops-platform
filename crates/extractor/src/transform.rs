@@ -89,9 +89,9 @@ async fn kpi_daily(pool: &PgPool, date: NaiveDate, provisional: bool) -> Result<
         provisional,
     ).await?;
 
-    // K_QC_Q — idle-periods-weighted mean quay-crane idle seconds.
+    // K_QC_NOMOVE — idle-periods-weighted mean quay-crane idle seconds.
     upsert_daily(
-        pool, date, "K_QC_Q", "s", "idle_periods-weighted mean(avg_idle_sec)",
+        pool, date, "K_QC_NOMOVE", "s", "idle_periods-weighted mean(avg_idle_sec)",
         "SELECT round(sum(avg_idle_sec*idle_periods)/nullif(sum(idle_periods),0),1), sum(idle_periods)::int
            FROM raw_k_qc_q WHERE snapshot_date = $1 HAVING sum(idle_periods) > 0",
         provisional,
@@ -163,7 +163,7 @@ pub async fn rollup_today_from_shifts(pool: &PgPool, date: NaiveDate) -> Result<
           WHERE business_date = $1
             AND value IS NOT NULL
             AND coalesce(agg_weight, sample_n) IS NOT NULL
-            AND kpi_key IN ('K_MPH','K_EMPTY','K_EMPTY_R','K_CYCLE','K_RTG_Q','K_QC_Q')
+            AND kpi_key IN ('K_MPH','K_EMPTY','K_EMPTY_R','K_CYCLE','K_RTG_Q','K_QC_NOMOVE')
           GROUP BY kpi_key
          HAVING sum(coalesce(agg_weight, sample_n)) > 0
          ON CONFLICT (kpi_key, snapshot_date) DO UPDATE SET

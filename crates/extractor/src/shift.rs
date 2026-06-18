@@ -166,14 +166,14 @@ async fn src_mph_vessels(pool: &PgPool, target: &str, date: NaiveDate, sh: Shift
 }
 
 async fn src_qcq(pool: &PgPool, target: &str, date: NaiveDate, sh: Shift, start: NaiveDateTime, end: NaiveDateTime) -> Result<()> {
-    run_logged(pool, "K_QC_Q_SHIFT", date, |_| async move {
+    run_logged(pool, "K_QC_NOMOVE_SHIFT", date, |_| async move {
         let sql = params::render_shift(SQL_QCQ, date, start, end, Some(TimeCol::MchOper))?;
         let rows: Vec<crate::kpis::k_qc_q::Row> = fetch(target, &sql).await?;
         let num = sum(rows.iter().map(|r| match (r.avg_idle_sec, r.idle_periods) { (Some(a), Some(p)) => Some(a*p), _ => None }));
         let den = sum(rows.iter().map(|r| r.idle_periods));
         let value = if den > 0.0 { Some((num/den*10.0).round()/10.0) } else { None };
         // weight = Σidle_periods (= sample_n here)
-        upsert_shift(pool, date, sh, "K_QC_Q", "s", value, Some(den as i64), Some(den), start, end).await?;
+        upsert_shift(pool, date, sh, "K_QC_NOMOVE", "s", value, Some(den as i64), Some(den), start, end).await?;
         Ok(rows.len() as u64)
     }).await.map(|_| ())
 }

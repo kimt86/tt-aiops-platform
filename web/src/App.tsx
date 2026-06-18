@@ -194,7 +194,7 @@ function useWsLive(): WsLive | null {
 //  • "dual"    — TOS leads (headline = c.value), websocket shown as an auxiliary "live"
 //                line. The lower-variation value is the headline; TOS shift/daily aggregates
 //                are smoother than the per-second feed, so TOS leads on
-//                K_UTIL/K_MPH/K_QC_Q/K_CYCLE (the TOS truck-cycle approximation).
+//                K_UTIL/K_MPH/K_QC_NOMOVE/K_CYCLE (the TOS truck-cycle approximation).
 //  • "tos"     — TOS only (no websocket counterpart, or the ws feed is down).
 //  • "wsOnly"  — only the websocket value is meaningful; the TOS value is not shown
 //                (K_UTIL: the TOS session number counts idle as utilized, so it is dropped).
@@ -243,7 +243,7 @@ function cardSrc(key: string, w: WsLive | null, ko: boolean): CardSrc {
   if (!w || !w.connected) return { kind: "tos" };
   if (key === "K_MPH" && w.crane_mph_live != null)
     return { kind: "dual", auxVal: `${w.crane_mph_live}/h`, auxTitle: ko ? "실시간 QC 평균 처리량 (PLC 사이클)" : "live avg QC throughput (PLC cycles)" };
-  if (key === "K_QC_Q")
+  if (key === "K_QC_NOMOVE")
     return { kind: "dual", auxVal: (w.qc_starving ?? 0) > 0 ? `${w.qc_starving}${ko ? "대" : ""} · ${w.qc_wait_live_s}s` : (ko ? "없음" : "none"), auxTitle: ko ? "지금 트럭을 기다리는(유휴·무트럭) 가동 QC 수 · 평균 대기 (websocket)" : "quay cranes waiting for a truck now — count · avg wait (websocket)" };
   return { kind: "tos" };
 }

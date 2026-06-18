@@ -20,7 +20,7 @@ pub const START_TS_TOKEN: &str = "{{START_TS}}";
 pub const END_TS_TOKEN: &str = "{{END_TS}}";
 pub const ELAPSED_DENOM_TOKEN: &str = "{{ELAPSED_DENOM}}";
 pub const TIME_PREDICATE_TOKEN: &str = "{{TIME_PREDICATE}}";
-// K_QC_Q min idle-gaps-per-QC threshold: day=10 (reliable), shift=2 (so a partial
+// K_QC_NOMOVE min idle-gaps-per-QC threshold: day=10 (reliable), shift=2 (so a partial
 // shift still yields an approximate value instead of nothing).
 pub const QCQ_HAVING_TOKEN: &str = "{{QCQ_HAVING}}";
 

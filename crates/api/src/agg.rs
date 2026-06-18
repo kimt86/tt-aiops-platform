@@ -117,13 +117,13 @@ pub async fn aggregate(pool: &PgPool, from: NaiveDate, to: NaiveDate) -> Result<
         let (vw, w, nt) = t("K_MPH");
         m.insert("K_MPH", finish(num + vw, den + w, nr + nt, 2, 1.0));
     }
-    // K_QC_Q (s): weight = idle_periods.
+    // K_QC_NOMOVE (s): weight = idle_periods.
     {
         let (num, den, nr) = raw_nd(pool,
             "SELECT sum(avg_idle_sec*idle_periods)::float8, sum(idle_periods)::float8, sum(idle_periods)::int8
                FROM raw_k_qc_q WHERE snapshot_date BETWEEN $1 AND $2", from, raw_to).await?;
-        let (vw, w, nt) = t("K_QC_Q");
-        m.insert("K_QC_Q", finish(num + vw, den + w, nr + nt, 1, 1.0));
+        let (vw, w, nt) = t("K_QC_NOMOVE");
+        m.insert("K_QC_NOMOVE", finish(num + vw, den + w, nr + nt, 1, 1.0));
     }
 
     // ---- K_UTIL: TIME-BASED utilization = mean of the 60s assignment samples over the

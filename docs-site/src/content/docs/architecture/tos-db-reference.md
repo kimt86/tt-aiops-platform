@@ -82,7 +82,7 @@ wp-tt가 실제로 읽는 핵심 테이블들. 컬럼은 추출 SQL(`crates/extr
 
 ### 3.2 `MCH_OPERATION` — 크레인 작업 기록 (move 단위)
 
-크레인 move 1건 = 1행. **QC 생산성(MPH)·QC 유휴(K_QC_Q)·크레인 가동률**의 원천. JOB_ORDER_HISTORY보다 가볍고(LOW~MEDIUM) 깊게 보존(≥35일).
+크레인 move 1건 = 1행. **QC 생산성(MPH)·QC 유휴(K_QC_NOMOVE)·크레인 가동률**의 원천. JOB_ORDER_HISTORY보다 가볍고(LOW~MEDIUM) 깊게 보존(≥35일).
 
 | 컬럼 | 의미 · 예 |
 |---|---|
@@ -94,7 +94,7 @@ wp-tt가 실제로 읽는 핵심 테이블들. 컬럼은 추출 SQL(`crates/extr
 | `TRK_ID` | 이 move를 처리한 트럭(TT) ID — 항차당 distinct TT 수 집계. |
 
 :::note
-인터벌 병합(연속 move 간 짧은 갭)으로 크레인 가동 구간을 만들고, **병합 구간 사이의 갭 = QC 유휴(K_QC_Q)**. 추출 SQL: `c07_k_mph_realtime`, `f2_k_qc_q`, `e1c_k_util_crane_merged_intervals`.
+인터벌 병합(연속 move 간 짧은 갭)으로 크레인 가동 구간을 만들고, **병합 구간 사이의 갭 = QC 유휴(K_QC_NOMOVE)**. 추출 SQL: `c07_k_mph_realtime`, `f2_k_qc_q`, `e1c_k_util_crane_merged_intervals`.
 :::
 
 ### 3.3 `VSS_STATISTICS` — 항차 계획·실적 (선박/항차 단위)
@@ -203,7 +203,7 @@ QC id(C##)가 TOS 계획 ↔ websocket PLC(크레인이 물리적으로 도는 �
 | **K_EMPTY_R** 공차비율 | % · 낮을수록↑ | Σ공차m / Σ(공차+적재)m (JOB_ORDER_HISTORY) | 미터 |
 | **K_CYCLE** 사이클타임 | s · 낮을수록↑ | 작업 첫~마지막 이벤트 간격의 jobs-가중평균 (JOB_ORDER_HISTORY) | jobs |
 | **K_UTIL** TT 가동률 | % · 높을수록↑ | **TT별 min(1, 가동분/경과분)의 평균**·100 — avg-of-ratios(단순 가중평균 아님) (MCH_WORKTIME/STOP) | (평균) |
-| **K_QC_Q** QC 대기 | s · 낮을수록↑ | QC 병합 active 구간 사이 유휴 갭 평균 (MCH_OPERATION C##) | idle_periods |
+| **K_QC_NOMOVE** QC 대기 | s · 낮을수록↑ | QC 병합 active 구간 사이 유휴 갭 평균 (MCH_OPERATION C##) | idle_periods |
 | **K_MPH** QC 처리량 | move/hr · 높을수록↑ | QC move/active-hour의 active_hours-가중평균 (MCH_OPERATION) | active_hours |
 | **K_RTG_Q** 야드 핸드오버 대기 (숨김) | s · 낮을수록↑ | (ACTV_DT − YT_DIS_DT) — TT 하차→야드 핸드오버 (JOB_ORDER_HISTORY). 안벽 QC 대기가 아님(ARMGC=RTG/ES). | in_range |
 
@@ -245,7 +245,7 @@ avg-of-ratios라 주/월 버킷은 일 단위 raw에서 재계산해야 정확(�
 | `include_str!` SQL 수정 | .sql 편집 후 .rs를 touch해 재임베드해야 반영. |
 | 시간대 MYT vs KST | 위 서빙 모델 섹션. terminal_now() 필수. KST 00:00–01:00(=MYT 23:00–24:00)에 "오늘"이 아직 시작 안 한 터미널 날을 가리켜 0/7 blank. |
 | 빈 결과셋 | toolbox가 `{"result":"null"}` 반환 → 0행 처리. |
-| K_RTG_Q 라벨 오해 | "QC 크레인 대기"가 아님 — ARMGC가 RTG/ES라 **야드 핸드오버 대기**. 실제 "QC가 트럭을 기다림"은 별도 K_QC_Q. |
+| K_RTG_Q 라벨 오해 | "QC 크레인 대기"가 아님 — ARMGC가 RTG/ES라 **야드 핸드오버 대기**. 실제 "QC가 트럭을 기다림"은 별도 K_QC_NOMOVE. |
 | RTG PLC 없음 | 양하 블록측 핸드오버는 직접 PLC 신호 없음 → GPS·RTG 근접도로 추정(배차 연구). |
 | 보존 한계 | 보존 기간 섹션. 깊은 과거(예 1월)는 백필 불가. 깊이는 앞으로만 누적. |
 | 직접 ssh+curl 금지 | Oracle 접근은 승인된 `remote-toolbox-sql`만(`SKILL_DIR=/home/aiadmin/.codex/skills/yard-db-ops`). |
