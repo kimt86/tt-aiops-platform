@@ -22,6 +22,24 @@ use crate::runner::Toolbox;
 const SQL_WORKQUEUE: &str = include_str!("../sql/workqueue.sql");
 const SQL_WORKPOOL: &str = include_str!("../sql/workpool.sql");
 const SQL_ASSIGNED: &str = include_str!("../sql/assigned_tt.sql");
+const SQL_VESSEL_SCHEDULE: &str = include_str!("../sql/vessel_schedule.sql");
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "UPPERCASE")]
+pub struct VesselScheduleRow {
+    pub vessel: String,
+    pub voyage: String,
+    pub status: Option<String>,
+    pub berthno: Option<String>,
+    pub estber: Option<String>,
+    pub estwkc: Option<String>,
+    pub estdep: Option<String>,
+    pub cutoff: Option<String>,
+    pub actber: Option<String>,
+    pub actdep: Option<String>,
+    pub disvan: Option<f64>,
+    pub loadvan: Option<f64>,
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "UPPERCASE")]
@@ -83,6 +101,7 @@ pub async fn tick_workpool(pool: &PgPool, target: &str) -> Result<()> {
         };
     }
     step!("workqueue", src_workqueue(pool, target, date, as_of));
+    step!("vessel_schedule", src_vessel_schedule(pool, target, date, as_of));
     step!("workpool", src_workpool(pool, target, date, as_of));
     step!("assigned", src_assigned(pool, target, date, as_of));
     step!("etw", src_etw(pool, date));
@@ -192,6 +211,40 @@ async fn src_workqueue(pool: &PgPool, target: &str, date: chrono::NaiveDate, as_
             .bind(r.total_qty.map(|v| v as i32)).bind(r.comp_qty.map(|v| v as i32))
             .bind(r.plan_qty.map(|v| v as i32)).bind(as_of)
             .execute(&mut *tx).await.context("insert live_workqueue")?;
+        }
+        tx.commit().await?;
+        Ok(rows.len() as u64)
+    })
+    .await
+    .map(|_| ())
+}
+
+/// Vessel schedule (VSB_VOYAGE) → live_vessel_schedule. The deadline source: estimated
+/// work-complete / departure / berth / cut-off + actuals + planned discharge/load counts.
+async fn src_vessel_schedule(pool: &PgPool, target: &str, date: chrono::NaiveDate, as_of: DateTime<Utc>) -> Result<()> {
+    run_logged(pool, "VESSEL_SCHEDULE", date, |_| async move {
+        let raw = Toolbox::from_env(target)?.run_sql(SQL_VESSEL_SCHEDULE).await?;
+        let rows: Vec<VesselScheduleRow> = parse_rows(&raw).context("parsing vessel schedule rows")?;
+        let ts = |s: &Option<String>| s.as_deref().and_then(parse_etw); // YYYYMMDDHHMMSS (MYT) → UTC
+        let mut tx = pool.begin().await?;
+        sqlx::query("DELETE FROM live_vessel_schedule").execute(&mut *tx).await?;
+        for r in &rows {
+            sqlx::query(
+                "INSERT INTO live_vessel_schedule
+                   (vessel, voyage, status, berthno, estber_ts, estwkc_ts, estdep_ts, cutoff_ts,
+                    actber_ts, actdep_ts, disvan, loadvan, as_of_ts)
+                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+                 ON CONFLICT (vessel, voyage) DO UPDATE SET
+                   status=EXCLUDED.status, berthno=EXCLUDED.berthno, estber_ts=EXCLUDED.estber_ts,
+                   estwkc_ts=EXCLUDED.estwkc_ts, estdep_ts=EXCLUDED.estdep_ts, cutoff_ts=EXCLUDED.cutoff_ts,
+                   actber_ts=EXCLUDED.actber_ts, actdep_ts=EXCLUDED.actdep_ts,
+                   disvan=EXCLUDED.disvan, loadvan=EXCLUDED.loadvan, as_of_ts=EXCLUDED.as_of_ts",
+            )
+            .bind(&r.vessel).bind(&r.voyage).bind(&r.status).bind(&r.berthno)
+            .bind(ts(&r.estber)).bind(ts(&r.estwkc)).bind(ts(&r.estdep)).bind(ts(&r.cutoff))
+            .bind(ts(&r.actber)).bind(ts(&r.actdep))
+            .bind(r.disvan.map(|v| v as i32)).bind(r.loadvan.map(|v| v as i32)).bind(as_of)
+            .execute(&mut *tx).await.context("insert live_vessel_schedule")?;
         }
         tx.commit().await?;
         Ok(rows.len() as u64)
