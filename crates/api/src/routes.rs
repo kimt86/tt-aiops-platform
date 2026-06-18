@@ -56,7 +56,7 @@ pub(crate) const ORDER: [KpiKey; 6] = [
     KpiKey::KEmptyR,
     KpiKey::KCycle,
     KpiKey::KUtil,
-    KpiKey::KQcNomove,
+    KpiKey::KQcTtWait,
     KpiKey::KMph,
 ];
 

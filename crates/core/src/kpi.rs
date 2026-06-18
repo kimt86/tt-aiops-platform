@@ -12,10 +12,11 @@ pub enum KpiKey {
     KRtgQ,
     KMph,
     KQcNomove,
+    KQcTtWait,
 }
 
 impl KpiKey {
-    pub const ALL: [KpiKey; 7] = [
+    pub const ALL: [KpiKey; 8] = [
         KpiKey::KUtil,
         KpiKey::KEmpty,
         KpiKey::KEmptyR,
@@ -23,6 +24,7 @@ impl KpiKey {
         KpiKey::KRtgQ,
         KpiKey::KMph,
         KpiKey::KQcNomove,
+        KpiKey::KQcTtWait,
     ];
 
     /// The string key used in the database (`kpi_daily.kpi_key`) and API.
@@ -35,6 +37,7 @@ impl KpiKey {
             KpiKey::KRtgQ => "K_RTG_Q",
             KpiKey::KMph => "K_MPH",
             KpiKey::KQcNomove => "K_QC_NOMOVE",
+            KpiKey::KQcTtWait => "K_QC_TT_WAIT",
         }
     }
 
@@ -48,6 +51,7 @@ impl KpiKey {
             KpiKey::KRtgQ => "RTG Handover Wait",
             KpiKey::KMph => "QC Moves / Hour",
             KpiKey::KQcNomove => "QC No-Move Idle",
+            KpiKey::KQcTtWait => "QC Wait for Truck",
         }
     }
 
@@ -61,6 +65,7 @@ impl KpiKey {
             KpiKey::KRtgQ => "야드(RTG) 핸드오버 대기",
             KpiKey::KMph => "QC 시간당 처리량",
             KpiKey::KQcNomove => "QC 무브 공백",
+            KpiKey::KQcTtWait => "QC 트럭 대기",
         }
     }
 
@@ -74,6 +79,7 @@ impl KpiKey {
             KpiKey::KRtgQ => "s",
             KpiKey::KMph => "move/hr",
             KpiKey::KQcNomove => "s",
+            KpiKey::KQcTtWait => "s",
         }
     }
 

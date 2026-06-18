@@ -125,6 +125,14 @@ pub async fn aggregate(pool: &PgPool, from: NaiveDate, to: NaiveDate) -> Result<
         let (vw, w, nt) = t("K_QC_NOMOVE");
         m.insert("K_QC_NOMOVE", finish(num + vw, den + w, nr + nt, 1, 1.0));
     }
+    // K_QC_TT_WAIT (s): same-bay idle ≈ true QC-waits-for-truck. weight = same_bay_periods.
+    {
+        let (num, den, nr) = raw_nd(pool,
+            "SELECT sum(same_bay_avg_sec*same_bay_periods)::float8, sum(same_bay_periods)::float8, sum(same_bay_periods)::int8
+               FROM raw_k_qc_q WHERE snapshot_date BETWEEN $1 AND $2", from, raw_to).await?;
+        let (vw, w, nt) = t("K_QC_TT_WAIT");
+        m.insert("K_QC_TT_WAIT", finish(num + vw, den + w, nr + nt, 1, 1.0));
+    }
 
     // ---- K_UTIL: TIME-BASED utilization = mean of the 60s assignment samples over the
     // whole range (today included — samples carry business_date). value = Σ(ratio)/Σ(1).

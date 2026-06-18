@@ -1,13 +1,15 @@
--- QC wait / idle: gap between a quay crane merged active groups = QC idle time,
--- mostly waiting for the next truck. Source tos-db-research phase_f f2, interval merged.
--- Only the date predicate uses the injected day token (index-safe). Load ~15K QC moves. LOW.
+-- QC idle: gap between quay-crane merged active groups = QC no-move idle (K_QC_NOMOVE).
+-- ALSO emits same-bay idle (K_QC_TT_WAIT, approx true QC-waits-for-truck): a gap is same-bay when
+-- the queue/bay (MCH_OPER_QUEUENAME) is UNCHANGED across it; a bay change = gantry move/hatch (not
+-- truck wait). Source tos-db-research phase_f f2, interval merged. Date predicate index-safe. LOW.
 
 WITH moves AS (
   SELECT MCH_OPER_MACHNO AS qc,
          MCH_OPER_VESSEL AS vessel,
          MCH_OPER_VOYAGE AS voyage,
          TO_DATE(SUBSTR(ST_DT, 1, 14), 'YYYYMMDDHH24MISS') AS s,
-         TO_DATE(MCH_OPER_COMPDATE || MCH_OPER_COMPTIME, 'YYYYMMDDHH24MISS') AS e
+         TO_DATE(MCH_OPER_COMPDATE || MCH_OPER_COMPTIME, 'YYYYMMDDHH24MISS') AS e,
+         MCH_OPER_QUEUENAME AS qn
     FROM TOSADM.MCH_OPERATION
    WHERE MCH_OPER_COMPDATE = '{{DAY_STR}}'
      {{TIME_PREDICATE}}
@@ -16,7 +18,7 @@ WITH moves AS (
      AND ST_DT IS NOT NULL AND LENGTH(ST_DT) >= 14
 ),
 flagged AS (
-  SELECT qc, vessel, voyage, s, e,
+  SELECT qc, vessel, voyage, s, e, qn,
          CASE WHEN s > MAX(e) OVER (PARTITION BY qc, vessel, voyage
                                     ORDER BY s
                                     ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING)
@@ -24,13 +26,13 @@ flagged AS (
     FROM moves
 ),
 grouped AS (
-  SELECT qc, vessel, voyage, s, e,
+  SELECT qc, vessel, voyage, s, e, qn,
          SUM(new_grp) OVER (PARTITION BY qc, vessel, voyage ORDER BY s) AS gid
     FROM flagged
 ),
 merged AS (
   SELECT qc, vessel, voyage, gid,
-         MIN(s) AS gs, MAX(e) AS ge, COUNT(*) AS moves_in_grp
+         MIN(s) AS gs, MAX(e) AS ge, COUNT(*) AS moves_in_grp, MIN(qn) AS qn
     FROM grouped
    GROUP BY qc, vessel, voyage, gid
 ),
@@ -38,7 +40,9 @@ gaps AS (
   SELECT qc, vessel, voyage,
          ge AS prev_end,
          LEAD(gs) OVER (PARTITION BY qc, vessel, voyage ORDER BY gs) AS next_start,
-         (LEAD(gs) OVER (PARTITION BY qc, vessel, voyage ORDER BY gs) - ge) * 86400 AS idle_sec
+         (LEAD(gs) OVER (PARTITION BY qc, vessel, voyage ORDER BY gs) - ge) * 86400 AS idle_sec,
+         qn AS cur_qn,
+         LEAD(qn) OVER (PARTITION BY qc, vessel, voyage ORDER BY gs) AS nxt_qn
     FROM merged
 )
 SELECT /*+ NO_PARALLEL */
@@ -52,7 +56,11 @@ SELECT /*+ NO_PARALLEL */
        ROUND(AVG(CASE WHEN idle_sec BETWEEN 0 AND 1800 THEN idle_sec END), 1)    AS avg_idle_sec,
        ROUND(MEDIAN(CASE WHEN idle_sec BETWEEN 0 AND 1800 THEN idle_sec END), 1) AS med_idle_sec,
        SUM(CASE WHEN idle_sec BETWEEN 0 AND 600 THEN idle_sec END)       AS total_tt_wait_sec,
-       SUM(CASE WHEN idle_sec BETWEEN 0 AND 1800 THEN idle_sec END)      AS total_idle_30m_sec
+       SUM(CASE WHEN idle_sec BETWEEN 0 AND 1800 THEN idle_sec END)      AS total_idle_30m_sec,
+       COUNT(CASE WHEN cur_qn = nxt_qn AND idle_sec BETWEEN 0 AND 1800 THEN 1 END)            AS same_bay_periods,
+       ROUND(AVG(CASE WHEN cur_qn = nxt_qn AND idle_sec BETWEEN 0 AND 1800 THEN idle_sec END), 1)    AS same_bay_avg_sec,
+       ROUND(MEDIAN(CASE WHEN cur_qn = nxt_qn AND idle_sec BETWEEN 0 AND 1800 THEN idle_sec END), 1) AS same_bay_med_sec,
+       ROUND(SUM(CASE WHEN cur_qn = nxt_qn AND idle_sec BETWEEN 0 AND 1800 THEN idle_sec END), 1)    AS same_bay_total_sec
   FROM gaps
  WHERE next_start IS NOT NULL
  GROUP BY qc

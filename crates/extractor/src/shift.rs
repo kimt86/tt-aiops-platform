@@ -174,6 +174,11 @@ async fn src_qcq(pool: &PgPool, target: &str, date: NaiveDate, sh: Shift, start:
         let value = if den > 0.0 { Some((num/den*10.0).round()/10.0) } else { None };
         // weight = Σidle_periods (= sample_n here)
         upsert_shift(pool, date, sh, "K_QC_NOMOVE", "s", value, Some(den as i64), Some(den), start, end).await?;
+        // also K_QC_TT_WAIT (same-bay ≈ truck-wait) from the same rows (no extra Oracle hit)
+        let sb_num = sum(rows.iter().map(|r| match (r.same_bay_avg_sec, r.same_bay_periods) { (Some(a), Some(p)) => Some(a*p), _ => None }));
+        let sb_den = sum(rows.iter().map(|r| r.same_bay_periods));
+        let sb_value = if sb_den > 0.0 { Some((sb_num/sb_den*10.0).round()/10.0) } else { None };
+        upsert_shift(pool, date, sh, "K_QC_TT_WAIT", "s", sb_value, Some(sb_den as i64), Some(sb_den), start, end).await?;
         Ok(rows.len() as u64)
     }).await.map(|_| ())
 }
