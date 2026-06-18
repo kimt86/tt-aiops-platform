@@ -105,6 +105,9 @@ struct QueueOut {
     total: i32,
     done: i32,
     remaining: i32,
+    /// SHADOW: when this bay/queue must complete so the vessel departs on time (deadline
+    /// distribution = ESTDEP minus the work still after it). NULL if the vessel has no ESTDEP.
+    deadline_ts: Option<DateTime<Utc>>,
 }
 
 #[derive(Serialize)]
@@ -115,6 +118,11 @@ struct QcOut {
     remaining: i64,
     queues: Vec<QueueOut>,
     moves: Vec<MoveOut>,
+    /// SHADOW deadline fields (primary/active vessel): departure time, remaining work seconds,
+    /// and slack = ESTDEP − now − work_left (negative = behind schedule for departure).
+    estdep_ts: Option<DateTime<Utc>>,
+    work_left_s: Option<i64>,
+    slack_s: Option<i64>,
 }
 
 #[derive(Serialize)]
@@ -254,6 +262,7 @@ pub async fn workpool(State(pool): State<PgPool>) -> Result<Json<WorkpoolOut>, A
                     total,
                     done,
                     remaining: (total - done).max(0),
+                    deadline_ts: None,
                 }
             })
             .collect();
@@ -266,10 +275,81 @@ pub async fn workpool(State(pool): State<PgPool>) -> Result<Json<WorkpoolOut>, A
             remaining,
             queues: queues_out,
             moves: moves_out,
+            estdep_ts: None,
+            work_left_s: None,
+            slack_s: None,
         });
     }
     // busiest QCs first (most active moves, then most remaining)
     qcs.sort_by(|a, b| b.active_moves.cmp(&a.active_moves).then(b.remaining.cmp(&a.remaining)));
+
+    // ── SHADOW: deadline distribution ──────────────────────────────────────────────────────
+    // Work backward from each vessel's departure (ESTDEP): the last bay must finish by ESTDEP,
+    // earlier bays sooner. Per-bay work = remaining containers × move time (discharge/load) +
+    // transition overhead (gantry between bays; hatch-cover at deck↔hold). Slack = ESTDEP − now
+    // − total remaining work (negative = behind). Display-only (not wired to dispatch).
+    // v1: containers≈moves (twin ignored ⇒ slight overestimate), move time = jobtype constant.
+    {
+        let estdep: std::collections::HashMap<String, DateTime<Utc>> =
+            sqlx::query_as::<_, (String, Option<DateTime<Utc>>)>(
+                "SELECT vessel, estdep_ts FROM live_vessel_schedule WHERE estdep_ts IS NOT NULL")
+                .fetch_all(&pool).await.unwrap_or_default()
+                .into_iter().filter_map(|(v, t)| t.map(|t| (v, t))).collect();
+        let now = Utc::now();
+        const DS_MOVE_S: f64 = 90.0;
+        const LD_MOVE_S: f64 = 110.0;
+        const BAY_CHANGE_S: f64 = 180.0; // gantry travel between bays (extra)
+        const HATCH_DS_S: f64 = 340.0;   // discharge deck→hold cover removal (extra)
+        const HATCH_LD_S: f64 = 390.0;   // load hold→deck cover placement (extra)
+        // "10D-D" → (bay "10", deck/hold 'D', job 'D')
+        fn parse_q(qn: &str) -> Option<(String, char, char)> {
+            let dash = qn.find('-')?;
+            if dash < 2 { return None; }
+            let dh = qn.as_bytes()[dash - 1] as char;
+            let job = *qn.as_bytes().get(dash + 1)? as char;
+            Some((qn[..dash - 1].to_string(), dh, job))
+        }
+        for qc in &mut qcs {
+            let mut by_vessel: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+            for (i, q) in qc.queues.iter().enumerate() {
+                by_vessel.entry(q.vessel.clone()).or_default().push(i);
+            }
+            for (vessel, mut idxs) in by_vessel {
+                let Some(&dep) = estdep.get(&vessel) else { continue };
+                idxs.sort_by_key(|&i| qc.queues[i].seq.unwrap_or(i32::MAX));
+                let mut procs: Vec<f64> = Vec::with_capacity(idxs.len());
+                let mut prev: Option<(String, char, char)> = None;
+                for &i in &idxs {
+                    let cur = parse_q(&qc.queues[i].queuename);
+                    let job = cur.as_ref().map(|c| c.2).unwrap_or('D');
+                    let move_s = if job == 'L' { LD_MOVE_S } else { DS_MOVE_S };
+                    let mut p = (qc.queues[i].remaining.max(0) as f64) * move_s;
+                    if let (Some((pb, pdh, _)), Some((cb, cdh, _))) = (&prev, &cur) {
+                        if pb != cb {
+                            p += BAY_CHANGE_S;
+                        } else if job == 'L' && *pdh == 'H' && *cdh == 'D' {
+                            p += HATCH_LD_S;
+                        } else if job != 'L' && *pdh == 'D' && *cdh == 'H' {
+                            p += HATCH_DS_S;
+                        }
+                    }
+                    procs.push(p);
+                    prev = cur;
+                }
+                let total: f64 = procs.iter().sum();
+                let mut cum_after = 0.0_f64;
+                for k in (0..idxs.len()).rev() {
+                    qc.queues[idxs[k]].deadline_ts = Some(dep - chrono::Duration::seconds(cum_after as i64));
+                    cum_after += procs[k];
+                }
+                if qc.vessels.first().map(|v| v == &vessel).unwrap_or(false) {
+                    qc.estdep_ts = Some(dep);
+                    qc.work_left_s = Some(total as i64);
+                    qc.slack_s = Some((dep - now).num_seconds() - total as i64);
+                }
+            }
+        }
+    }
 
     // global urgent front: active moves with a QC + ETW, soonest first, capped.
     // (drops the few orphan rows whose queue is gone and whose ETW is stale)

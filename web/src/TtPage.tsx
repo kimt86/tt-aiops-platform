@@ -335,6 +335,12 @@ function QcCol({ q, lang, ttState, working, mph, maxN }: { q: WpQc; lang: Lang; 
   for (const m of q.moves) if (assigned(m) && !discharged(m)) truckedSet.add((m.ytno as string).trim());
   const trucked = truckedSet.size;
 
+  // SHADOW deadline distribution: per-QC slack (will it finish by departure?) + per-bay deadline.
+  const clock = (ts?: string | null) => ts ? new Date(ts).toLocaleTimeString(k ? "ko-KR" : "en-US", { hour: "2-digit", minute: "2-digit", hour12: false }) : null;
+  const fmtSlack = (sec: number) => { const a = Math.abs(Math.round(sec / 60)); const t = a >= 60 ? `${Math.floor(a / 60)}시간 ${a % 60}분` : `${a}분`; return (sec < 0 ? "−" : "+") + t; };
+  const dlByQueue = new Map<string, string>();
+  for (const b of q.queues) if (b.deadline_ts) dlByQueue.set(b.queuename, b.deadline_ts);
+
   const row = (m: WpMove, role: "past" | "now" | "future") => {
     const tt = assigned(m) ? ttState.get((m.ytno as string).trim()) : undefined;
     const dot = tt?.dispatch ? DSP_META[tt.dispatch]?.color : undefined;
@@ -347,6 +353,7 @@ function QcCol({ q, lang, ttState, working, mph, maxN }: { q: WpQc; lang: Lang; 
           <div className="top">
             <span className={`type-${kindChip(m.jobtype)}`}>{kindLabel(m.jobtype)}</span> {m.contno ?? "—"}{m.twintandem ? ` · ${m.twintandem}` : ""}
             {m.queuename && <span className="qc-baytag mono" title={k ? "작업 베이/큐" : "work bay/queue"}>{m.queuename}</span>}
+            {(() => { const dl = dlByQueue.get(m.queuename); if (!dl) return null; const overdue = new Date(dl).getTime() < Date.now(); return <span className={`qc-dl mono${overdue ? " late" : ""}`} title={k ? "이 베이가 끝나야 하는 시각 (출항 역산·그림자)" : "bay deadline (from departure, shadow)"}>~{clock(dl)}</span>; })()}
           </div>
           <div className="bot">
             <span className="wp-loc">{wpLoc(m.jobtype, m.vessel ?? "?", q.qc, m.yt_topos ?? "?", m.armgc ?? "RTG")}</span>
@@ -373,6 +380,12 @@ function QcCol({ q, lang, ttState, working, mph, maxN }: { q: WpQc; lang: Lang; 
       </div>
       <div className="qc-progress"><span>{trucked} {k ? "배차중" : "trucked"}{working ? (k ? " · PLC 가동" : " · PLC live") : ""}</span><span className="mono">{done.toLocaleString()} / {tot.toLocaleString()}</span></div>
       <div className="qc-progress-bar"><div className="fill" style={{ width: `${pct}%` }} /></div>
+      {q.estdep_ts && (
+        <div className="qc-deadline" title={k ? "출항 예정시각 기준, 이 QC가 남은 일을 끝낼 시간 여유 (그림자·추정)" : "slack to finish before departure (shadow)"}>
+          🏁 {k ? "출항" : "dep"} <span className="mono">{clock(q.estdep_ts)}</span>
+          {q.slack_s != null && <span className={`qc-slack ${q.slack_s < 0 ? "late" : q.slack_s < 1800 ? "tight" : "ok"}`}>{k ? "여유" : "slack"} {fmtSlack(q.slack_s)}</span>}
+        </div>
+      )}
 
       <div className="qc-seqlabel">{k ? "작업 (컨테이너)" : "work (containers)"}</div>
       {shown.length === 0 && <div className="lvp-empty" style={{ padding: "8px 0" }}>{k ? "대기 작업 없음" : "no pending work"}</div>}

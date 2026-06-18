@@ -87,10 +87,12 @@ export interface WpMove {
 export interface WpQueue {
   queuename: string; vessel: string; voyage: string | null; disload: string | null;
   seq: number | null; total: number; done: number; remaining: number;
+  deadline_ts?: string | null; // SHADOW: when this bay must finish (deadline distribution)
 }
 export interface WpQc {
   qc: string; vessels: string[]; active_moves: number; remaining: number;
   queues: WpQueue[]; moves: WpMove[];
+  estdep_ts?: string | null; work_left_s?: number | null; slack_s?: number | null; // SHADOW deadline
 }
 export interface WpCandidate {
   qc: string | null; queuename: string; vessel: string; jobtype: string | null;
