@@ -320,6 +320,19 @@ function QcCol({ q, lang, ttState, working, mph, cands, pastN }: { q: WpQc; lang
   const doneBays = pastN > 0 ? doneAll.slice(-pastN) : [];
   const liveBays = bays.filter((b) => phaseOf(b) !== "done");
   const shownBays = [...doneBays, ...liveBays];
+  // The current work FRONT per disload = the lowest-seq active queue (one for discharge, one for
+  // load — a QC can dual-cycle). "active = partially done" alone over-marks: twin/dual queues for
+  // the same bay and paused-partial queues all look active. So only the front(s) get NOW; the rest
+  // of the partials show as 진행/WIP.
+  const frontByDisload = new Map<string, typeof bays[number]>();
+  for (const b of liveBays) {
+    if (phaseOf(b) !== "active") continue;
+    const dl = b.disload ?? "?";
+    const cur = frontByDisload.get(dl);
+    if (!cur || (b.seq ?? 9999) < (cur.seq ?? 9999)) frontByDisload.set(dl, b);
+  }
+  const nowKeys = new Set([...frontByDisload.values()].map((b) => `${b.queuename}|${b.seq}`));
+  const isNow = (b: typeof bays[number]) => nowKeys.has(`${b.queuename}|${b.seq}`);
 
   const moveRow = (m: WpMove) => {
     const tt = m.ytno ? ttState.get(m.ytno) : undefined;
@@ -352,9 +365,11 @@ function QcCol({ q, lang, ttState, working, mph, cands, pastN }: { q: WpQc; lang
     const unassigned = bcands.reduce((a, c) => a + c.n, 0);
     const pctB = b.total > 0 ? Math.round((b.done / b.total) * 100) : 0;
     const isDS = b.disload === "D";
-    const seqBadge = phase === "active" ? "NOW" : phase === "done" ? "✓" : `${b.seq ?? "·"}`;
+    const now = phase === "active" && isNow(b);
+    const cls = phase === "done" ? "done" : now ? "active" : phase === "active" ? "wip" : "upcoming";
+    const seqBadge = now ? "NOW" : phase === "done" ? "✓" : phase === "active" ? (k ? "진행" : "WIP") : `${b.seq ?? "·"}`;
     return (
-      <div className={`qc-bay ${phase}`} key={`${b.vessel}-${b.queuename}-${b.seq}`}>
+      <div className={`qc-bay ${cls}`} key={`${b.vessel}-${b.queuename}-${b.seq}`}>
         <div className="qc-bay-h">
           <span className="bay-seq">{seqBadge}</span>
           <span className="bay-name">{b.queuename}</span>
