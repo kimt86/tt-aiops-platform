@@ -340,7 +340,7 @@ td.mono { font-family: "JetBrains Mono", monospace; color: var(--text); }
 .qc-task.next { background: var(--bg-soft); border: 1px solid var(--border-soft); }
 .qc-task.queued { background: transparent; border: 1px dashed var(--border-soft); opacity: 0.85; }
 .qc-task.unassigned { background: transparent; border: 1px dashed var(--bad-border); opacity: 0.85; }
-.qc-task.past { background: transparent; opacity: 0.5; }
+.qc-task.past { background: transparent; opacity: 0.7; }
 .qc-task.past .seq { background: rgba(255,255,255,0.04); color: var(--text-mute); }
 .qc-task.cand { background: transparent; border: 1px dashed var(--border-soft); opacity: 0.9; }
 .qc-task.cand.now { background: rgba(34,197,94,0.10); border: 1px solid var(--good-border); opacity: 1; }

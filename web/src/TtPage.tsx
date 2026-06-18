@@ -224,8 +224,8 @@ function groupByVessel<T>(items: T[], vesselOf: (t: T) => string, qcOf: (t: T) =
 }
 
 function LiveQcSequence({ lang, wp, snap }: { lang: Lang; wp: WorkpoolResponse | null; snap: Snap | null }) {
-  const [pastN, setPastN] = useState(0); // how many COMPLETED bays to show before NOW (default 0 = none)
-  const [futureN, setFutureN] = useState(5); // how many UPCOMING (not-yet-dispatched) bays to show after NOW
+  const [pastN, setPastN] = useState(3); // how many recently-DONE containers to show before NOW
+  const [futureN, setFutureN] = useState(10); // how many UPCOMING containers to show after NOW
   // fuse: live crane PLC (cycling now + live move/hr) + per-TT dispatch state
   const ttState = new Map<string, Dev>();
   const craneFresh = new Map<string, boolean>();
