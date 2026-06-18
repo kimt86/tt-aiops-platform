@@ -316,7 +316,9 @@ td.mono { font-family: "JetBrains Mono", monospace; color: var(--text); }
   background: var(--surface-2); border: 1px solid var(--border); border-radius: 8px;
   color: var(--text-dim); font-size: 12px; font-weight: 600; cursor: pointer; font-family: inherit; }
 .qc-toggle:hover { border-color: var(--brand); color: var(--text); }
-.qc-panel { display: grid; grid-template-columns: repeat(auto-fill, minmax(215px, 1fr)); gap: 10px; }
+.qc-panel { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+@media (max-width: 1500px) { .qc-panel { grid-template-columns: repeat(2, 1fr); } }
+@media (max-width: 760px) { .qc-panel { grid-template-columns: 1fr; } }
 .qc-col { background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius-md); padding: 10px; display: flex; flex-direction: column; gap: 6px; }
 .qc-col.maint { background: rgba(239,68,68,0.06); border-color: rgba(239,68,68,0.3); }
 .qc-head { display: flex; justify-content: space-between; align-items: center; padding-bottom: 6px; border-bottom: 1px solid var(--border-soft); }
