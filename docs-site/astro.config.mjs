@@ -27,6 +27,7 @@ export default defineConfig({
 			sidebar: [
 				{ label: '시작하기', items: [{ autogenerate: { directory: 'start' } }] },
 				{ label: '대시보드 해설', items: [{ autogenerate: { directory: 'dashboard' } }] },
+				{ label: '배차 로직', items: [{ autogenerate: { directory: 'dispatch' } }] },
 				{ label: '기획', items: [{ autogenerate: { directory: 'planning' } }] },
 				{ label: '리서치', items: [{ autogenerate: { directory: 'research' } }] },
 				{ label: '아키텍처', items: [{ autogenerate: { directory: 'architecture' } }] },
