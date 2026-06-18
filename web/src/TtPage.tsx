@@ -224,8 +224,7 @@ function groupByVessel<T>(items: T[], vesselOf: (t: T) => string, qcOf: (t: T) =
 }
 
 function LiveQcSequence({ lang, wp, snap }: { lang: Lang; wp: WorkpoolResponse | null; snap: Snap | null }) {
-  const [pastN, setPastN] = useState(3); // how many recently-DONE containers to show before NOW
-  const [futureN, setFutureN] = useState(10); // how many UPCOMING containers to show after NOW
+  const [maxN, setMaxN] = useState(10); // max work items (containers) to show per QC (future only)
   // fuse: live crane PLC (cycling now + live move/hr) + per-TT dispatch state
   const ttState = new Map<string, Dev>();
   const craneFresh = new Map<string, boolean>();
@@ -257,16 +256,10 @@ function LiveQcSequence({ lang, wp, snap }: { lang: Lang; wp: WorkpoolResponse |
             </span>
           )}
           <span className="muted">{ko(lang) ? `잔여 ${(wp?.total_remaining ?? 0).toLocaleString()} move` : `${(wp?.total_remaining ?? 0).toLocaleString()} moves left`}</span>
-          <label className="qc-pastsel" title={ko(lang) ? "NOW 앞에 보여줄 '완료된 베이' 수 (0=숨김)" : "how many COMPLETED bays to show before NOW (0 = none)"}>
-            {ko(lang) ? "과거" : "past"}
-            <select value={pastN} onChange={(e) => setPastN(Number(e.target.value))}>
-              {[0, 3, 5, 10].map((n) => <option key={n} value={n}>{n}</option>)}
-            </select>
-          </label>
-          <label className="qc-pastsel" title={ko(lang) ? "NOW 뒤에 보여줄 '앞으로 할(미배차 포함) 베이' 수" : "how many UPCOMING (incl. not-yet-dispatched) bays to show after NOW"}>
-            {ko(lang) ? "미래" : "next"}
-            <select value={futureN} onChange={(e) => setFutureN(Number(e.target.value))}>
-              {[3, 5, 10, 20].map((n) => <option key={n} value={n}>{n}</option>)}
+          <label className="qc-pastsel" title={ko(lang) ? "QC당 보여줄 최대 작업(컨테이너) 수" : "max work items (containers) shown per QC"}>
+            {ko(lang) ? "QC당 최대" : "max/QC"}
+            <select value={maxN} onChange={(e) => setMaxN(Number(e.target.value))}>
+              {[5, 10, 20, 30].map((n) => <option key={n} value={n}>{n}</option>)}
             </select>
           </label>
           <span className="muted">{ageS != null ? `⟳ ${ageS}s` : ""}</span>
@@ -278,7 +271,7 @@ function LiveQcSequence({ lang, wp, snap }: { lang: Lang; wp: WorkpoolResponse |
           <div className="qc-vgroup" key={g.vessel}>
             <div className="qc-vgroup-h"><span className="vsl">{g.vessel}</span><span className="qc-vgroup-n">{g.items.length} QC</span></div>
             <div className="qc-panel">
-              {g.items.map((q) => <QcCol key={q.qc} q={q} lang={lang} ttState={ttState} working={craneFresh.get(q.qc) ?? false} mph={craneMph.get(q.qc)} pastN={pastN} futureN={futureN} />)}
+              {g.items.map((q) => <QcCol key={q.qc} q={q} lang={lang} ttState={ttState} working={craneFresh.get(q.qc) ?? false} mph={craneMph.get(q.qc)} maxN={maxN} />)}
             </div>
           </div>
         ))}
@@ -301,7 +294,7 @@ const agoMin = (ts?: string | null): number | null =>
 // containers] → NOW → [future N containers]; N counts CONTAINERS (not bays). "future" is mostly the
 // not-yet-dispatched (candidate) work. TOS has no per-container order within a bay, so within-bay
 // unassigned order is by bay only. Label = Vessel(QC) ↔ Block(RTG).
-function QcCol({ q, lang, ttState, working, mph, pastN, futureN }: { q: WpQc; lang: Lang; ttState: Map<string, Dev>; working: boolean; mph?: number; pastN: number; futureN: number }) {
+function QcCol({ q, lang, ttState, working, mph, maxN }: { q: WpQc; lang: Lang; ttState: Map<string, Dev>; working: boolean; mph?: number; maxN: number }) {
   const k = ko(lang);
   const tot = q.queues.reduce((a, x) => a + x.total, 0);
   const done = q.queues.reduce((a, x) => a + x.done, 0);
@@ -319,11 +312,10 @@ function QcCol({ q, lang, ttState, working, mph, pastN, futureN }: { q: WpQc; la
     || within(a) - within(b)
     || etwKey(a).localeCompare(etwKey(b))
     || (a.contno ?? "").localeCompare(b.contno ?? ""));
-  const doneList = all.filter(discharged);
+  // not-yet-done work (assigned-but-not-discharged + unassigned), capped to maxN containers per QC.
   const notDone = all.filter((m) => !discharged(m));
-  const past = pastN > 0 ? doneList.slice(-pastN) : [];
-  const future = notDone.slice(0, futureN);
-  const futureMore = notDone.length - future.length;
+  const shown = notDone.slice(0, Math.max(1, maxN));
+  const shownMore = notDone.length - shown.length;
   // trucks assigned to this QC and not finished — DISTINCT trucks (ytno), excluding DS trucks
   // already discharged (received + leaving = done with the QC). Distinct ⇒ twin-lift (1 truck, 2
   // container moves) counts once. Same definition as the top "Trucks Assigned per QC" card → match.
@@ -370,12 +362,10 @@ function QcCol({ q, lang, ttState, working, mph, pastN, futureN }: { q: WpQc; la
       <div className="qc-progress"><span>{trucked} {k ? "배차중" : "trucked"}{working ? (k ? " · PLC 가동" : " · PLC live") : ""}</span><span className="mono">{done.toLocaleString()} / {tot.toLocaleString()}</span></div>
       <div className="qc-progress-bar"><div className="fill" style={{ width: `${pct}%` }} /></div>
 
-      {past.length > 0 && <div className="qc-seqlabel">{k ? `방금 처리 ${past.length}` : `recent ${past.length}`}</div>}
-      {past.map((m) => row(m, "past"))}
-      <div className="qc-seqlabel">{k ? "다음 작업 (컨테이너)" : "next work (containers)"}</div>
-      {future.length === 0 && <div className="lvp-empty" style={{ padding: "8px 0" }}>{k ? "대기 작업 없음" : "no pending work"}</div>}
-      {future.map((m, i) => row(m, i === 0 ? "now" : "future"))}
-      {futureMore > 0 && <div className="qc-bay-more">+{futureMore} {k ? "컨테이너 더 (대부분 미배차)" : "more containers (mostly unassigned)"}</div>}
+      <div className="qc-seqlabel">{k ? "작업 (컨테이너)" : "work (containers)"}</div>
+      {shown.length === 0 && <div className="lvp-empty" style={{ padding: "8px 0" }}>{k ? "대기 작업 없음" : "no pending work"}</div>}
+      {shown.map((m, i) => row(m, i === 0 ? "now" : "future"))}
+      {shownMore > 0 && <div className="qc-bay-more">+{shownMore} {k ? "컨테이너 더 (대부분 미배차)" : "more containers (mostly unassigned)"}</div>}
     </div>
   );
 }
