@@ -340,6 +340,26 @@ function QcCol({ q, lang, ttState, working, mph, maxN }: { q: WpQc; lang: Lang; 
   const fmtSlack = (sec: number) => { const a = Math.abs(Math.round(sec / 60)); const t = a >= 60 ? `${Math.floor(a / 60)}시간 ${a % 60}분` : `${a}분`; return (sec < 0 ? "−" : "+") + t; };
   const dlByQueue = new Map<string, string>();
   for (const b of q.queues) if (b.deadline_ts) dlByQueue.set(b.queuename, b.deadline_ts);
+  // per-MOVE deadline: within a bay the moves are worked back-to-back, so each one's deadline is the
+  // bay deadline minus the work still after it in that bay (move-level distribution, not one shared
+  // bay deadline). Walk in work order (notDone) so the first move of a bay gets the earliest.
+  const remByQueue = new Map<string, number>();
+  for (const b of q.queues) remByQueue.set(b.queuename, b.remaining);
+  const mkey = (m: WpMove) => `${m.queuename}-${m.contno ?? ""}-${m.ytno ?? "u"}`;
+  const dlByMove = new Map<string, string>();
+  {
+    const bayIdx = new Map<string, number>();
+    for (const m of notDone) {
+      const i = bayIdx.get(m.queuename) ?? 0;
+      bayIdx.set(m.queuename, i + 1);
+      const dlBay = dlByQueue.get(m.queuename);
+      if (!dlBay) continue;
+      const rem = remByQueue.get(m.queuename) ?? 1;
+      const mt = (m.jobtype === "LD" ? 110 : 90) * 1000; // per-move time (ms)
+      const after = Math.max(0, rem - i - 1); // moves still after this one in the bay
+      dlByMove.set(mkey(m), new Date(new Date(dlBay).getTime() - after * mt).toISOString());
+    }
+  }
 
   const row = (m: WpMove, role: "past" | "now" | "future") => {
     const tt = assigned(m) ? ttState.get((m.ytno as string).trim()) : undefined;
@@ -353,7 +373,7 @@ function QcCol({ q, lang, ttState, working, mph, maxN }: { q: WpQc; lang: Lang; 
           <div className="top">
             <span className={`type-${kindChip(m.jobtype)}`}>{kindLabel(m.jobtype)}</span> {m.contno ?? "—"}{m.twintandem ? ` · ${m.twintandem}` : ""}
             {m.queuename && <span className="qc-baytag mono" title={k ? "작업 베이/큐" : "work bay/queue"}>{m.queuename}</span>}
-            {(() => { const dl = dlByQueue.get(m.queuename); if (!dl) return null; const overdue = new Date(dl).getTime() < Date.now(); return <span className={`qc-dl mono${overdue ? " late" : ""}`} title={k ? "이 베이가 끝나야 하는 시각 (출항 역산·그림자)" : "bay deadline (from departure, shadow)"}>~{clock(dl)}</span>; })()}
+            {(() => { const dl = dlByMove.get(mkey(m)); if (!dl) return null; const overdue = new Date(dl).getTime() < Date.now(); return <span className={`qc-dl mono${overdue ? " late" : ""}`} title={k ? "이 무브(컨테이너)가 끝나야 하는 시각 (출항 역산·그림자)" : "this move's deadline (from departure, shadow)"}>~{clock(dl)}</span>; })()}
           </div>
           <div className="bot">
             <span className="wp-loc">{wpLoc(m.jobtype, m.vessel ?? "?", q.qc, m.yt_topos ?? "?", m.armgc ?? "RTG")}</span>
