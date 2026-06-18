@@ -282,11 +282,14 @@ function LiveQcSequence({ lang, wp, snap }: { lang: Lang; wp: WorkpoolResponse |
   );
 }
 
-// Location label, QC-centric: vessel side = `Vessel(QC)`, yard side = `Block(RTG)`.
-// DS (discharge) physically goes vessel→block; LD (load) goes block→vessel.
-function wpLoc(jobtype: string | null, vessel: string, qc: string, block: string, rtg: string): string {
-  const b = `${block}(${rtg})`, v = `${vessel}(${qc})`;
-  return jobtype === "DS" ? `${v} → ${b}` : `${b} → ${v}`;
+// Location label. The QC is the column, so we only show the YARD endpoint that varies:
+// - LD (load): the truck picks the container up at a yard block (yt_topos) then brings it to THIS
+//   QC → show the pickup block only ("← block(RTG)"); the destination QC is always this column.
+// - DS (discharge): the QC lifts off the vessel onto the truck HERE; the yard destination block is
+//   not assigned yet at dispatch (yt_topos = the QC), so just show "→ yard".
+function wpLoc(jobtype: string | null, block: string, rtg: string, ko: boolean): string {
+  if (jobtype === "LD") return `← ${block}(${rtg})`;
+  return `→ ${ko ? "야드" : "yard"}`;
 }
 const agoMin = (ts?: string | null): number | null =>
   ts ? Math.max(0, Math.round((Date.now() - new Date(ts).getTime()) / 60000)) : null;
@@ -373,10 +376,16 @@ function QcCol({ q, lang, ttState, working, mph, maxN }: { q: WpQc; lang: Lang; 
           <div className="top">
             <span className={`type-${kindChip(m.jobtype)}`}>{kindLabel(m.jobtype)}</span> {m.contno ?? "—"}{m.twintandem ? ` · ${m.twintandem}` : ""}
             {m.queuename && <span className="qc-baytag mono" title={k ? "작업 베이/큐" : "work bay/queue"}>{m.queuename}</span>}
-            {(() => { const dl = dlByMove.get(mkey(m)); if (!dl) return null; const overdue = new Date(dl).getTime() < Date.now(); return <span className={`qc-dl mono${overdue ? " late" : ""}`} title={k ? "이 무브(컨테이너)가 끝나야 하는 시각 (출항 역산·그림자)" : "this move's deadline (from departure, shadow)"}>~{clock(dl)}</span>; })()}
+            {(() => {
+              const dl = dlByMove.get(mkey(m)); if (!dl) return null;
+              const ms = new Date(dl).getTime() - Date.now();
+              const lead = (m.jobtype === "LD" ? 20 : 5) * 60000; // dispatch lead time
+              const cls = ms < lead ? "late" : ms < lead + 1800000 ? "soon" : "";
+              return <span className={`qc-dl mono ${cls}`} title={k ? "이 컨테이너 작업이 끝나야 하는 마감 시각 (출항에서 역산·그림자). 빨강=지금 배차해야 함" : "deadline this move must complete by (from departure, shadow); red = dispatch now"}>{k ? "마감 " : "by "}{clock(dl)}</span>;
+            })()}
           </div>
           <div className="bot">
-            <span className="wp-loc">{wpLoc(m.jobtype, m.vessel ?? "?", q.qc, m.yt_topos ?? "?", m.armgc ?? "RTG")}</span>
+            <span className="wp-loc">{wpLoc(m.jobtype, m.yt_topos ?? "?", m.armgc ?? "?", k)}</span>
             {(() => { const e = etwLabel(m.etw_accurate, m.etw_expires, lang); return e && role !== "past" && <span className={`jetw ${e.cls}`} title={k ? `작업예정(ETW) ${e.text}` : `ETW ${e.text}`}>{e.text}</span>; })()}
             {role === "past" && m.actv_ts && <span className="jetw rtg-actv" title={k ? "TOS ACTV — QC 양하 완료(트럭 적재). 검증 ACTV==QC move 완료 0초(n=3464)." : "TOS ACTV — QC discharged onto the truck (verified, n=3464)."}>{k ? "양하완료" : "discharged"}</span>}
           </div>
