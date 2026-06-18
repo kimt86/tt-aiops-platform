@@ -344,8 +344,13 @@ function QcCol({ q, lang, ttState, working, mph, maxN, showDl }: { q: WpQc; lang
   // SHADOW deadline distribution: per-QC slack (will it finish by departure?) + per-bay deadline.
   const fmtSlack = (sec: number) => { const a = Math.abs(Math.round(sec / 60)); const t = a >= 60 ? `${Math.floor(a / 60)}시간 ${a % 60}분` : `${a}분`; return (sec < 0 ? "−" : "+") + t; };
   const clock = (ts?: string | null) => ts ? new Date(ts).toLocaleTimeString(k ? "ko-KR" : "en-US", { hour: "2-digit", minute: "2-digit", hour12: false }) : null;
-  // remaining time until a deadline, ETW-style (e.g. "23분", "5h20", "지연 4분")
-  const relDur = (ts: string) => { const sec = (new Date(ts).getTime() - Date.now()) / 1000; const a = Math.abs(Math.round(sec / 60)); const t = a >= 60 ? `${Math.floor(a / 60)}h${String(a % 60).padStart(2, "0")}` : `${a}분`; return sec < 0 ? `${k ? "지연" : "late"} ${t}` : t; };
+  // remaining time as an unambiguous DURATION (not a clock): "5시간 42분", "23분", "45초", "지연 4분".
+  const relDur = (sec: number) => {
+    const neg = sec < 0; const a = Math.abs(Math.round(sec));
+    const h = Math.floor(a / 3600), mn = Math.floor((a % 3600) / 60);
+    const t = h > 0 ? `${h}${k ? "시간 " : "h "}${mn}${k ? "분" : "m"}` : a >= 60 ? `${mn}${k ? "분" : "m"}` : `${a}${k ? "초" : "s"}`;
+    return (neg ? (k ? "지연 " : "late ") : "") + t;
+  };
   const dlByQueue = new Map<string, string>();
   for (const b of q.queues) if (b.deadline_ts) dlByQueue.set(b.queuename, b.deadline_ts);
   // per-MOVE deadline: within a bay the moves are worked back-to-back, so each one's deadline is the
@@ -388,8 +393,7 @@ function QcCol({ q, lang, ttState, working, mph, maxN, showDl }: { q: WpQc; lang
               const sec = Math.round((new Date(dl).getTime() - Date.now()) / 1000);
               const lead = (m.jobtype === "LD" ? 20 : 5) * 60; // dispatch lead time (s)
               const cls = sec < lead ? "late" : sec < lead + 1800 ? "soon" : "";
-              const txt = sec < 0 ? `${k ? "지연 " : "late "}${fmtRel(sec)}` : fmtRel(sec);
-              return <span className={`qc-dl mono ${cls}`} title={k ? "내 계산 마감 — 이 컨테이너가 끝나야 하는 시각까지 남은 시간 (출항 역산·그림자). 빨강=지금 배차해야 함" : "my computed deadline — time left until this must finish (shadow); red = dispatch now"}>🏁 {txt}</span>;
+              return <span className={`qc-dl mono ${cls}`} title={k ? "내 계산 마감까지 남은 시간 (출항 역산·그림자). 빨강=지금 배차해야 함" : "time left until my computed deadline (shadow); red = dispatch now"}>🏁 {relDur(sec)} {k ? "남음" : "left"}</span>;
             })()}
             {role === "past" && m.actv_ts && <span className="jetw rtg-actv" title={k ? "TOS ACTV — QC 양하 완료(트럭 적재). 검증 ACTV==QC move 완료 0초(n=3464)." : "TOS ACTV — QC discharged onto the truck (verified, n=3464)."}>{k ? "양하완료" : "discharged"}</span>}
           </div>
@@ -418,7 +422,7 @@ function QcCol({ q, lang, ttState, working, mph, maxN, showDl }: { q: WpQc; lang
         const slackSec = q.work_left_s != null ? depSec - q.work_left_s : null; // recomputed each tick
         return (
           <div className="qc-deadline" title={k ? "출항 예정시각 (괄호=지금부터 남은 시간) / 여유 = 출항까지 − 남은 작업 (그림자·추정)" : "departure time (paren = time left) / slack = to-departure − remaining work (shadow)"}>
-            🏁 {k ? "출항" : "dep"} <span className="mono">{clock(q.estdep_ts)}</span> <span className="qc-dep-left">({relDur(q.estdep_ts)} {k ? "남음" : "left"})</span>
+            🏁 {k ? "출항" : "dep"} <span className="mono">{clock(q.estdep_ts)}</span> <span className="qc-dep-left">({relDur(depSec)} {k ? "남음" : "left"})</span>
             {slackSec != null && <span className={`qc-slack ${slackSec < 0 ? "late" : slackSec < 1800 ? "tight" : "ok"}`}>{k ? "여유" : "slack"} {fmtSlack(slackSec)}</span>}
           </div>
         );
