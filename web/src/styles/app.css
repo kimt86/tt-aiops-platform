@@ -377,7 +377,8 @@ td.mono { font-family: "JetBrains Mono", monospace; color: var(--text); }
 
 /* candidate job pool (unassigned demand, grouped by QC) */
 .cand-note { font-size: 10px; color: var(--text-mute); margin-bottom: 9px; line-height: 1.55; }
-.cg-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(290px, 1fr)); gap: 8px; }
+.cg-list { display: flex; flex-direction: column; gap: 10px; }
+.cg-vgroup-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(290px, 1fr)); gap: 8px; margin-top: 4px; }
 .cg-card { background: var(--bg-soft); border: 1px solid var(--border-soft); border-radius: var(--radius-md); padding: 9px 11px; }
 .cg-head { display: flex; align-items: center; gap: 7px; }
 .cg-dot { width: 8px; height: 8px; border-radius: 999px; flex: none; }
