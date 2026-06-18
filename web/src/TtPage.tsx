@@ -227,6 +227,9 @@ function LiveQcSequence({ lang, wp, snap }: { lang: Lang; wp: WorkpoolResponse |
   // "auto" (default) = all assigned work + the next 3 unassigned; a number = max containers per QC.
   const [maxN, setMaxN] = useState<number | "auto">("auto");
   const [showDl, setShowDl] = useState(true); // show the computed deadline overlay (shadow)
+  // 1s ticker so relative times (ETW, deadline, slack) keep counting down between 15s data polls.
+  const [, setTick] = useState(0);
+  useEffect(() => { const iv = setInterval(() => setTick((t) => t + 1), 1000); return () => clearInterval(iv); }, []);
   // fuse: live crane PLC (cycling now + live move/hr) + per-TT dispatch state
   const ttState = new Map<string, Dev>();
   const craneFresh = new Map<string, boolean>();
@@ -334,7 +337,6 @@ function QcCol({ q, lang, ttState, working, mph, maxN, showDl }: { q: WpQc; lang
   const trucked = truckedSet.size;
 
   // SHADOW deadline distribution: per-QC slack (will it finish by departure?) + per-bay deadline.
-  const clock = (ts?: string | null) => ts ? new Date(ts).toLocaleTimeString(k ? "ko-KR" : "en-US", { hour: "2-digit", minute: "2-digit", hour12: false }) : null;
   const fmtSlack = (sec: number) => { const a = Math.abs(Math.round(sec / 60)); const t = a >= 60 ? `${Math.floor(a / 60)}시간 ${a % 60}분` : `${a}분`; return (sec < 0 ? "−" : "+") + t; };
   // remaining time until a deadline, ETW-style (e.g. "23분", "5h20", "지연 4분")
   const relDur = (ts: string) => { const sec = (new Date(ts).getTime() - Date.now()) / 1000; const a = Math.abs(Math.round(sec / 60)); const t = a >= 60 ? `${Math.floor(a / 60)}h${String(a % 60).padStart(2, "0")}` : `${a}분`; return sec < 0 ? `${k ? "지연" : "late"} ${t}` : t; };
@@ -405,12 +407,16 @@ function QcCol({ q, lang, ttState, working, mph, maxN, showDl }: { q: WpQc; lang
       </div>
       <div className="qc-progress"><span>{trucked} {k ? "배차중" : "trucked"}{working ? (k ? " · PLC 가동" : " · PLC live") : ""}</span><span className="mono">{done.toLocaleString()} / {tot.toLocaleString()}</span></div>
       <div className="qc-progress-bar"><div className="fill" style={{ width: `${pct}%` }} /></div>
-      {showDl && q.estdep_ts && (
-        <div className="qc-deadline" title={k ? "출항 예정시각 기준, 이 QC가 남은 일을 끝낼 시간 여유 (그림자·추정)" : "slack to finish before departure (shadow)"}>
-          🏁 {k ? "출항" : "dep"} <span className="mono">{clock(q.estdep_ts)}</span>
-          {q.slack_s != null && <span className={`qc-slack ${q.slack_s < 0 ? "late" : q.slack_s < 1800 ? "tight" : "ok"}`}>{k ? "여유" : "slack"} {fmtSlack(q.slack_s)}</span>}
-        </div>
-      )}
+      {showDl && q.estdep_ts && (() => {
+        const depSec = (new Date(q.estdep_ts).getTime() - Date.now()) / 1000; // time until departure
+        const slackSec = q.work_left_s != null ? depSec - q.work_left_s : null; // recomputed each tick
+        return (
+          <div className="qc-deadline" title={k ? "출항까지 남은 시간 / 여유 = 출항까지 − 남은 작업 (그림자·추정)" : "time to departure / slack = to-departure − remaining work (shadow)"}>
+            🏁 {k ? "출항까지" : "dep in"} <span className="mono">{relDur(q.estdep_ts)}</span>
+            {slackSec != null && <span className={`qc-slack ${slackSec < 0 ? "late" : slackSec < 1800 ? "tight" : "ok"}`}>{k ? "여유" : "slack"} {fmtSlack(slackSec)}</span>}
+          </div>
+        );
+      })()}
 
       <div className="qc-seqlabel">{k ? "작업 (컨테이너)" : "work (containers)"}</div>
       {shown.length === 0 && <div className="lvp-empty" style={{ padding: "8px 0" }}>{k ? "대기 작업 없음" : "no pending work"}</div>}
