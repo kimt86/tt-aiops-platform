@@ -335,6 +335,14 @@ td.mono { font-family: "JetBrains Mono", monospace; color: var(--text); }
 .qc-task.next { background: var(--bg-soft); border: 1px solid var(--border-soft); }
 .qc-task.queued { background: transparent; border: 1px dashed var(--border-soft); opacity: 0.85; }
 .qc-task.unassigned { background: transparent; border: 1px dashed var(--bad-border); opacity: 0.85; }
+.qc-task.past { background: transparent; opacity: 0.5; }
+.qc-task.past .seq { background: rgba(255,255,255,0.04); color: var(--text-mute); }
+.qc-task.cand { background: transparent; border: 1px dashed var(--border-soft); opacity: 0.9; }
+.qc-task.cand.now { background: rgba(34,197,94,0.10); border: 1px solid var(--good-border); opacity: 1; }
+.qc-task .cand-n { font-family: "JetBrains Mono", monospace; font-weight: 700; color: var(--brand); }
+.qc-seqlabel { font-size: 9px; color: var(--text-faint); text-transform: uppercase; letter-spacing: 0.04em; margin: 3px 0 0 2px; }
+.qc-pastsel { font-size: 10px; color: var(--text-dim); display: inline-flex; align-items: center; gap: 4px; }
+.qc-pastsel select { background: var(--surface-2); color: var(--text); border: 1px solid var(--border); border-radius: 4px; font-size: 10px; padding: 1px 3px; }
 .qc-task .seq { font-family: "JetBrains Mono", monospace; font-size: 9px; font-weight: 700; text-align: center; padding: 2px 0; border-radius: 3px; color: var(--text-dim); background: rgba(255,255,255,0.05); }
 .qc-task.now .seq { background: var(--good); color: #052e16; }
 .qc-task.next .seq { background: var(--brand-deep); color: #fff; }
