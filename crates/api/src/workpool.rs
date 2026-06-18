@@ -262,7 +262,7 @@ pub async fn workpool(State(pool): State<PgPool>) -> Result<Json<WorkpoolOut>, A
         qcs.push(QcOut {
             qc: qc.clone(),
             vessels,
-            active_moves: moves_out.len(),
+            active_moves: moves_out.iter().filter(|m| m.ytno.as_deref().is_some_and(|s| !s.is_empty())).count(),
             remaining,
             queues: queues_out,
             moves: moves_out,
@@ -281,7 +281,7 @@ pub async fn workpool(State(pool): State<PgPool>) -> Result<Json<WorkpoolOut>, A
     front.sort_by_key(|m| m.etw_accurate.or(m.etw_ts));
     front.truncate(POOL_CAP);
 
-    let active_moves = moves.len();
+    let active_moves = moves.iter().filter(|m| m.ytno.as_deref().is_some_and(|s| !s.is_empty())).count();
     let total_remaining: i64 = qcs.iter().map(|q| q.remaining).sum();
 
     // ── candidate job pool (unassigned demand), urgency-ranked ──

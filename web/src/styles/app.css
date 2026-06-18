@@ -369,6 +369,7 @@ td.mono { font-family: "JetBrains Mono", monospace; color: var(--text); }
 .qc-task.next .seq { background: var(--brand-deep); color: #fff; }
 .qc-task .body { min-width: 0; }
 .qc-task .body .top { display: flex; gap: 6px; align-items: center; font-family: "JetBrains Mono", monospace; font-size: 10px; font-weight: 600; color: var(--text); }
+.qc-baytag { font-family: "JetBrains Mono", monospace; font-size: 9px; font-weight: 600; color: var(--text-dim); background: rgba(255,255,255,0.06); padding: 0 4px; border-radius: 3px; margin-left: auto; }
 .qc-task .body .bot { font-size: 9px; color: var(--text-mute); margin-top: 1px; }
 .qc-task .assign { text-align: right; font-size: 10px; font-family: "JetBrains Mono", monospace; line-height: 1.2; }
 .qc-task .assign .tt { font-weight: 700; color: var(--brand); background: rgba(96,165,250,0.12); padding: 1px 5px; border-radius: 3px; }

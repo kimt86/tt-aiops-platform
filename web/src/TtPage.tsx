@@ -6,7 +6,7 @@
 // remain visual mocks (future AI-dispatch panels).
 import { useEffect, useState } from "react";
 import { type Lang } from "./i18n";
-import { api, type WorkpoolResponse, type WpQc, type WpCandidate, type WpMove } from "./api";
+import { api, type WorkpoolResponse, type WpQc, type WpMove } from "./api";
 
 const ko = (lang: Lang) => lang === "ko";
 
@@ -237,18 +237,11 @@ function LiveQcSequence({ lang, wp, snap }: { lang: Lang; wp: WorkpoolResponse |
       if (d.plc.mph != null && d.plc.mph > 0) craneMph.set(d.id, d.plc.mph);
     }
   }
-  // working QCs (active moves), grouped by vessel — same set/definition as the per-QC card.
-  const working = (wp?.qcs ?? []).filter((q) => q.active_moves > 0);
+  // QCs with any work (assigned or unassigned), grouped by vessel.
+  const working = (wp?.qcs ?? []).filter((q) => q.moves.length > 0);
   const groups = groupByVessel(working, (q) => q.vessels[0] ?? "—", (q) => q.qc);
   const ageS = wp?.as_of ? Math.max(0, Math.round((Date.now() - Date.parse(wp.as_of)) / 1000)) : null;
   const fleetMph = snap?.crane_mph_live ?? null;
-  // unassigned demand (no truck yet) grouped per QC — shown as block/queue counts in each column
-  const candByQc = new Map<string, WpCandidate[]>();
-  for (const c of wp?.candidates ?? []) {
-    if (!c.qc) continue;
-    const arr = candByQc.get(c.qc);
-    if (arr) arr.push(c); else candByQc.set(c.qc, [c]);
-  }
 
   return (
     <section className="tcard">
@@ -285,7 +278,7 @@ function LiveQcSequence({ lang, wp, snap }: { lang: Lang; wp: WorkpoolResponse |
           <div className="qc-vgroup" key={g.vessel}>
             <div className="qc-vgroup-h"><span className="vsl">{g.vessel}</span><span className="qc-vgroup-n">{g.items.length} QC</span></div>
             <div className="qc-panel">
-              {g.items.map((q) => <QcCol key={q.qc} q={q} lang={lang} ttState={ttState} working={craneFresh.get(q.qc) ?? false} mph={craneMph.get(q.qc)} cands={candByQc.get(q.qc) ?? []} pastN={pastN} futureN={futureN} />)}
+              {g.items.map((q) => <QcCol key={q.qc} q={q} lang={lang} ttState={ttState} working={craneFresh.get(q.qc) ?? false} mph={craneMph.get(q.qc)} pastN={pastN} futureN={futureN} />)}
             </div>
           </div>
         ))}
@@ -303,101 +296,58 @@ function wpLoc(jobtype: string | null, vessel: string, qc: string, block: string
 const agoMin = (ts?: string | null): number | null =>
   ts ? Math.max(0, Math.round((Date.now() - new Date(ts).getTime()) / 60000)) : null;
 
-// Bay-sequenced QC work card. The discharge/work order is the BAY sequence
-// (JOB_QUEUE_SCHEDULE.JOB_QUE_SEQ → live_workqueue.seq), NOT a per-container order (TOS has none).
-// Per QC, for its active vessel(s): [recently discharged N] → NOW (active bay) → upcoming bays in
-// seq order. Inside a bay, assigned containers (with a truck) show individually; the rest = an
-// unassigned count (per source block for LD). Label = Vessel(QC) ↔ Block(RTG).
-function QcCol({ q, lang, ttState, working, mph, cands, pastN, futureN }: { q: WpQc; lang: Lang; ttState: Map<string, Dev>; working: boolean; mph?: number; cands: WpCandidate[]; pastN: number; futureN: number }) {
+// Container-level QC work sequence. Order = bay sequence (JOB_QUE_SEQ → live_workqueue.seq), then
+// within a bay: already-discharged → trucked (by ETW) → not-yet-dispatched. Shows [past N
+// containers] → NOW → [future N containers]; N counts CONTAINERS (not bays). "future" is mostly the
+// not-yet-dispatched (candidate) work. TOS has no per-container order within a bay, so within-bay
+// unassigned order is by bay only. Label = Vessel(QC) ↔ Block(RTG).
+function QcCol({ q, lang, ttState, working, mph, pastN, futureN }: { q: WpQc; lang: Lang; ttState: Map<string, Dev>; working: boolean; mph?: number; pastN: number; futureN: number }) {
   const k = ko(lang);
   const tot = q.queues.reduce((a, x) => a + x.total, 0);
   const done = q.queues.reduce((a, x) => a + x.done, 0);
   const pct = tot > 0 ? Math.round((done / tot) * 100) : 0;
   const discharged = (m: WpMove) => m.jobtype === "DS" && !!m.actv_ts; // QC already discharged it
+  const assigned = (m: WpMove) => !!(m.ytno && m.ytno.trim());
 
-  // bays for the QC's active vessel(s), in work sequence (JOB_QUE_SEQ)
-  const vset = new Set(q.vessels);
-  const bays = q.queues
-    .filter((b) => vset.size === 0 || vset.has(b.vessel))
-    .slice().sort((a, b) => (a.seq ?? 9999) - (b.seq ?? 9999) || a.queuename.localeCompare(b.queuename));
-  const movesByQ = new Map<string, WpMove[]>();
-  for (const m of q.moves) { const a = movesByQ.get(m.queuename); if (a) a.push(m); else movesByQ.set(m.queuename, [m]); }
-  const candByQ = new Map<string, WpCandidate[]>();
-  for (const c of cands) { const a = candByQ.get(c.queuename); if (a) a.push(c); else candByQ.set(c.queuename, [c]); }
-  const phaseOf = (b: { done: number; total: number }) => (b.done >= b.total && b.total > 0) ? "done" : b.done > 0 ? "active" : "upcoming";
-  // completed bays before NOW (last `pastN`, most recent), then the active + upcoming bays
-  const doneAll = bays.filter((b) => phaseOf(b) === "done");
-  const doneBays = pastN > 0 ? doneAll.slice(-pastN) : [];
-  const activeBays = bays.filter((b) => phaseOf(b) === "active");
-  // upcoming = not-yet-started bays (mostly NOT-yet-dispatched work = the "candidate" jobs);
-  // capped to futureN so the card shows the next N work chunks the QC still has to do.
-  const upcomingBays = bays.filter((b) => phaseOf(b) === "upcoming").slice(0, Math.max(0, futureN));
-  const upcomingTotal = bays.filter((b) => phaseOf(b) === "upcoming").length;
-  const shownBays = [...doneBays, ...activeBays, ...upcomingBays];
-  // The current work FRONT per disload = the lowest-seq active queue (one for discharge, one for
-  // load — a QC can dual-cycle). "active = partially done" alone over-marks: twin/dual queues for
-  // the same bay and paused-partial queues all look active. So only the front(s) get NOW; the rest
-  // of the partials show as 진행/WIP.
-  const frontByDisload = new Map<string, typeof bays[number]>();
-  for (const b of activeBays) {
-    const dl = b.disload ?? "?";
-    const cur = frontByDisload.get(dl);
-    if (!cur || (b.seq ?? 9999) < (cur.seq ?? 9999)) frontByDisload.set(dl, b);
-  }
-  const nowKeys = new Set([...frontByDisload.values()].map((b) => `${b.queuename}|${b.seq}`));
-  const isNow = (b: typeof bays[number]) => nowKeys.has(`${b.queuename}|${b.seq}`);
+  // order all of this QC's containers by bay sequence, then within-bay (done → trucked → unassigned)
+  const seqByQ = new Map<string, number>();
+  for (const b of q.queues) seqByQ.set(b.queuename, b.seq ?? 9999);
+  const within = (m: WpMove) => (discharged(m) ? 0 : assigned(m) ? 1 : 2);
+  const etwKey = (m: WpMove) => m.etw_accurate ?? m.etw_ts ?? "~";
+  const all = q.moves.slice().sort((a, b) =>
+    (seqByQ.get(a.queuename) ?? 9999) - (seqByQ.get(b.queuename) ?? 9999)
+    || within(a) - within(b)
+    || etwKey(a).localeCompare(etwKey(b))
+    || (a.contno ?? "").localeCompare(b.contno ?? ""));
+  const doneList = all.filter(discharged);
+  const notDone = all.filter((m) => !discharged(m));
+  const past = pastN > 0 ? doneList.slice(-pastN) : [];
+  const future = notDone.slice(0, futureN);
+  const futureMore = notDone.length - future.length;
+  const assignedCount = q.moves.filter(assigned).length;
 
-  const moveRow = (m: WpMove) => {
-    const tt = m.ytno ? ttState.get(m.ytno) : undefined;
+  const row = (m: WpMove, role: "past" | "now" | "future") => {
+    const tt = assigned(m) ? ttState.get((m.ytno as string).trim()) : undefined;
     const dot = tt?.dispatch ? DSP_META[tt.dispatch]?.color : undefined;
-    const dim = discharged(m); // already discharged by the QC (truck carrying away)
     const ago = agoMin(m.actv_ts);
+    const seqTxt = role === "now" ? "NOW" : role === "past" ? (ago != null ? (k ? `${ago}분전` : `${ago}m`) : "✓") : "▸";
     return (
-      <div className={`qc-task bay${dim ? " past" : ""}`} key={`m-${m.contno}-${m.ytno ?? ""}`}>
-        <span className="seq">{dim ? (ago != null ? (k ? `${ago}분전` : `${ago}m`) : "✓") : "▸"}</span>
+      <div className={`qc-task ${role === "past" ? "past" : role === "now" ? "now" : "queued"}`} key={`${m.queuename}-${m.contno ?? ""}-${m.ytno ?? "u"}`}>
+        <span className="seq">{seqTxt}</span>
         <div className="body">
-          <div className="top"><span className={`type-${kindChip(m.jobtype)}`}>{kindLabel(m.jobtype)}</span> {m.contno ?? "—"}{m.twintandem ? ` · ${m.twintandem}` : ""}</div>
+          <div className="top">
+            <span className={`type-${kindChip(m.jobtype)}`}>{kindLabel(m.jobtype)}</span> {m.contno ?? "—"}{m.twintandem ? ` · ${m.twintandem}` : ""}
+            {m.queuename && <span className="qc-baytag mono" title={k ? "작업 베이/큐" : "work bay/queue"}>{m.queuename}</span>}
+          </div>
           <div className="bot">{wpLoc(m.jobtype, m.vessel ?? "?", q.qc, m.yt_topos ?? "?", m.armgc ?? "RTG")}
-            {(() => { const e = etwLabel(m.etw_accurate, m.etw_expires, lang); return e && !dim && <span className={`jetw ${e.cls}`} style={{ marginLeft: 6 }} title={k ? "TOS ETW RPC 기반 정확 ETW" : "accurate ETW from the TOS ETW RPC"}>ETW {e.text}</span>; })()}
-            {dim && m.actv_ts && <span className="jetw rtg-actv" style={{ marginLeft: 6 }} title={k ? "TOS ACTV — QC 양하 완료(트럭 적재). 검증 ACTV==QC move 완료 0초(n=3464)." : "TOS ACTV — QC discharged onto the truck (verified, n=3464)."}>{k ? "양하완료" : "discharged"}</span>}
+            {(() => { const e = etwLabel(m.etw_accurate, m.etw_expires, lang); return e && role !== "past" && <span className={`jetw ${e.cls}`} style={{ marginLeft: 6 }} title={k ? "TOS ETW RPC 기반 정확 ETW" : "accurate ETW from the TOS ETW RPC"}>ETW {e.text}</span>; })()}
+            {role === "past" && m.actv_ts && <span className="jetw rtg-actv" style={{ marginLeft: 6 }} title={k ? "TOS ACTV — QC 양하 완료(트럭 적재). 검증 ACTV==QC move 완료 0초(n=3464)." : "TOS ACTV — QC discharged onto the truck (verified, n=3464)."}>{k ? "양하완료" : "discharged"}</span>}
           </div>
         </div>
         <div className="assign">
-          {m.ytno ? <span className="tt" title={dspTitle(tt?.dispatch, lang)}>{dot && <span className="dot" style={{ background: dot, marginRight: 4 }} />}{m.ytno}</span> : <span className="tt-none">{k ? "미배차" : "Unassigned"}</span>}
+          {assigned(m) ? <span className="tt" title={dspTitle(tt?.dispatch, lang)}>{dot && <span className="dot" style={{ background: dot, marginRight: 4 }} />}{m.ytno}</span> : <span className="tt-none">{k ? "미배차" : "Unassigned"}</span>}
           {(() => { const w = ttWhere(tt, m.jobtype, lang); return w && <span className="tt-status" style={{ color: tt?.dispatch ? DSP_META[tt.dispatch]?.color : undefined }}>{w}</span>; })()}
         </div>
-      </div>
-    );
-  };
-
-  const bayBlock = (b: typeof bays[number]) => {
-    const phase = phaseOf(b);
-    const bmoves = (movesByQ.get(b.queuename) ?? []).slice()
-      .sort((x, y) => (y.actv_ts ?? y.etw_accurate ?? y.etw_ts ?? "").localeCompare(x.actv_ts ?? x.etw_accurate ?? x.etw_ts ?? "")); // newest first (recent discharges on top)
-    const bcands = candByQ.get(b.queuename) ?? [];
-    const unassigned = bcands.reduce((a, c) => a + c.n, 0);
-    const pctB = b.total > 0 ? Math.round((b.done / b.total) * 100) : 0;
-    const isDS = b.disload === "D";
-    const now = phase === "active" && isNow(b);
-    const cls = phase === "done" ? "done" : now ? "active" : phase === "active" ? "wip" : "upcoming";
-    const seqBadge = now ? "NOW" : phase === "done" ? "✓" : phase === "active" ? (k ? "진행" : "WIP") : `${b.seq ?? "·"}`;
-    return (
-      <div className={`qc-bay ${cls}`} key={`${b.vessel}-${b.queuename}-${b.seq}`}>
-        <div className="qc-bay-h">
-          <span className="bay-seq">{seqBadge}</span>
-          <span className="bay-name">{b.queuename}</span>
-          <span className={`type-${kindChip(isDS ? "DS" : "LD")}`}>{kindLabel(isDS ? "DS" : "LD")}</span>
-          <span className="bay-prog mono">{b.done}/{b.total}</span>
-        </div>
-        <div className="qc-bay-bar"><div className="fill" style={{ width: `${pctB}%` }} /></div>
-        {bmoves.slice(0, 4).map((m) => moveRow(m))}
-        {bmoves.length > 4 && <div className="qc-bay-more">+{bmoves.length - 4} {k ? "더" : "more"}</div>}
-        {unassigned > 0 && (
-          <div className="qc-bay-cand">
-            <span className="cand-n">×{unassigned}</span> {k ? "미배차" : "unassigned"}
-            {!isDS && bcands.length > 0 && <span className="cand-blocks"> · {bcands.slice(0, 3).map((c) => `${c.src_block ?? "?"}(${c.rtg ?? "RTG"})`).join("  ")}{bcands.length > 3 ? " …" : ""}</span>}
-          </div>
-        )}
       </div>
     );
   };
@@ -411,13 +361,15 @@ function QcCol({ q, lang, ttState, working, mph, cands, pastN, futureN }: { q: W
           ? <span className="mph" title={k ? "PLC 실시간 처리량 (최근 1시간 move)" : "live throughput from PLC (moves in last hour)"}>⚡<span className="v">{mph}</span>/h</span>
           : <span className="mph">{k ? "잔여" : "rem"} <span className="v">{q.remaining}</span></span>}
       </div>
-      <div className="qc-progress"><span>{q.active_moves} {k ? "작업중" : "active"}{working ? (k ? " · PLC 가동" : " · PLC live") : ""}</span><span className="mono">{done.toLocaleString()} / {tot.toLocaleString()}</span></div>
+      <div className="qc-progress"><span>{assignedCount} {k ? "배차중" : "trucked"}{working ? (k ? " · PLC 가동" : " · PLC live") : ""}</span><span className="mono">{done.toLocaleString()} / {tot.toLocaleString()}</span></div>
       <div className="qc-progress-bar"><div className="fill" style={{ width: `${pct}%` }} /></div>
 
-      <div className="qc-seqlabel">{k ? "작업 순서 (베이)" : "work sequence (bays)"}</div>
-      {shownBays.length === 0 && <div className="lvp-empty" style={{ padding: "8px 0" }}>{k ? "예정 베이 없음" : "no queued bay"}</div>}
-      {shownBays.map(bayBlock)}
-      {upcomingTotal > upcomingBays.length && <div className="qc-bay-more">+{upcomingTotal - upcomingBays.length} {k ? "베이 더 (미배차)" : "more bays (unassigned)"}</div>}
+      {past.length > 0 && <div className="qc-seqlabel">{k ? `방금 처리 ${past.length}` : `recent ${past.length}`}</div>}
+      {past.map((m) => row(m, "past"))}
+      <div className="qc-seqlabel">{k ? "다음 작업 (컨테이너)" : "next work (containers)"}</div>
+      {future.length === 0 && <div className="lvp-empty" style={{ padding: "8px 0" }}>{k ? "대기 작업 없음" : "no pending work"}</div>}
+      {future.map((m, i) => row(m, i === 0 ? "now" : "future"))}
+      {futureMore > 0 && <div className="qc-bay-more">+{futureMore} {k ? "컨테이너 더 (대부분 미배차)" : "more containers (mostly unassigned)"}</div>}
     </div>
   );
 }
