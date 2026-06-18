@@ -224,7 +224,8 @@ function groupByVessel<T>(items: T[], vesselOf: (t: T) => string, qcOf: (t: T) =
 }
 
 function LiveQcSequence({ lang, wp, snap }: { lang: Lang; wp: WorkpoolResponse | null; snap: Snap | null }) {
-  const [maxN, setMaxN] = useState(10); // max work items (containers) to show per QC (future only)
+  // "auto" (default) = all assigned work + the next 3 unassigned; a number = max containers per QC.
+  const [maxN, setMaxN] = useState<number | "auto">("auto");
   // fuse: live crane PLC (cycling now + live move/hr) + per-TT dispatch state
   const ttState = new Map<string, Dev>();
   const craneFresh = new Map<string, boolean>();
@@ -256,9 +257,10 @@ function LiveQcSequence({ lang, wp, snap }: { lang: Lang; wp: WorkpoolResponse |
             </span>
           )}
           <span className="muted">{ko(lang) ? `잔여 ${(wp?.total_remaining ?? 0).toLocaleString()} move` : `${(wp?.total_remaining ?? 0).toLocaleString()} moves left`}</span>
-          <label className="qc-pastsel" title={ko(lang) ? "QC당 보여줄 최대 작업(컨테이너) 수" : "max work items (containers) shown per QC"}>
-            {ko(lang) ? "QC당 최대" : "max/QC"}
-            <select value={maxN} onChange={(e) => setMaxN(Number(e.target.value))}>
+          <label className="qc-pastsel" title={ko(lang) ? "QC당 작업 표시 — 자동=배차된 작업 전부+미배차 다음 3개 / 숫자=최대 컨테이너 수" : "work shown per QC — auto = all assigned + next 3 unassigned / number = max containers"}>
+            {ko(lang) ? "QC당" : "per QC"}
+            <select value={maxN} onChange={(e) => setMaxN(e.target.value === "auto" ? "auto" : Number(e.target.value))}>
+              <option value="auto">{ko(lang) ? "자동" : "auto"}</option>
               {[5, 10, 20, 30].map((n) => <option key={n} value={n}>{n}</option>)}
             </select>
           </label>
@@ -294,7 +296,7 @@ const agoMin = (ts?: string | null): number | null =>
 // containers] → NOW → [future N containers]; N counts CONTAINERS (not bays). "future" is mostly the
 // not-yet-dispatched (candidate) work. TOS has no per-container order within a bay, so within-bay
 // unassigned order is by bay only. Label = Vessel(QC) ↔ Block(RTG).
-function QcCol({ q, lang, ttState, working, mph, maxN }: { q: WpQc; lang: Lang; ttState: Map<string, Dev>; working: boolean; mph?: number; maxN: number }) {
+function QcCol({ q, lang, ttState, working, mph, maxN }: { q: WpQc; lang: Lang; ttState: Map<string, Dev>; working: boolean; mph?: number; maxN: number | "auto" }) {
   const k = ko(lang);
   const tot = q.queues.reduce((a, x) => a + x.total, 0);
   const done = q.queues.reduce((a, x) => a + x.done, 0);
@@ -312,10 +314,20 @@ function QcCol({ q, lang, ttState, working, mph, maxN }: { q: WpQc; lang: Lang; 
     || within(a) - within(b)
     || etwKey(a).localeCompare(etwKey(b))
     || (a.contno ?? "").localeCompare(b.contno ?? ""));
-  // not-yet-done work (assigned-but-not-discharged + unassigned), capped to maxN containers per QC.
+  // not-yet-done work (assigned-but-not-discharged + unassigned). "auto" = all assigned + next 3
+  // unassigned; a number = first maxN containers.
   const notDone = all.filter((m) => !discharged(m));
-  const shown = notDone.slice(0, Math.max(1, maxN));
-  const shownMore = notDone.length - shown.length;
+  let shown: WpMove[];
+  let shownMore: number;
+  if (maxN === "auto") {
+    const asg = notDone.filter(assigned);
+    const un = notDone.filter((m) => !assigned(m));
+    shown = [...asg, ...un.slice(0, 3)];
+    shownMore = Math.max(0, un.length - 3);
+  } else {
+    shown = notDone.slice(0, Math.max(1, maxN));
+    shownMore = notDone.length - shown.length;
+  }
   // trucks assigned to this QC and not finished — DISTINCT trucks (ytno), excluding DS trucks
   // already discharged (received + leaving = done with the QC). Distinct ⇒ twin-lift (1 truck, 2
   // container moves) counts once. Same definition as the top "Trucks Assigned per QC" card → match.
