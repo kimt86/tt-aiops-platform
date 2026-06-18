@@ -291,6 +291,10 @@ td.mono { font-family: "JetBrains Mono", monospace; color: var(--text); }
 
 /* ============================ TT PAGE (mock) ============================ */
 .tt-page { display: flex; flex-direction: column; gap: 12px; }
+/* two big areas: left = QC (work), right = TT (supply) */
+.tt-2col { display: grid; grid-template-columns: minmax(0, 1.7fr) minmax(0, 1fr); gap: 12px; align-items: start; }
+.tt-2col .tt-col { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+@media (max-width: 1200px) { .tt-2col { grid-template-columns: 1fr; } }
 .tt-two { grid-template-columns: 5fr 7fr; gap: 12px; }
 @media (max-width: 1100px) { .tt-two { grid-template-columns: 1fr; } }
 
@@ -312,8 +316,7 @@ td.mono { font-family: "JetBrains Mono", monospace; color: var(--text); }
   background: var(--surface-2); border: 1px solid var(--border); border-radius: 8px;
   color: var(--text-dim); font-size: 12px; font-weight: 600; cursor: pointer; font-family: inherit; }
 .qc-toggle:hover { border-color: var(--brand); color: var(--text); }
-.qc-panel { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
-@media (max-width: 1100px) { .qc-panel { grid-template-columns: repeat(2, 1fr); } }
+.qc-panel { display: grid; grid-template-columns: repeat(auto-fill, minmax(215px, 1fr)); gap: 10px; }
 .qc-col { background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius-md); padding: 10px; display: flex; flex-direction: column; gap: 6px; }
 .qc-col.maint { background: rgba(239,68,68,0.06); border-color: rgba(239,68,68,0.3); }
 .qc-head { display: flex; justify-content: space-between; align-items: center; padding-bottom: 6px; border-bottom: 1px solid var(--border-soft); }
@@ -765,8 +768,8 @@ td.mono { font-family: "JetBrains Mono", monospace; color: var(--text); }
 .lvp-note { margin-top: 12px; font-size: 11px; color: var(--text-mute); line-height: 1.6; }
 
 /* live dispatch pool — 3 columns (idle / soon / swappable empty) */
-.lvp-cols3 { grid-template-columns: 1fr 1.25fr 1.1fr; }
-@media (max-width: 1000px) { .lvp-cols3 { grid-template-columns: 1fr; } }
+/* the TT pool now lives in the narrow right column → stack idle/soon/swap vertically */
+.lvp-cols3 { grid-template-columns: 1fr; }
 .lvp-sub { font-size: 10.5px; color: var(--text-mute); margin: -3px 0 8px 17px; }
 
 /* KPI history matrix (by day/week/month) */

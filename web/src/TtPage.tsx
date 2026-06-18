@@ -225,6 +225,7 @@ function groupByVessel<T>(items: T[], vesselOf: (t: T) => string, qcOf: (t: T) =
 
 function LiveQcSequence({ lang, wp, snap }: { lang: Lang; wp: WorkpoolResponse | null; snap: Snap | null }) {
   const [pastN, setPastN] = useState(0); // how many COMPLETED bays to show before NOW (default 0 = none)
+  const [futureN, setFutureN] = useState(5); // how many UPCOMING (not-yet-dispatched) bays to show after NOW
   // fuse: live crane PLC (cycling now + live move/hr) + per-TT dispatch state
   const ttState = new Map<string, Dev>();
   const craneFresh = new Map<string, boolean>();
@@ -252,8 +253,8 @@ function LiveQcSequence({ lang, wp, snap }: { lang: Lang; wp: WorkpoolResponse |
   return (
     <section className="tcard">
       <div className="tcard-head">
-        <h3>{ko(lang) ? "QC 작업 시퀀스 & 배차 (라이브)" : "QC Work Sequence & Dispatch (live)"}
-          <span className="h3-sub">{ko(lang) ? "TOS 작업지시 + PLC/GPS 융합" : "TOS job orders fused with PLC/GPS"}</span></h3>
+        <h3>{ko(lang) ? "QC 작업 현황" : "QC Work Status"}
+          <span className="h3-sub">{ko(lang) ? "작업 순서 · 배차/미배차(후보) 통합 (TOS+PLC/GPS)" : "work sequence · assigned + unassigned (candidates), merged (TOS+PLC/GPS)"}</span></h3>
         <div className="head-sub">
           <span className="pill good">{ko(lang) ? "가동 QC" : "Working QC"} {working.length}</span>
           {fleetMph != null && (
@@ -269,6 +270,12 @@ function LiveQcSequence({ lang, wp, snap }: { lang: Lang; wp: WorkpoolResponse |
               {[0, 3, 5, 10].map((n) => <option key={n} value={n}>{n}</option>)}
             </select>
           </label>
+          <label className="qc-pastsel" title={ko(lang) ? "NOW 뒤에 보여줄 '앞으로 할(미배차 포함) 베이' 수" : "how many UPCOMING (incl. not-yet-dispatched) bays to show after NOW"}>
+            {ko(lang) ? "미래" : "next"}
+            <select value={futureN} onChange={(e) => setFutureN(Number(e.target.value))}>
+              {[3, 5, 10, 20].map((n) => <option key={n} value={n}>{n}</option>)}
+            </select>
+          </label>
           <span className="muted">{ageS != null ? `⟳ ${ageS}s` : ""}</span>
         </div>
       </div>
@@ -278,7 +285,7 @@ function LiveQcSequence({ lang, wp, snap }: { lang: Lang; wp: WorkpoolResponse |
           <div className="qc-vgroup" key={g.vessel}>
             <div className="qc-vgroup-h"><span className="vsl">{g.vessel}</span><span className="qc-vgroup-n">{g.items.length} QC</span></div>
             <div className="qc-panel">
-              {g.items.map((q) => <QcCol key={q.qc} q={q} lang={lang} ttState={ttState} working={craneFresh.get(q.qc) ?? false} mph={craneMph.get(q.qc)} cands={candByQc.get(q.qc) ?? []} pastN={pastN} />)}
+              {g.items.map((q) => <QcCol key={q.qc} q={q} lang={lang} ttState={ttState} working={craneFresh.get(q.qc) ?? false} mph={craneMph.get(q.qc)} cands={candByQc.get(q.qc) ?? []} pastN={pastN} futureN={futureN} />)}
             </div>
           </div>
         ))}
@@ -301,7 +308,7 @@ const agoMin = (ts?: string | null): number | null =>
 // Per QC, for its active vessel(s): [recently discharged N] → NOW (active bay) → upcoming bays in
 // seq order. Inside a bay, assigned containers (with a truck) show individually; the rest = an
 // unassigned count (per source block for LD). Label = Vessel(QC) ↔ Block(RTG).
-function QcCol({ q, lang, ttState, working, mph, cands, pastN }: { q: WpQc; lang: Lang; ttState: Map<string, Dev>; working: boolean; mph?: number; cands: WpCandidate[]; pastN: number }) {
+function QcCol({ q, lang, ttState, working, mph, cands, pastN, futureN }: { q: WpQc; lang: Lang; ttState: Map<string, Dev>; working: boolean; mph?: number; cands: WpCandidate[]; pastN: number; futureN: number }) {
   const k = ko(lang);
   const tot = q.queues.reduce((a, x) => a + x.total, 0);
   const done = q.queues.reduce((a, x) => a + x.done, 0);
@@ -321,15 +328,18 @@ function QcCol({ q, lang, ttState, working, mph, cands, pastN }: { q: WpQc; lang
   // completed bays before NOW (last `pastN`, most recent), then the active + upcoming bays
   const doneAll = bays.filter((b) => phaseOf(b) === "done");
   const doneBays = pastN > 0 ? doneAll.slice(-pastN) : [];
-  const liveBays = bays.filter((b) => phaseOf(b) !== "done");
-  const shownBays = [...doneBays, ...liveBays];
+  const activeBays = bays.filter((b) => phaseOf(b) === "active");
+  // upcoming = not-yet-started bays (mostly NOT-yet-dispatched work = the "candidate" jobs);
+  // capped to futureN so the card shows the next N work chunks the QC still has to do.
+  const upcomingBays = bays.filter((b) => phaseOf(b) === "upcoming").slice(0, Math.max(0, futureN));
+  const upcomingTotal = bays.filter((b) => phaseOf(b) === "upcoming").length;
+  const shownBays = [...doneBays, ...activeBays, ...upcomingBays];
   // The current work FRONT per disload = the lowest-seq active queue (one for discharge, one for
   // load — a QC can dual-cycle). "active = partially done" alone over-marks: twin/dual queues for
   // the same bay and paused-partial queues all look active. So only the front(s) get NOW; the rest
   // of the partials show as 진행/WIP.
   const frontByDisload = new Map<string, typeof bays[number]>();
-  for (const b of liveBays) {
-    if (phaseOf(b) !== "active") continue;
+  for (const b of activeBays) {
     const dl = b.disload ?? "?";
     const cur = frontByDisload.get(dl);
     if (!cur || (b.seq ?? 9999) < (cur.seq ?? 9999)) frontByDisload.set(dl, b);
@@ -407,102 +417,11 @@ function QcCol({ q, lang, ttState, working, mph, cands, pastN }: { q: WpQc; lang
       <div className="qc-seqlabel">{k ? "작업 순서 (베이)" : "work sequence (bays)"}</div>
       {shownBays.length === 0 && <div className="lvp-empty" style={{ padding: "8px 0" }}>{k ? "예정 베이 없음" : "no queued bay"}</div>}
       {shownBays.map(bayBlock)}
+      {upcomingTotal > upcomingBays.length && <div className="qc-bay-more">+{upcomingTotal - upcomingBays.length} {k ? "베이 더 (미배차)" : "more bays (unassigned)"}</div>}
     </div>
   );
 }
 
-// ───────────────────────── candidate job pool (unassigned demand, grouped by QC) ─────
-// The work that actually needs dispatching: jobs with NO truck yet. Grouped per QC; the
-// QC's urgency = how soon it reaches this work (지금=working now / 곧=soon / 대기=later).
-// Each QC shows its demand split by pickup: discharge picks up AT the QC, load picks up
-// at source yard blocks (distance varies → shown per block).
-type CandGroup = {
-  qc: string; vessel: string; total: number; urg: "now" | "soon" | "later";
-  ds: number; loads: WpCandidate[];
-};
-const URG_META: Record<string, { ko: string; en: string; color: string }> = {
-  now: { ko: "지금", en: "Now", color: "#ef4444" },
-  soon: { ko: "곧", en: "Soon", color: "#f59e0b" },
-  later: { ko: "대기", en: "Later", color: "#64748b" },
-};
-
-function LiveCandidatePool({ lang, wp }: { lang: Lang; wp: WorkpoolResponse | null }) {
-  const cands = wp?.candidates ?? [];
-  const total = wp?.candidate_total ?? 0;
-
-  // group candidates by QC (load candidates use their destination QC)
-  const byQc = new Map<string, WpCandidate[]>();
-  for (const c of cands) {
-    const k = c.qc ?? "—";
-    (byQc.get(k) ?? byQc.set(k, []).get(k)!).push(c);
-  }
-  const groups: CandGroup[] = [...byQc.entries()].map(([qc, list]) => {
-    const ds = list.filter((c) => c.jobtype === "DS").reduce((a, c) => a + c.n, 0);
-    const loads = list.filter((c) => c.jobtype === "LD" && c.src_block).sort((a, b) => b.n - a.n);
-    const sum = list.reduce((a, c) => a + c.n, 0);
-    const minMoves = Math.min(...list.map((c) => (c.active ? 0 : c.moves_until)));
-    const urg: CandGroup["urg"] = list.some((c) => c.active) ? "now" : minMoves < 25 ? "soon" : "later";
-    const vessel = (list.find((c) => c.jobtype === "DS") ?? list[0]).vessel;
-    return { qc, vessel, total: sum, urg, ds, loads };
-  });
-  const rank = { now: 0, soon: 1, later: 2 };
-  groups.sort((a, b) => rank[a.urg] - rank[b.urg] || b.total - a.total);
-  // group the per-QC demand under its vessel; vessels ordered by their most urgent QC, then demand
-  const vgroups = groupByVessel(groups, (g) => g.vessel || "—", (g) => g.qc)
-    .map((vg) => ({ ...vg, urg: Math.min(...vg.items.map((g) => rank[g.urg])), total: vg.items.reduce((a, g) => a + g.total, 0) }))
-    .sort((a, b) => a.urg - b.urg || b.total - a.total);
-
-  return (
-    <section className="tcard">
-      <div className="tcard-head">
-        <h3>{ko(lang) ? "후보 작업 풀" : "Candidate Job Pool"}
-          <span className="h3-sub">{ko(lang) ? "미배정 수요 · 선박별" : "unassigned demand · by vessel"}</span></h3>
-        <div className="head-sub"><span className="muted">{ko(lang) ? `트럭 ${total.toLocaleString()} 필요` : `${total.toLocaleString()} trucks needed`}</span></div>
-      </div>
-      <div className="tcard-body">
-        <div className="cand-note">{ko(lang)
-          ? "아직 트럭이 안 붙은 작업을 선박별로 묶고 QC별로. 시급도 — 🔴지금(작업 중) · 🟠곧 · ⚪대기. 양하는 QC에서, 적하는 출발 블록에서 픽업."
-          : "unassigned work, grouped by vessel then QC. Urgency — 🔴Now (working) · 🟠Soon · ⚪Later. Discharge picks up at the QC, load at the source block."}</div>
-        <div className="cg-list">
-          {groups.length === 0 && <div className="lvp-empty">{ko(lang) ? "미배정 작업 없음" : "none unassigned"}</div>}
-          {vgroups.map((vg) => (
-            <div className="cg-vgroup" key={vg.vessel}>
-              <div className="qc-vgroup-h"><span className="vsl">{vg.vessel}</span><span className="qc-vgroup-n">{vg.items.length} QC · {vg.total}{ko(lang) ? "대" : ""}</span></div>
-              <div className="cg-vgroup-cards">
-                {vg.items.map((g) => {
-                  const u = URG_META[g.urg];
-                  return (
-                    <div className="cg-card" key={g.qc}>
-                      <div className="cg-head">
-                        <span className="cg-dot" style={{ background: u.color }} />
-                        <span className="cg-qc">{g.qc}</span>
-                        <span className="cg-urg" style={{ color: u.color, borderColor: u.color }}>{ko(lang) ? u.ko : u.en}</span>
-                        <span className="cg-total">{g.total}<small>{ko(lang) ? "대" : ""}</small></span>
-                      </div>
-                      <div className="cg-chips">
-                        {g.ds > 0 && (
-                          <span className="cg-chip ds" title={ko(lang) ? "양하 — QC에서 픽업" : "discharge — pick up at QC"}>
-                            <span className="type-dsc">DSC</span> {g.ds} · {ko(lang) ? "QC" : "@QC"}
-                          </span>
-                        )}
-                        {g.loads.slice(0, 5).map((l) => (
-                          <span className="cg-chip ld" key={l.src_block} title={ko(lang) ? `적하 — 블록 ${l.src_block}에서 픽업${l.rtg ? ` (${l.rtg})` : ""}` : `load — pick up at block ${l.src_block}${l.rtg ? ` (${l.rtg})` : ""}`}>
-                            <span className="type-lod">LOD</span> {l.src_block} {l.n}
-                          </span>
-                        ))}
-                        {g.loads.length > 5 && <span className="cg-more">+{g.loads.length - 5}</span>}
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-          ))}
-        </div>
-      </div>
-    </section>
-  );
-}
 
 // Per-QC live assignment: how many distinct trucks are currently assigned to each quay
 // crane (from live_workpool — the DS/LD dispatch pool). Starvation (0–2 trucks) is colour-cued.
@@ -568,11 +487,14 @@ export default function TtPage({ lang }: { lang: Lang }) {
   const { snap, err } = usePositions();
   const { data: wp } = useWorkpool();
   return (
-    <div className="content tt-page">
-      <QcAssignedCard lang={lang} wp={wp} snap={snap} />
-      <LiveDispatchPool lang={lang} snap={snap} err={err} />
-      <LiveCandidatePool lang={lang} wp={wp} />
-      <LiveQcSequence lang={lang} wp={wp} snap={snap} />
+    <div className="content tt-page tt-2col">
+      <div className="tt-col tt-col-qc">
+        <QcAssignedCard lang={lang} wp={wp} snap={snap} />
+        <LiveQcSequence lang={lang} wp={wp} snap={snap} />
+      </div>
+      <div className="tt-col tt-col-tt">
+        <LiveDispatchPool lang={lang} snap={snap} err={err} />
+      </div>
     </div>
   );
 }
