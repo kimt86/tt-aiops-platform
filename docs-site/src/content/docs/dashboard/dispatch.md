@@ -17,12 +17,15 @@ TT Dispatch 페이지는 **"지금 이 순간 트럭들이 어디서 무엇을 �
 
 ```mermaid
 flowchart LR
-  idle["유휴<br/>idle"] -->|"배차받음"| staging["대기<br/>staging"]
+  idle["유휴<br/>idle"] -->|"배차"| staging["대기<br/>staging"]
   staging --> et["공차주행<br/>empty_travel"]
-  et --> P["받기"]
+  et --> P["받기(픽업)"]
   P --> del["적재이동<br/>delivering"]
-  del --> wr["도착·RTG대기<br/>wait_rtg"]
-  wr -->|"크레인 관여"| si["곧유휴<br/>soon_idle"]
+  del -->|"LD: QC 도착"| si["곧유휴<br/>soon_idle"]
+  del -->|"DS: 블록 도착"| wr["도착·대기<br/>wait_rtg"]
+  wr -->|"QC완료 신호(ACTV)"| ap["approaching<br/>(DS)"]
+  ap -->|"RTG 근접"| si
+  wr -->|"RTG 근접"| si
   si -->|"넘기기 완료"| idle
 ```
 
@@ -32,8 +35,11 @@ flowchart LR
 | **staging** | 대기(배차됨) | 공차 + 정지 + **작업풀에 배정됨** | 일은 받았고 순서를 기다리는 중 (노는 게 아님) |
 | **empty_travel** | 공차 주행 | 공차 + 이동 중 | 픽업하러 빈 차로 가는 중 |
 | **delivering** | 적재 이동 | 적재(`container1` 있음) + 이동 중 | 짐 싣고 하역지로 가는 중 |
-| **wait_rtg** | 도착·RTG 대기 | 적재 + `arrival=ARRIVED` + 크레인 아직 미관여 | 도착은 했지만 크레인이 아직 안 옴 |
-| **soon_idle** | 곧 유휴 | 적재 + ARRIVED + **크레인 관여 중** | 마지막 넘기기 진행 → 곧 빈 차가 됨 |
+| **wait_rtg** | 도착·RTG 대기 (DS) | 적재 + ARRIVED at 블록 + RTG 미근접 + TOS ACTV 없음 | 블록에 도착했지만 RTG가 아직 안 옴 |
+| **approaching** | RTG 대기·QC완료 (DS) | 적재 + ARRIVED at 블록 + **TOS ACTV**(QC 양하 완료) + RTG GPS 미근접 | QC가 트럭에 실어준 건 확인됐고 블록서 RTG 차례 대기(~12분) |
+| **soon_idle** | 곧 유휴 | 적재 + ARRIVED + **크레인 관여 중** (LD=QC도착 / DS=RTG≤30m) | 마지막 넘기기 진행 → 곧 빈 차가 됨 |
+
+> **wait_rtg·approaching는 DS(양하) 전용**입니다. 둘의 차이 = RTG 작업 시작을 아는 신호: `approaching`은 TOS의 ACTV(QC가 트럭에 실어준 시각)로 "곧 RTG가 받는다"를 알고, `wait_rtg`는 그 신호조차 없어 더 불확실. (총 상태 = idle·staging·empty_travel·delivering·wait_rtg·approaching·soon_idle = **7개**)
 
 :::note[idle vs staging — 왜 갈랐나]
 예전엔 "공차+정지"면 전부 idle로 셌더니, 실제로는 **절반(102대 중 51대)이 이미 배차된 차**였습니다(순서 대기 중). 그래서 작업 풀(TOS)을 교차참조해 **배정된 대기 = staging**, **진짜 미배정 = idle**로 분리했고 idle 수가 102→21로 정상화됐습니다.
@@ -47,6 +53,10 @@ flowchart LR
 | **DS(양하)** | RTG GPS ↔ 트럭 GPS가 같은 베이(≈30m 이내) | 근접 추정 |
 
 > RTG는 PLC가 없어 직접 못 봅니다 → **GPS 거리**로 추정. 블록 위치는 ARRIVED한 트럭들의 GPS로 **학습한 중심좌표**를 써서, 크레인이 GPS를 안 쏠 때도 거리 계산이 됩니다.
+
+:::note[wait_qc는 왜 없나 — DS/LD 비대칭]
+**DS**는 RTG에 PLC가 없어 "도착했지만 크레인이 아직"을 `wait_rtg`/`approaching`으로 따로 둡니다. 반면 **LD**는 트럭이 QC에 ARRIVED하면 곧바로 `soon_idle`로 가고 **별도 wait_qc가 없습니다** — QC는 항상 PLC가 있어 관여 여부가 관측되기 때문(PLC 신선도는 reason 라벨로만 표시). 단, 측정상 LD 트럭은 도착 후에도 QC 큐에서 **~3.4분** 더 대기하므로([러닝센터 ④](/kc/dashboard/learning/)), 그 대기를 굳이 분리하고 싶다면 'LD ARRIVED + QC PLC 미신선'을 조건으로 `wait_qc`를 추가할 수 있습니다(현재는 그 대기가 `soon_idle`에 포함).
+:::
 
 ## 2. websocket 필드 → 화면 값 (lineage)
 

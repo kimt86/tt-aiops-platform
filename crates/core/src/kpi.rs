@@ -9,7 +9,7 @@ pub enum KpiKey {
     KEmpty,
     KEmptyR,
     KCycle,
-    KCraneQ,
+    KRtgQ,
     KMph,
     KQcQ,
 }
@@ -20,7 +20,7 @@ impl KpiKey {
         KpiKey::KEmpty,
         KpiKey::KEmptyR,
         KpiKey::KCycle,
-        KpiKey::KCraneQ,
+        KpiKey::KRtgQ,
         KpiKey::KMph,
         KpiKey::KQcQ,
     ];
@@ -32,7 +32,7 @@ impl KpiKey {
             KpiKey::KEmpty => "K_EMPTY",
             KpiKey::KEmptyR => "K_EMPTY_R",
             KpiKey::KCycle => "K_CYCLE",
-            KpiKey::KCraneQ => "K_CRANE_Q",
+            KpiKey::KRtgQ => "K_RTG_Q",
             KpiKey::KMph => "K_MPH",
             KpiKey::KQcQ => "K_QC_Q",
         }
@@ -45,7 +45,7 @@ impl KpiKey {
             KpiKey::KEmpty => "Empty Travel / Job",
             KpiKey::KEmptyR => "Empty Travel Ratio",
             KpiKey::KCycle => "TT Cycle Time",
-            KpiKey::KCraneQ => "Yard Handover Wait",
+            KpiKey::KRtgQ => "RTG Handover Wait",
             KpiKey::KMph => "QC Moves / Hour",
             KpiKey::KQcQ => "QC Wait (for truck)",
         }
@@ -58,7 +58,7 @@ impl KpiKey {
             KpiKey::KEmpty => "공차 이동거리/작업",
             KpiKey::KEmptyR => "공차 이동 비율",
             KpiKey::KCycle => "TT 사이클 타임",
-            KpiKey::KCraneQ => "야드 핸드오버 대기",
+            KpiKey::KRtgQ => "야드(RTG) 핸드오버 대기",
             KpiKey::KMph => "QC 시간당 처리량",
             KpiKey::KQcQ => "QC 대기시간",
         }
@@ -71,7 +71,7 @@ impl KpiKey {
             KpiKey::KEmpty => "km/Job",
             KpiKey::KEmptyR => "%",
             KpiKey::KCycle => "s",
-            KpiKey::KCraneQ => "s",
+            KpiKey::KRtgQ => "s",
             KpiKey::KMph => "move/hr",
             KpiKey::KQcQ => "s",
         }

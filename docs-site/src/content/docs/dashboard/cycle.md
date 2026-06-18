@@ -112,7 +112,38 @@ flowchart LR
 | 의미 | 실제 트럭이 돈 한 바퀴(이동 기반) | 작업 기록의 첫~마지막 이벤트 간격 |
 | 쓰임 | 운영 진단·트럭별 분석·ML 학습 라벨 | 공식 KPI 점수 |
 
-> 같은 인도 엣지를 공유하도록 설계해 라이브 KPI 중위값과 **항상 일치**합니다.
+> 라이브 KPI의 사이클 중위값은 같은 인도 엣지를 공유해 일치합니다. 단 **KPI 페이지의 K_CYCLE(TOS)** 는 별개입니다.
+
+:::note[K_CYCLE(TOS) ↔ GPS 사이클 교차검증 (7일)]
+GPS 사이클(중앙 ~20분)은 K_CYCLE(중앙 ~60분)의 **33~43%**입니다. K_CYCLE는 배차 큐·재계획 등 *행정 시간*까지 포함하고, GPS는 *실제 주행*만 재기 때문 — **절대값이 다른 게 정상**(둘 다 유효, 측정 대상이 다름). 그래서 GPS로 K_CYCLE의 절대값을 검증할 순 없고, **추세·비율·작업유형 순위**로 교차검증합니다(셋 다 일치 = 건강). 물리적 사이클·ML 라벨엔 **GPS 사이클**을, TOS 스코어카드엔 K_CYCLE를 쓰세요.
+:::
+
+## 7. Cycle 4단계 ↔ TT Dispatch 7상태 관계
+
+같은 트럭 여정을 두 방식으로 봅니다 — **Cycle 4단계 = 끝난 사이클의 시간 구간(사후·GPS)**, **Dispatch 7상태 = 지금 이 순간의 분류(실시간)**. 대응:
+
+| Cycle 4단계 | 대응 Dispatch 상태 | 비고 |
+|---|---|---|
+| (사이클 사이) | **idle** / **staging** | 유휴 / 배차받고 대기 — 아직 사이클 전 |
+| 공차이동 | **empty_travel** | 빈 차로 픽업지로 |
+| 받기 | (짧음) empty_travel→delivering 전환 | 픽업 적재 순간 |
+| 부하이동 | **delivering** | 짐 싣고 하역지로 |
+| 주기(넘기기) | **soon_idle** (LD·DS) · **approaching**/**wait_rtg** (DS) | 하역지 도착~인계. DS는 RTG 신호에 따라 세분 |
+
+```mermaid
+flowchart LR
+  subgraph C["Cycle 4단계 (사후·GPS)"]
+    c1["공차이동"] --> c2["받기"] --> c3["부하이동"] --> c4["주기"]
+  end
+  subgraph D["Dispatch 상태 (실시간)"]
+    d0["idle/staging"] --> d1["empty_travel"] --> d2["delivering"] --> d3["soon_idle / approaching / wait_rtg"]
+  end
+  c1 -.->|"≈"| d1
+  c3 -.->|"≈"| d2
+  c4 -.->|"≈"| d3
+```
+
+> 한 줄: **idle/staging**(사이클 밖) → **empty_travel**(공차이동) → **delivering**(부하이동) → **soon_idle/approaching/wait_rtg**(주기) → 다시 idle.
 
 ---
 **출처 문서:** [사이클 감지 로직](/kc/architecture/cycle-detection-v1/) · [사이클 v2 설계](/kc/experiments/cycle-v2-shadow/) · [RTG 작업 사이클](/kc/research/rtg-work-cycle/)

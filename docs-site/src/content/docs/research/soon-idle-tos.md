@@ -105,7 +105,7 @@ sidebar:
 | # | 주장 | 판정 | 핵심 근거 |
 |---|---|---|---|
 | 1 | `MCH_OPERATION`이 QC move의 **시작·완료·트럭ID·크레인ID**를 모두 제공 | **확인** | 추출 SQL 4종(c07·c10·f2·e1c)이 한 행에서 `ST_DT`·`COMPDATE/TIME`·`TRK_ID`·`MACHNO`를 SELECT **[코드]**; 추출 결과 `raw_k_mph_realtime`로 실재 입증 **[DB]** |
-| 2 | `JOB_ORDER_HISTORY`가 **대상 트럭·담당 RTG·시각**을 제공 → PLC 없는 RTG도 TOS로 관측 | **일부확인** | RTG(`ARMGC`)+시각(`YT_DIS_DT→ACTV_DT`)은 확인, K_CRANE_Q의 **97.1%가 DS**로 야드측임을 실증 **[DB]**. 단 **HISTORY 한 행에서 트럭ID가 나오는지는 (미검증)** — 트럭ID는 `MCH_OPERATION.TRK_ID`/라이브 `JOB_ODR_YTNO`에만 확인 |
+| 2 | `JOB_ORDER_HISTORY`가 **대상 트럭·담당 RTG·시각**을 제공 → PLC 없는 RTG도 TOS로 관측 | **일부확인** | RTG(`ARMGC`)+시각(`YT_DIS_DT→ACTV_DT`)은 확인, K_RTG_Q의 **97.1%가 DS**로 야드측임을 실증 **[DB]**. 단 **HISTORY 한 행에서 트럭ID가 나오는지는 (미검증)** — 트럭ID는 `MCH_OPERATION.TRK_ID`/라이브 `JOB_ODR_YTNO`에만 확인 |
 | 3 | **진행중(시작O·완료X) move 식별 = 곧 유휴**를 완료 전에 알 수 있다 | **일부확인** | 완료 전 리드타임 실재(LD 도착→유휴 중앙값 ~60초) **[문서/DB]**. 단 "진행중"은 **필요조건일 뿐** — 적재이동 중도 진행중이라 `delivering`. 추가로 도착+크레인 관여 필요. DS는 도착≠임박(스냅샷 RTG 25m 이내 0/6)으로 반증 |
 | 4 | 필요한 신호를 **증분·진행중-only 폴링**으로 Oracle 부하 최소화하며 추출 가능 | **일부확인** | 진행중-only·저부하는 확인(현 워크풀 `COMPDATE IS NULL`, ~3.7s/90s) **[코드/DB]**. 단 **"증분(워터마크)"은 미구현** — `etl_watermark` 테이블은 정의돼 있으나 **코드 참조 0건·행 0건** **[코드/DB]**. 현재는 전량 스냅샷 교체 |
 
@@ -178,7 +178,7 @@ QC가 **move 기반**이면 RTG는 **대기 기반**입니다. 깨끗한 시작/
 | **대상 트럭ID** | **`JOB_HIST_YTNO`** (DS 이력 87% 채움) | **✅ [ORA] 2차 확정** (1차 "확인 안 됨" 정정) |
 | **크레인 활성** | `JOB_HIST_ACTV_DT` (이력은 `COMP_DT` 항상 NULL → 완료=`JOBSTATUS='C'`) | **[ORA]** |
 
-핵심 파생값: `K_CRANE_Q = (ACTV_DT − YT_DIS_DT) × 86400`초 = "TT 하차 → 야드 크레인 활성까지 대기"(0..1800s) **[코드: c08]**. **이것이 RTG/블록측 신호임을 DB가 증명:** `raw_k_crane_q_daily` in-range 이벤트의 **97.1%가 DS** **[DB]**.
+핵심 파생값: `K_RTG_Q = (ACTV_DT − YT_DIS_DT) × 86400`초 = "TT 하차 → 야드 크레인 활성까지 대기"(0..1800s) **[코드: c08]**. **이것이 RTG/블록측 신호임을 DB가 증명:** `raw_k_crane_q_daily` in-range 이벤트의 **97.1%가 DS** **[DB]**.
 
 :::caution[존재하되 약하다]
 `ACTV_DT`는 RTG가 물리적으로 집은 순간이 아닙니다. **TOS 직접 조인으로 확정(2026-06-16): `ACTV_DT` = QC 양하 완료(트럭 적재) 시점** — `ACTV_DT`가 QC 물리 move(`MCH_OPERATION`, MACHNO `^C[0-9]`) 완료시각과 **0초 일치(위반 0/3464)**. 즉 RTG-측이 아니라 **QC-측 핸드오버(적재 시작)**이고, RTG 물리 들어올림(ST_DT→완료 59s)은 그보다 **~11분 뒤**. (DIS→QC양하 ~7분, QC양하=ACTV→자유 ~12분.)

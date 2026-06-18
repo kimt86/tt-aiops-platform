@@ -8,14 +8,14 @@ SELECT json_build_object(
     'K_EMPTY',   (SELECT round(sum(total_empty_m)/nullif(sum(jobs),0)/1000, 3) FROM raw_k_empty WHERE snapshot_date = :'d'),
     'K_EMPTY_R', (SELECT round(sum(total_empty_m)/nullif(sum(total_empty_m+total_laden_m),0)*100, 1) FROM raw_k_empty WHERE snapshot_date = :'d'),
     'K_CYCLE',   (SELECT round(sum(avg_sec*jobs)/nullif(sum(jobs),0), 0) FROM raw_k_cycle WHERE snapshot_date = :'d'),
-    'K_CRANE_Q', (SELECT round(sum(k_crane_q_avg_sec*in_range)/nullif(sum(in_range),0), 0) FROM raw_k_crane_q_daily WHERE work_date = :'d'),
+    'K_RTG_Q', (SELECT round(sum(k_crane_q_avg_sec*in_range)/nullif(sum(in_range),0), 0) FROM raw_k_crane_q_daily WHERE work_date = :'d'),
     'K_MPH',     (SELECT round(sum(k_mph_per_active_hour*active_hours)/nullif(sum(active_hours),0), 1) FROM raw_k_mph_realtime WHERE snapshot_date = :'d')
   ),
   'sample_n', json_build_object(
     'K_UTIL',    (SELECT count(*) FROM raw_k_util_tt WHERE snapshot_date = :'d'),
     'K_EMPTY',   (SELECT sum(jobs)::int FROM raw_k_empty WHERE snapshot_date = :'d'),
     'K_CYCLE',   (SELECT sum(jobs)::int FROM raw_k_cycle WHERE snapshot_date = :'d'),
-    'K_CRANE_Q', (SELECT sum(in_range)::int FROM raw_k_crane_q_daily WHERE work_date = :'d'),
+    'K_RTG_Q', (SELECT sum(in_range)::int FROM raw_k_crane_q_daily WHERE work_date = :'d'),
     'K_MPH',     (SELECT count(distinct vessel||voyage) FROM raw_k_mph_realtime WHERE snapshot_date = :'d')
   ),
   'crane_q_hour', (SELECT coalesce(json_agg(json_build_object('hour', hour, 'avg', avg_sec, 'p95', p95) ORDER BY hour), '[]')

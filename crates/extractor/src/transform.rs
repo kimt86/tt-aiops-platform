@@ -72,9 +72,9 @@ async fn kpi_daily(pool: &PgPool, date: NaiveDate, provisional: bool) -> Result<
         provisional,
     ).await?;
 
-    // K_CRANE_Q — in-range-weighted mean wait seconds.
+    // K_RTG_Q — in-range-weighted mean wait seconds.
     upsert_daily(
-        pool, date, "K_CRANE_Q", "s", "in_range-weighted mean(avg_sec)",
+        pool, date, "K_RTG_Q", "s", "in_range-weighted mean(avg_sec)",
         "SELECT round(sum(k_crane_q_avg_sec*in_range)/nullif(sum(in_range),0), 1), sum(in_range)::int
            FROM raw_k_crane_q_daily WHERE work_date = $1 HAVING sum(in_range) > 0",
         provisional,
@@ -163,7 +163,7 @@ pub async fn rollup_today_from_shifts(pool: &PgPool, date: NaiveDate) -> Result<
           WHERE business_date = $1
             AND value IS NOT NULL
             AND coalesce(agg_weight, sample_n) IS NOT NULL
-            AND kpi_key IN ('K_MPH','K_EMPTY','K_EMPTY_R','K_CYCLE','K_CRANE_Q','K_QC_Q')
+            AND kpi_key IN ('K_MPH','K_EMPTY','K_EMPTY_R','K_CYCLE','K_RTG_Q','K_QC_Q')
           GROUP BY kpi_key
          HAVING sum(coalesce(agg_weight, sample_n)) > 0
          ON CONFLICT (kpi_key, snapshot_date) DO UPDATE SET

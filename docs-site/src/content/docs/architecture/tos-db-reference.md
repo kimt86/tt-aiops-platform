@@ -48,9 +48,9 @@ TOS Oracle은 **롤링(rolling) 보존**이라 오래된 날짜가 자동 삭제
 
 | 소스 테이블 | 보존 | 영향받는 KPI | 실증 |
 |---|---|---|---|
-| `JOB_ORDER_HISTORY` | 약 15일 | 공차·공차비율·사이클·핸드오버대기(K_CRANE_Q) | raw_k_cycle이 정확히 ~15일 창에서 끊김 |
+| `JOB_ORDER_HISTORY` | 약 15일 | 공차·공차비율·사이클·핸드오버대기(K_RTG_Q) | raw_k_cycle이 정확히 ~15일 창에서 끊김 |
 | `MCH_OPERATION` / `VSS_STATISTICS` | ≥ 35일 | MPH·QC대기·가동률·항차 통계 | MCH 기반 raw_*가 더 깊게 남음 |
-| `YT_DIS_DT`/`ACTV_DT` (크레인대기 입력) | 오래된 날 희소 | K_CRANE_Q | 오래된 날은 0행 → 0 산출 |
+| `YT_DIS_DT`/`ACTV_DT` (크레인대기 입력) | 오래된 날 희소 | K_RTG_Q | 오래된 날은 0행 → 0 산출 |
 
 :::caution[실무 결론 — 깊은 백필 불가]
 예: **2026년 1월 데이터(약 160일 전)는 원천에 남아있지 않아 가져올 수 없습니다.** 백필로 끌어올 수 있는 최대 깊이는 공차/사이클 **~15일**, MPH/QC대기/가동률 **~35일** 뿐. 그 이전(특히 1~4월)은 Oracle에서 이미 삭제됨. **과거 깊이는 "추출을 시작한 시점"부터 앞으로만 영구 누적**됩니다(현재 Postgres 보유 2026-05-01~). 빈 결과셋에 toolbox는 `{"result":"null"}` 반환(0행 처리).
@@ -72,7 +72,7 @@ wp-tt가 실제로 읽는 핵심 테이블들. 컬럼은 추출 SQL(`crates/extr
 | `JOB_HIST_POINT` / `JOB_HIST_SEQNO` | 포인트 코드 / 시퀀스 번호. (CONTNO·POINT·SEQNO) = 한 작업. |
 | `JOB_HIST_VESSEL` / `JOB_HIST_VOYAGE` | 선박명 / 항차. 항차별 집계·맥락. |
 | `JOB_HIST_ARMGC` | 작업 크레인 ID. **주의:** probe 결과 RTG·ES·XXX(미배정)만 — **C##(안벽)은 없음**. 즉 야드측 크레인. |
-| `YT_DIS_DT` → `JOB_HIST_ACTV_DT` | YT(TT) 하차 시각 → 크레인 활성 시각. 차이 = **크레인 큐 대기(K_CRANE_Q)** = `(ACTV_DT − YT_DIS_DT)·86400`초. 오래된 날 희소. |
+| `YT_DIS_DT` → `JOB_HIST_ACTV_DT` | YT(TT) 하차 시각 → 크레인 활성 시각. 차이 = **크레인 큐 대기(K_RTG_Q)** = `(ACTV_DT − YT_DIS_DT)·86400`초. 오래된 날 희소. |
 | `CRNT_PSN_IDX_NO1` | 현재 위치 인덱스 = 블록 ID. |
 | `LNDN_TRV_RNG` / `UN_LNDN_TRV_RNG` | **적재거리 / 공차거리**(미터, 0~5000 필터). 공차비율 = `Σ공차 / Σ(적재+공차)`. |
 
@@ -195,7 +195,7 @@ QC id(C##)가 TOS 계획 ↔ websocket PLC(크레인이 물리적으로 도는 �
 
 ## 7개 KPI 정의
 
-대시보드는 6개 표시(K_CRANE_Q 숨김). 모두 intensive(평균·비율)라 기간 합산 시 분자/분모로 정확 결합.
+대시보드는 6개 표시(K_RTG_Q 숨김). 모두 intensive(평균·비율)라 기간 합산 시 분자/분모로 정확 결합.
 
 | KPI | 단위·방향 | 정의 (소스) | 가중치 |
 |---|---|---|---|
@@ -205,7 +205,7 @@ QC id(C##)가 TOS 계획 ↔ websocket PLC(크레인이 물리적으로 도는 �
 | **K_UTIL** TT 가동률 | % · 높을수록↑ | **TT별 min(1, 가동분/경과분)의 평균**·100 — avg-of-ratios(단순 가중평균 아님) (MCH_WORKTIME/STOP) | (평균) |
 | **K_QC_Q** QC 대기 | s · 낮을수록↑ | QC 병합 active 구간 사이 유휴 갭 평균 (MCH_OPERATION C##) | idle_periods |
 | **K_MPH** QC 처리량 | move/hr · 높을수록↑ | QC move/active-hour의 active_hours-가중평균 (MCH_OPERATION) | active_hours |
-| **K_CRANE_Q** 야드 핸드오버 대기 (숨김) | s · 낮을수록↑ | (ACTV_DT − YT_DIS_DT) — TT 하차→야드 핸드오버 (JOB_ORDER_HISTORY). 안벽 QC 대기가 아님(ARMGC=RTG/ES). | in_range |
+| **K_RTG_Q** 야드 핸드오버 대기 (숨김) | s · 낮을수록↑ | (ACTV_DT − YT_DIS_DT) — TT 하차→야드 핸드오버 (JOB_ORDER_HISTORY). 안벽 QC 대기가 아님(ARMGC=RTG/ES). | in_range |
 
 :::note[K_UTIL 특수]
 avg-of-ratios라 주/월 버킷은 일 단위 raw에서 재계산해야 정확(단순 평균 불가). 오늘분은 `util_tt_shift`(TT별 productive_min + 쉬프트 elapsed_min)에서 정확 재조합.
@@ -245,7 +245,7 @@ avg-of-ratios라 주/월 버킷은 일 단위 raw에서 재계산해야 정확(�
 | `include_str!` SQL 수정 | .sql 편집 후 .rs를 touch해 재임베드해야 반영. |
 | 시간대 MYT vs KST | 위 서빙 모델 섹션. terminal_now() 필수. KST 00:00–01:00(=MYT 23:00–24:00)에 "오늘"이 아직 시작 안 한 터미널 날을 가리켜 0/7 blank. |
 | 빈 결과셋 | toolbox가 `{"result":"null"}` 반환 → 0행 처리. |
-| K_CRANE_Q 라벨 오해 | "QC 크레인 대기"가 아님 — ARMGC가 RTG/ES라 **야드 핸드오버 대기**. 실제 "QC가 트럭을 기다림"은 별도 K_QC_Q. |
+| K_RTG_Q 라벨 오해 | "QC 크레인 대기"가 아님 — ARMGC가 RTG/ES라 **야드 핸드오버 대기**. 실제 "QC가 트럭을 기다림"은 별도 K_QC_Q. |
 | RTG PLC 없음 | 양하 블록측 핸드오버는 직접 PLC 신호 없음 → GPS·RTG 근접도로 추정(배차 연구). |
 | 보존 한계 | 보존 기간 섹션. 깊은 과거(예 1월)는 백필 불가. 깊이는 앞으로만 누적. |
 | 직접 ssh+curl 금지 | Oracle 접근은 승인된 `remote-toolbox-sql`만(`SKILL_DIR=/home/aiadmin/.codex/skills/yard-db-ops`). |

@@ -210,14 +210,14 @@ async fn src_cycle(pool: &PgPool, target: &str, date: NaiveDate, sh: Shift, star
 }
 
 async fn src_craneq(pool: &PgPool, target: &str, date: NaiveDate, sh: Shift, start: NaiveDateTime, end: NaiveDateTime) -> Result<()> {
-    run_logged(pool, "K_CRANE_Q_SHIFT", date, |_| async move {
+    run_logged(pool, "K_RTG_Q_SHIFT", date, |_| async move {
         let sql = params::render_shift(SQL_CRANEQ, date, start, end, Some(TimeCol::JobHist))?;
         let rows: Vec<crate::kpis::k_crane_q_daily::Row> = fetch(target, &sql).await?;
         let num = sum(rows.iter().map(|r| match (r.k_crane_q_avg_sec, r.in_range) { (Some(a), Some(n)) => Some(a*n), _ => None }));
         let den = sum(rows.iter().map(|r| r.in_range));
         let value = if den > 0.0 { Some((num/den*10.0).round()/10.0) } else { None };
         // weight = Σin_range (= sample_n here)
-        upsert_shift(pool, date, sh, "K_CRANE_Q", "s", value, Some(den as i64), Some(den), start, end).await?;
+        upsert_shift(pool, date, sh, "K_RTG_Q", "s", value, Some(den as i64), Some(den), start, end).await?;
         Ok(rows.len() as u64)
     }).await.map(|_| ())
 }

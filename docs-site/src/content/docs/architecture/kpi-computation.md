@@ -21,7 +21,7 @@ sidebar:
 
 ## 7개 KPI 정의
 
-대시보드는 6개 표시(K_CRANE_Q 숨김). 모두 **intensive**(평균·비율)라 기간 합산 시 분자/분모로 정확 결합됩니다. 각 KPI의 **가중치** = 진짜 분모.
+대시보드는 6개 표시(K_RTG_Q 숨김). 모두 **intensive**(평균·비율)라 기간 합산 시 분자/분모로 정확 결합됩니다. 각 KPI의 **가중치** = 진짜 분모.
 
 | KPI | 단위·방향 | 정의 (TOS 소스) | 가중치 |
 |---|---|---|---|
@@ -31,10 +31,10 @@ sidebar:
 | **K_UTIL** TT 가동률 | % · 높을수록↑ | **TT별 min(1, 가동분/경과분)의 평균**·100 — avg-of-ratios (MCH_WORKTIME/STOP) | (평균) |
 | **K_QC_Q** QC 대기 | s · 낮을수록↑ | QC 병합 active 구간 사이 유휴 갭 평균 (MCH_OPERATION C##) | idle_periods |
 | **K_MPH** QC 처리량 | move/hr · 높을수록↑ | QC move/active-hour의 active_hours-가중평균 (MCH_OPERATION) | active_hours |
-| **K_CRANE_Q** 야드 핸드오버 대기 (숨김) | s · 낮을수록↑ | (ACTV_DT − YT_DIS_DT) — TT 하차→야드 핸드오버 (JOB_ORDER_HISTORY) | in_range |
+| **K_RTG_Q** 야드 핸드오버 대기 (숨김) | s · 낮을수록↑ | (ACTV_DT − YT_DIS_DT) — TT 하차→야드 핸드오버 (JOB_ORDER_HISTORY) | in_range |
 
-:::caution[K_QC_Q ≠ K_CRANE_Q]
-**K_QC_Q**(표시) = "QC가 트럭을 기다림"(안벽 크레인 유휴 갭). **K_CRANE_Q**(숨김) = "TT가 야드에서 핸드오버를 기다림"(ARMGC=RTG). 둘은 다른 대기입니다. 자세한 TOS 컬럼은 [TOS DB 레퍼런스](/kc/architecture/tos-db-reference/).
+:::caution[K_QC_Q ≠ K_RTG_Q]
+**K_QC_Q**(표시) = "QC가 트럭을 기다림"(안벽 크레인 유휴 갭). **K_RTG_Q**(숨김) = "TT가 야드에서 핸드오버를 기다림"(ARMGC=RTG). 둘은 다른 대기입니다. 자세한 TOS 컬럼은 [TOS DB 레퍼런스](/kc/architecture/tos-db-reference/).
 :::
 
 ## KPI별 추출·가공·적재 상세
@@ -292,7 +292,7 @@ HAVING sum(active_hours) > 0
 화면의 `sample_n`은 **항차 수**지만, 실제 기간 결합 가중치는 `Σactive_hours`입니다. `shift.rs`는 `kpi_shift.agg_weight=Σactive_hours`를 따로 저장해(`0009` 마이그레이션) "오늘" 결합을 정확히 합니다 — sample_n으로 폴백하면 K_MPH는 근사가 됩니다.
 :::
 
-### K_CRANE_Q — 야드 핸드오버 대기 (숨김)
+### K_RTG_Q — 야드 핸드오버 대기 (숨김)
 
 #### ① 소스 · ② 가공
 
@@ -310,12 +310,12 @@ k_crane_q_avg_sec = AVG(crane_q_sec WHERE 0..1800)  -- ARMGC=RTG, 음수/30분�
 
 대상: `raw_k_crane_q_daily` · PK `(work_date, jobtype)` (`k_crane_q_daily.rs`; 시간별은 `e5`→`raw_k_crane_q_hour`). 롤업: `value = round(sum(k_crane_q_avg_sec*in_range)/nullif(sum(in_range),0), 1)`, `sample_n = sum(in_range)`, 가중치=`in_range`.
 
-:::caution[K_QC_Q ≠ K_CRANE_Q]
-**K_QC_Q**(표시) = MCH_OPERATION의 안벽 크레인(C##) 유휴 갭 = "QC가 트럭을 기다림". **K_CRANE_Q**(숨김) = JOB_ORDER_HISTORY의 `ACTV_DT−YT_DIS_DT` = "TT가 야드 핸드오버를 기다림"(ARMGC=RTG). 서로 다른 대기입니다.
+:::caution[K_QC_Q ≠ K_RTG_Q]
+**K_QC_Q**(표시) = MCH_OPERATION의 안벽 크레인(C##) 유휴 갭 = "QC가 트럭을 기다림". **K_RTG_Q**(숨김) = JOB_ORDER_HISTORY의 `ACTV_DT−YT_DIS_DT` = "TT가 야드 핸드오버를 기다림"(ARMGC=RTG). 서로 다른 대기입니다.
 :::
 
 :::note[정리 — 분자·분모 보존의 일관성]
-6개 표시 KPI는 모두 **가중치(=진짜 분모)**를 `raw_*`와 `kpi_shift.agg_weight`에 보존합니다: K_EMPTY=jobs, K_EMPTY_R=Σ미터, K_CYCLE=jobs, K_MPH=active_hours, K_QC_Q=idle_periods, K_CRANE_Q=in_range. 덕분에 일·주·월 어떤 구간도 `Σ(value·weight)/Σweight`로 정확히 결합되고(§4), K_UTIL만 avg-of-ratios라 `util_tt_shift`로 재조합합니다.
+6개 표시 KPI는 모두 **가중치(=진짜 분모)**를 `raw_*`와 `kpi_shift.agg_weight`에 보존합니다: K_EMPTY=jobs, K_EMPTY_R=Σ미터, K_CYCLE=jobs, K_MPH=active_hours, K_QC_Q=idle_periods, K_RTG_Q=in_range. 덕분에 일·주·월 어떤 구간도 `Σ(value·weight)/Σweight`로 정확히 결합되고(§4), K_UTIL만 avg-of-ratios라 `util_tt_shift`로 재조합합니다.
 :::
 
 ## 3계층 — 원천에서 화면까지

@@ -100,13 +100,13 @@ pub async fn aggregate(pool: &PgPool, from: NaiveDate, to: NaiveDate) -> Result<
                FROM raw_k_tt_cycle WHERE snapshot_date BETWEEN $1 AND $2", from, to).await?;
         m.insert("K_CYCLE_LD", finish(num, den, nr, 1, 1.0));
     }
-    // K_CRANE_Q (s): weight = in_range.
+    // K_RTG_Q (s): weight = in_range.
     {
         let (num, den, nr) = raw_nd(pool,
             "SELECT sum(k_crane_q_avg_sec*in_range)::float8, sum(in_range)::float8, sum(in_range)::int8
                FROM raw_k_crane_q_daily WHERE work_date BETWEEN $1 AND $2", from, raw_to).await?;
-        let (vw, w, nt) = t("K_CRANE_Q");
-        m.insert("K_CRANE_Q", finish(num + vw, den + w, nr + nt, 1, 1.0));
+        let (vw, w, nt) = t("K_RTG_Q");
+        m.insert("K_RTG_Q", finish(num + vw, den + w, nr + nt, 1, 1.0));
     }
     // K_MPH (move/hr): weight = active_hours. N = distinct voyages (raw) + today voyages.
     {

@@ -46,10 +46,10 @@ async fn rollup_today_from_shifts_against_pg() {
     // K_MPH: weight ≠ sample_n. (20·10 + 30·30)/40 = 27.5
     seed_shift(&pool, date, "D", "K_MPH", 20.0, 5, Some(10.0)).await;
     seed_shift(&pool, date, "E", "K_MPH", 30.0, 7, Some(30.0)).await;
-    // K_CRANE_Q: COALESCE fallback — D has NULL weight, falls back to sample_n=100.
+    // K_RTG_Q: COALESCE fallback — D has NULL weight, falls back to sample_n=100.
     //            (500·100 + 700·300)/400 = 650
-    seed_shift(&pool, date, "D", "K_CRANE_Q", 500.0, 100, None).await;
-    seed_shift(&pool, date, "E", "K_CRANE_Q", 700.0, 300, Some(300.0)).await;
+    seed_shift(&pool, date, "D", "K_RTG_Q", 500.0, 100, None).await;
+    seed_shift(&pool, date, "E", "K_RTG_Q", 700.0, 300, Some(300.0)).await;
     // K_UTIL: avg-of-ratios — must be EXCLUDED from the rollup entirely.
     seed_shift(&pool, date, "D", "K_UTIL", 90.0, 50, None).await;
     seed_shift(&pool, date, "E", "K_UTIL", 80.0, 50, None).await;
@@ -64,8 +64,8 @@ async fn rollup_today_from_shifts_against_pg() {
     let (mph, _, _) = day_value(&pool, "K_MPH", date).await.expect("K_MPH row");
     assert!((mph - 27.5).abs() < 1e-3, "K_MPH={mph}");
 
-    let (crane, _, _) = day_value(&pool, "K_CRANE_Q", date).await.expect("K_CRANE_Q row");
-    assert!((crane - 650.0).abs() < 1e-3, "K_CRANE_Q={crane}");
+    let (crane, _, _) = day_value(&pool, "K_RTG_Q", date).await.expect("K_RTG_Q row");
+    assert!((crane - 650.0).abs() < 1e-3, "K_RTG_Q={crane}");
 
     assert!(day_value(&pool, "K_UTIL", date).await.is_none(), "K_UTIL must be excluded from rollup");
 

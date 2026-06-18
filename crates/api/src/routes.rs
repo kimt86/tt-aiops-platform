@@ -50,7 +50,7 @@ async fn resolve_as_of(pool: &PgPool, given: Option<String>) -> Result<Option<Na
 
 // Display order (KPI cards on the dashboard): empty dist → empty ratio → TT cycle
 // → TT utilization → QC wait → QC productivity (MPH).
-// K_CRANE_Q (yard handover wait) is hidden for now — still extracted, just not shown.
+// K_RTG_Q (yard handover wait) is hidden for now — still extracted, just not shown.
 pub(crate) const ORDER: [KpiKey; 6] = [
     KpiKey::KEmpty,
     KpiKey::KEmptyR,
