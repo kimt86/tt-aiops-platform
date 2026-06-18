@@ -1712,6 +1712,105 @@ pub fn spawn_density_sampler(lm: Arc<LiveMap>, pool: PgPool) {
     });
 }
 
+/// K_QC_TT_WAIT_GPS history: every 30s snapshot live QC starvation (QC PLC idle + no truck) into
+/// qc_wait_sample, logged TWO ways for reliability comparison — topos1-code based (current live
+/// signal) vs GPS-distance based (no fresh TT within CRANE_ARRIVE_M of the crane). If the topos
+/// count runs well above the GPS count, the live value is inflated by dropped topos1 fields.
+pub fn spawn_qc_wait_logger(lm: Arc<LiveMap>, pool: PgPool) {
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(Duration::from_secs(30));
+        let mut tick = 0u64;
+        loop {
+            ticker.tick().await;
+            tick += 1;
+            if !lm.connected.load(Ordering::Relaxed) {
+                continue;
+            }
+            let now = Utc::now().timestamp_millis();
+            let (working, st, wt, sg, wg, sb, pos_known) = {
+                let map = lm.devices.read().await;
+                let plc = lm.plc.read().await;
+                let centroids = lm.centroids.read().await;
+                // crane live GPS positions (C/M/Z, fresh)
+                let cranes: HashMap<&str, (f64, f64)> = map
+                    .iter()
+                    .filter(|(_, p)| matches!(p.cls.as_str(), "C" | "M" | "Z") && (now - p.last_seen_ms) / 1000 <= STALE_AFTER_S)
+                    .map(|(id, p)| (id.as_str(), (p.lat, p.lon)))
+                    .collect();
+                // topos1-based "this crane has a truck" (current live logic)
+                let cranes_with_tt: std::collections::HashSet<&str> = map
+                    .values()
+                    .filter(|p| p.cls == "TT" && p.arrival.as_deref() == Some("ARRIVED"))
+                    .filter_map(|p| p.topos1.as_deref())
+                    .filter(|t| is_crane_code(t))
+                    .collect();
+                // fresh TT positions for the GPS-distance check
+                let tt_pos: Vec<(f64, f64)> = map
+                    .values()
+                    .filter(|p| p.cls == "TT" && (now - p.last_seen_ms) / 1000 <= STALE_AFTER_S)
+                    .map(|p| (p.lat, p.lon))
+                    .collect();
+                let (mut working, mut st, mut wt, mut sg, mut wg, mut sb, mut pos_known) =
+                    (0i64, 0i64, 0i64, 0i64, 0i64, 0i64, 0i64);
+                for (id, c) in plc.iter() {
+                    let is_working = c.moves.iter().any(|&t| now - t <= MOVE_WINDOW_MS);
+                    let fresh = (now - c.last_seen_ms) / 1000 <= STALE_AFTER_S;
+                    if !is_working || !fresh || c.last_move_ms == 0 {
+                        continue;
+                    }
+                    working += 1;
+                    // crane position: prefer live crane GPS (current gantry), else learned centroid.
+                    // Only cranes with a known position are scored, so topos vs gps share a denominator.
+                    let Some(cp) = cranes.get(id.as_str()).copied().or_else(|| centroids.get(id).map(|c| (c.lat, c.lon))) else {
+                        continue;
+                    };
+                    pos_known += 1;
+                    let idle_s = (now - c.last_move_ms) / 1000;
+                    if idle_s <= QCQ_IDLE_S {
+                        continue;
+                    }
+                    // (1) topos1-based starvation = current live signal (no TT assigned to this crane)
+                    let topos_starv = !cranes_with_tt.contains(id.as_str());
+                    // (2) GPS-distance starvation = no fresh TT within CRANE_ARRIVE_M of the crane
+                    let gps_starv = !tt_pos.iter().any(|&t| dist_m(cp, t) <= CRANE_ARRIVE_M);
+                    if topos_starv {
+                        st += 1;
+                        wt += idle_s;
+                    }
+                    if gps_starv {
+                        sg += 1;
+                        wg += idle_s;
+                    }
+                    if topos_starv && gps_starv {
+                        sb += 1;
+                    }
+                }
+                (working, st, wt, sg, wg, sb, pos_known)
+            };
+            let wt_avg = (st > 0).then(|| wt / st);
+            let wg_avg = (sg > 0).then(|| wg / sg);
+            let _ = sqlx::query(
+                "INSERT INTO qc_wait_sample (ts, working_qc, starving_topos, wait_topos_s, starving_gps, wait_gps_s, starving_both, pos_known_qc)
+                 VALUES (now(), $1, $2, $3, $4, $5, $6, $7) ON CONFLICT (ts) DO NOTHING",
+            )
+            .bind(working)
+            .bind(st)
+            .bind(wt_avg)
+            .bind(sg)
+            .bind(wg_avg)
+            .bind(sb)
+            .bind(pos_known)
+            .execute(&pool)
+            .await;
+            if tick % 20 == 0 {
+                let _ = sqlx::query("DELETE FROM qc_wait_sample WHERE ts < now() - interval '14 days'")
+                    .execute(&pool)
+                    .await;
+            }
+        }
+    });
+}
+
 pub fn spawn_travel_aggregator(pool: PgPool) {
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(Duration::from_secs(300));
