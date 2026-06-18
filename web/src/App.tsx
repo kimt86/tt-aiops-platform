@@ -111,19 +111,25 @@ function KpiExtras({ extras }: { extras?: KExtra[] }) {
   );
 }
 
-function SmallCard({ c, trend, lang, extras }: { c: KpiCard; trend?: TrendResponse; lang: Lang; extras?: KExtra[] }) {
+function SmallCard({ c, trend, lang, ws, extras }: { c: KpiCard; trend?: TrendResponse; lang: Lang; ws?: WsLive | null; extras?: KExtra[] }) {
   const s = t(lang);
+  const ko = lang === "ko";
   const imp = isImprovement(c);
   const dl = deltaLabel(c);
+  // K_QC_TT_WAIT card: secondary = live GPS-verified QC starvation (K_QC_TT_WAIT_GPS)
+  const gpsAux = c.key === "K_QC_TT_WAIT" && ws?.connected
+    ? ((ws.qc_starving ?? 0) > 0 ? `${ws.qc_starving}${ko ? "대" : ""} · ${ws.qc_wait_live_s}s` : (ko ? "없음" : "none"))
+    : null;
   return (
     <div className={`kpi${c.tier === "PRIMARY" ? " primary" : ""}`}>
-      <div className="label">{name(c, lang)}<SourceBadge src="tos" ko={lang === "ko"} /></div>
+      <div className="label">{name(c, lang)}<SourceBadge src={gpsAux != null ? "dual" : "tos"} ko={ko} /></div>
       <div className="vrow">
         <span className="val">{mainValue(c.key, c.value, c.unit).val}</span>
         <span className="unit">{mainValue(c.key, c.value, c.unit).unit}</span>
       </div>
       <KpiExtras extras={extras} />
-      {c.key === "K_CYCLE" && <CycleSplit ds={c.ds_cycle_s} ld={c.ld_cycle_s} ko={lang === "ko"} />}
+      {gpsAux != null && <WsAux val={gpsAux} title={ko ? "K_QC_TT_WAIT_GPS — 지금 트럭 기다리는(유휴·무트럭) 가동 QC 수 · 평균 대기 (GPS 검증)" : "K_QC_TT_WAIT_GPS — QC starving now (idle, no truck): count · avg wait (GPS)"} ko={ko} />}
+      {c.key === "K_CYCLE" && <CycleSplit ds={c.ds_cycle_s} ld={c.ld_cycle_s} ko={ko} />}
       {dl ? (
         <div className={`delta ${imp ? "good" : "bad"}`}>{dl}<span className="vs">{s.vsBaseline}</span></div>
       ) : (
@@ -243,8 +249,8 @@ function cardSrc(key: string, w: WsLive | null, ko: boolean): CardSrc {
   if (!w || !w.connected) return { kind: "tos" };
   if (key === "K_MPH" && w.crane_mph_live != null)
     return { kind: "dual", auxVal: `${w.crane_mph_live}/h`, auxTitle: ko ? "실시간 QC 평균 처리량 (PLC 사이클)" : "live avg QC throughput (PLC cycles)" };
-  if (key === "K_QC_NOMOVE")
-    return { kind: "dual", auxVal: (w.qc_starving ?? 0) > 0 ? `${w.qc_starving}${ko ? "대" : ""} · ${w.qc_wait_live_s}s` : (ko ? "없음" : "none"), auxTitle: ko ? "지금 트럭을 기다리는(유휴·무트럭) 가동 QC 수 · 평균 대기 (websocket)" : "quay cranes waiting for a truck now — count · avg wait (websocket)" };
+  if (key === "K_QC_TT_WAIT")
+    return { kind: "dual", auxVal: (w.qc_starving ?? 0) > 0 ? `${w.qc_starving}${ko ? "대" : ""} · ${w.qc_wait_live_s}s` : (ko ? "없음" : "none"), auxTitle: ko ? "K_QC_TT_WAIT_GPS — 지금 트럭을 기다리는(유휴·무트럭) 가동 QC 수 · 평균 대기 (GPS 검증)" : "K_QC_TT_WAIT_GPS — quay cranes starving now (idle, no truck): count · avg wait (GPS-verified)" };
   return { kind: "tos" };
 }
 
@@ -486,6 +492,7 @@ function QcGrid({ rows, lang }: { rows: QcRow[]; lang: Lang }) {
 function HistoryTab({ lang }: { lang: Lang }) {
   const [period, setPeriod] = useState<string>("last7");
   const data = useData(period);
+  const ws = useWsLive(); // for the K_QC_TT_WAIT card's live GPS-verified secondary (K_QC_TT_WAIT_GPS)
   const s = t(lang);
   const kpis = data.kpis?.kpis ?? [];
   return (
@@ -514,7 +521,7 @@ function HistoryTab({ lang }: { lang: Lang }) {
           <>
             <div className="section-title">{s.headline}</div>
             <div className="grid kpi-strip">
-              {kpis.map((c) => <SmallCard key={c.key} c={c} trend={data.trends[c.key]} lang={lang} extras={distanceExtras(kpis, c.key, lang)} />)}
+              {kpis.map((c) => <SmallCard key={c.key} c={c} trend={data.trends[c.key]} lang={lang} ws={ws} extras={distanceExtras(kpis, c.key, lang)} />)}
             </div>
 
             <div className="section-title" style={{ marginTop: 18 }}>{s.qcBreakdown}<span className="section-sub">{data.breakdown?.as_of}</span></div>
