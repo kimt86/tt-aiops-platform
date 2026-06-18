@@ -324,11 +324,12 @@ function QcCol({ q, lang, ttState, working, mph, pastN, futureN }: { q: WpQc; la
   const past = pastN > 0 ? doneList.slice(-pastN) : [];
   const future = notDone.slice(0, futureN);
   const futureMore = notDone.length - future.length;
-  // trucks currently serving this QC — SAME GPS definition as the top "Trucks Assigned per QC"
-  // card (distinct devices whose destination topos1 = this crane, non-idle), so the two agree.
-  // Counting q.moves would double-count twin-lift (1 truck = 2 container moves) and include
-  // DS trucks already discharged (carrying to the yard), which the top card excludes.
-  const trucked = [...ttState.values()].filter((d) => d.topos1 === q.qc && d.dispatch && d.dispatch !== "idle").length;
+  // trucks assigned to this QC and not finished — DISTINCT trucks (ytno), excluding DS trucks
+  // already discharged (received + leaving = done with the QC). Distinct ⇒ twin-lift (1 truck, 2
+  // container moves) counts once. Same definition as the top "Trucks Assigned per QC" card → match.
+  const truckedSet = new Set<string>();
+  for (const m of q.moves) if (assigned(m) && !discharged(m)) truckedSet.add((m.ytno as string).trim());
+  const trucked = truckedSet.size;
 
   const row = (m: WpMove, role: "past" | "now" | "future") => {
     const tt = assigned(m) ? ttState.get((m.ytno as string).trim()) : undefined;
@@ -387,18 +388,20 @@ function qcAssignColor(n: number): string {
   if (n <= 2) return "#f59e0b";    // thin
   return "#22c55e";                // healthy
 }
-function QcAssignedCard({ lang, wp, snap }: { lang: Lang; wp: WorkpoolResponse | null; snap: Snap | null }) {
-  // Trucks currently SERVING each QC, from live GPS: a truck whose destination (topos1) is this
-  // crane and that is not idle — i.e. heading to or at the QC. Trucks that already finished their
-  // QC bit (DS: discharged, now carrying to the yard → topos1 = a block; LD: loaded → gone/idle)
-  // have moved their destination off the QC, so they drop out automatically (no double-count).
-  const inbound = new Map<string, number>();
-  for (const d of (snap?.devices ?? []) as LiveTT[]) {
-    if (d.cls !== "TT" || !d.topos1 || !d.dispatch || d.dispatch === "idle") continue;
-    inbound.set(d.topos1, (inbound.get(d.topos1) ?? 0) + 1);
-  }
+function QcAssignedCard({ lang, wp }: { lang: Lang; wp: WorkpoolResponse | null }) {
+  // Trucks assigned to each QC and NOT finished — distinct trucks (ytno), excluding DS trucks
+  // already discharged (received the box and left = done with the QC). Distinct ⇒ twin-lift (1
+  // truck = 2 container moves) counts once. SAME definition as the QC Work Status header → match.
   const qcs = (wp?.qcs ?? [])
-    .map((q) => ({ qc: q.qc, count: inbound.get(q.qc) ?? 0, moves: q.active_moves, vessel: q.vessels[0] ?? "" }))
+    .map((q) => {
+      const t = new Set<string>();
+      for (const m of q.moves) {
+        if (!m.ytno || !m.ytno.trim()) continue;
+        if (m.jobtype === "DS" && m.actv_ts) continue; // discharged → truck left, done with QC
+        t.add(m.ytno.trim());
+      }
+      return { qc: q.qc, count: t.size, moves: q.active_moves, vessel: q.vessels[0] ?? "" };
+    })
     .filter((x) => x.moves > 0 || x.count > 0) // only working QCs (a 0 here = real starvation)
     .sort((a, b) => a.qc.localeCompare(b.qc, undefined, { numeric: true }));
   const totalTrucks = qcs.reduce((a, x) => a + x.count, 0);
@@ -408,7 +411,7 @@ function QcAssignedCard({ lang, wp, snap }: { lang: Lang; wp: WorkpoolResponse |
     <section className="tcard">
       <div className="tcard-head">
         <h3>{ko(lang) ? "QC별 배차 현황" : "Trucks Assigned per QC"}
-          <span className="h3-sub">{ko(lang) ? "각 QC로 향하는·있는 트럭 (작업 끝나 이탈한 트럭 제외 · 실시간 GPS)" : "trucks heading to / at each quay crane — finished trucks excluded (live GPS)"}</span></h3>
+          <span className="h3-sub">{ko(lang) ? "각 QC에 배차된 트럭 수 (양하완료·이탈 트럭 제외 · 트윈 중복 제거)" : "trucks assigned to each quay crane — finished/twin de-duped"}</span></h3>
         <div className="head-sub">
           <span className="muted">{ko(lang) ? `가동 QC ${qcs.length} · 배차 ${totalTrucks}대` : `${qcs.length} QCs · ${totalTrucks} trucks`}</span>
           {starved > 0 && <span style={{ color: "#ef4444", marginLeft: 8 }}>{ko(lang) ? `· 굶주림 ${starved}` : `· ${starved} starved`}</span>}
@@ -446,7 +449,7 @@ export default function TtPage({ lang }: { lang: Lang }) {
   return (
     <div className="content tt-page tt-2col">
       <div className="tt-col tt-col-qc">
-        <QcAssignedCard lang={lang} wp={wp} snap={snap} />
+        <QcAssignedCard lang={lang} wp={wp} />
         <LiveQcSequence lang={lang} wp={wp} snap={snap} />
       </div>
       <div className="tt-col tt-col-tt">
