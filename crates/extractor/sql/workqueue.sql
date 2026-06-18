@@ -1,8 +1,9 @@
 -- Live per-QC work-queue plan (JOB_QUEUE_SCHEDULE). Each row is one (crane, vessel,
 -- queue) chunk the QC works in JOB_QUE_SEQ order; TOTALQTY/COMPQTY give progress.
--- Bounded to currently-relevant queues: not deleted, not finished, touched within ~1
--- day. Small result (tens of rows). No date token: this is the live state right now.
--- JOB_QUE_ACTIVEYN is unreliable (NULL in practice) so it is NOT used as a filter.
+-- Bounded to currently-relevant queues: not deleted, touched within ~1 day, and either
+-- not-yet-finished OR finished within the last ~6h (so the UI can show the last few
+-- COMPLETED bays before NOW). Small result (tens-to-low-hundreds). No date token: live
+-- state right now. JOB_QUE_ACTIVEYN is unreliable (NULL in practice) so NOT a filter.
 SELECT
   s.JOB_QUE_CRANENO   AS qc,
   s.JOB_QUE_VESSEL    AS vessel,
@@ -16,6 +17,7 @@ SELECT
 FROM TOSADM.JOB_QUEUE_SCHEDULE s
 WHERE NVL(s.DELT_FLG, 'N') <> 'Y'
   AND s.JOB_QUE_CRANENO IS NOT NULL
-  AND NVL(s.JOB_QUE_TOTALQTY, 0) > NVL(s.JOB_QUE_COMPQTY, 0)
   AND s.UPD_DT >= TRUNC(SYSDATE) - 1
+  AND ( NVL(s.JOB_QUE_TOTALQTY, 0) > NVL(s.JOB_QUE_COMPQTY, 0)
+        OR s.UPD_DT >= SYSDATE - 0.25 )
 ORDER BY s.JOB_QUE_CRANENO, s.JOB_QUE_SEQ
