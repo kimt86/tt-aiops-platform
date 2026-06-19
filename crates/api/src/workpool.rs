@@ -322,6 +322,10 @@ pub async fn workpool(State(pool): State<PgPool>) -> Result<Json<WorkpoolOut>, A
                 .filter_map(|(qc, jt, ms)| ms.map(|ms| ((qc, if jt == "LD" { 'L' } else { 'D' }), ms as f64)))
                 .collect();
         let now = Utc::now();
+        // work-ETA is a FIXED future instant (when the QC reaches a bay); anchor it to the data
+        // snapshot (as_of), NOT now — else every poll re-anchors to a later "now" and the countdown
+        // jumps back up ~poll-interval each refresh. (slack/deadline below stay now/ESTDEP-anchored.)
+        let eta_anchor = as_of.unwrap_or(now);
         const DS_MOVE_S: f64 = 90.0;
         const LD_MOVE_S: f64 = 110.0;
         const BAY_CHANGE_S: f64 = 180.0;   // gantry travel between bays (extra)
@@ -376,7 +380,7 @@ pub async fn workpool(State(pool): State<PgPool>) -> Result<Json<WorkpoolOut>, A
                     qc.queues[qi].deadline_ts = Some(dep - chrono::Duration::seconds(cum_after as i64));
                     // when the QC starts this bay = now + work scheduled before it
                     let before = (total - cum_after - procs[k]).max(0.0);
-                    qc.queues[qi].work_eta_ts = Some(now + chrono::Duration::seconds(before as i64));
+                    qc.queues[qi].work_eta_ts = Some(eta_anchor + chrono::Duration::seconds(before as i64));
                     qc.queues[qi].proc_s = Some(procs[k] as i64);
                     cum_after += procs[k];
                 }
