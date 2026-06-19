@@ -304,6 +304,15 @@ pub async fn workpool(State(pool): State<PgPool>) -> Result<Json<WorkpoolOut>, A
                    FROM live_workpool GROUP BY vessel")
                 .fetch_all(&pool).await.unwrap_or_default()
                 .into_iter().filter_map(|(v, f)| f.map(|f| (v, f))).collect();
+        // per-crane per-jobtype median move time (rolling 3-day, from learn_qc_move_time); key
+        // ('D'=discharge,'L'=load). Falls back to the jobtype constant when a crane has no sample.
+        let move_time: std::collections::HashMap<(String, char), f64> =
+            sqlx::query_as::<_, (String, String, Option<i32>)>(
+                "SELECT qc, jobtype, med_sec FROM learn_qc_move_time WHERE med_sec IS NOT NULL")
+                .fetch_all(&pool).await.unwrap_or_default()
+                .into_iter()
+                .filter_map(|(qc, jt, ms)| ms.map(|ms| ((qc, if jt == "LD" { 'L' } else { 'D' }), ms as f64)))
+                .collect();
         let now = Utc::now();
         const DS_MOVE_S: f64 = 90.0;
         const LD_MOVE_S: f64 = 110.0;
@@ -320,6 +329,7 @@ pub async fn workpool(State(pool): State<PgPool>) -> Result<Json<WorkpoolOut>, A
             Some((qn[..dash - 1].to_string(), dh, job))
         }
         for qc in &mut qcs {
+            let qc_id = qc.qc.clone();
             let mut by_vessel: BTreeMap<String, Vec<usize>> = BTreeMap::new();
             for (i, q) in qc.queues.iter().enumerate() {
                 by_vessel.entry(q.vessel.clone()).or_default().push(i);
@@ -334,7 +344,10 @@ pub async fn workpool(State(pool): State<PgPool>) -> Result<Json<WorkpoolOut>, A
                 for &i in &idxs {
                     let cur = parse_q(&qc.queues[i].queuename);
                     let job = cur.as_ref().map(|c| c.2).unwrap_or('D');
-                    let move_s = if job == 'L' { LD_MOVE_S } else { DS_MOVE_S };
+                    let move_s = move_time
+                        .get(&(qc_id.clone(), job))
+                        .copied()
+                        .unwrap_or(if job == 'L' { LD_MOVE_S } else { DS_MOVE_S });
                     let mut p = (qc.queues[i].remaining.max(0) as f64) * move_factor * move_s;
                     if let (Some((pb, pdh, _)), Some((cb, cdh, _))) = (&prev, &cur) {
                         if pb != cb {

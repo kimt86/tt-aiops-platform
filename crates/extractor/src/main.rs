@@ -221,6 +221,7 @@ async fn run_kpi(pool: &sqlx::PgPool, kpi: &str, date: NaiveDate, target: &str) 
         "k_util_crane" => step!("k_util_crane", kpis::k_util_crane::extract(pool, date, target)),
         "k_mph_realtime" => step!("k_mph_realtime", kpis::k_mph_realtime::extract(pool, date, target)),
         "k_qc_q" => step!("k_qc_q", kpis::k_qc_q::extract(pool, date, target)),
+        "qc_move_time" => step!("qc_move_time", kpis::qc_move_time::extract(pool, date, target)),
         "k_tt_cycle" => step!("k_tt_cycle", kpis::k_tt_cycle::extract(pool, date, target)),
         "k_mph_voyage" => step!("k_mph_voyage", kpis::k_mph_voyage::extract(pool, date, target)),
         "k_empty" => step!("k_empty", kpis::k_empty::extract(pool, date, target)),
@@ -233,6 +234,7 @@ async fn run_kpi(pool: &sqlx::PgPool, kpi: &str, date: NaiveDate, target: &str) 
             step!("k_util_crane", kpis::k_util_crane::extract(pool, date, target));
             step!("k_mph_realtime", kpis::k_mph_realtime::extract(pool, date, target));
             step!("k_qc_q", kpis::k_qc_q::extract(pool, date, target));
+            step!("qc_move_time", kpis::qc_move_time::extract(pool, date, target));
             step!("k_tt_cycle", kpis::k_tt_cycle::extract(pool, date, target));
             step!("k_mph_voyage", kpis::k_mph_voyage::extract(pool, date, target));
             // heavier JOB_ORDER_HISTORY range scans
