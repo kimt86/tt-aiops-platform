@@ -151,6 +151,9 @@ body {
 .qca-cell .qca-n { font-family: "Manrope", sans-serif; font-size: 26px; font-weight: 800; line-height: 1.1; letter-spacing: -1px; }
 .qca-cell .qca-n small { font-size: 11px; font-weight: 600; color: var(--text-mute); margin-left: 1px; }
 .qca-cell .qca-vsl { font-size: 9.5px; color: var(--text-mute); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.qca-cell .qca-light { font-size: 10px; }
+.qca-cell.clickable { cursor: pointer; transition: border-color 0.12s, background 0.12s; }
+.qca-cell.clickable:hover { border-color: var(--accent, #60a5fa); background: var(--surface-3); }
 /* vessel grouping headings (per-QC card + work-sequence card) */
 .qc-vgroup { margin-bottom: 14px; }
 /* per-QC card: pack vessel groups across the row (flex-wrap), sized to content,

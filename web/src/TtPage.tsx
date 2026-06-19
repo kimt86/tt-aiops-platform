@@ -433,7 +433,7 @@ function QcCol({ q, lang, ttState, working, mph, maxN, showDl }: { q: WpQc; lang
   };
 
   return (
-    <div className="qc-col">
+    <div className="qc-col" id={`qccol-${q.qc}`}>
       <div className="qc-head">
         <span className={`id ${working ? "busy" : "idle"}`}><span className="dot" />{q.qc}
           <span className="qc-vessel">{q.vessels.join(" · ") || "—"}</span></span>
@@ -489,55 +489,62 @@ function qcAssignColor(n: number): string {
   if (n <= 2) return "#f59e0b";    // thin
   return "#22c55e";                // healthy
 }
-function QcAssignedCard({ lang, wp }: { lang: Lang; wp: WorkpoolResponse | null }) {
-  // Trucks assigned to each QC and NOT finished — distinct trucks (ytno), excluding DS trucks
-  // already discharged (received the box and left = done with the QC). Distinct ⇒ twin-lift (1
-  // truck = 2 container moves) counts once. SAME definition as the QC Work Status header → match.
+// SIMPLE summary (top): per-QC at-a-glance — vessel departure, live work rate, dispatch urgency
+// (slack light), assigned trucks. Click a cell to jump to that QC's detailed card below.
+function QcAssignedCard({ lang, wp, snap }: { lang: Lang; wp: WorkpoolResponse | null; snap: Snap | null }) {
+  const ko_ = ko(lang);
+  const mphByQc = new Map<string, number>();
+  for (const d of snap?.devices ?? []) if (d.plc?.mph != null && d.plc.mph > 0) mphByQc.set(d.id, d.plc.mph);
+  // distinct assigned trucks per QC (twin de-duped, discharged DS excluded) — matches the detail card
   const qcs = (wp?.qcs ?? [])
     .map((q) => {
       const t = new Set<string>();
       for (const m of q.moves) {
         if (!m.ytno || !m.ytno.trim()) continue;
-        if (m.jobtype === "DS" && m.actv_ts) continue; // discharged → truck left, done with QC
+        if (m.jobtype === "DS" && m.actv_ts) continue;
         t.add(m.ytno.trim());
       }
-      return { qc: q.qc, count: t.size, moves: q.active_moves, vessel: q.vessels[0] ?? "" };
+      return { qc: q.qc, count: t.size, moves: q.active_moves, vessel: q.vessels[0] ?? "", slack: q.slack_s ?? null, estdep: q.estdep_ts ?? null, mph: mphByQc.get(q.qc) ?? null };
     })
-    .filter((x) => x.moves > 0 || x.count > 0) // only working QCs (a 0 here = real starvation)
+    .filter((x) => x.moves > 0 || x.count > 0)
     .sort((a, b) => a.qc.localeCompare(b.qc, undefined, { numeric: true }));
   const totalTrucks = qcs.reduce((a, x) => a + x.count, 0);
-  const starved = qcs.filter((x) => x.count === 0).length;
+  const atRisk = qcs.filter((x) => x.slack != null && x.slack < 0).length;
   const groups = groupByVessel(qcs, (x) => x.vessel || "—", (x) => x.qc);
+  const light = (slack: number | null) => slack == null ? "" : slack < 0 ? "🔴" : slack < 1800 ? "🟡" : "🟢";
+  const jump = (qc: string) => document.getElementById(`qccol-${qc}`)?.scrollIntoView({ behavior: "smooth", block: "center" });
   return (
     <section className="tcard">
       <div className="tcard-head">
-        <h3>{ko(lang) ? "QC별 배차 현황" : "Trucks Assigned per QC"}
-          <span className="h3-sub">{ko(lang) ? "각 QC에 배차된 트럭 수 (양하완료·이탈 트럭 제외 · 트윈 중복 제거)" : "trucks assigned to each quay crane — finished/twin de-duped"}</span></h3>
+        <h3>{ko_ ? "QC 간단 현황" : "QC Summary"}
+          <span className="h3-sub">{ko_ ? "선박 출항 · 작업속도 · 배차 긴급도(🟢🟡🔴) · 배차 대수 — 클릭하면 아래 상세로 이동" : "departure · work rate · dispatch urgency · trucks — click to jump to detail"}</span></h3>
         <div className="head-sub">
-          <span className="muted">{ko(lang) ? `가동 QC ${qcs.length} · 배차 ${totalTrucks}대` : `${qcs.length} QCs · ${totalTrucks} trucks`}</span>
-          {starved > 0 && <span style={{ color: "#ef4444", marginLeft: 8 }}>{ko(lang) ? `· 굶주림 ${starved}` : `· ${starved} starved`}</span>}
+          <span className="muted">{ko_ ? `가동 QC ${qcs.length} · 배차 ${totalTrucks}대` : `${qcs.length} QCs · ${totalTrucks} trucks`}</span>
+          {atRisk > 0 && <span style={{ color: "#ef4444", marginLeft: 8 }}>{ko_ ? `· 🔴 지연위험 ${atRisk}` : `· 🔴 ${atRisk} at risk`}</span>}
         </div>
       </div>
       <div className="tcard-body">
-        {qcs.length === 0 && <div className="lvp-empty">{ko(lang) ? "가동 중인 QC 없음" : "no active QC"}</div>}
+        {qcs.length === 0 && <div className="lvp-empty">{ko_ ? "가동 중인 QC 없음" : "no active QC"}</div>}
         <div className="qca-cols">
-          {groups.map((g) => {
-            const vtrucks = g.items.reduce((a, x) => a + x.count, 0);
-            return (
-              <div className="qca-vgroup" key={g.vessel}>
-                <div className="qc-vgroup-h"><span className="vsl">{g.vessel}</span><span className="qc-vgroup-n">{g.items.length} QC · {vtrucks}{ko(lang) ? "대" : ""}</span></div>
-                <div className="qca-grid">
-                  {g.items.map((x) => (
-                    <div className="qca-cell" key={x.qc} title={`${x.qc} · ${x.vessel} · ${ko(lang) ? `작업 ${x.moves}건` : `${x.moves} moves`}`}>
-                      <div className="qca-qc">{x.qc}</div>
-                      <div className="qca-n" style={{ color: qcAssignColor(x.count) }}>{x.count}<small>{ko(lang) ? "대" : ""}</small></div>
-                      <div className="qca-vsl">{ko(lang) ? `${x.moves}작업` : `${x.moves} mv`}</div>
-                    </div>
-                  ))}
-                </div>
+          {groups.map((g) => (
+            <div className="qca-vgroup" key={g.vessel}>
+              <div className="qc-vgroup-h">
+                <span className="vsl">{g.vessel}</span>
+                {g.items[0]?.estdep && <span className="vgroup-dep" title={ko_ ? "출항 예정시각" : "departure"}>🏁 {ko_ ? "출항" : "dep"} <span className="mono">{dayClockOf(g.items[0].estdep, ko_)}</span></span>}
+                <span className="qc-vgroup-n">{g.items.length} QC</span>
               </div>
-            );
-          })}
+              <div className="qca-grid">
+                {g.items.map((x) => (
+                  <div className="qca-cell clickable" key={x.qc} onClick={() => jump(x.qc)}
+                    title={`${x.qc} · ${x.vessel} — ${ko_ ? "클릭=상세로 이동" : "click for detail"}`}>
+                    <div className="qca-qc">{x.qc} <span className="qca-light">{light(x.slack)}</span></div>
+                    <div className="qca-n" style={{ color: qcAssignColor(x.count) }}>{x.count}<small>{ko_ ? "대" : ""}</small></div>
+                    <div className="qca-vsl">{x.mph != null ? `⚡${x.mph}/h` : (ko_ ? `${x.moves}작업` : `${x.moves} mv`)}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ))}
         </div>
       </div>
     </section>
@@ -550,7 +557,7 @@ export default function TtPage({ lang }: { lang: Lang }) {
   return (
     <div className="content tt-page tt-2col">
       <div className="tt-col tt-col-qc">
-        <QcAssignedCard lang={lang} wp={wp} />
+        <QcAssignedCard lang={lang} wp={wp} snap={snap} />
         <LiveQcSequence lang={lang} wp={wp} snap={snap} />
       </div>
       <div className="tt-col tt-col-tt">
