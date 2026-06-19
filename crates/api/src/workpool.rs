@@ -3,7 +3,8 @@
 //! `live_workpool`) that the extractor refreshes ~every 90s from TOS — the API crate
 //! never touches Oracle. The frontend fuses this with the live websocket PLC/GPS.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::time::Duration;
 
 use axum::{extract::State, Json};
 use chrono::{DateTime, Utc};
@@ -150,6 +151,12 @@ const POOL_CAP: usize = 80;
 
 /// `GET /api/workpool` — the live per-QC work pool (Postgres snapshot, ~90s fresh).
 pub async fn workpool(State(pool): State<PgPool>) -> Result<Json<WorkpoolOut>, AppError> {
+    Ok(Json(build_workpool(pool).await?))
+}
+
+/// The full per-QC work pool + shadow deadline computation, shared by the HTTP handler and the
+/// dispatch-prediction logger (so the logged predictions exactly match what the page computes).
+pub(crate) async fn build_workpool(pool: PgPool) -> Result<WorkpoolOut, AppError> {
     let queues: Vec<QueueRow> = sqlx::query_as(
         "SELECT qc, vessel, voyage, queuename, disload, seq, total_qty, comp_qty
            FROM live_workqueue",
@@ -470,7 +477,7 @@ pub async fn workpool(State(pool): State<PgPool>) -> Result<Json<WorkpoolOut>, A
     // soonest-needed first (active queues first), then larger demand
     candidates.sort_by(|a, b| a.moves_until.cmp(&b.moves_until).then(b.n.cmp(&a.n)));
 
-    Ok(Json(WorkpoolOut {
+    Ok(WorkpoolOut {
         as_of,
         qc_count: qcs.len(),
         active_moves,
@@ -479,5 +486,135 @@ pub async fn workpool(State(pool): State<PgPool>) -> Result<Json<WorkpoolOut>, A
         pool: front,
         candidates,
         candidate_total,
-    }))
+    })
+}
+
+/// SHADOW VALIDATION: log Stage-1 predictions and their ground truth. Every 2 min, for the front
+/// containers of each working QC, record (predicted work-ETA, dispatch deadline, assigned, slack);
+/// mark a row resolved when its container leaves the pool (≈ actually worked). Each container is
+/// logged once while open. Powers the accuracy (resolved vs predicted) + effect (late-unassigned vs
+/// real starvation) evaluation. Display-only data; never drives dispatch.
+pub fn spawn_dispatch_pred_logger(pool: PgPool) {
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(Duration::from_secs(120));
+        let mut tick = 0u64;
+        loop {
+            ticker.tick().await;
+            tick += 1;
+            let Ok(wp) = build_workpool(pool.clone()).await else { continue };
+            // every container we can currently see (across all QCs)
+            let present: Vec<String> = {
+                let mut s: HashSet<String> = HashSet::new();
+                for qc in &wp.qcs {
+                    for m in &qc.moves {
+                        if let Some(c) = &m.contno { s.insert(c.clone()); }
+                    }
+                }
+                s.into_iter().collect()
+            };
+            if present.is_empty() {
+                continue;
+            }
+            // (1a) DS containers are "worked" the instant the QC discharges (actv_ts ≈ QC move
+            // complete, verified ~0s) — resolve those with their actv_ts (exact ground truth). LD
+            // has no such per-container signal, so it falls through to pool-leave (1b, ~lagged).
+            let (mut ds_c, mut ds_t): (Vec<String>, Vec<DateTime<Utc>>) = (Vec::new(), Vec::new());
+            for qc in &wp.qcs {
+                for m in &qc.moves {
+                    if m.jobtype.as_deref() == Some("DS") {
+                        if let (Some(c), Some(a)) = (&m.contno, m.actv_ts) {
+                            ds_c.push(c.clone());
+                            ds_t.push(a);
+                        }
+                    }
+                }
+            }
+            if !ds_c.is_empty() {
+                let _ = sqlx::query(
+                    "UPDATE dispatch_pred_sample d SET resolved_at = v.actv
+                       FROM (SELECT unnest($1::text[]) AS contno, unnest($2::timestamptz[]) AS actv) v
+                      WHERE d.contno = v.contno AND d.resolved_at IS NULL",
+                )
+                .bind(&ds_c)
+                .bind(&ds_t)
+                .execute(&pool)
+                .await;
+            }
+            // (1b) anything else that left the pool = worked (LD, or DS we missed) — now (≈ lagged)
+            let _ = sqlx::query(
+                "UPDATE dispatch_pred_sample SET resolved_at=now() WHERE resolved_at IS NULL AND contno <> ALL($1)",
+            )
+            .bind(&present)
+            .execute(&pool)
+            .await;
+            // (2) containers already logged & still open → skip (log each once)
+            let open: HashSet<String> = sqlx::query_scalar::<_, String>(
+                "SELECT DISTINCT contno FROM dispatch_pred_sample WHERE resolved_at IS NULL",
+            )
+            .fetch_all(&pool)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
+            // (3) log the front (≤6 new) containers of each QC's primary vessel
+            for qc in &wp.qcs {
+                let Some(prim) = qc.vessels.first() else { continue };
+                let mut bay: HashMap<(&str, &str), (DateTime<Utc>, i64, i32)> = HashMap::new();
+                for b in &qc.queues {
+                    if let (Some(eta), Some(p)) = (b.work_eta_ts, b.proc_s) {
+                        bay.insert((b.vessel.as_str(), b.queuename.as_str()), (eta, p, b.remaining.max(1)));
+                    }
+                }
+                let mut fronts: Vec<&MoveOut> = qc
+                    .moves
+                    .iter()
+                    .filter(|m| &m.vessel == prim && m.contno.is_some()
+                        && !(m.jobtype.as_deref() == Some("DS") && m.actv_ts.is_some()))
+                    .collect();
+                fronts.sort_by_key(|m| m.etw_ts.unwrap_or(DateTime::<Utc>::MAX_UTC));
+                let mut idx: HashMap<(&str, &str), i32> = HashMap::new();
+                let mut logged = 0;
+                for m in fronts.into_iter().take(20) {
+                    if logged >= 6 {
+                        break;
+                    }
+                    let key = (m.vessel.as_str(), m.queuename.as_str());
+                    let i = *idx.get(&key).unwrap_or(&0);
+                    idx.insert(key, i + 1);
+                    let contno = m.contno.as_ref().unwrap();
+                    if open.contains(contno) {
+                        continue;
+                    }
+                    let Some(&(eta, p, rem)) = bay.get(&key) else { continue };
+                    let lead: i64 = if m.jobtype.as_deref() == Some("LD") { 1200 } else { 300 };
+                    let work_eta = eta + chrono::Duration::seconds(((i as f64 / rem as f64) * p as f64) as i64);
+                    let deadline = work_eta - chrono::Duration::seconds(lead);
+                    let assigned = m.ytno.as_deref().map(|s| !s.trim().is_empty()).unwrap_or(false);
+                    let _ = sqlx::query(
+                        "INSERT INTO dispatch_pred_sample
+                           (qc, vessel, contno, queuename, jobtype, pred_work_eta_ts, dispatch_deadline_ts, assigned, slack_s, lead_s)
+                         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
+                    )
+                    .bind(&qc.qc)
+                    .bind(&m.vessel)
+                    .bind(contno)
+                    .bind(&m.queuename)
+                    .bind(&m.jobtype)
+                    .bind(work_eta)
+                    .bind(deadline)
+                    .bind(assigned)
+                    .bind(qc.slack_s.map(|v| v as i32))
+                    .bind(lead as i32)
+                    .execute(&pool)
+                    .await;
+                    logged += 1;
+                }
+            }
+            if tick % 30 == 0 {
+                let _ = sqlx::query("DELETE FROM dispatch_pred_sample WHERE logged_at < now() - interval '21 days'")
+                    .execute(&pool)
+                    .await;
+            }
+        }
+    });
 }

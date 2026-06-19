@@ -106,6 +106,7 @@ async fn main() -> anyhow::Result<()> {
     livemap::spawn_soon_idle_logger(livemap.clone(), pool.clone()); // 30s soon_idle 예측 적재(그림자 정확도)
     livemap::spawn_qc_wait_logger(livemap.clone(), pool.clone()); // 30s QC starvation 적재(K_QC_TT_WAIT_GPS, topos vs GPS 비교)
     livemap::spawn_qc_wait_kpi(pool.clone()); // 5min: qc_wait_sample → kpi_daily/shift (K_QC_TT_WAIT_GPS 영속)
+    workpool::spawn_dispatch_pred_logger(pool.clone()); // 2min: 배차 1단계 예측 검증 로그(dispatch_pred_sample)
     let state = AppState { pool, livemap };
 
     let addr = std::env::var("API_ADDR").unwrap_or_else(|_| "127.0.0.1:8080".to_string());
