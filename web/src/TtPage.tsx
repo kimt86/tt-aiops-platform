@@ -372,7 +372,6 @@ function QcCol({ q, lang, ttState, working, mph, maxN, showDl }: { q: WpQc; lang
   const trucked = truckedSet.size;
 
   // SHADOW deadline distribution: per-QC slack (will it finish by departure?) + per-bay deadline.
-  const fmtSlack = (sec: number) => { const a = Math.abs(Math.round(sec / 60)); const t = a >= 60 ? `${Math.floor(a / 60)}시간 ${a % 60}분` : `${a}분`; return (sec < 0 ? "−" : "+") + t; };
   // per-bay work-ETA (when the QC starts the bay) + proc seconds, from the backend. KEYED PER
   // VESSEL: a QC can hold queues for two vessels with colliding queuenames (e.g. both "06H-L"), so
   // keying by name alone would mix them. Per-move dispatch deadline is derived in row().
@@ -442,11 +441,18 @@ function QcCol({ q, lang, ttState, working, mph, maxN, showDl }: { q: WpQc; lang
       </div>
       <div className="qc-progress"><span>{trucked} {k ? "배차중" : "trucked"}{working ? (k ? " · PLC 가동" : " · PLC live") : ""}</span><span className="mono">{done.toLocaleString()} / {tot.toLocaleString()}</span></div>
       <div className="qc-progress-bar"><div className="fill" style={{ width: `${pct}%` }} /></div>
-      {showDl && q.slack_s != null && (
-        <div className="qc-deadline" title={k ? "여유 = 출항(−30분 마무리) − 지금 − 남은 작업. 음수면 출항 전 못 끝낼 위험" : "slack = departure(−30m) − now − remaining work; negative = at risk before departure"}>
-          <span className={`qc-slack ${q.slack_s < 0 ? "late" : q.slack_s < 1800 ? "tight" : "ok"}`}>{k ? "여유" : "slack"} {fmtSlack(q.slack_s)}</span>
-        </div>
-      )}
+      {showDl && q.slack_s != null && (() => {
+        const s = q.slack_s;
+        const light = s < 0 ? "🔴" : s < 1800 ? "🟡" : "🟢"; // 30분 미만이면 빠듯
+        const a = Math.abs(Math.round(s / 60));
+        const hm = `${Math.floor(a / 60)}h ${a % 60}m`;
+        const word = s < 0 ? (k ? "부족" : "short") : (k ? "여유" : "slack");
+        return (
+          <div className="qc-deadline" title={k ? "이 QC가 출항(−30분 마무리) 전에 남은 일을 끝내고도 남는 시간. 🔴=음수(못 끝낼 위험) 🟡=빠듯(30분 미만) 🟢=충분" : "spare time after finishing remaining work before departure(−30m). 🔴 negative (at risk) · 🟡 tight (<30m) · 🟢 ample"}>
+            <span className={`qc-slack ${s < 0 ? "late" : s < 1800 ? "tight" : "ok"}`}>{light} {hm} {word}</span>
+          </div>
+        );
+      })()}
 
       <div className="qc-seqlabel">{k ? "작업 (컨테이너)" : "work (containers)"}</div>
       {shown.length === 0 && <div className="lvp-empty" style={{ padding: "8px 0" }}>{k ? "대기 작업 없음" : "no pending work"}</div>}
