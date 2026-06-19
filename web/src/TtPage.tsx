@@ -79,6 +79,15 @@ function fmtRel(sec: number): string {
 function clockOf(ts: string | null | undefined, ko: boolean): string | null {
   return ts ? new Date(ts).toLocaleTimeString(ko ? "ko-KR" : "en-US", { hour: "2-digit", minute: "2-digit", hour12: false }) : null;
 }
+// dispatch-deadline format, ETW-style colon clock: "M:SS", or "H:MM:SS" past an hour. "지연" if past.
+function clockDur(sec: number, ko: boolean): string {
+  const neg = sec < 0;
+  const a = Math.abs(Math.round(sec));
+  const h = Math.floor(a / 3600), m = Math.floor((a % 3600) / 60), s = a % 60;
+  const p = (n: number) => String(n).padStart(2, "0");
+  const t = h > 0 ? `${h}:${p(m)}:${p(s)}` : `${m}:${p(s)}`;
+  return (neg ? (ko ? "지연 " : "late ") : "") + t;
+}
 // remaining time as an unambiguous DURATION (not a clock): "5시간 42분" / "23분" / "지연 4분".
 function relDurOf(sec: number, ko: boolean): string {
   const neg = sec < 0;
@@ -408,8 +417,8 @@ function QcCol({ q, lang, ttState, working, mph, maxN, showDl }: { q: WpQc; lang
               const workEtaMs = new Date(e.eta).getTime() + (idx / e.rem) * e.proc * 1000;
               const lead = (m.jobtype === "LD" ? 20 : 5) * 60; // truck travel+handover
               const dispatchSec = Math.round((workEtaMs - Date.now()) / 1000) - lead;
-              const cls = dispatchSec < 120 ? "late" : dispatchSec < 1800 ? "soon" : "";
-              return <span className={`qc-dl mono ${cls}`} title={k ? "이 컨테이너 배차 마감까지 남은 시간 = 작업 예정시각 − 트럭 리드타임(양하5/적하20분). 빨강=지금 배차" : "time until this container's dispatch deadline = work-ETA − truck lead; red = dispatch now"}>🏁 {k ? "배차 " : "disp "}{relDurOf(dispatchSec, k)}</span>;
+              const cls = dispatchSec < 120 ? "bad" : dispatchSec < 1800 ? "warn" : "ok";
+              return <span className={`jetw ${cls}`} title={k ? "이 컨테이너 배차 마감까지 남은 시간 = 작업 예정시각 − 트럭 리드타임(양하5/적하20분). 빨강=지금 배차" : "time until this container's dispatch deadline = work-ETA − truck lead; red = dispatch now"}>🏁 {clockDur(dispatchSec, k)}</span>;
             })()}
             {role === "past" && m.actv_ts && <span className="jetw rtg-actv" title={k ? "TOS ACTV — QC 양하 완료(트럭 적재). 검증 ACTV==QC move 완료 0초(n=3464)." : "TOS ACTV — QC discharged onto the truck (verified, n=3464)."}>{k ? "양하완료" : "discharged"}</span>}
           </div>
