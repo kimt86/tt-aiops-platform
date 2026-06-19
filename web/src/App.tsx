@@ -128,7 +128,7 @@ function SmallCard({ c, trend, lang, ws, extras }: { c: KpiCard; trend?: TrendRe
         <span className="unit">{mainValue(c.key, c.value, c.unit).unit}</span>
       </div>
       <KpiExtras extras={extras} />
-      {gpsAux != null && <WsAux val={gpsAux} title={ko ? "K_QC_TT_WAIT_GPS — 지금 트럭 기다리는(유휴·무트럭) 가동 QC 수 · 평균 대기 (GPS 검증)" : "K_QC_TT_WAIT_GPS — QC starving now (idle, no truck): count · avg wait (GPS)"} ko={ko} />}
+      {gpsAux != null && <WsAux val={gpsAux} title={ko ? "K_QC_TT_WAIT_GPS — 지금 트럭을 기다리는 가동 QC 수 · 평균 대기. GPS로 40m 내 트럭 없음 + 그 크레인이 남은 작업 보유 + 3분 평균(라이브 신호 GPS 교체·평활)" : "K_QC_TT_WAIT_GPS — QC starving now: count · avg wait. No truck within 40m (GPS) + crane has pending work + 3-min smoothed"} ko={ko} />}
       {c.key === "K_CYCLE" && <CycleSplit ds={c.ds_cycle_s} ld={c.ld_cycle_s} ko={ko} />}
       {dl ? (
         <div className={`delta ${imp ? "good" : "bad"}`}>{dl}<span className="vs">{s.vsBaseline}</span></div>
@@ -250,7 +250,7 @@ function cardSrc(key: string, w: WsLive | null, ko: boolean): CardSrc {
   if (key === "K_MPH" && w.crane_mph_live != null)
     return { kind: "dual", auxVal: `${w.crane_mph_live}/h`, auxTitle: ko ? "실시간 QC 평균 처리량 (PLC 사이클)" : "live avg QC throughput (PLC cycles)" };
   if (key === "K_QC_TT_WAIT")
-    return { kind: "dual", auxVal: (w.qc_starving ?? 0) > 0 ? `${w.qc_starving}${ko ? "대" : ""} · ${w.qc_wait_live_s}s` : (ko ? "없음" : "none"), auxTitle: ko ? "K_QC_TT_WAIT_GPS — 지금 트럭을 기다리는(유휴·무트럭) 가동 QC 수 · 평균 대기 (GPS 검증)" : "K_QC_TT_WAIT_GPS — quay cranes starving now (idle, no truck): count · avg wait (GPS-verified)" };
+    return { kind: "dual", auxVal: (w.qc_starving ?? 0) > 0 ? `${w.qc_starving}${ko ? "대" : ""} · ${w.qc_wait_live_s}s` : (ko ? "없음" : "none"), auxTitle: ko ? "K_QC_TT_WAIT_GPS — 지금 트럭을 기다리는 가동 QC 수 · 평균 대기. GPS로 40m 내 트럭 없음 + 그 크레인이 남은 작업 보유 + 3분 평균(라이브 GPS 교체·평활)" : "K_QC_TT_WAIT_GPS — QC starving now: count · avg wait. No truck within 40m (GPS) + crane has pending work + 3-min smoothed" };
   return { kind: "tos" };
 }
 

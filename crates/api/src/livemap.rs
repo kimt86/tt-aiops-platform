@@ -422,6 +422,10 @@ pub struct LiveMap {
     // logger records each trip's FIRST soon_idle entry once; released when the truck stops
     // carrying that container. Powers the soon-idle accuracy shadow (tt_soon_idle_pred).
     soon_idle_open: Mutex<HashSet<(String, String)>>,
+    // SMOOTHED live QC starvation (GPS-distance, pending-work gated) — rolling mean over the last
+    // few 30s ticks, written by spawn_qc_wait_logger and read by the positions endpoint. Replaces
+    // the jumpy per-request topos1 count. (count, avg_wait_s).
+    qc_wait_live: RwLock<Option<(usize, Option<i64>)>>,
 }
 
 /// Cap on the in-memory completed-cycle buffer. If the flusher stalls we drop the oldest
@@ -444,6 +448,7 @@ impl LiveMap {
             cycle_log: Mutex::new(VecDeque::new()),
             cycle_v2: Mutex::new(VecDeque::new()),
             soon_idle_open: Mutex::new(HashSet::new()),
+            qc_wait_live: RwLock::new(None),
             connected: AtomicBool::new(false),
             messages: AtomicU64::new(0),
             reconnects: AtomicU64::new(0),
@@ -1017,30 +1022,11 @@ pub async fn positions(State(lm): State<Arc<LiveMap>>, State(pool): State<PgPool
     .flatten()
     .map(|v| v as i64);
 
-    // ── live QC starvation (QC waiting for a truck; = K_QC_TT_WAIT_GPS basis) ── a working quay
-    // crane that's been idle past a normal inter-move gap with NO assigned TT arrived at it.
-    // GPS+PLC verified (truck under crane?). Conservative (60s gap); quay only. (Distinct from the
-    // TOS K_QC_NOMOVE KPI = all no-move gaps incl. bay-move/hatch.)
-    let cranes_with_tt: std::collections::HashSet<&str> = map
-        .values()
-        .filter(|p| p.cls == "TT" && p.arrival.as_deref() == Some("ARRIVED"))
-        .filter_map(|p| p.topos1.as_deref())
-        .filter(|t| is_crane_code(t))
-        .collect();
-    let (mut qc_starving, mut qc_wait_sum) = (0usize, 0i64);
-    for (id, c) in plc.iter() {
-        let working = c.moves.iter().any(|&t| now - t <= MOVE_WINDOW_MS);
-        let fresh = (now - c.last_seen_ms) / 1000 <= STALE_AFTER_S;
-        if !working || !fresh || c.last_move_ms == 0 {
-            continue;
-        }
-        let idle_s = (now - c.last_move_ms) / 1000;
-        if idle_s > QCQ_IDLE_S && !cranes_with_tt.contains(id.as_str()) {
-            qc_starving += 1;
-            qc_wait_sum += idle_s;
-        }
-    }
-    let qc_wait_live_s = (qc_starving > 0).then(|| qc_wait_sum / qc_starving as i64);
+    // ── live QC starvation (QC waiting for a truck; = K_QC_TT_WAIT_GPS basis). GPS-distance based
+    // (no fresh TT within CRANE_ARRIVE_M of the crane), gated on the crane having pending work, and
+    // smoothed over ~3 min — computed by spawn_qc_wait_logger and read here. Replaces the jumpy
+    // per-request topos1 count (which over-reported ~2× per the 19h evaluation).
+    let (qc_starving, qc_wait_live_s) = (*lm.qc_wait_live.read().await).unwrap_or((0, None));
 
     let last_ms = lm.last_msg_ms.load(Ordering::Relaxed);
     let as_of = (last_ms != 0).then(|| DateTime::from_timestamp_millis(last_ms as i64)).flatten();
@@ -1720,14 +1706,24 @@ pub fn spawn_qc_wait_logger(lm: Arc<LiveMap>, pool: PgPool) {
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(Duration::from_secs(30));
         let mut tick = 0u64;
+        let mut smooth: VecDeque<(i64, Option<i64>)> = VecDeque::new(); // last 6 ticks: (real, wait_avg)
         loop {
             ticker.tick().await;
             tick += 1;
             if !lm.connected.load(Ordering::Relaxed) {
                 continue;
             }
+            // QCs that actually have pending work — gate out no-work idle (non-TT confound).
+            let pending: std::collections::HashSet<String> = sqlx::query_scalar::<_, String>(
+                "SELECT qc FROM live_workqueue WHERE total_qty > comp_qty GROUP BY qc",
+            )
+            .fetch_all(&pool)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
             let now = Utc::now().timestamp_millis();
-            let (working, st, wt, sg, wg, sb, pos_known) = {
+            let (working, st, wt, sg, wg, sb, sr, wr, pos_known) = {
                 let map = lm.devices.read().await;
                 let plc = lm.plc.read().await;
                 let centroids = lm.centroids.read().await;
@@ -1750,8 +1746,8 @@ pub fn spawn_qc_wait_logger(lm: Arc<LiveMap>, pool: PgPool) {
                     .filter(|p| p.cls == "TT" && (now - p.last_seen_ms) / 1000 <= STALE_AFTER_S)
                     .map(|p| (p.lat, p.lon))
                     .collect();
-                let (mut working, mut st, mut wt, mut sg, mut wg, mut sb, mut pos_known) =
-                    (0i64, 0i64, 0i64, 0i64, 0i64, 0i64, 0i64);
+                let (mut working, mut st, mut wt, mut sg, mut wg, mut sb, mut sr, mut wr, mut pos_known) =
+                    (0i64, 0i64, 0i64, 0i64, 0i64, 0i64, 0i64, 0i64, 0i64);
                 for (id, c) in plc.iter() {
                     let is_working = c.moves.iter().any(|&t| now - t <= MOVE_WINDOW_MS);
                     let fresh = (now - c.last_seen_ms) / 1000 <= STALE_AFTER_S;
@@ -1784,14 +1780,20 @@ pub fn spawn_qc_wait_logger(lm: Arc<LiveMap>, pool: PgPool) {
                     if topos_starv && gps_starv {
                         sb += 1;
                     }
+                    // corrected (real) TT-starvation: GPS no-truck AND the crane has pending work
+                    if gps_starv && pending.contains(id.as_str()) {
+                        sr += 1;
+                        wr += idle_s;
+                    }
                 }
-                (working, st, wt, sg, wg, sb, pos_known)
+                (working, st, wt, sg, wg, sb, sr, wr, pos_known)
             };
             let wt_avg = (st > 0).then(|| wt / st);
             let wg_avg = (sg > 0).then(|| wg / sg);
+            let wr_avg = (sr > 0).then(|| wr / sr);
             let _ = sqlx::query(
-                "INSERT INTO qc_wait_sample (ts, working_qc, starving_topos, wait_topos_s, starving_gps, wait_gps_s, starving_both, pos_known_qc)
-                 VALUES (now(), $1, $2, $3, $4, $5, $6, $7) ON CONFLICT (ts) DO NOTHING",
+                "INSERT INTO qc_wait_sample (ts, working_qc, starving_topos, wait_topos_s, starving_gps, wait_gps_s, starving_both, pos_known_qc, starving_real, wait_real_s)
+                 VALUES (now(), $1, $2, $3, $4, $5, $6, $7, $8, $9) ON CONFLICT (ts) DO NOTHING",
             )
             .bind(working)
             .bind(st)
@@ -1800,8 +1802,20 @@ pub fn spawn_qc_wait_logger(lm: Arc<LiveMap>, pool: PgPool) {
             .bind(wg_avg)
             .bind(sb)
             .bind(pos_known)
+            .bind(sr)
+            .bind(wr_avg)
             .execute(&pool)
             .await;
+            // smoothed live value (rolling mean over the last ~3 min) for the positions endpoint
+            smooth.push_back((sr, wr_avg));
+            while smooth.len() > 6 {
+                smooth.pop_front();
+            }
+            let n = smooth.len().max(1) as f64;
+            let avg_count = (smooth.iter().map(|(c, _)| *c).sum::<i64>() as f64 / n).round() as usize;
+            let waits: Vec<i64> = smooth.iter().filter_map(|(_, w)| *w).collect();
+            let avg_wait = (!waits.is_empty()).then(|| waits.iter().sum::<i64>() / waits.len() as i64);
+            *lm.qc_wait_live.write().await = Some((avg_count, avg_wait));
             if tick % 20 == 0 {
                 let _ = sqlx::query("DELETE FROM qc_wait_sample WHERE ts < now() - interval '14 days'")
                     .execute(&pool)
