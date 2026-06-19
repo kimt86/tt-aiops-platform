@@ -288,19 +288,29 @@ pub async fn workpool(State(pool): State<PgPool>) -> Result<Json<WorkpoolOut>, A
     // earlier bays sooner. Per-bay work = remaining containers × move time (discharge/load) +
     // transition overhead (gantry between bays; hatch-cover at deck↔hold). Slack = ESTDEP − now
     // − total remaining work (negative = behind). Display-only (not wired to dispatch).
-    // v1: containers≈moves (twin ignored ⇒ slight overestimate), move time = jobtype constant.
+    // moves = containers × (1 − twin_frac/2) per vessel (a twin lift = 2 containers in 1 move);
+    // work must finish a buffer before departure; move time per jobtype constant (per-crane below).
     {
         let estdep: std::collections::HashMap<String, DateTime<Utc>> =
             sqlx::query_as::<_, (String, Option<DateTime<Utc>>)>(
                 "SELECT vessel, estdep_ts FROM live_vessel_schedule WHERE estdep_ts IS NOT NULL")
                 .fetch_all(&pool).await.unwrap_or_default()
                 .into_iter().filter_map(|(v, t)| t.map(|t| (v, t))).collect();
+        // per-vessel twin fraction of remaining containers (from the dispatchable pool) — a proxy
+        // for the whole remaining queue. moves ≈ containers × (1 − frac/2).
+        let twin_frac: std::collections::HashMap<String, f64> =
+            sqlx::query_as::<_, (String, Option<f64>)>(
+                "SELECT vessel, avg(CASE WHEN twintandem='W' THEN 1.0 ELSE 0.0 END)::float8
+                   FROM live_workpool GROUP BY vessel")
+                .fetch_all(&pool).await.unwrap_or_default()
+                .into_iter().filter_map(|(v, f)| f.map(|f| (v, f))).collect();
         let now = Utc::now();
         const DS_MOVE_S: f64 = 90.0;
         const LD_MOVE_S: f64 = 110.0;
-        const BAY_CHANGE_S: f64 = 180.0; // gantry travel between bays (extra)
-        const HATCH_DS_S: f64 = 340.0;   // discharge deck→hold cover removal (extra)
-        const HATCH_LD_S: f64 = 390.0;   // load hold→deck cover placement (extra)
+        const BAY_CHANGE_S: f64 = 180.0;   // gantry travel between bays (extra)
+        const HATCH_DS_S: f64 = 340.0;     // discharge deck→hold cover removal (extra)
+        const HATCH_LD_S: f64 = 390.0;     // load hold→deck cover placement (extra)
+        const FINISH_BUFFER_S: i64 = 1800; // work should finish ~30 min before departure
         // "10D-D" → (bay "10", deck/hold 'D', job 'D')
         fn parse_q(qn: &str) -> Option<(String, char, char)> {
             let dash = qn.find('-')?;
@@ -316,6 +326,8 @@ pub async fn workpool(State(pool): State<PgPool>) -> Result<Json<WorkpoolOut>, A
             }
             for (vessel, mut idxs) in by_vessel {
                 let Some(&dep) = estdep.get(&vessel) else { continue };
+                let twin = twin_frac.get(&vessel).copied().unwrap_or(0.0).clamp(0.0, 1.0);
+                let move_factor = 1.0 - twin / 2.0; // containers → moves
                 idxs.sort_by_key(|&i| qc.queues[i].seq.unwrap_or(i32::MAX));
                 let mut procs: Vec<f64> = Vec::with_capacity(idxs.len());
                 let mut prev: Option<(String, char, char)> = None;
@@ -323,7 +335,7 @@ pub async fn workpool(State(pool): State<PgPool>) -> Result<Json<WorkpoolOut>, A
                     let cur = parse_q(&qc.queues[i].queuename);
                     let job = cur.as_ref().map(|c| c.2).unwrap_or('D');
                     let move_s = if job == 'L' { LD_MOVE_S } else { DS_MOVE_S };
-                    let mut p = (qc.queues[i].remaining.max(0) as f64) * move_s;
+                    let mut p = (qc.queues[i].remaining.max(0) as f64) * move_factor * move_s;
                     if let (Some((pb, pdh, _)), Some((cb, cdh, _))) = (&prev, &cur) {
                         if pb != cb {
                             p += BAY_CHANGE_S;
@@ -345,7 +357,8 @@ pub async fn workpool(State(pool): State<PgPool>) -> Result<Json<WorkpoolOut>, A
                 if qc.vessels.first().map(|v| v == &vessel).unwrap_or(false) {
                     qc.estdep_ts = Some(dep);
                     qc.work_left_s = Some(total as i64);
-                    qc.slack_s = Some((dep - now).num_seconds() - total as i64);
+                    // slack vs the must-finish target (departure − buffer); work-ETA stays buffer-free
+                    qc.slack_s = Some((dep - now).num_seconds() - FINISH_BUFFER_S - total as i64);
                 }
             }
         }
