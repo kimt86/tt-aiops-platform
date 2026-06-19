@@ -75,6 +75,19 @@ function fmtRel(sec: number): string {
   return hh > 0 ? `${hh}h${String(mm).padStart(2, "0")}` : (mm > 0 ? `${mm}:${String(abs % 60).padStart(2, "0")}` : `${abs}s`);
 }
 
+// HH:MM clock in the terminal/user TZ.
+function clockOf(ts: string | null | undefined, ko: boolean): string | null {
+  return ts ? new Date(ts).toLocaleTimeString(ko ? "ko-KR" : "en-US", { hour: "2-digit", minute: "2-digit", hour12: false }) : null;
+}
+// remaining time as an unambiguous DURATION (not a clock): "5시간 42분" / "23분" / "지연 4분".
+function relDurOf(sec: number, ko: boolean): string {
+  const neg = sec < 0;
+  const a = Math.abs(Math.round(sec));
+  const h = Math.floor(a / 3600), mn = Math.floor((a % 3600) / 60);
+  const t = h > 0 ? `${h}${ko ? "시간 " : "h "}${mn}${ko ? "분" : "m"}` : a >= 60 ? `${mn}${ko ? "분" : "m"}` : `${a}${ko ? "초" : "s"}`;
+  return (neg ? (ko ? "지연 " : "late ") : "") + t;
+}
+
 function etwLabel(etw: string | null | undefined, expires: string | null | undefined, lang: Lang): { text: string; cls: string } | null {
   if (!etw) return null;
   const sec = Math.round((Date.parse(etw) - Date.now()) / 1000);
@@ -273,7 +286,7 @@ function LiveQcSequence({ lang, wp, snap }: { lang: Lang; wp: WorkpoolResponse |
               {[5, 10, 20, 30].map((n) => <option key={n} value={n}>{n}</option>)}
             </select>
           </label>
-          <label className="qc-pastsel" title={ko(lang) ? "예측(작업 시점·출항·여유, 그림자) 표시 켜고 끄기" : "toggle the forecast overlay (work ETA·departure·slack, shadow)"}>
+          <label className="qc-pastsel" title={ko(lang) ? "예측(출항·여유·배차 마감, 그림자) 표시 켜고 끄기" : "toggle the forecast overlay (departure·slack·dispatch deadline, shadow)"}>
             <input type="checkbox" checked={showDl} onChange={(e) => setShowDl(e.target.checked)} /> {ko(lang) ? "예측" : "forecast"}
           </label>
           <span className="muted">{ageS != null ? `⟳ ${ageS}s` : ""}</span>
@@ -283,9 +296,17 @@ function LiveQcSequence({ lang, wp, snap }: { lang: Lang; wp: WorkpoolResponse |
         {working.length === 0 && <div className="lvp-empty">{ko(lang) ? "가동 중인 QC 없음" : "no working QC"}</div>}
         {groups.map((g) => (
           <div className="qc-vgroup" key={g.vessel}>
-            <div className="qc-vgroup-h"><span className="vsl">{g.vessel}</span><span className="qc-vgroup-n">{g.items.length} QC</span></div>
+            <div className="qc-vgroup-h">
+              <span className="vsl">{g.vessel}</span>
+              {showDl && g.items[0]?.estdep_ts && (() => {
+                const dep = g.items[0].estdep_ts!;
+                const sec = (new Date(dep).getTime() - Date.now()) / 1000;
+                return <span className="vgroup-dep" title={ko(lang) ? "출항 예정시각 (괄호=지금부터 남은 시간)" : "departure time (paren = time left)"}>🏁 {ko(lang) ? "출항" : "dep"} <span className="mono">{clockOf(dep, ko(lang))}</span> <span className="qc-dep-left">({relDurOf(sec, ko(lang))} {ko(lang) ? "남음" : "left"})</span></span>;
+              })()}
+              <span className="qc-vgroup-n">{g.items.length} QC</span>
+            </div>
             <div className="qc-panel">
-              {g.items.map((q) => <QcCol key={q.qc} q={q} lang={lang} ttState={ttState} working={craneFresh.get(q.qc) ?? false} mph={craneMph.get(q.qc)} maxN={maxN} showDl={showDl} asOf={wp?.as_of} />)}
+              {g.items.map((q) => <QcCol key={q.qc} q={q} lang={lang} ttState={ttState} working={craneFresh.get(q.qc) ?? false} mph={craneMph.get(q.qc)} maxN={maxN} showDl={showDl} />)}
             </div>
           </div>
         ))}
@@ -302,7 +323,7 @@ const agoMin = (ts?: string | null): number | null =>
 // containers] → NOW → [future N containers]; N counts CONTAINERS (not bays). "future" is mostly the
 // not-yet-dispatched (candidate) work. TOS has no per-container order within a bay, so within-bay
 // unassigned order is by bay only. Label = Vessel(QC) ↔ Block(RTG).
-function QcCol({ q, lang, ttState, working, mph, maxN, showDl, asOf }: { q: WpQc; lang: Lang; ttState: Map<string, Dev>; working: boolean; mph?: number; maxN: number | "auto"; showDl: boolean; asOf?: string | null }) {
+function QcCol({ q, lang, ttState, working, mph, maxN, showDl }: { q: WpQc; lang: Lang; ttState: Map<string, Dev>; working: boolean; mph?: number; maxN: number | "auto"; showDl: boolean }) {
   const k = ko(lang);
   const tot = q.queues.reduce((a, x) => a + x.total, 0);
   const done = q.queues.reduce((a, x) => a + x.done, 0);
@@ -343,34 +364,22 @@ function QcCol({ q, lang, ttState, working, mph, maxN, showDl, asOf }: { q: WpQc
 
   // SHADOW deadline distribution: per-QC slack (will it finish by departure?) + per-bay deadline.
   const fmtSlack = (sec: number) => { const a = Math.abs(Math.round(sec / 60)); const t = a >= 60 ? `${Math.floor(a / 60)}시간 ${a % 60}분` : `${a}분`; return (sec < 0 ? "−" : "+") + t; };
-  const clock = (ts?: string | null) => ts ? new Date(ts).toLocaleTimeString(k ? "ko-KR" : "en-US", { hour: "2-digit", minute: "2-digit", hour12: false }) : null;
-  // remaining time as an unambiguous DURATION (not a clock): "5시간 42분", "23분", "45초", "지연 4분".
-  const relDur = (sec: number) => {
-    const neg = sec < 0; const a = Math.abs(Math.round(sec));
-    const h = Math.floor(a / 3600), mn = Math.floor((a % 3600) / 60);
-    const t = h > 0 ? `${h}${k ? "시간 " : "h "}${mn}${k ? "분" : "m"}` : a >= 60 ? `${mn}${k ? "분" : "m"}` : `${a}${k ? "초" : "s"}`;
-    return (neg ? (k ? "지연 " : "late ") : "") + t;
-  };
-  const dlByQueue = new Map<string, string>();
-  for (const b of q.queues) if (b.deadline_ts) dlByQueue.set(b.queuename, b.deadline_ts);
-  // per-MOVE deadline: within a bay the moves are worked back-to-back, so each one's deadline is the
-  // bay deadline minus the work still after it in that bay (move-level distribution, not one shared
-  // bay deadline). Walk in work order (notDone) so the first move of a bay gets the earliest.
-  const remByQueue = new Map<string, number>();
-  for (const b of q.queues) remByQueue.set(b.queuename, b.remaining);
-  const mkey = (m: WpMove) => `${m.queuename}-${m.contno ?? ""}-${m.ytno ?? "u"}`;
-  const dlByMove = new Map<string, string>();
+  // per-bay work-ETA (when the QC starts the bay) + proc seconds, from the backend. KEYED PER
+  // VESSEL: a QC can hold queues for two vessels with colliding queuenames (e.g. both "06H-L"), so
+  // keying by name alone would mix them. Per-move dispatch deadline is derived in row().
+  const bkey = (vessel: string | null | undefined, qn: string) => `${vessel ?? "?"}|${qn}`;
+  const etaByQueue = new Map<string, { eta: string; proc: number; rem: number }>();
+  for (const b of q.queues) if (b.work_eta_ts) etaByQueue.set(bkey(b.vessel, b.queuename), { eta: b.work_eta_ts, proc: b.proc_s ?? 0, rem: Math.max(1, b.remaining) });
+  const mkey = (m: WpMove) => `${m.vessel}-${m.queuename}-${m.contno ?? ""}-${m.ytno ?? "u"}`;
+  // within-bay work order index (the i-th remaining container of its bay), for staggering work-ETA
+  const moveIdx = new Map<string, number>();
   {
     const bayIdx = new Map<string, number>();
     for (const m of notDone) {
-      const i = bayIdx.get(m.queuename) ?? 0;
-      bayIdx.set(m.queuename, i + 1);
-      const dlBay = dlByQueue.get(m.queuename);
-      if (!dlBay) continue;
-      const rem = remByQueue.get(m.queuename) ?? 1;
-      const mt = (m.jobtype === "LD" ? 110 : 90) * 1000; // per-move time (ms)
-      const after = Math.max(0, rem - i - 1); // moves still after this one in the bay
-      dlByMove.set(mkey(m), new Date(new Date(dlBay).getTime() - after * mt).toISOString());
+      const bk = bkey(m.vessel, m.queuename);
+      const i = bayIdx.get(bk) ?? 0;
+      bayIdx.set(bk, i + 1);
+      moveIdx.set(mkey(m), i);
     }
   }
 
@@ -389,15 +398,18 @@ function QcCol({ q, lang, ttState, working, mph, maxN, showDl, asOf }: { q: WpQc
           <div className="bot">
             {(() => { const e = etwLabel(m.etw_accurate, m.etw_expires, lang); return e && role !== "past" && <span className={`jetw ${e.cls}`} title={k ? "TOS 작업예정(ETW) — 크레인이 이 컨테이너를 작업할 예정 시각" : "TOS ETW — when the crane is scheduled to work this"}>⏱ {e.text}</span>; })()}
             {showDl && (() => {
-              const dl = dlByMove.get(mkey(m));
-              if (!dl || q.work_left_s == null || !q.estdep_ts || !asOf) return null;
-              // when the QC will actually work this container = deadline − slack. As an absolute time:
-              //   work-ETA = as_of + (work_left − work_after) = as_of + work_left − estdep + deadline.
-              const etaMs = new Date(asOf).getTime() + q.work_left_s * 1000 - new Date(q.estdep_ts).getTime() + new Date(dl).getTime();
-              const sec = Math.round((etaMs - Date.now()) / 1000);
-              const lead = (m.jobtype === "LD" ? 20 : 5) * 60; // truck must arrive by work time − lead
-              const cls = sec < lead ? "late" : sec < lead + 1800 ? "soon" : "";
-              return <span className={`qc-dl mono ${cls}`} title={k ? "이 컨테이너가 실제로 작업될 때까지 남은 시간 (내 처리속도 추정·그림자). 빨강=지금 트럭 보내야 함" : "time until the QC actually works this (my estimate, shadow); red = dispatch now"}>⏳ {k ? "작업까지 " : "work in "}{relDur(sec)}</span>;
+              // work_eta is forward-from-now per vessel; the backend only chains the QC's CURRENT
+              // (primary) vessel, so only show the dispatch deadline for primary-vessel moves.
+              if (q.vessels[0] && m.vessel !== q.vessels[0]) return null;
+              const e = etaByQueue.get(bkey(m.vessel, m.queuename));
+              if (!e) return null;
+              // when the QC works THIS container = bay start + its share of the bay's processing
+              const idx = moveIdx.get(mkey(m)) ?? 0;
+              const workEtaMs = new Date(e.eta).getTime() + (idx / e.rem) * e.proc * 1000;
+              const lead = (m.jobtype === "LD" ? 20 : 5) * 60; // truck travel+handover
+              const dispatchSec = Math.round((workEtaMs - Date.now()) / 1000) - lead;
+              const cls = dispatchSec < 120 ? "late" : dispatchSec < 1800 ? "soon" : "";
+              return <span className={`qc-dl mono ${cls}`} title={k ? "이 컨테이너 배차 마감까지 남은 시간 = 작업 예정시각 − 트럭 리드타임(양하5/적하20분). 빨강=지금 배차" : "time until this container's dispatch deadline = work-ETA − truck lead; red = dispatch now"}>🏁 {k ? "배차 " : "disp "}{relDurOf(dispatchSec, k)}</span>;
             })()}
             {role === "past" && m.actv_ts && <span className="jetw rtg-actv" title={k ? "TOS ACTV — QC 양하 완료(트럭 적재). 검증 ACTV==QC move 완료 0초(n=3464)." : "TOS ACTV — QC discharged onto the truck (verified, n=3464)."}>{k ? "양하완료" : "discharged"}</span>}
           </div>
@@ -421,16 +433,11 @@ function QcCol({ q, lang, ttState, working, mph, maxN, showDl, asOf }: { q: WpQc
       </div>
       <div className="qc-progress"><span>{trucked} {k ? "배차중" : "trucked"}{working ? (k ? " · PLC 가동" : " · PLC live") : ""}</span><span className="mono">{done.toLocaleString()} / {tot.toLocaleString()}</span></div>
       <div className="qc-progress-bar"><div className="fill" style={{ width: `${pct}%` }} /></div>
-      {showDl && q.estdep_ts && (() => {
-        const depSec = (new Date(q.estdep_ts).getTime() - Date.now()) / 1000; // time until departure
-        const slackSec = q.work_left_s != null ? depSec - q.work_left_s : null; // recomputed each tick
-        return (
-          <div className="qc-deadline" title={k ? "출항 예정시각 (괄호=지금부터 남은 시간) / 여유 = 출항까지 − 남은 작업 (그림자·추정)" : "departure time (paren = time left) / slack = to-departure − remaining work (shadow)"}>
-            🏁 {k ? "출항" : "dep"} <span className="mono">{clock(q.estdep_ts)}</span> <span className="qc-dep-left">({relDur(depSec)} {k ? "남음" : "left"})</span>
-            {slackSec != null && <span className={`qc-slack ${slackSec < 0 ? "late" : slackSec < 1800 ? "tight" : "ok"}`}>{k ? "여유" : "slack"} {fmtSlack(slackSec)}</span>}
-          </div>
-        );
-      })()}
+      {showDl && q.slack_s != null && (
+        <div className="qc-deadline" title={k ? "여유 = 출항(−30분 마무리) − 지금 − 남은 작업. 음수면 출항 전 못 끝낼 위험" : "slack = departure(−30m) − now − remaining work; negative = at risk before departure"}>
+          <span className={`qc-slack ${q.slack_s < 0 ? "late" : q.slack_s < 1800 ? "tight" : "ok"}`}>{k ? "여유" : "slack"} {fmtSlack(q.slack_s)}</span>
+        </div>
+      )}
 
       <div className="qc-seqlabel">{k ? "작업 (컨테이너)" : "work (containers)"}</div>
       {shown.length === 0 && <div className="lvp-empty" style={{ padding: "8px 0" }}>{k ? "대기 작업 없음" : "no pending work"}</div>}

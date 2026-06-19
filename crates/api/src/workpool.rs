@@ -108,6 +108,12 @@ struct QueueOut {
     /// SHADOW: when this bay/queue must complete so the vessel departs on time (deadline
     /// distribution = ESTDEP minus the work still after it). NULL if the vessel has no ESTDEP.
     deadline_ts: Option<DateTime<Utc>>,
+    /// SHADOW: when the QC will START this bay (now + work scheduled before it). With proc_s the
+    /// frontend staggers per-container consistently (avoids reconstructing from deadline_ts with a
+    /// mismatched move time). NULL if the vessel has no ESTDEP.
+    work_eta_ts: Option<DateTime<Utc>>,
+    /// SHADOW: this bay's total processing seconds (moves + transition overhead).
+    proc_s: Option<i64>,
 }
 
 #[derive(Serialize)]
@@ -263,6 +269,8 @@ pub async fn workpool(State(pool): State<PgPool>) -> Result<Json<WorkpoolOut>, A
                     done,
                     remaining: (total - done).max(0),
                     deadline_ts: None,
+                    work_eta_ts: None,
+                    proc_s: None,
                 }
             })
             .collect();
@@ -362,9 +370,14 @@ pub async fn workpool(State(pool): State<PgPool>) -> Result<Json<WorkpoolOut>, A
                     prev = cur;
                 }
                 let total: f64 = procs.iter().sum();
-                let mut cum_after = 0.0_f64;
+                let mut cum_after = 0.0_f64; // work scheduled after bay k
                 for k in (0..idxs.len()).rev() {
-                    qc.queues[idxs[k]].deadline_ts = Some(dep - chrono::Duration::seconds(cum_after as i64));
+                    let qi = idxs[k];
+                    qc.queues[qi].deadline_ts = Some(dep - chrono::Duration::seconds(cum_after as i64));
+                    // when the QC starts this bay = now + work scheduled before it
+                    let before = (total - cum_after - procs[k]).max(0.0);
+                    qc.queues[qi].work_eta_ts = Some(now + chrono::Duration::seconds(before as i64));
+                    qc.queues[qi].proc_s = Some(procs[k] as i64);
                     cum_after += procs[k];
                 }
                 if qc.vessels.first().map(|v| v == &vessel).unwrap_or(false) {

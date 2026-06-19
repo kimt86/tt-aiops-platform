@@ -88,6 +88,8 @@ export interface WpQueue {
   queuename: string; vessel: string; voyage: string | null; disload: string | null;
   seq: number | null; total: number; done: number; remaining: number;
   deadline_ts?: string | null; // SHADOW: when this bay must finish (deadline distribution)
+  work_eta_ts?: string | null; // SHADOW: when the QC starts this bay (now + work before it)
+  proc_s?: number | null;      // SHADOW: this bay's total processing seconds
 }
 export interface WpQc {
   qc: string; vessels: string[]; active_moves: number; remaining: number;

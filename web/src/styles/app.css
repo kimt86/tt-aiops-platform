@@ -159,7 +159,8 @@ body {
 .qca-vgroup { max-width: 286px; }   /* up to ~3 QC cells per row; small vessels stay narrow */
 .qc-vgroup-h { display: flex; align-items: baseline; gap: 8px; margin: 4px 0 8px; padding-bottom: 4px; border-bottom: 1px solid var(--border); }
 .qc-vgroup-h .vsl { font-family: "Manrope", sans-serif; font-weight: 800; font-size: 13px; color: var(--text); letter-spacing: -0.2px; }
-.qc-vgroup-h .qc-vgroup-n { font-size: 10.5px; color: var(--text-mute); }
+.qc-vgroup-h .vgroup-dep { font-size: 10.5px; color: var(--text-dim); }
+.qc-vgroup-h .qc-vgroup-n { font-size: 10.5px; color: var(--text-mute); margin-left: auto; }
 /* extra sub-values inside the distance / ratio cards (loaded, total, loaded-ratio) */
 .kpi-extras { display: flex; flex-direction: column; gap: 1px; margin: 1px 0 2px; padding-top: 3px; border-top: 1px dashed var(--border-soft); }
 .kpi-extra { display: flex; justify-content: space-between; align-items: baseline; font-size: 10.5px; }
