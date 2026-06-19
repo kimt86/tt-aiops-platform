@@ -1713,7 +1713,10 @@ pub fn spawn_qc_wait_logger(lm: Arc<LiveMap>, pool: PgPool) {
             if !lm.connected.load(Ordering::Relaxed) {
                 continue;
             }
-            // QCs that actually have pending work — gate out no-work idle (non-TT confound).
+            // QCs that have pending work — gates out no-work idle. (A stricter "mid active queue"
+            // gate to also strip hatch/bay transitions was tried but live_workqueue.comp_qty/seq
+            // don't reliably identify the crane's CURRENT queue — out-of-order/lagging comp made it
+            // over-exclude genuine starvation, so we keep the reliable pending-work gate.)
             let pending: std::collections::HashSet<String> = sqlx::query_scalar::<_, String>(
                 "SELECT qc FROM live_workqueue WHERE total_qty > comp_qty GROUP BY qc",
             )
@@ -1780,7 +1783,7 @@ pub fn spawn_qc_wait_logger(lm: Arc<LiveMap>, pool: PgPool) {
                     if topos_starv && gps_starv {
                         sb += 1;
                     }
-                    // corrected (real) TT-starvation: GPS no-truck AND the crane has pending work
+                    // real TT-starvation: GPS no-truck AND the crane has pending work
                     if gps_starv && pending.contains(id.as_str()) {
                         sr += 1;
                         wr += idle_s;
