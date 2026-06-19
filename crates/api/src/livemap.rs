@@ -1825,6 +1825,74 @@ pub fn spawn_qc_wait_logger(lm: Arc<LiveMap>, pool: PgPool) {
     });
 }
 
+/// Persist the GPS-confirmed QC truck-wait signal as a daily/shift KPI (K_QC_TT_WAIT_GPS = avg
+/// concurrent cranes waiting for a truck). Aggregates the 30s qc_wait_sample ticks (starving_real)
+/// by terminal business-date + shift every 5 min and upserts kpi_daily/kpi_shift, so it survives
+/// the sample table's 14-day prune and gets history/trend like the Oracle-derived KPIs.
+pub fn spawn_qc_wait_kpi(pool: PgPool) {
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(Duration::from_secs(300));
+        let off = wp_core::shift::terminal_offset();
+        loop {
+            ticker.tick().await;
+            let rows: Vec<(DateTime<Utc>, i32)> = sqlx::query_as(
+                "SELECT ts, starving_real FROM qc_wait_sample WHERE starving_real IS NOT NULL",
+            )
+            .fetch_all(&pool)
+            .await
+            .unwrap_or_default();
+            if rows.is_empty() {
+                continue;
+            }
+            let today = wp_core::shift::current(wp_core::shift::terminal_now().naive_local()).0;
+            let mut daily: HashMap<chrono::NaiveDate, (i64, i64)> = HashMap::new(); // bd → (sum, n)
+            let mut byshift: HashMap<(chrono::NaiveDate, &'static str), (i64, i64)> = HashMap::new();
+            for (ts, sr) in &rows {
+                let (bd, sh) = wp_core::shift::current(ts.with_timezone(&off).naive_local());
+                let d = daily.entry(bd).or_insert((0, 0));
+                d.0 += *sr as i64;
+                d.1 += 1;
+                let s = byshift.entry((bd, sh.label())).or_insert((0, 0));
+                s.0 += *sr as i64;
+                s.1 += 1;
+            }
+            for (bd, (sum, n)) in &daily {
+                let avg = *sum as f64 / *n as f64;
+                let _ = sqlx::query(
+                    "INSERT INTO kpi_daily (kpi_key, snapshot_date, value, sample_n, unit, source_grain, is_provisional, computed_at)
+                     VALUES ('K_QC_TT_WAIT_GPS', $1, $2, $3, 'QC', 'live-gps-30s', $4, now())
+                     ON CONFLICT (kpi_key, snapshot_date) DO UPDATE SET
+                       value=EXCLUDED.value, sample_n=EXCLUDED.sample_n, is_provisional=EXCLUDED.is_provisional, computed_at=now()",
+                )
+                .bind(bd)
+                .bind(avg)
+                .bind(*n as i32)
+                .bind(*bd >= today)
+                .execute(&pool)
+                .await;
+            }
+            for ((bd, sh_label), (sum, n)) in &byshift {
+                let avg = *sum as f64 / *n as f64;
+                let Some(sh) = wp_core::shift::Shift::from_label(sh_label) else { continue };
+                let window_start = wp_core::shift::terminal_to_utc(wp_core::shift::window(*bd, sh).0);
+                let _ = sqlx::query(
+                    "INSERT INTO kpi_shift (business_date, shift, kpi_key, value, sample_n, unit, as_of_ts, window_start, computed_at)
+                     VALUES ($1, $2, 'K_QC_TT_WAIT_GPS', $3, $4, 'QC', now(), $5, now())
+                     ON CONFLICT (business_date, shift, kpi_key) DO UPDATE SET
+                       value=EXCLUDED.value, sample_n=EXCLUDED.sample_n, as_of_ts=now()",
+                )
+                .bind(bd)
+                .bind(*sh_label)
+                .bind(avg)
+                .bind(*n as i32)
+                .bind(window_start)
+                .execute(&pool)
+                .await;
+            }
+        }
+    });
+}
+
 pub fn spawn_travel_aggregator(pool: PgPool) {
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(Duration::from_secs(300));
