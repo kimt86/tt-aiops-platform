@@ -68,25 +68,27 @@ const DSP_META: Record<string, { ko: string; en: string; color: string }> = {
 
 // ETW countdown from the accurate TOS ETW RPC (qc_etw_utc via the tos_etw_gateway). The
 // snapshot has a TTL (expires); past it, the value is stale and shown dimmed.
-// Relative duration in ETW's format: "5h20" (≥1h), "23:45" (≥1m, mm:ss), "8s" (<1m).
+// Relative duration as a colon clock: "23:45" (m:ss), "1:23:45" (h:mm:ss past an hour), "0:08" (<1m).
 function fmtRel(sec: number): string {
-  const abs = Math.abs(sec);
-  const hh = Math.floor(abs / 3600), mm = Math.floor((abs % 3600) / 60);
-  return hh > 0 ? `${hh}h${String(mm).padStart(2, "0")}` : (mm > 0 ? `${mm}:${String(abs % 60).padStart(2, "0")}` : `${abs}s`);
+  const a = Math.abs(Math.round(sec));
+  const h = Math.floor(a / 3600), m = Math.floor((a % 3600) / 60), s = a % 60;
+  const p = (n: number) => String(n).padStart(2, "0");
+  return h > 0 ? `${h}:${p(m)}:${p(s)}` : `${m}:${p(s)}`;
 }
 
 // HH:MM clock in the terminal/user TZ.
 function clockOf(ts: string | null | undefined, ko: boolean): string | null {
   return ts ? new Date(ts).toLocaleTimeString(ko ? "ko-KR" : "en-US", { hour: "2-digit", minute: "2-digit", hour12: false }) : null;
 }
-// dispatch-deadline format, ETW-style colon clock: "M:SS", or "H:MM:SS" past an hour. "지연" if past.
+// "MM-DD HH:MM" — departure can fall on a different day, so include the date.
+function dayClockOf(ts: string | null | undefined, ko: boolean): string | null {
+  if (!ts) return null;
+  const d = new Date(ts);
+  return `${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")} ${clockOf(ts, ko)}`;
+}
+// dispatch-deadline format = colon clock with a "지연/late" prefix when past.
 function clockDur(sec: number, ko: boolean): string {
-  const neg = sec < 0;
-  const a = Math.abs(Math.round(sec));
-  const h = Math.floor(a / 3600), m = Math.floor((a % 3600) / 60), s = a % 60;
-  const p = (n: number) => String(n).padStart(2, "0");
-  const t = h > 0 ? `${h}:${p(m)}:${p(s)}` : `${m}:${p(s)}`;
-  return (neg ? (ko ? "지연 " : "late ") : "") + t;
+  return (sec < 0 ? (ko ? "지연 " : "late ") : "") + fmtRel(sec);
 }
 // remaining time as an unambiguous DURATION (not a clock): "5시간 42분" / "23분" / "지연 4분".
 function relDurOf(sec: number, ko: boolean): string {
@@ -310,7 +312,7 @@ function LiveQcSequence({ lang, wp, snap }: { lang: Lang; wp: WorkpoolResponse |
               {showDl && g.items[0]?.estdep_ts && (() => {
                 const dep = g.items[0].estdep_ts!;
                 const sec = (new Date(dep).getTime() - Date.now()) / 1000;
-                return <span className="vgroup-dep" title={ko(lang) ? "출항 예정시각 (괄호=지금부터 남은 시간)" : "departure time (paren = time left)"}>🏁 {ko(lang) ? "출항" : "dep"} <span className="mono">{clockOf(dep, ko(lang))}</span> <span className="qc-dep-left">({relDurOf(sec, ko(lang))} {ko(lang) ? "남음" : "left"})</span></span>;
+                return <span className="vgroup-dep" title={ko(lang) ? "출항 예정시각 (괄호=지금부터 남은 시간)" : "departure time (paren = time left)"}>🏁 {ko(lang) ? "출항" : "dep"} <span className="mono">{dayClockOf(dep, ko(lang))}</span> <span className="qc-dep-left">({relDurOf(sec, ko(lang))} {ko(lang) ? "남음" : "left"})</span></span>;
               })()}
               <span className="qc-vgroup-n">{g.items.length} QC</span>
             </div>
