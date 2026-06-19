@@ -154,32 +154,6 @@ body {
 .qca-cell .qca-light { font-size: 10px; }
 .qca-cell.clickable { cursor: pointer; transition: border-color 0.12s, background 0.12s; }
 .qca-cell.clickable:hover { border-color: var(--accent, #60a5fa); background: var(--surface-3); }
-
-/* ── live crane digital twin ── */
-.crane-live { display: flex; flex-direction: column; gap: 12px; }
-.cl-bar { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
-.cl-bar h2 { margin: 0; font-size: 18px; }
-.cl-sub { font-size: 11px; color: var(--text-mute); }
-.cl-conn { margin-left: auto; font-size: 11px; }
-.cl-conn.on { color: #22c55e; } .cl-conn.off { color: var(--text-mute); }
-.cl-selector { display: flex; gap: 6px; flex-wrap: wrap; }
-.cl-chip { display: inline-flex; align-items: center; gap: 5px; padding: 4px 10px; border-radius: 8px; background: var(--surface-2); border: 1px solid var(--border); color: var(--text-dim); font-family: "JetBrains Mono", monospace; font-size: 12px; font-weight: 700; cursor: pointer; }
-.cl-chip.active { border-color: #60a5fa; background: var(--surface-3); color: var(--text); }
-.cl-chip small { color: var(--text-mute); font-weight: 600; margin-left: 2px; }
-.cl-chip .cl-dot { width: 7px; height: 7px; border-radius: 50%; }
-.cl-dot.on { background: #22c55e; } .cl-dot.off { background: #555; }
-.cl-stage { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 10px; }
-.cl-stage-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 6px; font-size: 12px; }
-.cl-stage-head .cl-qc { font-family: "Manrope", sans-serif; font-weight: 800; font-size: 18px; }
-.cl-stage-head .cl-vsl { color: var(--text-dim); font-weight: 700; }
-.cl-stage-head .cl-bay { color: var(--text-dim); }
-.cl-job { padding: 1px 7px; border-radius: 5px; border: 1px solid; font-size: 11px; font-weight: 700; }
-.cl-state.on { color: #22c55e; } .cl-state.off { color: #fbbf24; }
-.cl-mph { color: #fbbf24; }
-.cl-prog { color: var(--text-dim); margin-left: auto; }
-.cl-prog small { color: var(--text-mute); }
-.cl-svg { width: 100%; height: auto; max-height: 62vh; display: block; background: #0a0e14; border-radius: 8px; }
-.cl-svg .cl-lbl { fill: var(--text-mute); font-size: 11px; }
 /* vessel grouping headings (per-QC card + work-sequence card) */
 .qc-vgroup { margin-bottom: 14px; }
 /* per-QC card: pack vessel groups across the row (flex-wrap), sized to content,

@@ -4,7 +4,6 @@ import { LineChart } from "./charts";
 import { deltaLabel, fmtValue, isImprovement } from "./format";
 import { t, type Lang } from "./i18n";
 import TtPage from "./TtPage";
-import CraneLivePage from "./CraneLivePage";
 import CyclesPage from "./CyclesPage";
 import LiveMapPage from "./LiveMapPage";
 import HealthPage from "./HealthPage";
@@ -591,11 +590,10 @@ const IconLearn = () => (
   </svg>
 );
 
-type PageKey = "kpi" | "tt" | "crane" | "cycles" | "learn" | "map" | "health" | "feed";
+type PageKey = "kpi" | "tt" | "cycles" | "learn" | "map" | "health" | "feed";
 const PAGES: { key: PageKey; label: string; Icon: () => ReactElement; ko: string; en: string }[] = [
   { key: "kpi", label: "KPI", Icon: IconKpi, ko: "KPI 운영 지표", en: "KPI Metrics" },
   { key: "tt", label: "TT", Icon: IconTt, ko: "TT 배차 현황", en: "TT Dispatch" },
-  { key: "crane", label: "CRANE", Icon: IconTt, ko: "라이브 크레인", en: "Live Crane" },
   { key: "cycles", label: "CYCLES", Icon: IconCycles, ko: "사이클 이력", en: "Cycle History" },
   { key: "learn", label: "LEARN", Icon: IconLearn, ko: "학습 센터", en: "Learning Center" },
   { key: "map", label: "MAP", Icon: IconMap, ko: "라이브 맵", en: "Live Map" },
@@ -649,7 +647,7 @@ export default function App() {
               </button>
             ))}
           </div>
-          {page === "kpi" ? <KpiPage lang={lang} /> : page === "tt" ? <TtPage lang={lang} /> : page === "crane" ? <CraneLivePage lang={lang} /> : page === "cycles" ? <CyclesPage lang={lang} /> : page === "learn" ? <LearnPage lang={lang} /> : page === "map" ? <LiveMapPage lang={lang} /> : page === "health" ? <HealthPage lang={lang} /> : <FeedHealthPage lang={lang} />}
+          {page === "kpi" ? <KpiPage lang={lang} /> : page === "tt" ? <TtPage lang={lang} /> : page === "cycles" ? <CyclesPage lang={lang} /> : page === "learn" ? <LearnPage lang={lang} /> : page === "map" ? <LiveMapPage lang={lang} /> : page === "health" ? <HealthPage lang={lang} /> : <FeedHealthPage lang={lang} />}
         </div>
       </div>
     </>
