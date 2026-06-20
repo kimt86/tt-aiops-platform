@@ -565,13 +565,26 @@ pub fn spawn_dispatch_pred_logger(pool: PgPool) {
                         bay.insert((b.vessel.as_str(), b.queuename.as_str()), (eta, p, b.remaining.max(1)));
                     }
                 }
+                // order by genuine work order (bay sequence, then ETW within a bay) so the "front"
+                // is the next containers to be worked — stable across ticks (ETW alone is unstable
+                // when many near-term containers have no ETW yet, re-logging a different set each tick).
+                let seq_of: HashMap<&str, i32> = qc
+                    .queues
+                    .iter()
+                    .filter(|b| &b.vessel == prim)
+                    .map(|b| (b.queuename.as_str(), b.seq.unwrap_or(i32::MAX)))
+                    .collect();
                 let mut fronts: Vec<&MoveOut> = qc
                     .moves
                     .iter()
                     .filter(|m| &m.vessel == prim && m.contno.is_some()
                         && !(m.jobtype.as_deref() == Some("DS") && m.actv_ts.is_some()))
                     .collect();
-                fronts.sort_by_key(|m| m.etw_ts.unwrap_or(DateTime::<Utc>::MAX_UTC));
+                fronts.sort_by_key(|m| (
+                    seq_of.get(m.queuename.as_str()).copied().unwrap_or(i32::MAX),
+                    m.etw_ts.unwrap_or(DateTime::<Utc>::MAX_UTC),
+                    m.contno.as_deref().unwrap_or(""), // stable tiebreak so the front-6 is the SAME set each tick
+                ));
                 let mut idx: HashMap<(&str, &str), i32> = HashMap::new();
                 let mut logged = 0;
                 for m in fronts.into_iter().take(20) {
