@@ -303,8 +303,8 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
   const [useLive, setUseLive] = useState(true);
   const useLiveRef = useRef(useLive);
   useLiveRef.current = useLive;
-  const [delayMin, setDelayMin] = useState(0); // smooth playback: render this many min in the past
-  const delayMinRef = useRef(0); delayMinRef.current = delayMin;
+  const [delayMin, setDelayMin] = useState(5 / 60); // default 5s smooth: interpolate + hold through brief GPS gaps/spikes (less flicker than realtime)
+  const delayMinRef = useRef(5 / 60); delayMinRef.current = delayMin;
   const histRef = useRef<Map<string, { cls: string; pts: Pt[] }>>(new Map()); // per-device fix buffer
   const clockOffsetRef = useRef(0); // server(as_of) − client(Date.now): a continuous, skew-free time base
   const gpsEventsRef = useRef<Array<[number, boolean]>>([]); // [t, isOutlier] over a rolling window
@@ -684,7 +684,11 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
             const arr = e.pts;
             if (arr.length === 0) continue;
             const firstT = arr[0][0], lastT = arr[arr.length - 1][0];
-            if (displayMs < firstT - 60000 || displayMs > lastT + 60000) continue; // not present around this time
+            // HOLD through GPS gaps: keep the device at its last position for up to HOLD_MS after its
+            // last fix (instead of dropping at 60s → flicker when fixes arrive >60s apart). Beyond
+            // that it's genuinely stale and drops. (Spikes are already rejected upstream.)
+            const HOLD_MS = 180000; // 3 min
+            if (displayMs < firstT - 60000 || displayMs > lastT + HOLD_MS) continue;
             const t = Math.min(Math.max(displayMs, firstT), lastT);
             const p = posAt({ id, cls: e.cls, pts: arr }, t);
             if (!p) continue;
