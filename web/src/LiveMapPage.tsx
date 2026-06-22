@@ -34,8 +34,10 @@ type LiveSnap = { source: string; connected: boolean; count: number; as_of: stri
 // smooth (delayed) playback: show the map N minutes in the past so we can interpolate each
 // device between the GPS fixes that have arrived since — turning the sparse "teleporting" feed
 // into smooth motion. Presets in minutes (0 = realtime, no interpolation).
-const DELAY_OPTS = [0, 1, 3, 5] as const;
+// delay presets in MINUTES (fractions = seconds, e.g. 5/60 = 5s). 0 = realtime (no interpolation).
+const DELAY_OPTS = [0, 5 / 60, 10 / 60, 30 / 60, 1, 3, 5] as const;
 const MAX_DELAY_MIN = 5;
+const delayLbl = (m: number, ko: boolean) => m === 0 ? (ko ? "실시간" : "live") : m < 1 ? `${Math.round(m * 60)}s` : `${m}m`;
 // yard equipment tops out ~25-30 km/h; a fix implying faster than this (over its real fix-time
 // gap) is a GPS spike/teleport, not motion — reject it so smooth playback doesn't "fly".
 const MAX_PLAUSIBLE_KMH = 50;
@@ -782,14 +784,14 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
             <span className="mdl-lbl">{ko ? "부드럽게" : "Smooth"}</span>
             {DELAY_OPTS.map((m) => (
               <button key={m} className={`mdl${delayMin === m ? " on" : ""}`} onClick={() => setDelayMin(m)}>
-                {m === 0 ? (ko ? "실시간" : "live") : `${m}m`}
+                {delayLbl(m, ko)}
               </button>
             ))}
           </div>
         )}
         <span className="map-count mono">{counts.total} / {liveActive ? liveInfo.count : ndev}</span>
         {liveActive ? (
-          <span className="map-clock mono" title={liveInfo.asOf ?? ""}>⟳ {asOfAge != null ? `${asOfAge}s` : "—"}{delayMin > 0 ? ` · −${delayMin}m` : ""}</span>
+          <span className="map-clock mono" title={liveInfo.asOf ?? ""}>⟳ {asOfAge != null ? `${asOfAge}s` : "—"}{delayMin > 0 ? ` · −${delayLbl(delayMin, ko)}` : ""}</span>
         ) : (
           <span className="map-clock mono">▶ t+{tpos}s / {win}s</span>
         )}
