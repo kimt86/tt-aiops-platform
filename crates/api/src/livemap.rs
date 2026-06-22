@@ -598,9 +598,9 @@ const IDLE_SPEED_KMH: f64 = 3.0;
 // A TT within this of its ASSIGNED quay crane's GPS ≈ arrived at the crane. Used ONLY to
 // populate the SHADOW crane-arrival columns (observational); the live phase logic is untouched.
 const CRANE_ARRIVE_M: f64 = 40.0;
-// A fresh, unengaged TT within this of a crane ≈ a truck that was available nearby. Used by the
-// per-QC starvation log (near_idle_tt) to separate "no truck dispatched in time" (Stage-1) from
-// "no truck was anywhere near" (Stage-2/location) when validating dispatch timing.
+// A fresh, EMPTY + UNASSIGNED TT within this of a crane ≈ a truck that was genuinely available
+// nearby. Used by the per-QC starvation log (near_idle_tt) to separate "no truck dispatched in
+// time" (Stage-1) from "no free truck was anywhere near" (Stage-2/location) when validating timing.
 const NEAR_TT_M: f64 = 600.0;
 // the crane is "actively handling" if its PLC logged a pickup within this window.
 const CRANE_PLC_ACTIVE_MS: i64 = 120_000;
@@ -1771,11 +1771,16 @@ pub fn spawn_qc_wait_logger(lm: Arc<LiveMap>, pool: PgPool) {
                     .filter(|p| p.cls == "TT" && (now - p.last_seen_ms) / 1000 <= STALE_AFTER_S)
                     .map(|p| (p.lat, p.lon))
                     .collect();
-                // fresh TTs NOT currently arrived at a crane = available-ish trucks (location control)
+                // genuinely AVAILABLE trucks = fresh + empty (no container) + unassigned (no topos1
+                // target). Excludes loaded/en-route/assigned trucks committed elsewhere, so
+                // near_idle_tt counts trucks that could actually have served this crane (location
+                // control: "no truck was free nearby" = Stage-2, vs "free truck nearby but not sent
+                // in time" = Stage-1). NOT `arrival != ARRIVED`, which counts committed trucks.
                 let tt_free: Vec<(f64, f64)> = map
                     .values()
                     .filter(|p| p.cls == "TT" && (now - p.last_seen_ms) / 1000 <= STALE_AFTER_S
-                        && p.arrival.as_deref() != Some("ARRIVED"))
+                        && p.container1.as_deref().map(|c| c.trim().is_empty()).unwrap_or(true)
+                        && p.topos1.as_deref().map(|t| t.trim().is_empty()).unwrap_or(true))
                     .map(|p| (p.lat, p.lon))
                     .collect();
                 let (mut working, mut st, mut wt, mut sg, mut wg, mut sb, mut sr, mut wr, mut pos_known) =

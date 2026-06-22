@@ -521,10 +521,12 @@ pub fn spawn_dispatch_pred_logger(pool: PgPool) {
                 continue;
             }
             // (0) D_tos capture: record the FIRST tick each open container is seen assigned (ytno
-            // present) = TOS's dispatch time. tos_upd_dt = the row's TOS UPD_DT (precise, ≈ the
-            // assignment); became_assigned_at = now() (poll-lagged fallback). MUST run BEFORE the
-            // resolve below, else a container assigned+worked within one tick gap stays NULL and
-            // would be mis-read as "never assigned" by the analysis.
+            // present) ≈ TOS's dispatch time. tos_upd_dt = the row's TOS UPD_DT (assignment-OR-LATER
+            // upper bound — UPD_DT is a generic last-update, but at first-assigned sighting it's
+            // usually the assignment); became_assigned_at = now() (poll-lagged, ≤~3.5min late). MUST
+            // run BEFORE the resolve below, else a container assigned+worked within one tick gap
+            // stays NULL and would be mis-read as "never assigned". GROUP BY dedups twin/duplicate
+            // contno so each gets one deterministic upd.
             let (mut as_c, mut as_u): (Vec<String>, Vec<Option<DateTime<Utc>>>) = (Vec::new(), Vec::new());
             for qc in &wp.qcs {
                 for m in &qc.moves {
@@ -540,7 +542,9 @@ pub fn spawn_dispatch_pred_logger(pool: PgPool) {
                 let _ = sqlx::query(
                     "UPDATE dispatch_pred_sample d
                         SET became_assigned_at = now(), became_assigned_tick = $3, tos_upd_dt = v.upd
-                       FROM (SELECT unnest($1::text[]) AS contno, unnest($2::timestamptz[]) AS upd) v
+                       FROM (SELECT contno, min(upd) AS upd
+                               FROM (SELECT unnest($1::text[]) AS contno, unnest($2::timestamptz[]) AS upd) z
+                              GROUP BY contno) v
                       WHERE d.contno = v.contno AND d.resolved_at IS NULL AND d.became_assigned_at IS NULL",
                 )
                 .bind(&as_c)

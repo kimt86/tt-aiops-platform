@@ -7,8 +7,9 @@
 --   no_truck_gps   : no fresh TT within 40m of the crane (raw geometric, ignores idle threshold)
 --   no_truck_topos : TOS topos1 says no TT assigned to this crane
 --   starving_real  : idle past threshold AND no_truck_gps AND pending = genuine truck-starvation
---   near_idle_tt   : fresh unengaged TTs within ~600m (location/travel-time control — distinguishes
---                    "no truck dispatched in time" (Stage-1) from "no truck was nearby" (Stage-2))
+--   near_idle_tt   : fresh EMPTY + UNASSIGNED TTs within ~600m = genuinely available trucks
+--                    (location/travel control — distinguishes "free truck nearby but not sent in
+--                    time" (Stage-1) from "no free truck was anywhere near" (Stage-2))
 --   next_vessel/queuename : best-effort block/bay the crane is waiting on (lowest-seq incomplete
 --                    queue; per-container is impossible — MSNSEQ is 100% NULL in the snapshot)
 CREATE TABLE IF NOT EXISTS qc_wait_qc_sample (

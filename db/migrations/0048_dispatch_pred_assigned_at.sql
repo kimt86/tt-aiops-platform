@@ -3,8 +3,10 @@
 -- timestamp in TOS (JOB_ORDER_LIST has only CRE_DT, UPD_DT, YT_DIS_DT=after-arrival), so D_tos is
 -- captured two ways at the first tick we observe the container assigned (ytno present):
 --   became_assigned_at : when our 2-min logger first SAW it assigned (poll-lagged, ≤~3.5min late)
---   tos_upd_dt         : the row's TOS UPD_DT at that sighting (server-side last-update ≈ the
---                        assignment itself — the PRECISE D_tos; prefer this, fall back to the above)
+--   tos_upd_dt         : the row's TOS UPD_DT at that sighting. UPD_DT is a GENERIC last-update,
+--                        so this is assignment-OR-LATER (an upper bound on D_tos), though at the
+--                        first-assigned sighting it is usually the assignment. Prefer it over
+--                        became_assigned_at (server-side, no poll lag) but treat as upper bound.
 --   became_assigned_tick : logger tick number of first-assigned sighting (debug/ordering)
 -- NULL on all three = never observed assigned within its open episode (treat as "unobserved" in
 -- analysis, NOT as "very late" — could be a fast Q→A→worked transition the polling missed).
