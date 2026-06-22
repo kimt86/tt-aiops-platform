@@ -504,7 +504,9 @@ function QcAssignedCard({ lang, wp, snap }: { lang: Lang; wp: WorkpoolResponse |
         if (m.jobtype === "DS" && m.actv_ts) continue;
         t.add(m.ytno.trim());
       }
-      return { qc: q.qc, count: t.size, moves: q.active_moves, vessel: q.vessels[0] ?? "", slack: q.slack_s ?? null, estdep: q.estdep_ts ?? null, mph: mphByQc.get(q.qc) ?? null };
+      const comp = q.queues.reduce((a, b) => a + b.done, 0);
+      const tot = q.queues.reduce((a, b) => a + b.total, 0);
+      return { qc: q.qc, count: t.size, moves: q.active_moves, vessel: q.vessels[0] ?? "", slack: q.slack_s ?? null, estdep: q.estdep_ts ?? null, mph: mphByQc.get(q.qc) ?? null, comp, tot };
     })
     .filter((x) => x.moves > 0 || x.count > 0)
     .sort((a, b) => a.qc.localeCompare(b.qc, undefined, { numeric: true }));
@@ -526,13 +528,21 @@ function QcAssignedCard({ lang, wp, snap }: { lang: Lang; wp: WorkpoolResponse |
       <div className="tcard-body">
         {qcs.length === 0 && <div className="lvp-empty">{ko_ ? "가동 중인 QC 없음" : "no active QC"}</div>}
         <div className="qca-cols">
-          {groups.map((g) => (
+          {groups.map((g) => {
+            const vcomp = g.items.reduce((a, x) => a + x.comp, 0);
+            const vtot = g.items.reduce((a, x) => a + x.tot, 0);
+            const vpct = vtot > 0 ? Math.round((vcomp / vtot) * 100) : 0;
+            return (
             <div className="qca-vgroup" key={g.vessel}>
               <div className="qc-vgroup-h">
                 <span className="vsl">{g.vessel}</span>
                 {g.items[0]?.estdep && <span className="vgroup-dep" title={ko_ ? "출항 예정시각" : "departure"}>🏁 {ko_ ? "출항" : "dep"} <span className="mono">{dayClockOf(g.items[0].estdep, ko_)}</span></span>}
                 <span className="qc-vgroup-n">{g.items.length} QC</span>
               </div>
+              <div className="qc-progress" title={ko_ ? "이 선박 전체 작업 진행률 (완료/전체 컨테이너)" : "vessel total progress (done/total)"}>
+                <span>{ko_ ? "선박 진행" : "vessel"} {vpct}%</span><span className="mono">{vcomp.toLocaleString()} / {vtot.toLocaleString()}</span>
+              </div>
+              <div className="qc-progress-bar"><div className="fill" style={{ width: `${vpct}%` }} /></div>
               <div className="qca-grid">
                 {g.items.map((x) => (
                   <div className="qca-cell clickable" key={x.qc} onClick={() => jump(x.qc)}
@@ -544,7 +554,8 @@ function QcAssignedCard({ lang, wp, snap }: { lang: Lang; wp: WorkpoolResponse |
                 ))}
               </div>
             </div>
-          ))}
+            );
+          })}
         </div>
       </div>
     </section>

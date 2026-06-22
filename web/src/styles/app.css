@@ -303,8 +303,9 @@ td.mono { font-family: "JetBrains Mono", monospace; color: var(--text); }
 @media (max-width: 1100px) { .tt-two { grid-template-columns: 1fr; } }
 
 /* card shell */
-.tcard { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg); overflow: hidden; }
-.tcard-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 10px 14px; border-bottom: 1px solid var(--border-soft); background: var(--surface-2); }
+.tcard { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg); }
+.tcard-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 10px 14px; border-bottom: 1px solid var(--border-soft); background: var(--surface-2);
+  position: sticky; top: calc(var(--header-h) + 48px); z-index: 12; border-radius: var(--radius-lg) var(--radius-lg) 0 0; }
 .tcard-head h3 { font-size: 12px; font-weight: 700; color: var(--text); display: flex; align-items: baseline; gap: 8px; }
 .tcard-head h3 .h3-sub { font-size: 10px; font-weight: 400; color: var(--text-mute); }
 .tcard-body { padding: 14px; }
