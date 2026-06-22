@@ -598,6 +598,10 @@ const IDLE_SPEED_KMH: f64 = 3.0;
 // A TT within this of its ASSIGNED quay crane's GPS ≈ arrived at the crane. Used ONLY to
 // populate the SHADOW crane-arrival columns (observational); the live phase logic is untouched.
 const CRANE_ARRIVE_M: f64 = 40.0;
+// A fresh, unengaged TT within this of a crane ≈ a truck that was available nearby. Used by the
+// per-QC starvation log (near_idle_tt) to separate "no truck dispatched in time" (Stage-1) from
+// "no truck was anywhere near" (Stage-2/location) when validating dispatch timing.
+const NEAR_TT_M: f64 = 600.0;
 // the crane is "actively handling" if its PLC logged a pickup within this window.
 const CRANE_PLC_ACTIVE_MS: i64 = 120_000;
 const SWAP_MIN_M: f64 = 500.0; // default swap threshold (frontend slider overrides for display)
@@ -1725,6 +1729,24 @@ pub fn spawn_qc_wait_logger(lm: Arc<LiveMap>, pool: PgPool) {
             .unwrap_or_default()
             .into_iter()
             .collect();
+            // best-effort "next block" each QC is working/waiting on = its lowest-seq incomplete
+            // queue (per-container is impossible; MSNSEQ is 100% NULL). For the per-QC starvation log.
+            let next_q: HashMap<String, (Option<String>, Option<String>)> =
+                sqlx::query_as::<_, (String, Option<String>, Option<String>)>(
+                    "SELECT DISTINCT ON (qc) qc, vessel, queuename FROM live_workqueue
+                      WHERE total_qty > comp_qty ORDER BY qc, seq",
+                )
+                .fetch_all(&pool)
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .map(|(qc, v, q)| (qc, (v, q)))
+                .collect();
+            let ts = Utc::now(); // single timestamp shared by all per-QC rows this tick
+            // per-QC starvation rows collected in the loop below: (qc, idle_s, no_truck_gps,
+            // no_truck_topos, pending, starving_real, near_idle_tt, next_vessel, next_queuename)
+            let mut qc_rows: Vec<(String, i64, bool, bool, bool, bool, i32, Option<String>, Option<String>)> =
+                Vec::new();
             let now = Utc::now().timestamp_millis();
             let (working, st, wt, sg, wg, sb, sr, wr, pos_known) = {
                 let map = lm.devices.read().await;
@@ -1749,6 +1771,13 @@ pub fn spawn_qc_wait_logger(lm: Arc<LiveMap>, pool: PgPool) {
                     .filter(|p| p.cls == "TT" && (now - p.last_seen_ms) / 1000 <= STALE_AFTER_S)
                     .map(|p| (p.lat, p.lon))
                     .collect();
+                // fresh TTs NOT currently arrived at a crane = available-ish trucks (location control)
+                let tt_free: Vec<(f64, f64)> = map
+                    .values()
+                    .filter(|p| p.cls == "TT" && (now - p.last_seen_ms) / 1000 <= STALE_AFTER_S
+                        && p.arrival.as_deref() != Some("ARRIVED"))
+                    .map(|p| (p.lat, p.lon))
+                    .collect();
                 let (mut working, mut st, mut wt, mut sg, mut wg, mut sb, mut sr, mut wr, mut pos_known) =
                     (0i64, 0i64, 0i64, 0i64, 0i64, 0i64, 0i64, 0i64, 0i64);
                 for (id, c) in plc.iter() {
@@ -1765,13 +1794,23 @@ pub fn spawn_qc_wait_logger(lm: Arc<LiveMap>, pool: PgPool) {
                     };
                     pos_known += 1;
                     let idle_s = (now - c.last_move_ms) / 1000;
-                    if idle_s <= QCQ_IDLE_S {
-                        continue;
-                    }
                     // (1) topos1-based starvation = current live signal (no TT assigned to this crane)
                     let topos_starv = !cranes_with_tt.contains(id.as_str());
                     // (2) GPS-distance starvation = no fresh TT within CRANE_ARRIVE_M of the crane
                     let gps_starv = !tt_pos.iter().any(|&t| dist_m(cp, t) <= CRANE_ARRIVE_M);
+                    // per-QC time series (validation): log EVERY working+positioned crane — not only
+                    // starving ones — so episode start/end (gps_starv true→false = truck arrived) and
+                    // idle duration are reconstructable. Collect BEFORE the idle gate below.
+                    let pend = pending.contains(id.as_str());
+                    let near_idle_tt = tt_free.iter().filter(|&&t| dist_m(cp, t) <= NEAR_TT_M).count() as i32;
+                    let (nv, nq) = next_q.get(id.as_str()).cloned().unwrap_or((None, None));
+                    qc_rows.push((
+                        id.clone(), idle_s, gps_starv, topos_starv, pend,
+                        idle_s > QCQ_IDLE_S && gps_starv && pend, near_idle_tt, nv, nq,
+                    ));
+                    if idle_s <= QCQ_IDLE_S {
+                        continue;
+                    }
                     if topos_starv {
                         st += 1;
                         wt += idle_s;
@@ -1791,6 +1830,28 @@ pub fn spawn_qc_wait_logger(lm: Arc<LiveMap>, pool: PgPool) {
                 }
                 (working, st, wt, sg, wg, sb, sr, wr, pos_known)
             };
+            // per-QC starvation time series (dispatch validation) — bulk insert this tick's rows
+            if !qc_rows.is_empty() {
+                let qa: Vec<String> = qc_rows.iter().map(|r| r.0.clone()).collect();
+                let ia: Vec<i32> = qc_rows.iter().map(|r| r.1 as i32).collect();
+                let nga: Vec<bool> = qc_rows.iter().map(|r| r.2).collect();
+                let nta: Vec<bool> = qc_rows.iter().map(|r| r.3).collect();
+                let pea: Vec<bool> = qc_rows.iter().map(|r| r.4).collect();
+                let sra: Vec<bool> = qc_rows.iter().map(|r| r.5).collect();
+                let nia: Vec<i32> = qc_rows.iter().map(|r| r.6).collect();
+                let nva: Vec<Option<String>> = qc_rows.iter().map(|r| r.7.clone()).collect();
+                let nqa: Vec<Option<String>> = qc_rows.iter().map(|r| r.8.clone()).collect();
+                let _ = sqlx::query(
+                    "INSERT INTO qc_wait_qc_sample
+                       (ts, qc, idle_s, no_truck_gps, no_truck_topos, pending, starving_real, near_idle_tt, next_vessel, next_queuename)
+                     SELECT $1, * FROM unnest($2::text[], $3::int[], $4::bool[], $5::bool[], $6::bool[], $7::bool[], $8::int[], $9::text[], $10::text[])
+                     ON CONFLICT (ts, qc) DO NOTHING",
+                )
+                .bind(ts)
+                .bind(&qa).bind(&ia).bind(&nga).bind(&nta).bind(&pea).bind(&sra).bind(&nia).bind(&nva).bind(&nqa)
+                .execute(&pool)
+                .await;
+            }
             let wt_avg = (st > 0).then(|| wt / st);
             let wg_avg = (sg > 0).then(|| wg / sg);
             let wr_avg = (sr > 0).then(|| wr / sr);
@@ -1821,6 +1882,10 @@ pub fn spawn_qc_wait_logger(lm: Arc<LiveMap>, pool: PgPool) {
             *lm.qc_wait_live.write().await = Some((avg_count, avg_wait));
             if tick % 20 == 0 {
                 let _ = sqlx::query("DELETE FROM qc_wait_sample WHERE ts < now() - interval '14 days'")
+                    .execute(&pool)
+                    .await;
+                // 21d to match dispatch_pred_sample so the join window isn't truncated
+                let _ = sqlx::query("DELETE FROM qc_wait_qc_sample WHERE ts < now() - interval '21 days'")
                     .execute(&pool)
                     .await;
             }

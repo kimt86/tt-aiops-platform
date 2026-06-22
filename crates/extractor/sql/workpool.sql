@@ -22,6 +22,7 @@ SELECT
   l.JOB_ODR_ARMGC      AS armgc,
   l.JOB_ODR_ETW_DT     AS etw_dt,
   l.JOB_ODR_ACTV_DT    AS actv_dt,
+  TO_CHAR(l.UPD_DT, 'YYYYMMDDHH24MISS') AS upd_dt,  -- row last-update ≈ dispatch time (D_tos); DATE→string for parse_etw
   SUBSTR(l.JOB_ODR_CONTNO, 1, 11) AS contno,
   l.JOB_ODR_MSNSEQ     AS msnseq,
   l.JOB_ODR_YT_TOPOS   AS yt_topos,

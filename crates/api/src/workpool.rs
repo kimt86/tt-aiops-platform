@@ -43,6 +43,7 @@ struct MoveRow {
     from_pos: Option<String>,
     to_pos: Option<String>,
     twintandem: Option<String>,
+    upd_ts: Option<DateTime<Utc>>,
 }
 
 #[derive(Serialize, Clone)]
@@ -67,6 +68,9 @@ struct MoveOut {
     from_pos: Option<String>,
     to_pos: Option<String>,
     twintandem: Option<String>,
+    /// TOS row last-update ≈ truck-assignment time (D_tos); internal (validation logger), not in JSON
+    #[serde(skip)]
+    upd_ts: Option<DateTime<Utc>>,
 }
 
 #[derive(sqlx::FromRow)]
@@ -168,7 +172,7 @@ pub(crate) async fn build_workpool(pool: PgPool) -> Result<WorkpoolOut, AppError
         "SELECT w.qc, w.queuename, w.vessel, w.jobtype, w.yt_status, w.ytno, w.armgc, w.etw_ts,
                 coalesce(e.qc_etw_utc, e.vessel_etw_utc) AS etw_accurate,
                 e.expires_at_utc AS etw_expires, w.actv_ts,
-                w.contno, w.yt_topos, w.from_pos, w.to_pos, w.twintandem
+                w.contno, w.yt_topos, w.from_pos, w.to_pos, w.twintandem, w.upd_ts
            FROM live_workpool w
            LEFT JOIN tos_etw_cntr e
                   ON e.vessel = w.vessel AND e.voyage = w.voyage AND e.cntr_no = w.contno",
@@ -199,6 +203,7 @@ pub(crate) async fn build_workpool(pool: PgPool) -> Result<WorkpoolOut, AppError
         from_pos: m.from_pos.clone(),
         to_pos: m.to_pos.clone(),
         twintandem: m.twintandem.clone(),
+        upd_ts: m.upd_ts,
     };
 
     // which QCs are "working now": have an active move, or a started queue (comp>0).
@@ -515,6 +520,35 @@ pub fn spawn_dispatch_pred_logger(pool: PgPool) {
             if present.is_empty() {
                 continue;
             }
+            // (0) D_tos capture: record the FIRST tick each open container is seen assigned (ytno
+            // present) = TOS's dispatch time. tos_upd_dt = the row's TOS UPD_DT (precise, ≈ the
+            // assignment); became_assigned_at = now() (poll-lagged fallback). MUST run BEFORE the
+            // resolve below, else a container assigned+worked within one tick gap stays NULL and
+            // would be mis-read as "never assigned" by the analysis.
+            let (mut as_c, mut as_u): (Vec<String>, Vec<Option<DateTime<Utc>>>) = (Vec::new(), Vec::new());
+            for qc in &wp.qcs {
+                for m in &qc.moves {
+                    if m.ytno.as_deref().map(|s| !s.trim().is_empty()).unwrap_or(false) {
+                        if let Some(c) = &m.contno {
+                            as_c.push(c.clone());
+                            as_u.push(m.upd_ts);
+                        }
+                    }
+                }
+            }
+            if !as_c.is_empty() {
+                let _ = sqlx::query(
+                    "UPDATE dispatch_pred_sample d
+                        SET became_assigned_at = now(), became_assigned_tick = $3, tos_upd_dt = v.upd
+                       FROM (SELECT unnest($1::text[]) AS contno, unnest($2::timestamptz[]) AS upd) v
+                      WHERE d.contno = v.contno AND d.resolved_at IS NULL AND d.became_assigned_at IS NULL",
+                )
+                .bind(&as_c)
+                .bind(&as_u)
+                .bind(tick as i64)
+                .execute(&pool)
+                .await;
+            }
             // (1a) DS containers are "worked" the instant the QC discharges (actv_ts ≈ QC move
             // complete, verified ~0s) — resolve those with their actv_ts (exact ground truth). LD
             // has no such per-container signal, so it falls through to pool-leave (1b, ~lagged).
@@ -603,10 +637,13 @@ pub fn spawn_dispatch_pred_logger(pool: PgPool) {
                     let work_eta = eta + chrono::Duration::seconds(((i as f64 / rem as f64) * p as f64) as i64);
                     let deadline = work_eta - chrono::Duration::seconds(lead);
                     let assigned = m.ytno.as_deref().map(|s| !s.trim().is_empty()).unwrap_or(false);
+                    // if already assigned at first log, seed D_tos now (else NULL → captured later by (0))
+                    let (ba_at, ba_tick, ba_upd): (Option<DateTime<Utc>>, Option<i64>, Option<DateTime<Utc>>) =
+                        if assigned { (Some(Utc::now()), Some(tick as i64), m.upd_ts) } else { (None, None, None) };
                     let _ = sqlx::query(
                         "INSERT INTO dispatch_pred_sample
-                           (qc, vessel, contno, queuename, jobtype, pred_work_eta_ts, dispatch_deadline_ts, assigned, slack_s, lead_s)
-                         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
+                           (qc, vessel, contno, queuename, jobtype, pred_work_eta_ts, dispatch_deadline_ts, assigned, slack_s, lead_s, became_assigned_at, became_assigned_tick, tos_upd_dt)
+                         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)",
                     )
                     .bind(&qc.qc)
                     .bind(&m.vessel)
@@ -618,6 +655,9 @@ pub fn spawn_dispatch_pred_logger(pool: PgPool) {
                     .bind(assigned)
                     .bind(qc.slack_s.map(|v| v as i32))
                     .bind(lead as i32)
+                    .bind(ba_at)
+                    .bind(ba_tick)
+                    .bind(ba_upd)
                     .execute(&pool)
                     .await;
                     logged += 1;
