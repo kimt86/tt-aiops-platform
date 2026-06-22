@@ -1,5 +1,5 @@
 * { margin: 0; padding: 0; box-sizing: border-box; }
-html, body, #root { height: 100%; }
+html, body, #root { min-height: 100%; } /* min-height (not height) so the sticky header's containing block spans the full page, not just one viewport */
 body {
   font-family: "Inter", "Malgun Gothic", sans-serif;
   background: var(--bg);
@@ -160,7 +160,12 @@ body {
    so small vessels share a row and the total row count is minimised. */
 .qca-cols { display: flex; flex-wrap: wrap; gap: 16px 24px; align-items: flex-start; }
 .qca-vgroup { max-width: 286px; }   /* up to ~3 QC cells per row; small vessels stay narrow */
-.qc-vgroup-h { display: flex; align-items: baseline; gap: 8px; margin: 4px 0 8px; padding-bottom: 4px; border-bottom: 1px solid var(--border); }
+.qc-vgroup-h { display: flex; align-items: baseline; gap: 8px; margin: 4px 0 3px; }
+/* vessel total-progress bar — under the vessel name, above the divider line */
+.qc-vbar { margin: 0 0 8px; padding-bottom: 7px; border-bottom: 1px solid var(--border); }
+.qc-vbar-txt { display: flex; justify-content: space-between; font-size: 8px; color: var(--text-mute); margin-bottom: 2px; }
+.qc-vbar-track { height: 4px; background: var(--bg-soft); border-radius: 999px; overflow: hidden; }
+.qc-vbar-track .fill { height: 100%; background: linear-gradient(90deg, var(--brand-deep), var(--brand)); border-radius: 999px; }
 .qc-vgroup-h .vsl { font-family: "Manrope", sans-serif; font-weight: 800; font-size: 13px; color: var(--text); letter-spacing: -0.2px; }
 .qc-vgroup-h .vgroup-dep { font-size: 10.5px; color: var(--text-dim); }
 .qc-vgroup-h .qc-vgroup-n { font-size: 10.5px; color: var(--text-mute); margin-left: auto; }

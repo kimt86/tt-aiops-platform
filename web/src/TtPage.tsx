@@ -305,7 +305,11 @@ function LiveQcSequence({ lang, wp, snap }: { lang: Lang; wp: WorkpoolResponse |
       </div>
       <div className="tcard-body">
         {working.length === 0 && <div className="lvp-empty">{ko(lang) ? "가동 중인 QC 없음" : "no working QC"}</div>}
-        {groups.map((g) => (
+        {groups.map((g) => {
+          const vcomp = g.items.reduce((a, q) => a + q.queues.reduce((s, b) => s + b.done, 0), 0);
+          const vtot = g.items.reduce((a, q) => a + q.queues.reduce((s, b) => s + b.total, 0), 0);
+          const vpct = vtot > 0 ? Math.round((vcomp / vtot) * 100) : 0;
+          return (
           <div className="qc-vgroup" key={g.vessel}>
             <div className="qc-vgroup-h">
               <span className="vsl">{g.vessel}</span>
@@ -316,11 +320,16 @@ function LiveQcSequence({ lang, wp, snap }: { lang: Lang; wp: WorkpoolResponse |
               })()}
               <span className="qc-vgroup-n">{g.items.length} QC</span>
             </div>
+            <div className="qc-vbar" title={ko(lang) ? "이 선박 전체 작업 진행률 (완료/전체 컨테이너)" : "vessel total progress (done/total)"}>
+              <div className="qc-vbar-txt"><span>{ko(lang) ? "선박 진행" : "vessel"} {vpct}%</span><span className="mono">{vcomp.toLocaleString()} / {vtot.toLocaleString()}</span></div>
+              <div className="qc-vbar-track"><div className="fill" style={{ width: `${vpct}%` }} /></div>
+            </div>
             <div className="qc-panel">
               {g.items.map((q) => <QcCol key={q.qc} q={q} lang={lang} ttState={ttState} working={craneFresh.get(q.qc) ?? false} mph={craneMph.get(q.qc)} maxN={maxN} showDl={showDl} />)}
             </div>
           </div>
-        ))}
+          );
+        })}
       </div>
     </section>
   );
@@ -539,10 +548,10 @@ function QcAssignedCard({ lang, wp, snap }: { lang: Lang; wp: WorkpoolResponse |
                 {g.items[0]?.estdep && <span className="vgroup-dep" title={ko_ ? "출항 예정시각" : "departure"}>🏁 {ko_ ? "출항" : "dep"} <span className="mono">{dayClockOf(g.items[0].estdep, ko_)}</span></span>}
                 <span className="qc-vgroup-n">{g.items.length} QC</span>
               </div>
-              <div className="qc-progress" title={ko_ ? "이 선박 전체 작업 진행률 (완료/전체 컨테이너)" : "vessel total progress (done/total)"}>
-                <span>{ko_ ? "선박 진행" : "vessel"} {vpct}%</span><span className="mono">{vcomp.toLocaleString()} / {vtot.toLocaleString()}</span>
+              <div className="qc-vbar" title={ko_ ? "이 선박 전체 작업 진행률 (완료/전체 컨테이너)" : "vessel total progress (done/total)"}>
+                <div className="qc-vbar-txt"><span>{ko_ ? "선박 진행" : "vessel"} {vpct}%</span><span className="mono">{vcomp.toLocaleString()} / {vtot.toLocaleString()}</span></div>
+                <div className="qc-vbar-track"><div className="fill" style={{ width: `${vpct}%` }} /></div>
               </div>
-              <div className="qc-progress-bar"><div className="fill" style={{ width: `${vpct}%` }} /></div>
               <div className="qca-grid">
                 {g.items.map((x) => (
                   <div className="qca-cell clickable" key={x.qc} onClick={() => jump(x.qc)}
