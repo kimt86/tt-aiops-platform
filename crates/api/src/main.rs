@@ -108,6 +108,7 @@ async fn main() -> anyhow::Result<()> {
     livemap::spawn_qc_wait_logger(livemap.clone(), pool.clone()); // 30s QC starvation 적재(K_QC_TT_WAIT_GPS, topos vs GPS 비교)
     livemap::spawn_qc_wait_kpi(pool.clone()); // 5min: qc_wait_sample → kpi_daily/shift (K_QC_TT_WAIT_GPS 영속)
     workpool::spawn_dispatch_pred_logger(pool.clone()); // 2min: 배차 1단계 예측 검증 로그(dispatch_pred_sample)
+    livemap::spawn_stage2_shadow(livemap.clone(), pool.clone()); // 60s: Stage-2 매칭 그림자(stage2_match_shadow)
     let state = AppState { pool, livemap };
 
     let addr = std::env::var("API_ADDR").unwrap_or_else(|_| "127.0.0.1:8080".to_string());

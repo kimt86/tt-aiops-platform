@@ -3162,3 +3162,131 @@ fn clean_driver(s: &str) -> String {
     out = out.split_whitespace().collect::<Vec<_>>().join(" ");
     out
 }
+
+// ── Stage-2 SHADOW optimal-matching recommender ──────────────────────────────────────────────
+/// ~225m spatial grid cell of a coordinate (mirrors the SQL travel_grid225, mig 0051) — lets a
+/// truck's live GPS look up the OD cost summary in memory.
+fn grid225(lat: f64, lon: f64) -> String {
+    format!("G{}_{}", (lat / 0.00202).round() as i64, (lon / 0.00202).round() as i64)
+}
+
+/// Every 60s, recommend vehicle→work matches and log them (SHADOW; never drives live dispatch).
+/// Candidates = idle + soon-free TTs. Work = Stage-1 unassigned demand (build_workpool) with its
+/// QC's work-ETA + pickup coord (LD=block centroid, DS=QC GPS). Cost = time-to-free + OD travel
+/// (travel_cost_lookup layer, loaded once). Greedy: urgent work first gets its n cheapest feasible
+/// vehicles. Logs arrival, conservative deadline slack, feasibility, OD tier → stage2_match_shadow.
+pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(Duration::from_secs(60));
+        let mut tick = 0u64;
+        loop {
+            ticker.tick().await;
+            tick += 1;
+            if !lm.connected.load(Ordering::Relaxed) {
+                continue;
+            }
+            let now = Utc::now().timestamp_millis();
+            // candidate vehicles: idle (free now) + soon-free; committed/moving (delivering/empty) skipped
+            let vehicles: Vec<(String, f64, f64, i64, &'static str)> = {
+                let map = lm.devices.read().await;
+                let plc = lm.plc.read().await;
+                let centroids = lm.centroids.read().await;
+                let assigned_pool = lm.assigned_pool.read().await;
+                let rtgs: Vec<(f64, f64)> = map.values()
+                    .filter(|p| p.cls == "RTG" && (now - p.last_seen_ms) / 1000 <= STALE_AFTER_S)
+                    .map(|p| (p.lat, p.lon)).collect();
+                let cranes: HashMap<String, (f64, f64)> = map.iter()
+                    .filter(|(_, p)| matches!(p.cls.as_str(), "C" | "M" | "Z") && (now - p.last_seen_ms) / 1000 <= STALE_AFTER_S)
+                    .map(|(id, p)| (id.clone(), (p.lat, p.lon))).collect();
+                let mut v = Vec::new();
+                for (id, p) in map.iter() {
+                    if p.cls != "TT" || (now - p.last_seen_ms) / 1000 > STALE_AFTER_S {
+                        continue;
+                    }
+                    let c = classify_tt(p, assigned_pool.get(id), &rtgs, &plc, &cranes, &centroids, now);
+                    let base = match c.state {
+                        "idle" => 0,
+                        s @ ("soon_idle" | "approaching" | "wait_rtg") => free_in(s, p.jobtype.as_deref()).0.unwrap_or(0),
+                        _ => continue,
+                    };
+                    v.push((id.clone(), p.lat, p.lon, base, c.state));
+                }
+                v
+            };
+            if vehicles.is_empty() {
+                continue;
+            }
+            // candidate work + pickup coord
+            let Ok(work) = crate::workpool::stage2_work_candidates(pool.clone()).await else { continue };
+            let (cranes_now, centroids_now): (HashMap<String, (f64, f64)>, HashMap<String, (f64, f64)>) = {
+                let map = lm.devices.read().await;
+                let cr = map.iter()
+                    .filter(|(_, p)| matches!(p.cls.as_str(), "C" | "M" | "Z") && (now - p.last_seen_ms) / 1000 <= STALE_AFTER_S)
+                    .map(|(id, p)| (id.clone(), (p.lat, p.lon))).collect();
+                let ce = lm.centroids.read().await;
+                let cem = ce.iter().map(|(k, c)| (k.clone(), (c.lat, c.lon))).collect();
+                (cr, cem)
+            };
+            // (work index, pickup lat, pickup lon, work-ETA ms) — only those with a coord + ETA
+            let works: Vec<(usize, f64, f64, i64)> = work.iter().enumerate().filter_map(|(i, w)| {
+                let coord = if w.jobtype == "LD" {
+                    w.src_block.as_ref().and_then(|b| centroids_now.get(b).copied())
+                } else {
+                    cranes_now.get(&w.qc).copied().or_else(|| centroids_now.get(&w.qc).copied())
+                }?;
+                Some((i, coord.0, coord.1, w.work_eta_ts?.timestamp_millis()))
+            }).collect();
+            if works.is_empty() {
+                continue;
+            }
+            // OD cost summary (225m grid, n>=10) loaded once → in-memory lookup
+            let od: HashMap<(String, String), (i64, i64)> = sqlx::query_as::<_, (String, String, i32, i32)>(
+                "SELECT oz, dz, p50_s, p90_s FROM learn_travel_zone225 WHERE n >= 10",
+            )
+            .fetch_all(&pool).await.unwrap_or_default()
+            .into_iter().map(|(oz, dz, p50, p90)| ((oz, dz), (p50 as i64, p90 as i64))).collect();
+            let cost = |vlat: f64, vlon: f64, wlat: f64, wlon: f64| -> (i64, i64, &'static str) {
+                match od.get(&(grid225(vlat, vlon), grid225(wlat, wlon))) {
+                    Some(&(p50, p90)) => (p50, p90, "L2"),
+                    None => { let m = dist_m((vlat, vlon), (wlat, wlon)); ((m / 1.8194) as i64, (m / 1.8194 * 1.5) as i64, "L3") }
+                }
+            };
+            // greedy: urgent work (soonest work-ETA) first; assign its n cheapest unused vehicles
+            let mut order: Vec<&(usize, f64, f64, i64)> = works.iter().collect();
+            order.sort_by_key(|w| w.3);
+            let mut used: std::collections::HashSet<usize> = std::collections::HashSet::new();
+            let ts = Utc::now();
+            for &&(wi, wlat, wlon, eta_ms) in &order {
+                let w = &work[wi];
+                let mut cand: Vec<(usize, i64, i64, &'static str)> = vehicles.iter().enumerate()
+                    .filter(|(vi, _)| !used.contains(vi))
+                    .map(|(vi, v)| { let (p50, p90, tier) = cost(v.1, v.2, wlat, wlon); (vi, v.3 + p50, v.3 + p90, tier) })
+                    .collect();
+                cand.sort_by_key(|c| c.1);
+                let mut taken = 0i32;
+                for (vi, arr, arr_p90, tier) in cand {
+                    if taken >= w.n {
+                        break;
+                    }
+                    let arrival_at = now + arr_p90 * 1000;
+                    let slack = (eta_ms - arrival_at) / 1000;
+                    let v = &vehicles[vi];
+                    let _ = sqlx::query(
+                        "INSERT INTO stage2_match_shadow
+                           (ts,tick,ytno,qc,vessel,queuename,jobtype,src_block,veh_state,arrival_s,od_p90_s,deadline_slack_s,feasible,cost_tier)
+                         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) ON CONFLICT (ts,ytno) DO NOTHING",
+                    )
+                    .bind(ts).bind(tick as i64).bind(&v.0).bind(&w.qc).bind(&w.vessel).bind(&w.queuename)
+                    .bind(&w.jobtype).bind(&w.src_block).bind(v.4)
+                    .bind(arr as i32).bind(arr_p90 as i32).bind(slack as i32).bind(arrival_at <= eta_ms).bind(tier)
+                    .execute(&pool).await;
+                    used.insert(vi);
+                    taken += 1;
+                }
+            }
+            if tick % 30 == 0 {
+                let _ = sqlx::query("DELETE FROM stage2_match_shadow WHERE ts < now() - interval '21 days'").execute(&pool).await;
+            }
+        }
+    });
+}

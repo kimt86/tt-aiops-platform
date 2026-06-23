@@ -683,3 +683,50 @@ pub fn spawn_dispatch_pred_logger(pool: PgPool) {
         }
     });
 }
+
+// ── Stage-2 matching support ─────────────────────────────────────────────────────────────────
+/// One unassigned-demand bucket (a Stage-1 candidate) flattened for the Stage-2 shadow matcher,
+/// with its QC's work-ETA (→ dispatch deadline) and pickup descriptor. pub(crate) so the matcher
+/// (in livemap, which holds the live vehicle GPS) can read it across modules.
+pub(crate) struct Stage2Work {
+    pub(crate) qc: String,
+    pub(crate) vessel: String,
+    pub(crate) queuename: String,
+    pub(crate) jobtype: String,            // "DS" | "LD"
+    pub(crate) src_block: Option<String>,  // LD: pickup block; DS: None (pickup = the QC)
+    pub(crate) n: i32,                      // containers in this bucket still needing a truck
+    pub(crate) work_eta_ts: Option<DateTime<Utc>>, // when the QC reaches this work (deadline base)
+    pub(crate) lead_s: i64,                 // dispatch lead (DS 300 / LD 1200)
+}
+
+/// Build the Stage-2 work-demand list from the same engine the dispatch page uses (build_workpool):
+/// each unassigned candidate + its queue's work-ETA. Same-module access to the private WorkpoolOut.
+pub(crate) async fn stage2_work_candidates(pool: PgPool) -> Result<Vec<Stage2Work>, AppError> {
+    let wp = build_workpool(pool).await?;
+    let mut eta: HashMap<(String, String, String), DateTime<Utc>> = HashMap::new();
+    for qc in &wp.qcs {
+        for q in &qc.queues {
+            if let Some(e) = q.work_eta_ts {
+                eta.insert((qc.qc.clone(), q.vessel.clone(), q.queuename.clone()), e);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    for c in &wp.candidates {
+        let Some(qc) = c.qc.clone().filter(|s| !s.is_empty()) else { continue };
+        let jt = c.jobtype.clone().unwrap_or_default();
+        let lead = if jt == "LD" { 1200 } else { 300 };
+        let work_eta = eta.get(&(qc.clone(), c.vessel.clone(), c.queuename.clone())).copied();
+        out.push(Stage2Work {
+            qc,
+            vessel: c.vessel.clone(),
+            queuename: c.queuename.clone(),
+            jobtype: jt,
+            src_block: c.src_block.clone(),
+            n: c.n,
+            work_eta_ts: work_eta,
+            lead_s: lead,
+        });
+    }
+    Ok(out)
+}
