@@ -4,6 +4,7 @@ import { LineChart } from "./charts";
 import { deltaLabel, fmtValue, isImprovement } from "./format";
 import { t, type Lang } from "./i18n";
 import TtPage from "./TtPage";
+import Stage2Page from "./Stage2Page";
 import CyclesPage from "./CyclesPage";
 import LiveMapPage from "./LiveMapPage";
 import HealthPage from "./HealthPage";
@@ -569,6 +570,11 @@ const IconMap = () => (
     <path d="M12 21s7-6.3 7-11a7 7 0 1 0-14 0c0 4.7 7 11 7 11z" /><circle cx="12" cy="10" r="2.5" />
   </svg>
 );
+const IconStage2 = () => (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M16 3h5v5" /><path d="M21 3L13 11" /><path d="M8 21H3v-5" /><path d="M3 21l8-8" /><circle cx="6" cy="6" r="2.2" /><circle cx="18" cy="18" r="2.2" />
+  </svg>
+);
 const IconCycles = () => (
   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
     <path d="M21 12a9 9 0 1 1-2.64-6.36" /><polyline points="21 3 21 9 15 9" />
@@ -590,10 +596,11 @@ const IconLearn = () => (
   </svg>
 );
 
-type PageKey = "kpi" | "tt" | "cycles" | "learn" | "map" | "health" | "feed";
+type PageKey = "kpi" | "tt" | "stage2" | "cycles" | "learn" | "map" | "health" | "feed";
 const PAGES: { key: PageKey; label: string; Icon: () => ReactElement; ko: string; en: string }[] = [
   { key: "kpi", label: "KPI", Icon: IconKpi, ko: "KPI 운영 지표", en: "KPI Metrics" },
   { key: "tt", label: "TT", Icon: IconTt, ko: "TT 배차 현황", en: "TT Dispatch" },
+  { key: "stage2", label: "MATCH", Icon: IconStage2, ko: "2단계 매칭", en: "Stage-2 Match" },
   { key: "cycles", label: "CYCLES", Icon: IconCycles, ko: "사이클 이력", en: "Cycle History" },
   { key: "learn", label: "LEARN", Icon: IconLearn, ko: "학습 센터", en: "Learning Center" },
   { key: "map", label: "MAP", Icon: IconMap, ko: "라이브 맵", en: "Live Map" },
@@ -647,7 +654,7 @@ export default function App() {
               </button>
             ))}
           </div>
-          {page === "kpi" ? <KpiPage lang={lang} /> : page === "tt" ? <TtPage lang={lang} /> : page === "cycles" ? <CyclesPage lang={lang} /> : page === "learn" ? <LearnPage lang={lang} /> : page === "map" ? <LiveMapPage lang={lang} /> : page === "health" ? <HealthPage lang={lang} /> : <FeedHealthPage lang={lang} />}
+          {page === "kpi" ? <KpiPage lang={lang} /> : page === "tt" ? <TtPage lang={lang} /> : page === "stage2" ? <Stage2Page lang={lang} /> : page === "cycles" ? <CyclesPage lang={lang} /> : page === "learn" ? <LearnPage lang={lang} /> : page === "map" ? <LiveMapPage lang={lang} /> : page === "health" ? <HealthPage lang={lang} /> : <FeedHealthPage lang={lang} />}
         </div>
       </div>
     </>

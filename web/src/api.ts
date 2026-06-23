@@ -207,6 +207,21 @@ export interface DispatchPredData {
   ld_eval: number; ld_med_err_min: number | null;
 }
 
+export interface Stage2Match {
+  ytno: string; qc: string | null; vessel: string | null; queuename: string | null;
+  jobtype: string | null; src_block: string | null; veh_state: string | null;
+  arrival_s: number | null; deadline_slack_s: number | null; feasible: boolean | null;
+  cost_tier: string | null; switched: boolean | null;
+}
+export interface Stage2Shadow {
+  summary: {
+    matches_30m: number; switched_pct: number | null; feasible_pct: number | null;
+    l2_pct: number | null; median_arrival_s: number | null; vehicles: number; works: number;
+  };
+  latest_ts: string | null;
+  latest: Stage2Match[];
+}
+
 async function get<T>(path: string): Promise<T> {
   const r = await fetch(path);
   if (!r.ok) throw new Error(`${path}: ${r.status}`);
@@ -233,4 +248,5 @@ export const api = {
   learnTravel: () => get<TravelData>("/api/learn/travel"),
   learnSoonIdle: () => get<SoonIdleData>("/api/learn/soon-idle"),
   learnDispatchPred: () => get<DispatchPredData>("/api/learn/dispatch-pred"),
+  stage2Shadow: () => get<Stage2Shadow>("/api/stage2/shadow"),
 };

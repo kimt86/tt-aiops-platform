@@ -730,3 +730,70 @@ pub(crate) async fn stage2_work_candidates(pool: PgPool) -> Result<Vec<Stage2Wor
     }
     Ok(out)
 }
+
+// ── Stage-2 shadow validation dashboard feed ─────────────────────────────────────────────────
+#[derive(Serialize, sqlx::FromRow)]
+struct S2Summary {
+    matches_30m: i64,
+    switched_pct: Option<f64>,
+    feasible_pct: Option<f64>,
+    l2_pct: Option<f64>,
+    median_arrival_s: Option<f64>,
+    vehicles: i64,
+    works: i64,
+}
+#[derive(Serialize, sqlx::FromRow)]
+struct S2Match {
+    ytno: String,
+    qc: Option<String>,
+    vessel: Option<String>,
+    queuename: Option<String>,
+    jobtype: Option<String>,
+    src_block: Option<String>,
+    veh_state: Option<String>,
+    arrival_s: Option<i32>,
+    deadline_slack_s: Option<i32>,
+    feasible: Option<bool>,
+    cost_tier: Option<String>,
+    switched: Option<bool>,
+}
+#[derive(Serialize)]
+pub struct Stage2ShadowOut {
+    summary: S2Summary,
+    latest_ts: Option<DateTime<Utc>>,
+    latest: Vec<S2Match>,
+}
+
+/// `GET /api/stage2/shadow` — live Stage-2 matching shadow: last-30min summary (thrash, feasibility,
+/// OD tier, median arrival) + the most recent tick's recommended vehicle→work matches.
+pub async fn stage2_shadow(State(pool): State<PgPool>) -> Result<Json<Stage2ShadowOut>, AppError> {
+    let summary: S2Summary = sqlx::query_as(
+        "SELECT count(*) AS matches_30m,
+                (100.0*count(*) FILTER (WHERE switched)/nullif(count(*),0))::float8 AS switched_pct,
+                (100.0*count(*) FILTER (WHERE feasible)/nullif(count(*),0))::float8 AS feasible_pct,
+                (100.0*count(*) FILTER (WHERE cost_tier='L2')/nullif(count(*),0))::float8 AS l2_pct,
+                (percentile_cont(0.5) WITHIN GROUP (ORDER BY arrival_s))::float8 AS median_arrival_s,
+                count(DISTINCT ytno) AS vehicles,
+                count(DISTINCT (qc, queuename, vessel)) AS works
+           FROM stage2_match_shadow WHERE ts > now() - interval '30 minutes'",
+    )
+    .fetch_one(&pool)
+    .await?;
+    let latest_ts: Option<(Option<DateTime<Utc>>,)> =
+        sqlx::query_as("SELECT max(ts) FROM stage2_match_shadow")
+            .fetch_optional(&pool)
+            .await?;
+    let latest_ts = latest_ts.and_then(|r| r.0);
+    let latest: Vec<S2Match> = match latest_ts {
+        Some(ts) => sqlx::query_as(
+            "SELECT ytno, qc, vessel, queuename, jobtype, src_block, veh_state, arrival_s,
+                    deadline_slack_s, feasible, cost_tier, switched
+               FROM stage2_match_shadow WHERE ts = $1 ORDER BY arrival_s",
+        )
+        .bind(ts)
+        .fetch_all(&pool)
+        .await?,
+        None => Vec::new(),
+    };
+    Ok(Json(Stage2ShadowOut { summary, latest_ts, latest }))
+}
