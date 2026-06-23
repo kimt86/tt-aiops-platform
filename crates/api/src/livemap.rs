@@ -3169,6 +3169,9 @@ fn clean_driver(s: &str) -> String {
 fn grid225(lat: f64, lon: f64) -> String {
     format!("G{}_{}", (lat / 0.00202).round() as i64, (lon / 0.00202).round() as i64)
 }
+// anti-thrash: a vehicle keeps its previous-tick work bucket unless another is >= this many
+// arrival-seconds cheaper. Damps reassignment from small OD/GPS noise.
+const SWITCH_PENALTY_S: i64 = 180;
 
 /// Every 60s, recommend vehicle→work matches and log them (SHADOW; never drives live dispatch).
 /// Candidates = idle + soon-free TTs. Work = Stage-1 unassigned demand (build_workpool) with its
@@ -3186,6 +3189,14 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                 continue;
             }
             let now = Utc::now().timestamp_millis();
+            // previous-tick recommendation per vehicle (ytno → work bucket key) for anti-thrash.
+            // ts-based (restart-safe), latest per vehicle within the last ~2.5 ticks.
+            let prev: HashMap<String, (String, String, String)> = sqlx::query_as::<_, (String, String, String, String)>(
+                "SELECT DISTINCT ON (ytno) ytno, coalesce(qc,''), coalesce(vessel,''), coalesce(queuename,'')
+                   FROM stage2_match_shadow WHERE ts > now() - interval '150 seconds' ORDER BY ytno, ts DESC",
+            )
+            .fetch_all(&pool).await.unwrap_or_default()
+            .into_iter().map(|(yt, q, v, qn)| (yt, (q, v, qn))).collect();
             // candidate vehicles: idle (free now) + soon-free; committed/moving (delivering/empty) skipped
             let vehicles: Vec<(String, f64, f64, i64, &'static str)> = {
                 let map = lm.devices.read().await;
@@ -3258,13 +3269,22 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
             let ts = Utc::now();
             for &&(wi, wlat, wlon, eta_ms) in &order {
                 let w = &work[wi];
-                let mut cand: Vec<(usize, i64, i64, &'static str)> = vehicles.iter().enumerate()
+                let this_key = (w.qc.clone(), w.vessel.clone(), w.queuename.clone());
+                // (vi, sort_cost = arrival + switch_penalty, arrival, p90, tier, switched)
+                let mut cand: Vec<(usize, i64, i64, i64, &'static str, bool)> = vehicles.iter().enumerate()
                     .filter(|(vi, _)| !used.contains(vi))
-                    .map(|(vi, v)| { let (p50, p90, tier) = cost(v.1, v.2, wlat, wlon); (vi, v.3 + p50, v.3 + p90, tier) })
+                    .map(|(vi, v)| {
+                        let (p50, p90, tier) = cost(v.1, v.2, wlat, wlon);
+                        let arr = v.3 + p50;
+                        // switched = this vehicle was recommended a DIFFERENT bucket last tick
+                        let switched = prev.get(&v.0).map(|pk| pk != &this_key).unwrap_or(false);
+                        let pen = if switched { SWITCH_PENALTY_S } else { 0 };
+                        (vi, arr + pen, arr, v.3 + p90, tier, switched)
+                    })
                     .collect();
-                cand.sort_by_key(|c| c.1);
+                cand.sort_by_key(|c| c.1); // penalized cost → keep prior bucket unless clearly cheaper
                 let mut taken = 0i32;
-                for (vi, arr, arr_p90, tier) in cand {
+                for (vi, _sort, arr, arr_p90, tier, switched) in cand {
                     if taken >= w.n {
                         break;
                     }
@@ -3273,12 +3293,12 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                     let v = &vehicles[vi];
                     let _ = sqlx::query(
                         "INSERT INTO stage2_match_shadow
-                           (ts,tick,ytno,qc,vessel,queuename,jobtype,src_block,veh_state,arrival_s,od_p90_s,deadline_slack_s,feasible,cost_tier)
-                         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) ON CONFLICT (ts,ytno) DO NOTHING",
+                           (ts,tick,ytno,qc,vessel,queuename,jobtype,src_block,veh_state,arrival_s,od_p90_s,deadline_slack_s,feasible,cost_tier,switched)
+                         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) ON CONFLICT (ts,ytno) DO NOTHING",
                     )
                     .bind(ts).bind(tick as i64).bind(&v.0).bind(&w.qc).bind(&w.vessel).bind(&w.queuename)
                     .bind(&w.jobtype).bind(&w.src_block).bind(v.4)
-                    .bind(arr as i32).bind(arr_p90 as i32).bind(slack as i32).bind(arrival_at <= eta_ms).bind(tier)
+                    .bind(arr as i32).bind(arr_p90 as i32).bind(slack as i32).bind(arrival_at <= eta_ms).bind(tier).bind(switched)
                     .execute(&pool).await;
                     used.insert(vi);
                     taken += 1;
