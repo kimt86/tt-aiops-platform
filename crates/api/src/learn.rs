@@ -522,3 +522,88 @@ pub async fn soon_idle(State(pool): State<PgPool>) -> Result<Json<SoonIdleResp>,
         metric_series,
     }))
 }
+
+// ── Stage-1 dispatch work-time prediction (shadow validation) ─────────────────────────────────
+// The deadline-aware engine predicts WHEN each crane will work each container (work-ETA → dispatch
+// deadline). We log every prediction and, when the container is actually worked, the truth: DS via
+// the exact crane-discharge time, LD via pool-leave (lagged). This card shows the model's
+// accumulating validated sample base (learning) + the near-term (dispatch-relevant, lead<20min)
+// accuracy of predicted-vs-actual work time (test). DS is the clean ground truth; LD lags a few min.
+#[derive(sqlx::FromRow)]
+struct DpDay { n: i64 }
+#[derive(sqlx::FromRow)]
+struct DpTest {
+    ds_eval: i64,
+    ds_med_err_min: Option<f64>,
+    ds_within10_pct: Option<f64>,
+    ld_eval: i64,
+    ld_med_err_min: Option<f64>,
+}
+#[derive(sqlx::FromRow)]
+struct DpTot { resolved_total: i64, distinct_cont: i64 }
+
+#[derive(Serialize)]
+pub struct DispatchPredResp {
+    samples: Vec<i64>,        // cumulative validated (resolved) predictions per day
+    resolved_total: i64,
+    distinct_cont: i64,
+    ds_eval: i64,
+    ds_med_err_min: Option<f64>,
+    ds_within10_pct: Option<f64>,
+    ld_eval: i64,
+    ld_med_err_min: Option<f64>,
+}
+
+pub async fn dispatch_pred(State(pool): State<PgPool>) -> Result<Json<DispatchPredResp>, AppError> {
+    // learning series: daily resolved-prediction count → cumulated (validation base grows)
+    let days: Vec<DpDay> = sqlx::query_as(
+        "SELECT count(*)::int8 AS n FROM dispatch_pred_sample
+          WHERE resolved_at IS NOT NULL AND logged_at > now() - interval '14 days'
+          GROUP BY logged_at::date ORDER BY logged_at::date",
+    )
+    .fetch_all(&pool)
+    .await?;
+    let mut cum = 0i64;
+    let samples: Vec<i64> = days.iter().map(|d| { cum += d.n; cum }).collect();
+
+    // test: near-term (lead < 20min, dispatch-relevant) accuracy of predicted vs actual work time
+    let test: DpTest = sqlx::query_as(
+        "WITH z AS (
+           SELECT jobtype,
+             extract(epoch FROM (resolved_at - pred_work_eta_ts))/60 AS err,
+             (pred_work_eta_ts - logged_at) AS lead_iv
+           FROM dispatch_pred_sample
+           WHERE resolved_at IS NOT NULL AND resolved_at >= logged_at AND pred_work_eta_ts IS NOT NULL
+             AND logged_at > now() - interval '2 days'
+         ), n AS (SELECT * FROM z WHERE lead_iv < interval '20 minutes')
+         SELECT
+           count(*) FILTER (WHERE jobtype='DS')::int8 AS ds_eval,
+           (percentile_cont(0.5) WITHIN GROUP (ORDER BY err) FILTER (WHERE jobtype='DS'))::float8 AS ds_med_err_min,
+           (100.0*count(*) FILTER (WHERE jobtype='DS' AND abs(err)<=10)
+             / nullif(count(*) FILTER (WHERE jobtype='DS'),0))::float8 AS ds_within10_pct,
+           count(*) FILTER (WHERE jobtype='LD')::int8 AS ld_eval,
+           (percentile_cont(0.5) WITHIN GROUP (ORDER BY err) FILTER (WHERE jobtype='LD'))::float8 AS ld_med_err_min
+         FROM n",
+    )
+    .fetch_one(&pool)
+    .await?;
+
+    let tot: DpTot = sqlx::query_as(
+        "SELECT count(*) FILTER (WHERE resolved_at IS NOT NULL)::int8 AS resolved_total,
+                count(DISTINCT contno)::int8 AS distinct_cont
+           FROM dispatch_pred_sample",
+    )
+    .fetch_one(&pool)
+    .await?;
+
+    Ok(Json(DispatchPredResp {
+        samples,
+        resolved_total: tot.resolved_total,
+        distinct_cont: tot.distinct_cont,
+        ds_eval: test.ds_eval,
+        ds_med_err_min: test.ds_med_err_min,
+        ds_within10_pct: test.ds_within10_pct,
+        ld_eval: test.ld_eval,
+        ld_med_err_min: test.ld_med_err_min,
+    }))
+}

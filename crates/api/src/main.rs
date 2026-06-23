@@ -58,6 +58,7 @@ fn app(state: AppState) -> Router {
         .route("/api/learn/lanes", get(learn::lanes))
         .route("/api/learn/travel", get(learn::travel))
         .route("/api/learn/soon-idle", get(learn::soon_idle))
+        .route("/api/learn/dispatch-pred", get(learn::dispatch_pred))
         .route("/api/health", get(routes::health))
         .layer(CorsLayer::permissive()) // dev; tighten to the dashboard origin in prod
         .with_state(state);

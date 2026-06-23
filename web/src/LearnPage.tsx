@@ -1,9 +1,9 @@
-// 학습 센터 — 4개 학습 모델을 "세션 카드"로. 각 카드는 가로 2단:
+// 학습 센터 — 5개 학습 모델을 "세션 카드"로. 각 카드는 가로 2단:
 //   📈 학습 추이(품질이 시간이 갈수록 좋아지나) | 🧪 최신 테스트(예측 vs 실제, 최근 결과)
 //   ① TT 이동시간  ② 작업지점 좌표  ③ 주행 차선  ④ Soon-idle 예측 정확도
 import { useEffect, useMemo, useState } from "react";
 import { type Lang } from "./i18n";
-import { api, type LearnTopos, type LearnToposPoint, type LanesData, type TravelData, type TravelOd, type SoonIdleData, type SoonIdleLead } from "./api";
+import { api, type LearnTopos, type LearnToposPoint, type LanesData, type TravelData, type TravelOd, type SoonIdleData, type SoonIdleLead, type DispatchPredData } from "./api";
 import { LineChart } from "./charts";
 
 const ko = (lang: Lang) => lang === "ko";
@@ -131,6 +131,7 @@ export default function LearnPage({ lang }: { lang: Lang }) {
   const [ln, setLn] = useState<LanesData | null>(null);
   const [tv, setTv] = useState<TravelData | null>(null);
   const [si, setSi] = useState<SoonIdleData | null>(null);
+  const [dp, setDp] = useState<DispatchPredData | null>(null);
   const [err, setErr] = useState(false);
   const [onlyBlock, setOnlyBlock] = useState(true);
   const [q, setQ] = useState("");
@@ -142,6 +143,7 @@ export default function LearnPage({ lang }: { lang: Lang }) {
       api.learnLanes().then((r) => { if (alive) setLn(r); }).catch(() => {});
       api.learnTravel().then((r) => { if (alive) setTv(r); }).catch(() => {});
       api.learnSoonIdle().then((r) => { if (alive) setSi(r); }).catch(() => {});
+      api.learnDispatchPred().then((r) => { if (alive) setDp(r); }).catch(() => {});
     };
     load();
     const id = setInterval(load, 30000);
@@ -186,7 +188,7 @@ export default function LearnPage({ lang }: { lang: Lang }) {
       <div className="cyc-head">
         <div className="cyc-title">
           <h2>{k ? "학습 센터" : "Learning Center"}</h2>
-          <span className="cyc-title-sub">{k ? "4개 학습 모델 · 📈 학습 추이 + 🧪 최신 테스트(예측 vs 실제)" : "4 models · 📈 learning trend + 🧪 latest test"}{err && <span className="cyc-err">{k ? " · 연결 오류" : " · offline"}</span>}</span>
+          <span className="cyc-title-sub">{k ? "5개 학습 모델 · 📈 학습 추이 + 🧪 최신 테스트(예측 vs 실제)" : "5 models · 📈 learning trend + 🧪 latest test"}{err && <span className="cyc-err">{k ? " · 연결 오류" : " · offline"}</span>}</span>
         </div>
       </div>
 
@@ -369,6 +371,31 @@ export default function LearnPage({ lang }: { lang: Lang }) {
           </div>
         </div>
         <div className="ls-note">{k ? "예측기 = 작업유형별 학습 중앙(+DS는 거리·신호 셀). 정답=GPS-우선 빔(tt_cycle_v2.dropped_at·TOS 폴백), 7일. 둘 다 per-건 오차는 QC/RTG 큐 변동으로 큼 — 점이 아닌 분포로 사용." : "Predictor = learned median per jobtype (DS adds distance×signal cells). Truth=GPS-first. Per-truck error is large (queue stochasticity) — use as a distribution."}</div>
+      </Session>
+
+      {/* ⑤ 배차 작업시점 예측 (1단계) */}
+      <Session n={5} accent="#f472b6" title={k ? "배차 작업시점 예측" : "Dispatch work-time prediction"} sub={k ? "출항 역산 + 학습한 크레인 속도로 '크레인이 각 컨테이너를 작업할 시각'을 예측 → 배차 마감 산정" : "vessel-departure backsolve + learned crane pace → per-container work time → dispatch deadline"}>
+        <div className="ls-cols">
+          <Panel tag={k ? "학습 추이 — 누적 검증 표본" : "learning — validated samples"}>
+            <Metric series={dp?.samples ?? []} fmt={fmtN} label={k ? "실제와 대조 완료한 예측 (누적)" : "predictions validated vs actual (cumulative)"} color="#f472b6" higherBetter lang={lang} />
+          </Panel>
+          <Panel test tag={k ? "최신 테스트 — 예측 vs 실제 작업시각 (근거리 20분내·2일)" : "test — predicted vs actual work time (near 20m · 2d)"}>
+            {dp && dp.ds_eval > 0 ? (
+              <div className="ls-testchips">
+                <Chip label={k ? "양하 ±10분 적중" : "DS within ±10m"} value={dp.ds_within10_pct != null ? `${dp.ds_within10_pct.toFixed(0)}%` : "—"} accent="#34d399" />
+                <Chip label={k ? "양하 중앙오차" : "DS median err"} value={dp.ds_med_err_min != null ? `${dp.ds_med_err_min >= 0 ? "+" : ""}${dp.ds_med_err_min.toFixed(1)}${k ? "분" : "m"}` : "—"} accent="#f59e0b" />
+                <Chip label={k ? "양하 평가" : "DS evaluated"} value={fmtN(dp.ds_eval)} />
+                <Chip label={k ? "적하 중앙오차" : "LD median err"} value={dp.ld_med_err_min != null ? `${dp.ld_med_err_min >= 0 ? "+" : ""}${dp.ld_med_err_min.toFixed(1)}${k ? "분" : "m"}` : "—"} />
+              </div>
+            ) : <div className="cyc-empty">{k ? "작업 완료 대기 중" : "awaiting worked containers"}</div>}
+            <div className="ls-paside">{k ? "예측한 작업시각 vs 실제 작업된 시각. 양하는 정답이 정확, 적하는 ~수분 지연." : "predicted vs actual work time. DS truth exact; LD lagged a few min."}</div>
+          </Panel>
+        </div>
+        <div className="ls-chips">
+          <Chip label={k ? "검증된 예측 (누적)" : "validated (total)"} value={dp ? fmtN(dp.resolved_total) : "—"} accent="#34d399" />
+          <Chip label={k ? "고유 컨테이너" : "distinct containers"} value={dp ? fmtN(dp.distinct_cont) : "—"} />
+        </div>
+        <div className="ls-note">{k ? "운영을 바꾸지 않고 예측만 옆에서 기록 → 실제 작업시각과 대조(그림자 검증). 평균은 잘 맞으나 컨테이너 개별 정밀도는 작업순서 데이터 한계로 거침 — 크레인 단위 신호로 유효. 최근 근거리 낙관(~10분)을 보정해 점차 0에 수렴 중." : "Shadow validation: log predictions without touching operations, compare to actual work time. Average calibrated; per-container precision rough (work-order data limits) — use as a crane-level signal. Recent near-term bias correction is converging toward 0."}</div>
       </Session>
     </div>
   );

@@ -201,6 +201,12 @@ export interface SoonIdleData {
   ds_eta: SoonIdleEtaModel; ds_eta_cells: SoonIdleEtaCell[]; metric_series: SoonIdleMetricPoint[];
 }
 
+export interface DispatchPredData {
+  samples: number[]; resolved_total: number; distinct_cont: number;
+  ds_eval: number; ds_med_err_min: number | null; ds_within10_pct: number | null;
+  ld_eval: number; ld_med_err_min: number | null;
+}
+
 async function get<T>(path: string): Promise<T> {
   const r = await fetch(path);
   if (!r.ok) throw new Error(`${path}: ${r.status}`);
@@ -226,4 +232,5 @@ export const api = {
   learnLanes: () => get<LanesData>("/api/learn/lanes"),
   learnTravel: () => get<TravelData>("/api/learn/travel"),
   learnSoonIdle: () => get<SoonIdleData>("/api/learn/soon-idle"),
+  learnDispatchPred: () => get<DispatchPredData>("/api/learn/dispatch-pred"),
 };
