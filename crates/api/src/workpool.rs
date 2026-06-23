@@ -344,6 +344,12 @@ pub(crate) async fn build_workpool(pool: PgPool) -> Result<WorkpoolOut, AppError
         const HATCH_DS_S: f64 = 340.0;     // discharge deck→hold cover removal (extra)
         const HATCH_LD_S: f64 = 390.0;     // load hold→deck cover placement (extra)
         const FINISH_BUFFER_S: i64 = 1800; // work should finish ~30 min before departure
+        // Empirical work-ETA calibration: the active crane's CURRENT in-progress operation is not
+        // modeled at the bay anchor, so DS work-ETAs ran ~+10 min optimistic vs actual in the near
+        // (dispatch-relevant) range — confirmed by shadow validation (resolved_at − pred). Shift DS
+        // work-ETA by this. The departure-based deadline_ts and slack_s use `total` and are
+        // UNAFFECTED. Far-out predictions remain limited by queue-order reliability (seq), not this.
+        const DS_WORK_ETA_BIAS_S: i64 = 600;
         // "10D-D" → (bay "10", deck/hold 'D', job 'D')
         fn parse_q(qn: &str) -> Option<(String, char, char)> {
             let dash = qn.find('-')?;
@@ -390,9 +396,11 @@ pub(crate) async fn build_workpool(pool: PgPool) -> Result<WorkpoolOut, AppError
                 for k in (0..idxs.len()).rev() {
                     let qi = idxs[k];
                     qc.queues[qi].deadline_ts = Some(dep - chrono::Duration::seconds(cum_after as i64));
-                    // when the QC starts this bay = now + work scheduled before it
+                    // when the QC starts this bay = now + work scheduled before it (+ DS calibration)
                     let before = (total - cum_after - procs[k]).max(0.0);
-                    qc.queues[qi].work_eta_ts = Some(eta_anchor + chrono::Duration::seconds(before as i64));
+                    let job = parse_q(&qc.queues[qi].queuename).map(|c| c.2).unwrap_or('D');
+                    let bias = if job == 'L' { 0 } else { DS_WORK_ETA_BIAS_S };
+                    qc.queues[qi].work_eta_ts = Some(eta_anchor + chrono::Duration::seconds(before as i64 + bias));
                     qc.queues[qi].proc_s = Some(procs[k] as i64);
                     cum_after += procs[k];
                 }
