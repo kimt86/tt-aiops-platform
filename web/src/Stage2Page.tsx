@@ -30,6 +30,7 @@ export default function Stage2Page({ lang }: { lang: Lang }) {
     return () => { alive = false; clearInterval(iv); };
   }, []);
   const s = d?.summary;
+  const ie = d?.inefficiency;
   const rows = d?.latest ?? [];
   return (
     <div className="content cyc-page">
@@ -57,6 +58,23 @@ export default function Stage2Page({ lang }: { lang: Lang }) {
           ? "그림자 모드 — 실제 배차는 바꾸지 않고 권고만 기록·검증합니다. thrash = 직전 틱 대비 작업이 바뀐 차량 비율(낮을수록 안정; 전환 페널티로 억제). 마감 충족은 현재 작업-ETA 입력 한계로 보수적(로깅 전용, 매칭 구동엔 무관)."
           : "Shadow only — recommendations logged, live dispatch untouched. thrash = vehicles whose work changed vs last tick (lower=stable). feasibility conservative (work-ETA input limits)."}
       </div>
+
+      {ie && ie.starve_ticks > 0 && (
+        <div className="ls-card" style={{ borderTopColor: "#f59e0b", padding: "12px 16px", marginBottom: 12 }}>
+          <div style={{ fontWeight: 700, marginBottom: 8 }}>{k ? "🎯 권고 vs TOS — 근방 유휴 비효율 (최근 30분)" : "🎯 Stage-2 vs TOS — wasted nearby idle (30m)"}</div>
+          <div className="ls-chips">
+            <Chip label={k ? "크레인 멈춤 (QC·분)" : "crane stuck (QC·min)"} value={(ie.starve_ticks * 0.5).toFixed(0)} accent="#ef4444" />
+            <Chip label={k ? "근방에 빈 트럭 있었음" : "free truck nearby"} value={pct(ie.with_free_pct)} accent="#f59e0b" />
+            <Chip label={k ? "평균 근방 유휴트럭" : "avg free nearby"} value={ie.avg_free != null ? `${ie.avg_free.toFixed(1)}${k ? "대" : ""}` : "—"} />
+            <Chip label={k ? "영향 QC" : "QCs"} value={String(ie.qcs)} />
+          </div>
+          <div className="ls-note" style={{ marginTop: 8 }}>
+            {k
+              ? "크레인이 트럭이 없어 멈춰 있던 시간 중, 근방(~600m)에 빈 트럭이 있었던 비율입니다. 트럭이 부족해서가 아니라 가까운 빈 트럭을 안 보낸 것 — Stage-2 최적 매칭이 줄일 수 있는 비효율입니다."
+              : "Of the time a crane sat stuck waiting for a truck, how often a free truck was within ~600m — not a shortage but a dispatch gap Stage-2 would close."}
+          </div>
+        </div>
+      )}
 
       <table className="hist-table" style={{ marginTop: 12 }}>
         <thead>

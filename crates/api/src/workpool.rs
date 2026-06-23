@@ -757,11 +757,23 @@ struct S2Match {
     cost_tier: Option<String>,
     switched: Option<bool>,
 }
+/// "Free truck nearby but the QC is stuck" — the dispatch inefficiency Stage-2 targets: a working QC
+/// idle past threshold with no truck at it (starving_real) WHILE empty+unassigned trucks sit within
+/// ~600m (near_idle_tt > 0). These are cases TOS left on the table that optimal matching would serve.
+#[derive(Serialize, sqlx::FromRow)]
+struct S2Ineff {
+    starve_ticks: i64,
+    with_free_pct: Option<f64>,
+    avg_free: Option<f64>,
+    qcs: i64,
+}
+
 #[derive(Serialize)]
 pub struct Stage2ShadowOut {
     summary: S2Summary,
     latest_ts: Option<DateTime<Utc>>,
     latest: Vec<S2Match>,
+    inefficiency: S2Ineff,
 }
 
 /// `GET /api/stage2/shadow` — live Stage-2 matching shadow: last-30min summary (thrash, feasibility,
@@ -795,5 +807,16 @@ pub async fn stage2_shadow(State(pool): State<PgPool>) -> Result<Json<Stage2Shad
         .await?,
         None => Vec::new(),
     };
-    Ok(Json(Stage2ShadowOut { summary, latest_ts, latest }))
+    // inefficiency: QC idle-waiting for a truck while a free truck sat nearby (Stage-2 would serve it)
+    let inefficiency: S2Ineff = sqlx::query_as(
+        "SELECT count(*) FILTER (WHERE starving_real) AS starve_ticks,
+                (100.0*count(*) FILTER (WHERE starving_real AND near_idle_tt > 0)
+                  / nullif(count(*) FILTER (WHERE starving_real), 0))::float8 AS with_free_pct,
+                (avg(near_idle_tt) FILTER (WHERE starving_real AND near_idle_tt > 0))::float8 AS avg_free,
+                count(DISTINCT qc) FILTER (WHERE starving_real) AS qcs
+           FROM qc_wait_qc_sample WHERE ts > now() - interval '30 minutes'",
+    )
+    .fetch_one(&pool)
+    .await?;
+    Ok(Json(Stage2ShadowOut { summary, latest_ts, latest, inefficiency }))
 }
