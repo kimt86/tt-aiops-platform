@@ -2117,6 +2117,11 @@ pub fn spawn_travel_aggregator(pool: PgPool) {
             let _ = sqlx::query("DELETE FROM learn_travel_sample WHERE captured_at < now() - interval '30 days'")
                 .execute(&pool)
                 .await;
+            // refresh the Stage-2 OD cost layer (225m-grid summary, mig 0051) from the new samples.
+            // CONCURRENTLY keeps it readable during refresh (needs the unique index on (oz,dz)).
+            let _ = sqlx::query("REFRESH MATERIALIZED VIEW CONCURRENTLY learn_travel_zone225")
+                .execute(&pool)
+                .await;
             let _ = sqlx::query(
                 "INSERT INTO learn_travel_metric
                    (captured_at, samples, od_pairs, confident_pairs, median_speed_kmh,
