@@ -1,0 +1,13 @@
+-- Refined "genuine" truck-starvation flag for the dispatch Stage-1 validation. The existing
+-- starving_real OVER-DETECTS ~53x (16.4% of ticks, median idle 9min, free trucks usually nearby):
+-- it fires on normal between-move gaps and NON-truck idle (hatch-cover, bay-change, end-of-work),
+-- which the 6/23 evaluation showed almost always have an available truck within ~600m. genuine adds
+-- the one discriminator those lack — NO genuinely-available truck (empty + unassigned) within ~600m
+-- (near_idle_tt = 0):
+--     genuine = pending AND no truck within 40m AND near_idle_tt = 0 AND idle > threshold
+-- i.e. "the crane is stuck and there was no free truck to send" — transient dispatch-latency
+-- starvation (NOT sustained shortage; ~0.31% of ticks). It is ADDITIVE: starving_real, qc_wait_sample
+-- and the K_QC_TT_WAIT_GPS KPI are unchanged. Computable from existing columns, so historical rows
+-- need no back-fill (analysis can derive it). Apply a 2-tick persistence filter in analysis to drop
+-- single-tick GPS-dropout noise (near0 single-tick runs are common).
+ALTER TABLE qc_wait_qc_sample ADD COLUMN IF NOT EXISTS genuine boolean;

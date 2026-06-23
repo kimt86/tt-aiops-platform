@@ -1745,7 +1745,7 @@ pub fn spawn_qc_wait_logger(lm: Arc<LiveMap>, pool: PgPool) {
             let ts = Utc::now(); // single timestamp shared by all per-QC rows this tick
             // per-QC starvation rows collected in the loop below: (qc, idle_s, no_truck_gps,
             // no_truck_topos, pending, starving_real, near_idle_tt, next_vessel, next_queuename)
-            let mut qc_rows: Vec<(String, i64, bool, bool, bool, bool, i32, Option<String>, Option<String>)> =
+            let mut qc_rows: Vec<(String, i64, bool, bool, bool, bool, i32, Option<String>, Option<String>, bool)> =
                 Vec::new();
             let now = Utc::now().timestamp_millis();
             let (working, st, wt, sg, wg, sb, sr, wr, pos_known) = {
@@ -1809,9 +1809,11 @@ pub fn spawn_qc_wait_logger(lm: Arc<LiveMap>, pool: PgPool) {
                     let pend = pending.contains(id.as_str());
                     let near_idle_tt = tt_free.iter().filter(|&&t| dist_m(cp, t) <= NEAR_TT_M).count() as i32;
                     let (nv, nq) = next_q.get(id.as_str()).cloned().unwrap_or((None, None));
+                    let starv = idle_s > QCQ_IDLE_S && gps_starv && pend;
                     qc_rows.push((
                         id.clone(), idle_s, gps_starv, topos_starv, pend,
-                        idle_s > QCQ_IDLE_S && gps_starv && pend, near_idle_tt, nv, nq,
+                        starv, near_idle_tt, nv, nq,
+                        starv && near_idle_tt == 0, // genuine: starving AND no free truck nearby
                     ));
                     if idle_s <= QCQ_IDLE_S {
                         continue;
@@ -1846,14 +1848,15 @@ pub fn spawn_qc_wait_logger(lm: Arc<LiveMap>, pool: PgPool) {
                 let nia: Vec<i32> = qc_rows.iter().map(|r| r.6).collect();
                 let nva: Vec<Option<String>> = qc_rows.iter().map(|r| r.7.clone()).collect();
                 let nqa: Vec<Option<String>> = qc_rows.iter().map(|r| r.8.clone()).collect();
+                let ga: Vec<bool> = qc_rows.iter().map(|r| r.9).collect();
                 let _ = sqlx::query(
                     "INSERT INTO qc_wait_qc_sample
-                       (ts, qc, idle_s, no_truck_gps, no_truck_topos, pending, starving_real, near_idle_tt, next_vessel, next_queuename)
-                     SELECT $1, * FROM unnest($2::text[], $3::int[], $4::bool[], $5::bool[], $6::bool[], $7::bool[], $8::int[], $9::text[], $10::text[])
+                       (ts, qc, idle_s, no_truck_gps, no_truck_topos, pending, starving_real, near_idle_tt, next_vessel, next_queuename, genuine)
+                     SELECT $1, * FROM unnest($2::text[], $3::int[], $4::bool[], $5::bool[], $6::bool[], $7::bool[], $8::int[], $9::text[], $10::text[], $11::bool[])
                      ON CONFLICT (ts, qc) DO NOTHING",
                 )
                 .bind(ts)
-                .bind(&qa).bind(&ia).bind(&nga).bind(&nta).bind(&pea).bind(&sra).bind(&nia).bind(&nva).bind(&nqa)
+                .bind(&qa).bind(&ia).bind(&nga).bind(&nta).bind(&pea).bind(&sra).bind(&nia).bind(&nva).bind(&nqa).bind(&ga)
                 .execute(&pool)
                 .await;
             }
