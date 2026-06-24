@@ -48,7 +48,7 @@ pub struct ToposResp {
 pub async fn topos(State(pool): State<PgPool>) -> Result<Json<ToposResp>, AppError> {
     let points: Vec<ToposPoint> = sqlx::query_as(
         "SELECT topos, is_crane, lat, lon, n, obs, spread_m, updated_at
-           FROM learn_topos_point ORDER BY obs DESC LIMIT 1000",
+           FROM learn_topos_point WHERE topos NOT LIKE 'WHARF%' ORDER BY obs DESC LIMIT 1000",
     )
     .fetch_all(&pool)
     .await?;
@@ -74,7 +74,7 @@ pub async fn topos(State(pool): State<PgPool>) -> Result<Json<ToposResp>, AppErr
                 count(*) FILTER (WHERE NOT is_crane),
                 coalesce(sum(obs), 0)::bigint,
                 percentile_cont(0.5) WITHIN GROUP (ORDER BY spread_m) FILTER (WHERE n >= 30)
-           FROM learn_topos_point",
+           FROM learn_topos_point WHERE topos NOT LIKE 'WHARF%'",
     )
     .fetch_one(&pool)
     .await?;

@@ -311,6 +311,7 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
   const [showGrid, setShowGrid] = useState(false); // metric grid overlay
   const [showAdvisory, setShowAdvisory] = useState(false); // Stage-B AI dispatch advisory overlay
   const advisoryRef = useRef<Stage2Advisory[]>([]);
+  const [showWharf, setShowWharf] = useState(false); // learned wharf/quay positions overlay
   const [gridM, setGridM] = useState(100); // grid cell size (m), adjustable
   const [gridMetric, setGridMetric] = useState<"speed" | "count">("speed"); // what the cell color shows
   const [panelOpen, setPanelOpen] = useState(true);
@@ -410,6 +411,34 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
     }
   }, [showAdvisory, ready]);
 
+  // wharf overlay: learned quay-segment positions (changes slowly → poll 60s when shown)
+  useEffect(() => {
+    if (!ready || !showWharf) return;
+    let alive = true;
+    const load = () =>
+      api.livemapWharf().then((pts) => {
+        if (!alive) return;
+        const feats: GeoJSON.Feature[] = pts.map((p) => ({
+          type: "Feature",
+          geometry: { type: "Point", coordinates: [p.lon, p.lat] },
+          properties: { topos: p.topos, n: p.n, spread: p.spread_m != null ? Math.round(p.spread_m) : null },
+        }));
+        (mapRef.current?.getSource("wharf") as maplibregl.GeoJSONSource | undefined)?.setData({ type: "FeatureCollection", features: feats });
+      }).catch(() => {});
+    load();
+    const iv = setInterval(load, 60000);
+    return () => { alive = false; clearInterval(iv); };
+  }, [showWharf, ready]);
+
+  // wharf overlay visibility
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map) return;
+    for (const id of ["wharf-pt", "wharf-label"]) {
+      if (map.getLayer(id)) map.setLayoutProperty(id, "visibility", showWharf ? "visible" : "none");
+    }
+  }, [showWharf, ready]);
+
   // init map once
   useEffect(() => {
     if (!mapEl.current) return;
@@ -470,6 +499,30 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
         minzoom: 15,
         layout: { visibility: "none", "symbol-placement": "line-center", "text-field": ["get", "label"], "text-size": 10 },
         paint: { "text-color": "#e2e8f0", "text-halo-color": "#0a0f1d", "text-halo-width": 1.2 },
+      });
+
+      // ── learned wharf/quay positions (from cur_loc=WHARF_*) — empty until polled ──
+      map.addSource("wharf", { type: "geojson", data: EMPTY_FC });
+      map.addLayer({
+        id: "wharf-pt",
+        type: "circle",
+        source: "wharf",
+        layout: { visibility: "none" },
+        paint: {
+          "circle-radius": ["interpolate", ["linear"], ["zoom"], 13, 3, 17, 7],
+          "circle-color": "#38bdf8",
+          "circle-opacity": 0.85,
+          "circle-stroke-width": 1.2,
+          "circle-stroke-color": "#0ea5e9",
+        },
+      });
+      map.addLayer({
+        id: "wharf-label",
+        type: "symbol",
+        source: "wharf",
+        minzoom: 14,
+        layout: { visibility: "none", "text-field": ["get", "topos"], "text-size": 9, "text-offset": [0, 1.1], "text-anchor": "top" },
+        paint: { "text-color": "#bae6fd", "text-halo-color": "#0a0f1d", "text-halo-width": 1.2 },
       });
 
       // ── vehicles (top) ──
@@ -932,6 +985,7 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
               <Row on={toggles.areas} color="#7eb6ff" label={ko ? "도로/블록 영역" : "Road/Block"} onChange={(v) => set("areas", v)} />
               <Row on={showGrid} color={gridMetric === "speed" ? "#22c55e" : "#22d3ee"} label={ko ? `메트릭 격자 (${gridM}m)` : `Metric grid (${gridM}m)`} onChange={setShowGrid} />
               <Row on={showAdvisory} color="#34d399" label={ko ? "AI 배차 권고 (참고)" : "AI dispatch advisory"} onChange={setShowAdvisory} />
+              <Row on={showWharf} color="#38bdf8" label={ko ? "안벽 위치 (WHARF)" : "Wharf positions"} onChange={setShowWharf} />
               {showGrid && (
                 <div className="llp-gridctl" style={{ padding: "2px 0 6px 18px", display: "flex", flexDirection: "column", gap: 5 }}>
                   <div style={{ display: "flex", gap: 4 }}>

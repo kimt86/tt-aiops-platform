@@ -1116,6 +1116,27 @@ pub struct WeatherOut {
     weather_code: Option<i32>,
     age_s: i64,
 }
+/// Learned wharf/quay segment positions (cur_loc=WHARF_*), from `learn_topos_point`. Powers the
+/// live-map wharf overlay. Confident points only (n>=5). topos = the wharf label (e.g. WHARF_14_C).
+#[derive(Serialize, sqlx::FromRow)]
+pub struct WharfPoint {
+    topos: String,
+    lat: f64,
+    lon: f64,
+    n: i32,
+    spread_m: Option<f64>,
+}
+pub async fn wharf(State(pool): State<PgPool>) -> Json<Vec<WharfPoint>> {
+    let pts = sqlx::query_as::<_, WharfPoint>(
+        "SELECT topos, lat, lon, n, spread_m FROM learn_topos_point
+          WHERE topos LIKE 'WHARF%' AND n >= 5 ORDER BY topos",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap_or_default();
+    Json(pts)
+}
+
 pub async fn weather(State(pool): State<PgPool>) -> Json<Option<WeatherOut>> {
     let row: Option<(DateTime<Utc>, Option<f64>, Option<f64>, Option<f64>, Option<i32>)> =
         sqlx::query_as(
@@ -2640,6 +2661,14 @@ async fn ingest_text(lm: &Arc<LiveMap>, text: &str) {
                 if pre != t {
                     c.entry(pre).or_default().push(lat, lon);
                 }
+            }
+        }
+        // learn wharf/quay segment positions from the truck's cur_loc (e.g. WHARF_14_C) — same
+        // running-centroid mechanism, separate keys; ARRIVED gate filters in-transit mislabels.
+        // Surfaced via /api/livemap/wharf + the live-map overlay (persisted in learn_topos_point).
+        if let Some(cl) = pos.cur_loc.as_deref() {
+            if cl.starts_with("WHARF") && !cl.is_empty() {
+                lm.centroids.write().await.entry(cl.to_string()).or_default().push(lat, lon);
             }
         }
     }
