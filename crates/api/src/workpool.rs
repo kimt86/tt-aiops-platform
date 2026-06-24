@@ -768,12 +768,23 @@ struct S2Ineff {
     qcs: i64,
 }
 
+/// Phase-2 solver gain: the adopted deadline-aware optimum vs the simple greedy baseline, over the
+/// recent window — total-arrival savings and deadline-miss counts for each.
+#[derive(Serialize, sqlx::FromRow)]
+struct S2Solver {
+    ticks: i64,
+    savings_pct: Option<f64>, // (greedy − optimal) / greedy total arrival, %
+    greedy_miss: Option<i64>,
+    optimal_miss: Option<i64>,
+}
+
 #[derive(Serialize)]
 pub struct Stage2ShadowOut {
     summary: S2Summary,
     latest_ts: Option<DateTime<Utc>>,
     latest: Vec<S2Match>,
     inefficiency: S2Ineff,
+    solver: S2Solver,
 }
 
 /// `GET /api/stage2/shadow` — live Stage-2 matching shadow: last-30min summary (thrash, feasibility,
@@ -818,5 +829,15 @@ pub async fn stage2_shadow(State(pool): State<PgPool>) -> Result<Json<Stage2Shad
     )
     .fetch_one(&pool)
     .await?;
-    Ok(Json(Stage2ShadowOut { summary, latest_ts, latest, inefficiency }))
+    // phase-2 solver gain: adopted optimum vs greedy baseline (efficiency + deadline misses)
+    let solver: S2Solver = sqlx::query_as(
+        "SELECT count(*) AS ticks,
+                (100.0*sum(greedy_cost_s - optimal_cost_s)/nullif(sum(greedy_cost_s),0))::float8 AS savings_pct,
+                sum(greedy_miss)::bigint AS greedy_miss,
+                sum(optimal_miss)::bigint AS optimal_miss
+           FROM stage2_solver_shadow WHERE ts > now() - interval '30 minutes'",
+    )
+    .fetch_one(&pool)
+    .await?;
+    Ok(Json(Stage2ShadowOut { summary, latest_ts, latest, inefficiency, solver }))
 }

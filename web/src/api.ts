@@ -221,6 +221,7 @@ export interface Stage2Shadow {
   latest_ts: string | null;
   latest: Stage2Match[];
   inefficiency: { starve_ticks: number; with_free_pct: number | null; avg_free: number | null; qcs: number };
+  solver: { ticks: number; savings_pct: number | null; greedy_miss: number | null; optimal_miss: number | null };
 }
 
 async function get<T>(path: string): Promise<T> {

@@ -31,6 +31,7 @@ export default function Stage2Page({ lang }: { lang: Lang }) {
   }, []);
   const s = d?.summary;
   const ie = d?.inefficiency;
+  const sv = d?.solver;
   const rows = d?.latest ?? [];
   return (
     <div className="content cyc-page">
@@ -72,6 +73,22 @@ export default function Stage2Page({ lang }: { lang: Lang }) {
             {k
               ? "크레인이 트럭이 없어 멈춰 있던 시간 중, 근방(~600m)에 빈 트럭이 있었던 비율입니다. 트럭이 부족해서가 아니라 가까운 빈 트럭을 안 보낸 것 — Stage-2 최적 매칭이 줄일 수 있는 비효율입니다."
               : "Of the time a crane sat stuck waiting for a truck, how often a free truck was within ~600m — not a shortage but a dispatch gap Stage-2 would close."}
+          </div>
+        </div>
+      )}
+
+      {sv && sv.ticks > 0 && (
+        <div className="ls-card" style={{ borderTopColor: "#a78bfa", padding: "12px 16px", marginBottom: 12 }}>
+          <div style={{ fontWeight: 700, marginBottom: 8 }}>{k ? "⚙️ 최적 솔버 vs 단순 배정 (최근 30분)" : "⚙️ Optimal solver vs greedy (30m)"}</div>
+          <div className="ls-chips">
+            <Chip label={k ? "총 도착시간 절감" : "arrival saved"} value={sv.savings_pct != null ? `${sv.savings_pct.toFixed(0)}%` : "—"} accent="#34d399" />
+            <Chip label={k ? "마감 누락 (단순→최적)" : "misses (greedy→opt)"} value={`${sv.greedy_miss ?? "—"} → ${sv.optimal_miss ?? "—"}`} accent="#a78bfa" />
+            <Chip label={k ? "비교 틱" : "ticks"} value={String(sv.ticks)} />
+          </div>
+          <div className="ls-note" style={{ marginTop: 8 }}>
+            {k
+              ? "권고는 전역 최적(마감 인지형 최소비용) 배정입니다. 트럭을 하나씩 가까운 곳에 붙이는 단순 방식보다 전체 도착시간을 줄이면서, 급한 작업의 마감 누락도 더 적습니다."
+              : "Recommendations use the global deadline-aware optimum — less total arrival time AND fewer deadline misses than the greedy baseline."}
           </div>
         </div>
       )}
