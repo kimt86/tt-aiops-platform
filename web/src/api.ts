@@ -223,6 +223,11 @@ export interface Stage2Shadow {
   inefficiency: { starve_ticks: number; with_free_pct: number | null; avg_free: number | null; qcs: number };
   solver: { ticks: number; savings_pct: number | null; greedy_miss: number | null; optimal_miss: number | null };
 }
+export interface Stage2Advisory {
+  ytno: string; qc: string | null; jobtype: string | null; src_block: string | null;
+  dest_lat: number | null; dest_lon: number | null; src_lat: number | null; src_lon: number | null;
+  arrival_s: number | null; feasible: boolean | null;
+}
 
 async function get<T>(path: string): Promise<T> {
   const r = await fetch(path);
@@ -251,4 +256,5 @@ export const api = {
   learnSoonIdle: () => get<SoonIdleData>("/api/learn/soon-idle"),
   learnDispatchPred: () => get<DispatchPredData>("/api/learn/dispatch-pred"),
   stage2Shadow: () => get<Stage2Shadow>("/api/stage2/shadow"),
+  stage2Advisory: () => get<Stage2Advisory[]>("/api/stage2/advisory"),
 };

@@ -841,3 +841,31 @@ pub async fn stage2_shadow(State(pool): State<PgPool>) -> Result<Json<Stage2Shad
     .await?;
     Ok(Json(Stage2ShadowOut { summary, latest_ts, latest, inefficiency, solver }))
 }
+
+/// Stage-B advisory: the latest tick's recommended truck→work moves with endpoints, for the live
+/// map overlay (operator-facing "send this truck here" — display only, never drives dispatch).
+#[derive(Serialize, sqlx::FromRow)]
+pub struct S2Advisory {
+    ytno: String,
+    qc: Option<String>,
+    jobtype: Option<String>,
+    src_block: Option<String>,
+    dest_lat: Option<f64>,
+    dest_lon: Option<f64>,
+    src_lat: Option<f64>,
+    src_lon: Option<f64>,
+    arrival_s: Option<i32>,
+    feasible: Option<bool>,
+}
+
+/// `GET /api/stage2/advisory` — latest recommended moves (with endpoints) for the live-map overlay.
+pub async fn stage2_advisory(State(pool): State<PgPool>) -> Result<Json<Vec<S2Advisory>>, AppError> {
+    let rows: Vec<S2Advisory> = sqlx::query_as(
+        "SELECT ytno, qc, jobtype, src_block, dest_lat, dest_lon, src_lat, src_lon, arrival_s, feasible
+           FROM stage2_match_shadow
+          WHERE ts = (SELECT max(ts) FROM stage2_match_shadow) AND dest_lat IS NOT NULL",
+    )
+    .fetch_all(&pool)
+    .await?;
+    Ok(Json(rows))
+}

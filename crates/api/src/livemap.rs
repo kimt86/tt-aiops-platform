@@ -3504,7 +3504,7 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
             let mut opt_cost: i64 = 0;
             let mut opt_miss: i32 = 0;
             for &(vi, wpos) in &assign {
-                let (wi, _wlat, _wlon, _eta) = works[order[wpos]];
+                let (wi, wlat, wlon, _eta) = works[order[wpos]];
                 let w = &work[wi];
                 let deadline = deadlines[wpos];
                 let (arr, arr_p90, tier, switched) = matrix[wpos][vi];
@@ -3518,12 +3518,13 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                 let v = &vehicles[vi];
                 let _ = sqlx::query(
                     "INSERT INTO stage2_match_shadow
-                       (ts,tick,ytno,qc,vessel,queuename,jobtype,src_block,veh_state,arrival_s,od_p90_s,deadline_slack_s,feasible,cost_tier,switched)
-                     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) ON CONFLICT (ts,ytno) DO NOTHING",
+                       (ts,tick,ytno,qc,vessel,queuename,jobtype,src_block,veh_state,arrival_s,od_p90_s,deadline_slack_s,feasible,cost_tier,switched,dest_lat,dest_lon,src_lat,src_lon)
+                     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19) ON CONFLICT (ts,ytno) DO NOTHING",
                 )
                 .bind(ts).bind(tick as i64).bind(&v.0).bind(&w.qc).bind(&w.vessel).bind(&w.queuename)
                 .bind(&w.jobtype).bind(&w.src_block).bind(v.4)
                 .bind(arr as i32).bind(arr_p90 as i32).bind(slack as i32).bind(feasible).bind(tier).bind(switched)
+                .bind(wlat).bind(wlon).bind(v.1).bind(v.2)
                 .execute(&pool).await;
             }
             let gap_pct = if opt_cost > 0 { 100.0 * (greedy_cost - opt_cost) as f64 / opt_cost as f64 } else { 0.0 };

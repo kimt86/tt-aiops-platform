@@ -7,7 +7,7 @@ import maplibregl from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { type Lang } from "./i18n";
-import { api } from "./api";
+import { api, type Stage2Advisory } from "./api";
 import { LiveVehicleDetail, type SelVeh } from "./LiveVehicleDetail";
 
 const ESRI = "https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}";
@@ -185,6 +185,26 @@ const DEFAULT_TOGGLES: Toggles = {
 const LAYER_TOTAL = 12; // toggle count shown in the panel header
 const EMPTY_FC: GeoJSON.FeatureCollection = { type: "FeatureCollection", features: [] };
 
+// Stage-B advisory: build a line per recommended truck→work move. Start anchored to the truck's LIVE
+// position (join by id, fall back to the logged position); end at the work pickup point.
+function advisoryFC(adv: Stage2Advisory[], devices: { id: string; lat: number; lon: number }[]): GeoJSON.FeatureCollection {
+  const byId = new Map(devices.map((d) => [d.id, d]));
+  const feats: GeoJSON.Feature[] = [];
+  for (const a of adv) {
+    if (a.dest_lat == null || a.dest_lon == null) continue;
+    const live = byId.get(a.ytno);
+    const sy = live?.lat ?? a.src_lat;
+    const sx = live?.lon ?? a.src_lon;
+    if (sy == null || sx == null) continue;
+    feats.push({
+      type: "Feature",
+      properties: { feasible: a.feasible ? 1 : 0, label: `${a.ytno}→${a.qc ?? ""}${a.arrival_s != null ? ` ${Math.round(a.arrival_s / 60)}분` : ""}` },
+      geometry: { type: "LineString", coordinates: [[sx, sy], [a.dest_lon, a.dest_lat]] },
+    });
+  }
+  return { type: "FeatureCollection", features: feats };
+}
+
 // Metric grid: terminal split into uniform `m`-metre cells; each occupied cell becomes a filled
 // polygon colored by a chosen live metric (avg speed / vehicle count). Cell = (round(lat/deg),
 // round(lon/deg)) — same cell def as the density collector. Computed client-side from the live feed.
@@ -289,6 +309,8 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
   const [dispatchFilter, setDispatchFilter] = useState<Dispatch | null>(null);
   const [toggles, setToggles] = useState<Toggles>(DEFAULT_TOGGLES);
   const [showGrid, setShowGrid] = useState(false); // metric grid overlay
+  const [showAdvisory, setShowAdvisory] = useState(false); // Stage-B AI dispatch advisory overlay
+  const advisoryRef = useRef<Stage2Advisory[]>([]);
   const [gridM, setGridM] = useState(100); // grid cell size (m), adjustable
   const [gridMetric, setGridMetric] = useState<"speed" | "count">("speed"); // what the cell color shows
   const [panelOpen, setPanelOpen] = useState(true);
@@ -361,6 +383,33 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
     return () => clearInterval(iv);
   }, [showGrid, gridM, gridMetric, ready]);
 
+  // Stage-B advisory overlay: poll the latest recommended moves (10s) + re-anchor lines to live
+  // truck positions (2.5s). Display only — never drives dispatch.
+  const showAdvisoryRef = useRef(false);
+  useEffect(() => { showAdvisoryRef.current = showAdvisory; }, [showAdvisory]);
+  useEffect(() => {
+    if (!ready) return;
+    let alive = true;
+    const apply = () => {
+      const src = mapRef.current?.getSource("advisory") as maplibregl.GeoJSONSource | undefined;
+      if (src) src.setData(advisoryFC(advisoryRef.current, liveRef.current?.devices ?? []));
+    };
+    const poll = () => api.stage2Advisory().then((a) => { if (alive) { advisoryRef.current = a; apply(); } }).catch(() => {});
+    poll();
+    const iv = setInterval(poll, 10000);
+    const iv2 = setInterval(() => { if (alive && showAdvisoryRef.current) apply(); }, 2500);
+    return () => { alive = false; clearInterval(iv); clearInterval(iv2); };
+  }, [ready]);
+
+  // advisory overlay visibility
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map) return;
+    for (const id of ["advisory-line", "advisory-label"]) {
+      if (map.getLayer(id)) map.setLayoutProperty(id, "visibility", showAdvisory ? "visible" : "none");
+    }
+  }, [showAdvisory, ready]);
+
   // init map once
   useEffect(() => {
     if (!mapEl.current) return;
@@ -399,6 +448,29 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
         const N = NODE_LAYERS[k];
         map.addLayer({ id: `nd-${k}`, type: "circle", source: "nodes", filter: ["==", ["get", "cat"], N.cat], layout: { visibility: "none" }, paint: { "circle-radius": ["interpolate", ["linear"], ["zoom"], 13, 1.3, 17, 3.5], "circle-color": N.color, "circle-opacity": 0.85 } });
       }
+
+      // ── Stage-B AI dispatch advisory (recommended truck→work lines) — empty until polled ──
+      map.addSource("advisory", { type: "geojson", data: EMPTY_FC });
+      map.addLayer({
+        id: "advisory-line",
+        type: "line",
+        source: "advisory",
+        layout: { visibility: "none", "line-cap": "round" },
+        paint: {
+          "line-color": ["case", ["==", ["get", "feasible"], 1], "#34d399", "#f59e0b"],
+          "line-width": ["interpolate", ["linear"], ["zoom"], 13, 1.2, 17, 3],
+          "line-opacity": 0.75,
+          "line-dasharray": [2, 1.5],
+        },
+      });
+      map.addLayer({
+        id: "advisory-label",
+        type: "symbol",
+        source: "advisory",
+        minzoom: 15,
+        layout: { visibility: "none", "symbol-placement": "line-center", "text-field": ["get", "label"], "text-size": 10 },
+        paint: { "text-color": "#e2e8f0", "text-halo-color": "#0a0f1d", "text-halo-width": 1.2 },
+      });
 
       // ── vehicles (top) ──
       // ── learned-layout (work-points · driving lanes) + dispatch demand overlays ──
@@ -859,6 +931,7 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
               <header>{ko ? "영역" : "Areas"}</header>
               <Row on={toggles.areas} color="#7eb6ff" label={ko ? "도로/블록 영역" : "Road/Block"} onChange={(v) => set("areas", v)} />
               <Row on={showGrid} color={gridMetric === "speed" ? "#22c55e" : "#22d3ee"} label={ko ? `메트릭 격자 (${gridM}m)` : `Metric grid (${gridM}m)`} onChange={setShowGrid} />
+              <Row on={showAdvisory} color="#34d399" label={ko ? "AI 배차 권고 (참고)" : "AI dispatch advisory"} onChange={setShowAdvisory} />
               {showGrid && (
                 <div className="llp-gridctl" style={{ padding: "2px 0 6px 18px", display: "flex", flexDirection: "column", gap: 5 }}>
                   <div style={{ display: "flex", gap: 4 }}>
