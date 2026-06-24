@@ -1729,6 +1729,17 @@ pub fn spawn_qc_wait_logger(lm: Arc<LiveMap>, pool: PgPool) {
             .unwrap_or_default()
             .into_iter()
             .collect();
+            // a crane only genuinely needs a truck if it is ACTUALLY working now — i.e. has in-flight
+            // moves in the work pool. "has future queued work" (pending) wrongly flags not-yet-started
+            // cranes (lots of slack) as starving; require active moves to keep the alarm honest.
+            let active: std::collections::HashSet<String> = sqlx::query_scalar::<_, String>(
+                "SELECT DISTINCT qc FROM live_workpool WHERE qc IS NOT NULL AND qc <> ''",
+            )
+            .fetch_all(&pool)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
             // best-effort "next block" each QC is working/waiting on = its lowest-seq incomplete
             // queue (per-container is impossible; MSNSEQ is 100% NULL). For the per-QC starvation log.
             let next_q: HashMap<String, (Option<String>, Option<String>)> =
@@ -1807,9 +1818,12 @@ pub fn spawn_qc_wait_logger(lm: Arc<LiveMap>, pool: PgPool) {
                     // starving ones — so episode start/end (gps_starv true→false = truck arrived) and
                     // idle duration are reconstructable. Collect BEFORE the idle gate below.
                     let pend = pending.contains(id.as_str());
+                    let working = active.contains(id.as_str()); // has in-flight moves = actually working
                     let near_idle_tt = tt_free.iter().filter(|&&t| dist_m(cp, t) <= NEAR_TT_M).count() as i32;
                     let (nv, nq) = next_q.get(id.as_str()).cloned().unwrap_or((None, None));
-                    let starv = idle_s > QCQ_IDLE_S && gps_starv && pend;
+                    // genuine starvation: idle past threshold, no truck, AND actually mid-work (not just
+                    // future queued work) — excludes not-yet-started cranes that merely have slack.
+                    let starv = idle_s > QCQ_IDLE_S && gps_starv && pend && working;
                     qc_rows.push((
                         id.clone(), idle_s, gps_starv, topos_starv, pend,
                         starv, near_idle_tt, nv, nq,
