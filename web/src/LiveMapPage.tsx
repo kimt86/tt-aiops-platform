@@ -195,18 +195,30 @@ function wharfZonesFC(pts: WharfPoint[]): GeoJSON.FeatureCollection {
     const de = (a.lon - b.lon) * M * Math.cos(((a.lat + b.lat) / 2) * Math.PI / 180);
     return Math.hypot(dn, de);
   };
+  const bearingTo = (p: WharfPoint, q: WharfPoint) => {
+    const de = (q.lon - p.lon) * M * Math.cos(((p.lat + q.lat) / 2) * Math.PI / 180);
+    return Math.atan2(de, (q.lat - p.lat) * M); // from north, clockwise
+  };
+  // global quay direction = axial mean of every point's nearest-neighbour bearing (robust fallback)
+  let gr = 0, gi = 0;
+  for (const p of pts) {
+    const nn = pts.filter((q) => q !== p).map((q) => ({ q, d: distM(p, q) })).sort((a, b) => a.d - b.d)[0];
+    if (nn) { const th = bearingTo(p, nn.q); gr += Math.cos(2 * th); gi += Math.sin(2 * th); }
+  }
+  const global = pts.length > 1 ? Math.atan2(gi, gr) / 2 : 0;
   const feats: GeoJSON.Feature[] = pts.map((p) => {
-    const near = pts.filter((q) => q !== p).map((q) => ({ q, d: distM(p, q) })).sort((a, b) => a.d - b.d).slice(0, 2);
+    const near = pts.filter((q) => q !== p).map((q) => ({ q, d: distM(p, q) })).sort((a, b) => a.d - b.d).slice(0, 3);
     // axial mean of bearings to the nearest neighbours (a line has no head/tail → double-angle mean)
     let zr = 0, zi = 0;
     for (const { q } of near) {
-      const de = (q.lon - p.lon) * M * Math.cos(((p.lat + q.lat) / 2) * Math.PI / 180);
-      const dn = (q.lat - p.lat) * M;
-      const th = Math.atan2(de, dn);
+      const th = bearingTo(p, q);
       zr += Math.cos(2 * th);
       zi += Math.sin(2 * th);
     }
-    const theta = near.length ? Math.atan2(zi, zr) / 2 : 0;
+    let theta = near.length ? Math.atan2(zi, zr) / 2 : global;
+    // reject a local estimate that deviates > 25° (line-angle) from the quay → use the global direction
+    const diff = Math.abs((((theta - global) + Math.PI / 2) % Math.PI + Math.PI) % Math.PI - Math.PI / 2);
+    if (diff > (25 * Math.PI) / 180) theta = global;
     const L = Math.max(30, Math.min(90, near.length ? near[0].d : 50)); // along quay
     const W = Math.max(18, Math.min(45, (p.spread_m ?? 30) * 0.9)); // depth
     const u = [Math.sin(theta), Math.cos(theta)]; // along (east, north)
