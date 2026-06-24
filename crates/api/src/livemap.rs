@@ -3178,6 +3178,10 @@ const SWITCH_PENALTY_S: i64 = 180;
 const URGENCY_BONUS_S: i64 = 600; // reward when due exactly now
 const URGENCY_BONUS_MAX_S: i64 = 1000; // ceiling — most-overdue work
 const URGENCY_HORIZON_S: i64 = 1800;
+// a crane that is ACTUALLY stuck right now (idle, work pending, no truck) gets a decisive pull so
+// trucks go to the starving cranes (mostly discharge) instead of merely-nearby load work. This ties
+// the matcher to the live starvation signal (qc_wait_qc_sample), not just the work-ETA prediction.
+const STARVE_BONUS_S: i64 = 1500;
 // per-container QC handling time (for the bucket's service window + the needed-trucks cap)
 const DS_MOVE_S: i64 = 90;
 const LD_MOVE_S: i64 = 110;
@@ -3347,6 +3351,12 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
             )
             .fetch_all(&pool).await.unwrap_or_default()
             .into_iter().map(|(yt, q, v, qn)| (yt, (q, v, qn))).collect();
+            // cranes that are ACTUALLY stuck waiting for a truck right now (live starvation signal) —
+            // these get a decisive urgency pull so trucks go to them, not to merely-nearby load work.
+            let starving: std::collections::HashSet<String> = sqlx::query_scalar::<_, String>(
+                "SELECT DISTINCT qc FROM qc_wait_qc_sample WHERE ts > now() - interval '90 seconds' AND starving_real",
+            )
+            .fetch_all(&pool).await.unwrap_or_default().into_iter().collect();
             // candidate vehicles: idle (free now) + soon-free; committed/moving (delivering/empty) skipped
             let vehicles: Vec<(String, f64, f64, i64, &'static str)> = {
                 let map = lm.devices.read().await;
@@ -3445,32 +3455,29 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                 deadlines.push(eta_ms.max(now) + spread_ms);
                 let this_key = (w.qc.clone(), w.vessel.clone(), w.queuename.clone());
                 let wpos = matrix.len();
-                // LOAD work: the crane needs the truck AT THE QUAY, so after reaching the pickup block
-                // the truck still drives block→QC (+ a load). Without this second leg, load work (pickup
-                // = a yard block, near the yard-parked idle trucks) looks far cheaper than discharge
-                // (pickup = the QC itself) and unfairly dominates. Discharge: pickup IS the QC → no leg.
-                let second_leg = if w.jobtype == "LD" {
-                    cranes_now.get(&w.qc).or_else(|| centroids_now.get(&w.qc))
-                        .map(|&(ql, qo)| { let (p, _, _) = cost(wlat, wlon, ql, qo); p + LD_MOVE_S })
-                        .unwrap_or(0)
-                } else {
-                    0
-                };
+                // DISPATCH COST = the truck's EMPTY travel to engage the work (truck→pickup): discharge
+                // pickup = the QC, load pickup = the yard block. The loaded delivery leg (block→QC for
+                // load) is PRODUCTIVE work, not waste — penalising it would push idle yard trucks into
+                // long empty drives to the quay (worse) and starve load work. So we minimise empty travel.
                 // urgency reward: ramps from 0 at the horizon to the base when due now, and keeps
                 // climbing (to the cap) for overdue work so the many late buckets stay rankable.
                 let slack_to_eta = eta_ms / 1000 - now_s;
-                let bonus = (URGENCY_BONUS_S as f64 * (URGENCY_HORIZON_S - slack_to_eta) as f64 / URGENCY_HORIZON_S as f64)
+                let mut bonus = (URGENCY_BONUS_S as f64 * (URGENCY_HORIZON_S - slack_to_eta) as f64 / URGENCY_HORIZON_S as f64)
                     .clamp(0.0, URGENCY_BONUS_MAX_S as f64) as i64;
+                // decisive pull for a crane that is stuck waiting for a truck RIGHT NOW
+                if starving.contains(&w.qc) {
+                    bonus += STARVE_BONUS_S;
+                }
                 let mut row = Vec::with_capacity(vehicles.len());
                 for (vi, v) in vehicles.iter().enumerate() {
                     let (p50, p90, tier) = cost(v.1, v.2, wlat, wlon);
-                    let arr = v.3 + p50 + second_leg; // ready-at-crane time (incl. block→QC for load)
+                    let arr = v.3 + p50; // empty travel to the pickup
                     let switched = prev.get(&v.0).map(|pk| pk != &this_key).unwrap_or(false);
                     if arr < 1800 {
                         let eff = arr + if switched { SWITCH_PENALTY_S } else { 0 } - bonus;
                         edges.push((vi, wpos, eff)); // prune the far tail (never in the optimum)
                     }
-                    row.push((arr, v.3 + p90 + second_leg, tier, switched));
+                    row.push((arr, v.3 + p90, tier, switched));
                 }
                 matrix.push(row);
             }
