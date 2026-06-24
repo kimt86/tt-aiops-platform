@@ -3445,6 +3445,17 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                 deadlines.push(eta_ms.max(now) + spread_ms);
                 let this_key = (w.qc.clone(), w.vessel.clone(), w.queuename.clone());
                 let wpos = matrix.len();
+                // LOAD work: the crane needs the truck AT THE QUAY, so after reaching the pickup block
+                // the truck still drives block→QC (+ a load). Without this second leg, load work (pickup
+                // = a yard block, near the yard-parked idle trucks) looks far cheaper than discharge
+                // (pickup = the QC itself) and unfairly dominates. Discharge: pickup IS the QC → no leg.
+                let second_leg = if w.jobtype == "LD" {
+                    cranes_now.get(&w.qc).or_else(|| centroids_now.get(&w.qc))
+                        .map(|&(ql, qo)| { let (p, _, _) = cost(wlat, wlon, ql, qo); p + LD_MOVE_S })
+                        .unwrap_or(0)
+                } else {
+                    0
+                };
                 // urgency reward: ramps from 0 at the horizon to the base when due now, and keeps
                 // climbing (to the cap) for overdue work so the many late buckets stay rankable.
                 let slack_to_eta = eta_ms / 1000 - now_s;
@@ -3453,13 +3464,13 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                 let mut row = Vec::with_capacity(vehicles.len());
                 for (vi, v) in vehicles.iter().enumerate() {
                     let (p50, p90, tier) = cost(v.1, v.2, wlat, wlon);
-                    let arr = v.3 + p50;
+                    let arr = v.3 + p50 + second_leg; // ready-at-crane time (incl. block→QC for load)
                     let switched = prev.get(&v.0).map(|pk| pk != &this_key).unwrap_or(false);
                     if arr < 1800 {
                         let eff = arr + if switched { SWITCH_PENALTY_S } else { 0 } - bonus;
                         edges.push((vi, wpos, eff)); // prune the far tail (never in the optimum)
                     }
-                    row.push((arr, v.3 + p90, tier, switched));
+                    row.push((arr, v.3 + p90 + second_leg, tier, switched));
                 }
                 matrix.push(row);
             }
