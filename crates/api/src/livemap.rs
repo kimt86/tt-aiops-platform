@@ -3172,6 +3172,11 @@ fn grid225(lat: f64, lon: f64) -> String {
 // anti-thrash: a vehicle keeps its previous-tick work bucket unless another is >= this many
 // arrival-seconds cheaper. Damps reassignment from small OD/GPS noise.
 const SWITCH_PENALTY_S: i64 = 180;
+// deadline-awareness: a work bucket due sooner gets up to this many seconds shaved off its edge cost
+// (a reward, ramped from 0 at the horizon to full when due now/overdue) so the optimal solver serves
+// urgent work even when a nearer non-urgent bucket exists — efficiency objective, deadline as a soft pull.
+const URGENCY_BONUS_S: i64 = 600;
+const URGENCY_HORIZON_S: i64 = 1800;
 
 // The yard grid (blocks + roads) is rotated ~29.8° from north. Manhattan distance measured along the
 // QUAY-ALIGNED axes (not lat/lon) tracks the real road detour (×1.18 of straight-line ≈ the road
@@ -3261,11 +3266,12 @@ impl Mcmf {
 }
 
 /// Optimal min-cost assignment of trucks (each → ≤1 work) to works (each → ≤ cap_j trucks): source →
-/// truck (cap 1) → work (cost=arrival) → sink (cap n_j). Returns (Σ arrival over the optimum, #assigned).
-fn optimal_assign(n_trucks: usize, caps: &[i64], edges: &[(usize, usize, i64)]) -> (i64, i64) {
+/// truck (cap 1) → work (cost = effective edge cost) → sink (cap n_j). Returns the chosen (truck,
+/// work-pos) pairs (the max-cardinality, min-cost matching).
+fn optimal_assign(n_trucks: usize, caps: &[i64], edges: &[(usize, usize, i64)]) -> Vec<(usize, usize)> {
     let w = caps.len();
     if n_trucks == 0 || w == 0 {
-        return (0, 0);
+        return Vec::new();
     }
     let trucks0 = 1usize;
     let works0 = 1 + n_trucks;
@@ -3282,7 +3288,18 @@ fn optimal_assign(n_trucks: usize, caps: &[i64], edges: &[(usize, usize, i64)]) 
             g.add(works0 + j, t, cap, 0);
         }
     }
-    g.run(0, t)
+    g.run(0, t);
+    // extract assignment: a truck→work forward edge that carried flow has residual cap 0
+    let mut assign = Vec::new();
+    for truck in 0..n_trucks {
+        for &e in &g.head[trucks0 + truck] {
+            let v = g.to[e];
+            if v >= works0 && v < t && g.cap[e] == 0 {
+                assign.push((truck, v - works0));
+            }
+        }
+    }
+    assign
 }
 
 /// Every 60s, recommend vehicle→work matches and log them (SHADOW; never drives live dispatch).
@@ -3374,36 +3391,44 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                     None => { let p50 = quay_manhattan_m(vlat, vlon, wlat, wlon) / MANHATTAN_SPEED_MS; (p50 as i64, (p50 * 1.5) as i64, "L3") }
                 }
             };
-            // precompute the full cost matrix (all vehicles × all works) once: feeds BOTH the greedy
-            // solver and the min-cost-flow optimum we benchmark it against. Work order = urgent first.
+            // precompute the cost matrix (all vehicles × all works) once. Greedy reads raw arrival;
+            // the optimal solver reads EFFECTIVE edge cost = arrival + switch-penalty − urgency-bonus
+            // (efficiency objective, anti-thrash, deadline as a soft pull). Work order = urgent first.
             let mut order: Vec<usize> = (0..works.len()).collect();
             order.sort_by_key(|i| works[*i].3);
+            let now_s = now / 1000;
             let mut caps: Vec<i64> = Vec::with_capacity(order.len());
-            let mut edges: Vec<(usize, usize, i64)> = Vec::new(); // (truck, work-pos, real arrival)
-            let mut matrix: Vec<Vec<(i64, i64, &'static str, bool)>> = Vec::with_capacity(order.len()); // [wpos][vi]
+            let mut edges: Vec<(usize, usize, i64)> = Vec::new(); // (truck, work-pos, EFFECTIVE cost)
+            let mut matrix: Vec<Vec<(i64, i64, &'static str, bool)>> = Vec::with_capacity(order.len()); // [wpos][vi]=(arr,p90,tier,switched)
             for &oi in &order {
-                let (wi, wlat, wlon, _eta) = works[oi];
+                let (wi, wlat, wlon, eta_ms) = works[oi];
                 let w = &work[wi];
                 caps.push(w.n.max(0) as i64);
                 let this_key = (w.qc.clone(), w.vessel.clone(), w.queuename.clone());
                 let wpos = matrix.len();
+                // urgency reward: 0 at the horizon, ramps to full when the work is due now/overdue
+                let slack_to_eta = eta_ms / 1000 - now_s;
+                let bonus = (URGENCY_BONUS_S as f64 * (URGENCY_HORIZON_S - slack_to_eta) as f64 / URGENCY_HORIZON_S as f64)
+                    .clamp(0.0, URGENCY_BONUS_S as f64) as i64;
                 let mut row = Vec::with_capacity(vehicles.len());
                 for (vi, v) in vehicles.iter().enumerate() {
                     let (p50, p90, tier) = cost(v.1, v.2, wlat, wlon);
                     let arr = v.3 + p50;
                     let switched = prev.get(&v.0).map(|pk| pk != &this_key).unwrap_or(false);
                     if arr < 1800 {
-                        edges.push((vi, wpos, arr)); // prune the far tail (never in the optimum)
+                        let eff = arr + if switched { SWITCH_PENALTY_S } else { 0 } - bonus;
+                        edges.push((vi, wpos, eff)); // prune the far tail (never in the optimum)
                     }
                     row.push((arr, v.3 + p90, tier, switched));
                 }
                 matrix.push(row);
             }
-            // greedy: urgent work first, assign its n cheapest unused vehicles (switch-penalised order)
+            // greedy BASELINE (urgent-first, n cheapest) — computed only to measure what we'd lose;
+            // NOT logged as the recommendation anymore.
             let mut used: std::collections::HashSet<usize> = std::collections::HashSet::new();
             let mut greedy_cost: i64 = 0;
             let mut greedy_n: i32 = 0;
-            let ts = Utc::now();
+            let mut greedy_miss: i32 = 0;
             for (wpos, &oi) in order.iter().enumerate() {
                 let (wi, _wlat, _wlon, eta_ms) = works[oi];
                 let w = &work[wi];
@@ -3417,34 +3442,51 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                     if taken >= w.n {
                         break;
                     }
-                    let (arr, arr_p90, tier, switched) = matrix[wpos][vi];
-                    let arrival_at = now + arr_p90 * 1000;
-                    let slack = (eta_ms - arrival_at) / 1000;
-                    let v = &vehicles[vi];
-                    let _ = sqlx::query(
-                        "INSERT INTO stage2_match_shadow
-                           (ts,tick,ytno,qc,vessel,queuename,jobtype,src_block,veh_state,arrival_s,od_p90_s,deadline_slack_s,feasible,cost_tier,switched)
-                         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) ON CONFLICT (ts,ytno) DO NOTHING",
-                    )
-                    .bind(ts).bind(tick as i64).bind(&v.0).bind(&w.qc).bind(&w.vessel).bind(&w.queuename)
-                    .bind(&w.jobtype).bind(&w.src_block).bind(v.4)
-                    .bind(arr as i32).bind(arr_p90 as i32).bind(slack as i32).bind(arrival_at <= eta_ms).bind(tier).bind(switched)
-                    .execute(&pool).await;
+                    let (arr, p90, _t, _s) = matrix[wpos][vi];
+                    if now + p90 * 1000 > eta_ms {
+                        greedy_miss += 1;
+                    }
                     used.insert(vi);
                     taken += 1;
                     greedy_cost += arr;
                     greedy_n += 1;
                 }
             }
-            // PHASE-2 (shadow): min-cost-flow optimum on the same matrix → how much does greedy leave?
-            let (opt_cost, opt_flow) = optimal_assign(vehicles.len(), &caps, &edges);
+            // PHASE-2: deadline-aware MIN-COST optimum = the actual recommendation (logged).
+            let assign = optimal_assign(vehicles.len(), &caps, &edges);
+            let ts = Utc::now();
+            let mut opt_cost: i64 = 0;
+            let mut opt_miss: i32 = 0;
+            for &(vi, wpos) in &assign {
+                let (wi, _wlat, _wlon, eta_ms) = works[order[wpos]];
+                let w = &work[wi];
+                let (arr, arr_p90, tier, switched) = matrix[wpos][vi];
+                let arrival_at = now + arr_p90 * 1000;
+                let slack = (eta_ms - arrival_at) / 1000;
+                let feasible = arrival_at <= eta_ms;
+                if !feasible {
+                    opt_miss += 1;
+                }
+                opt_cost += arr;
+                let v = &vehicles[vi];
+                let _ = sqlx::query(
+                    "INSERT INTO stage2_match_shadow
+                       (ts,tick,ytno,qc,vessel,queuename,jobtype,src_block,veh_state,arrival_s,od_p90_s,deadline_slack_s,feasible,cost_tier,switched)
+                     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) ON CONFLICT (ts,ytno) DO NOTHING",
+                )
+                .bind(ts).bind(tick as i64).bind(&v.0).bind(&w.qc).bind(&w.vessel).bind(&w.queuename)
+                .bind(&w.jobtype).bind(&w.src_block).bind(v.4)
+                .bind(arr as i32).bind(arr_p90 as i32).bind(slack as i32).bind(feasible).bind(tier).bind(switched)
+                .execute(&pool).await;
+            }
             let gap_pct = if opt_cost > 0 { 100.0 * (greedy_cost - opt_cost) as f64 / opt_cost as f64 } else { 0.0 };
             let _ = sqlx::query(
-                "INSERT INTO stage2_solver_shadow (ts,tick,n_trucks,n_works,greedy_n,greedy_cost_s,optimal_n,optimal_cost_s,gap_pct)
-                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT (ts) DO NOTHING",
+                "INSERT INTO stage2_solver_shadow (ts,tick,n_trucks,n_works,greedy_n,greedy_cost_s,optimal_n,optimal_cost_s,gap_pct,greedy_miss,optimal_miss)
+                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) ON CONFLICT (ts) DO NOTHING",
             )
             .bind(ts).bind(tick as i64).bind(vehicles.len() as i32).bind(order.len() as i32)
-            .bind(greedy_n).bind(greedy_cost).bind(opt_flow as i32).bind(opt_cost).bind(gap_pct as f32)
+            .bind(greedy_n).bind(greedy_cost).bind(assign.len() as i32).bind(opt_cost).bind(gap_pct as f32)
+            .bind(greedy_miss).bind(opt_miss)
             .execute(&pool).await;
             if tick % 30 == 0 {
                 let _ = sqlx::query("DELETE FROM stage2_match_shadow WHERE ts < now() - interval '21 days'").execute(&pool).await;
