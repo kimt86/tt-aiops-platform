@@ -3172,11 +3172,18 @@ fn grid225(lat: f64, lon: f64) -> String {
 // anti-thrash: a vehicle keeps its previous-tick work bucket unless another is >= this many
 // arrival-seconds cheaper. Damps reassignment from small OD/GPS noise.
 const SWITCH_PENALTY_S: i64 = 180;
-// deadline-awareness: a work bucket due sooner gets up to this many seconds shaved off its edge cost
-// (a reward, ramped from 0 at the horizon to full when due now/overdue) so the optimal solver serves
-// urgent work even when a nearer non-urgent bucket exists — efficiency objective, deadline as a soft pull.
-const URGENCY_BONUS_S: i64 = 600;
+// deadline-awareness: a work bucket due sooner gets a cost reward, ramped from 0 at the horizon to
+// the base when due now and KEEPING to climb (to the cap) for OVERDUE work — so the solver can still
+// rank the many already-late buckets (74% of demand) by how far behind they are, not lump them.
+const URGENCY_BONUS_S: i64 = 600; // reward when due exactly now
+const URGENCY_BONUS_MAX_S: i64 = 1000; // ceiling — most-overdue work
 const URGENCY_HORIZON_S: i64 = 1800;
+// per-container QC handling time (for the bucket's service window + the needed-trucks cap)
+const DS_MOVE_S: i64 = 90;
+const LD_MOVE_S: i64 = 110;
+// a bucket can only usefully consume trucks as fast as the QC works through it — cap the trucks we
+// commit to one bucket at what it can serve within this horizon (spreads trucks across more QCs).
+const NEED_HORIZON_S: i64 = 900;
 
 // The yard grid (blocks + roads) is rotated ~29.8° from north. Manhattan distance measured along the
 // QUAY-ALIGNED axes (not lat/lon) tracks the real road detour (×1.18 of straight-line ≈ the road
@@ -3265,37 +3272,51 @@ impl Mcmf {
     }
 }
 
-/// Optimal min-cost assignment of trucks (each → ≤1 work) to works (each → ≤ cap_j trucks): source →
-/// truck (cap 1) → work (cost = effective edge cost) → sink (cap n_j). Returns the chosen (truck,
-/// work-pos) pairs (the max-cardinality, min-cost matching).
-fn optimal_assign(n_trucks: usize, caps: &[i64], edges: &[(usize, usize, i64)]) -> Vec<(usize, usize)> {
-    let w = caps.len();
-    if n_trucks == 0 || w == 0 {
+/// Optimal min-cost assignment, four layers: source → truck (cap 1) → bucket (cost = effective edge)
+/// → QC (cap = how many trucks the crane can consume in the horizon) → sink. The QC layer is the real
+/// "needed trucks" cap — a crane works through ALL its buckets sequentially, so capping per bucket
+/// would let a multi-bucket QC hoard trucks. Returns the chosen (truck, bucket-pos) pairs.
+fn optimal_assign(
+    n_trucks: usize,
+    bucket_caps: &[i64],
+    bucket_qc: &[usize],
+    qc_caps: &[i64],
+    edges: &[(usize, usize, i64)],
+) -> Vec<(usize, usize)> {
+    let b = bucket_caps.len();
+    let nq = qc_caps.len();
+    if n_trucks == 0 || b == 0 || nq == 0 {
         return Vec::new();
     }
     let trucks0 = 1usize;
-    let works0 = 1 + n_trucks;
-    let t = 1 + n_trucks + w;
+    let buckets0 = 1 + n_trucks;
+    let qcs0 = 1 + n_trucks + b;
+    let t = 1 + n_trucks + b + nq;
     let mut g = Mcmf::new(t + 1);
     for i in 0..n_trucks {
         g.add(0, trucks0 + i, 1, 0);
     }
     for &(u, v, c) in edges {
-        g.add(trucks0 + u, works0 + v, 1, c);
+        g.add(trucks0 + u, buckets0 + v, 1, c);
     }
-    for (j, &cap) in caps.iter().enumerate() {
+    for (j, &cap) in bucket_caps.iter().enumerate() {
         if cap > 0 {
-            g.add(works0 + j, t, cap, 0);
+            g.add(buckets0 + j, qcs0 + bucket_qc[j], cap, 0);
+        }
+    }
+    for (q, &cap) in qc_caps.iter().enumerate() {
+        if cap > 0 {
+            g.add(qcs0 + q, t, cap, 0);
         }
     }
     g.run(0, t);
-    // extract assignment: a truck→work forward edge that carried flow has residual cap 0
+    // extract assignment: a truck→bucket forward edge that carried flow has residual cap 0
     let mut assign = Vec::new();
     for truck in 0..n_trucks {
         for &e in &g.head[trucks0 + truck] {
             let v = g.to[e];
-            if v >= works0 && v < t && g.cap[e] == 0 {
-                assign.push((truck, v - works0));
+            if v >= buckets0 && v < qcs0 && g.cap[e] == 0 {
+                assign.push((truck, v - buckets0));
             }
         }
     }
@@ -3397,19 +3418,38 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
             let mut order: Vec<usize> = (0..works.len()).collect();
             order.sort_by_key(|i| works[*i].3);
             let now_s = now / 1000;
-            let mut caps: Vec<i64> = Vec::with_capacity(order.len());
+            // QC layer: a crane consumes trucks at ~horizon/move-time regardless of how many buckets
+            // it has → cap by QC, not by bucket (else a multi-bucket crane hoards trucks).
+            let mut qc_idx: HashMap<String, usize> = HashMap::new();
+            let mut qc_caps: Vec<i64> = Vec::new();
+            let mut bucket_qc: Vec<usize> = Vec::with_capacity(order.len());
+            let mut caps: Vec<i64> = Vec::with_capacity(order.len()); // per-bucket demand cap
+            let mut deadlines: Vec<i64> = Vec::with_capacity(order.len()); // feasibility deadline ms per wpos
             let mut edges: Vec<(usize, usize, i64)> = Vec::new(); // (truck, work-pos, EFFECTIVE cost)
             let mut matrix: Vec<Vec<(i64, i64, &'static str, bool)>> = Vec::with_capacity(order.len()); // [wpos][vi]=(arr,p90,tier,switched)
             for &oi in &order {
                 let (wi, wlat, wlon, eta_ms) = works[oi];
                 let w = &work[wi];
-                caps.push(w.n.max(0) as i64);
+                let move_s = if w.jobtype == "LD" { LD_MOVE_S } else { DS_MOVE_S };
+                let qc_cap = (NEED_HORIZON_S / move_s).max(1);
+                let qi = *qc_idx.entry(w.qc.clone()).or_insert_with(|| {
+                    qc_caps.push(qc_cap);
+                    qc_caps.len() - 1
+                });
+                bucket_qc.push(qi);
+                let cap_j = w.n.max(0) as i64; // full bucket demand (QC layer does the real capping)
+                caps.push(cap_j);
+                // feasibility deadline: bucket served from max(eta,now) over its near slots (capped by
+                // the QC rate) — realistic midpoint vs the old bay-start-for-all.
+                let spread_ms = (cap_j.min(qc_cap) / 2) * move_s * 1000;
+                deadlines.push(eta_ms.max(now) + spread_ms);
                 let this_key = (w.qc.clone(), w.vessel.clone(), w.queuename.clone());
                 let wpos = matrix.len();
-                // urgency reward: 0 at the horizon, ramps to full when the work is due now/overdue
+                // urgency reward: ramps from 0 at the horizon to the base when due now, and keeps
+                // climbing (to the cap) for overdue work so the many late buckets stay rankable.
                 let slack_to_eta = eta_ms / 1000 - now_s;
                 let bonus = (URGENCY_BONUS_S as f64 * (URGENCY_HORIZON_S - slack_to_eta) as f64 / URGENCY_HORIZON_S as f64)
-                    .clamp(0.0, URGENCY_BONUS_S as f64) as i64;
+                    .clamp(0.0, URGENCY_BONUS_MAX_S as f64) as i64;
                 let mut row = Vec::with_capacity(vehicles.len());
                 for (vi, v) in vehicles.iter().enumerate() {
                     let (p50, p90, tier) = cost(v.1, v.2, wlat, wlon);
@@ -3426,44 +3466,51 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
             // greedy BASELINE (urgent-first, n cheapest) — computed only to measure what we'd lose;
             // NOT logged as the recommendation anymore.
             let mut used: std::collections::HashSet<usize> = std::collections::HashSet::new();
+            let mut qc_used: Vec<i64> = vec![0; qc_caps.len()];
             let mut greedy_cost: i64 = 0;
             let mut greedy_n: i32 = 0;
             let mut greedy_miss: i32 = 0;
-            for (wpos, &oi) in order.iter().enumerate() {
-                let (wi, _wlat, _wlon, eta_ms) = works[oi];
-                let w = &work[wi];
+            for (wpos, _oi) in order.iter().enumerate() {
+                let qi = bucket_qc[wpos];
+                let limit = caps[wpos].min(qc_caps[qi] - qc_used[qi]); // bucket demand AND QC room
+                if limit <= 0 {
+                    continue;
+                }
+                let deadline = deadlines[wpos];
                 let mut cand: Vec<(usize, i64)> = (0..vehicles.len())
                     .filter(|vi| !used.contains(vi))
                     .map(|vi| { let (arr, _p90, _t, sw) = matrix[wpos][vi]; (vi, arr + if sw { SWITCH_PENALTY_S } else { 0 }) })
                     .collect();
                 cand.sort_by_key(|c| c.1);
-                let mut taken = 0i32;
+                let mut taken = 0i64;
                 for (vi, _pen) in cand {
-                    if taken >= w.n {
+                    if taken >= limit {
                         break;
                     }
                     let (arr, p90, _t, _s) = matrix[wpos][vi];
-                    if now + p90 * 1000 > eta_ms {
+                    if now + p90 * 1000 > deadline {
                         greedy_miss += 1;
                     }
                     used.insert(vi);
                     taken += 1;
+                    qc_used[qi] += 1;
                     greedy_cost += arr;
                     greedy_n += 1;
                 }
             }
             // PHASE-2: deadline-aware MIN-COST optimum = the actual recommendation (logged).
-            let assign = optimal_assign(vehicles.len(), &caps, &edges);
+            let assign = optimal_assign(vehicles.len(), &caps, &bucket_qc, &qc_caps, &edges);
             let ts = Utc::now();
             let mut opt_cost: i64 = 0;
             let mut opt_miss: i32 = 0;
             for &(vi, wpos) in &assign {
-                let (wi, _wlat, _wlon, eta_ms) = works[order[wpos]];
+                let (wi, _wlat, _wlon, _eta) = works[order[wpos]];
                 let w = &work[wi];
+                let deadline = deadlines[wpos];
                 let (arr, arr_p90, tier, switched) = matrix[wpos][vi];
                 let arrival_at = now + arr_p90 * 1000;
-                let slack = (eta_ms - arrival_at) / 1000;
-                let feasible = arrival_at <= eta_ms;
+                let slack = (deadline - arrival_at) / 1000;
+                let feasible = arrival_at <= deadline;
                 if !feasible {
                     opt_miss += 1;
                 }
