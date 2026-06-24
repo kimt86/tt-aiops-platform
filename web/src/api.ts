@@ -223,6 +223,18 @@ export interface Stage2Shadow {
   inefficiency: { starve_ticks: number; with_free_pct: number | null; avg_free: number | null; qcs: number };
   solver: { ticks: number; savings_pct: number | null; greedy_miss: number | null; optimal_miss: number | null };
 }
+export interface HealthDispatch {
+  up: boolean; last_tick_age_s: number | null; ticks_1h: number; matches_latest: number;
+  thrash_pct: number | null; feasible_pct: number | null; savings_pct: number | null; l2_pct: number | null;
+  arr_p50_s: number | null; arr_p90_s: number | null;
+  arrival_hist: { label: string; n: number }[];
+  trend: { hour: string; thrash_pct: number | null; matches: number }[];
+  decisions: {
+    ts: string; ytno: string; qc: string | null; queuename: string | null; jobtype: string | null;
+    arrival_s: number | null; deadline_slack_s: number | null; feasible: boolean | null;
+    cost_tier: string | null; switched: boolean | null;
+  }[];
+}
 export interface WharfPoint {
   topos: string; lat: number; lon: number; n: number; spread_m: number | null;
 }
@@ -261,4 +273,5 @@ export const api = {
   stage2Shadow: () => get<Stage2Shadow>("/api/stage2/shadow"),
   stage2Advisory: () => get<Stage2Advisory[]>("/api/stage2/advisory"),
   livemapWharf: () => get<WharfPoint[]>("/api/livemap/wharf"),
+  healthDispatch: () => get<HealthDispatch>("/api/health/dispatch"),
 };

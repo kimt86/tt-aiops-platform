@@ -869,3 +869,122 @@ pub async fn stage2_advisory(State(pool): State<PgPool>) -> Result<Json<Vec<S2Ad
     .await?;
     Ok(Json(rows))
 }
+
+// ── Dispatch Health (real data, replacing the mock) ──────────────────────────────────────────
+#[derive(Serialize, sqlx::FromRow)]
+struct HistBucket {
+    label: String,
+    n: i64,
+}
+#[derive(Serialize, sqlx::FromRow)]
+struct TrendPt {
+    hour: DateTime<Utc>,
+    thrash_pct: Option<f64>,
+    matches: i64,
+}
+#[derive(Serialize, sqlx::FromRow)]
+struct HDecision {
+    ts: DateTime<Utc>,
+    ytno: String,
+    qc: Option<String>,
+    queuename: Option<String>,
+    jobtype: Option<String>,
+    arrival_s: Option<i32>,
+    deadline_slack_s: Option<i32>,
+    feasible: Option<bool>,
+    cost_tier: Option<String>,
+    switched: Option<bool>,
+}
+#[derive(Serialize)]
+pub struct HealthDispatchOut {
+    up: bool,
+    last_tick_age_s: Option<i64>,
+    ticks_1h: i64,
+    matches_latest: i64,
+    thrash_pct: Option<f64>,
+    feasible_pct: Option<f64>,
+    savings_pct: Option<f64>,
+    l2_pct: Option<f64>,
+    arr_p50_s: Option<f64>,
+    arr_p90_s: Option<f64>,
+    arrival_hist: Vec<HistBucket>,
+    trend: Vec<TrendPt>,
+    decisions: Vec<HDecision>,
+}
+
+/// `GET /api/health/dispatch` — real dispatch-engine health from the Stage-2 shadow matcher
+/// (replaces the mock): liveness, recommendation volume/stability/feasibility/optimisation gain,
+/// arrival-time distribution, hourly stability trend, and the latest recommended decisions.
+pub async fn health_dispatch(State(pool): State<PgPool>) -> Result<Json<HealthDispatchOut>, AppError> {
+    let (last_tick_age_s, ticks_1h, matches_latest): (Option<i64>, i64, i64) = sqlx::query_as(
+        "SELECT extract(epoch FROM now() - max(ts))::int8 AS age,
+                count(DISTINCT ts) FILTER (WHERE ts > now() - interval '1 hour') AS ticks_1h,
+                count(*) FILTER (WHERE ts = (SELECT max(ts) FROM stage2_match_shadow)) AS latest
+           FROM stage2_match_shadow",
+    )
+    .fetch_one(&pool)
+    .await?;
+    let up = last_tick_age_s.map(|a| a < 120).unwrap_or(false);
+
+    let (thrash_pct, feasible_pct, l2_pct, arr_p50_s, arr_p90_s): (
+        Option<f64>, Option<f64>, Option<f64>, Option<f64>, Option<f64>,
+    ) = sqlx::query_as(
+        "SELECT (100.0*count(*) FILTER (WHERE switched)/nullif(count(*),0))::float8,
+                (100.0*count(*) FILTER (WHERE feasible)/nullif(count(*),0))::float8,
+                (100.0*count(*) FILTER (WHERE cost_tier='L2')/nullif(count(*),0))::float8,
+                (percentile_cont(0.5) WITHIN GROUP (ORDER BY arrival_s))::float8,
+                (percentile_cont(0.9) WITHIN GROUP (ORDER BY arrival_s))::float8
+           FROM stage2_match_shadow WHERE ts > now() - interval '30 minutes'",
+    )
+    .fetch_one(&pool)
+    .await?;
+
+    let savings_pct: Option<f64> = sqlx::query_scalar(
+        "SELECT (100.0*sum(greedy_cost_s - optimal_cost_s)/nullif(sum(greedy_cost_s),0))::float8
+           FROM stage2_solver_shadow WHERE ts > now() - interval '30 minutes'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap_or(None);
+
+    let arrival_hist: Vec<HistBucket> = sqlx::query_as(
+        "SELECT label, n FROM (
+           SELECT CASE WHEN arrival_s < 120 THEN '0–2' WHEN arrival_s < 240 THEN '2–4'
+                       WHEN arrival_s < 360 THEN '4–6' WHEN arrival_s < 480 THEN '6–8'
+                       WHEN arrival_s < 600 THEN '8–10' WHEN arrival_s < 900 THEN '10–15'
+                       ELSE '15+' END AS label,
+                  count(*)::int8 AS n, min(arrival_s) AS ord
+             FROM stage2_match_shadow
+            WHERE ts > now() - interval '1 hour' AND arrival_s IS NOT NULL
+            GROUP BY 1) z ORDER BY ord",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap_or_default();
+
+    let trend: Vec<TrendPt> = sqlx::query_as(
+        "SELECT date_trunc('hour', ts) AS hour,
+                (100.0*count(*) FILTER (WHERE switched)/nullif(count(*),0))::float8 AS thrash_pct,
+                count(*)::int8 AS matches
+           FROM stage2_match_shadow WHERE ts > now() - interval '24 hours'
+          GROUP BY 1 ORDER BY 1",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap_or_default();
+
+    let decisions: Vec<HDecision> = sqlx::query_as(
+        "SELECT ts, ytno, qc, queuename, jobtype, arrival_s, deadline_slack_s, feasible, cost_tier, switched
+           FROM stage2_match_shadow WHERE ts = (SELECT max(ts) FROM stage2_match_shadow)
+          ORDER BY arrival_s LIMIT 12",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap_or_default();
+
+    Ok(Json(HealthDispatchOut {
+        up, last_tick_age_s, ticks_1h, matches_latest,
+        thrash_pct, feasible_pct, savings_pct, l2_pct, arr_p50_s, arr_p90_s,
+        arrival_hist, trend, decisions,
+    }))
+}

@@ -55,6 +55,7 @@ fn app(state: AppState) -> Router {
         .route("/api/workpool", get(workpool::workpool))
         .route("/api/stage2/shadow", get(workpool::stage2_shadow))
         .route("/api/stage2/advisory", get(workpool::stage2_advisory))
+        .route("/api/health/dispatch", get(workpool::health_dispatch))
         .route("/api/tt-cycles/summary", get(cycles::summary))
         .route("/api/tt-cycles/detail", get(cycles::detail))
         .route("/api/learn/topos", get(learn::topos))
