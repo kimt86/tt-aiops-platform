@@ -3173,6 +3173,22 @@ fn grid225(lat: f64, lon: f64) -> String {
 // arrival-seconds cheaper. Damps reassignment from small OD/GPS noise.
 const SWITCH_PENALTY_S: i64 = 180;
 
+// The yard grid (blocks + roads) is rotated ~29.8° from north. Manhattan distance measured along the
+// QUAY-ALIGNED axes (not lat/lon) tracks the real road detour (×1.18 of straight-line ≈ the road
+// graph's ×1.15) at near-zero cost — far better than straight-line for the untrained-OD (L3)
+// estimate, because trucks drive the grid, not diagonally. Speed calibrated to actual trips.
+const GRID_COS: f64 = 0.86777; // cos(29.8°)
+const GRID_SIN: f64 = 0.49697; // sin(29.8°)
+const MANHATTAN_SPEED_MS: f64 = 2.278; // ~8.2 km/h, median implied speed over grid-Manhattan distance
+fn quay_manhattan_m(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
+    const M: f64 = 111_320.0;
+    let dn = (lat2 - lat1) * M;
+    let de = (lon2 - lon1) * M * ((lat1 + lat2) / 2.0).to_radians().cos();
+    let u = dn * GRID_COS + de * GRID_SIN; // along-grid
+    let v = -dn * GRID_SIN + de * GRID_COS; // cross-grid
+    u.abs() + v.abs()
+}
+
 /// Every 60s, recommend vehicle→work matches and log them (SHADOW; never drives live dispatch).
 /// Candidates = idle + soon-free TTs. Work = Stage-1 unassigned demand (build_workpool) with its
 /// QC's work-ETA + pickup coord (LD=block centroid, DS=QC GPS). Cost = time-to-free + OD travel
@@ -3259,7 +3275,7 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
             let cost = |vlat: f64, vlon: f64, wlat: f64, wlon: f64| -> (i64, i64, &'static str) {
                 match od.get(&(grid225(vlat, vlon), grid225(wlat, wlon))) {
                     Some(&(p50, p90)) => (p50, p90, "L2"),
-                    None => { let m = dist_m((vlat, vlon), (wlat, wlon)); ((m / 1.8194) as i64, (m / 1.8194 * 1.5) as i64, "L3") }
+                    None => { let p50 = quay_manhattan_m(vlat, vlon, wlat, wlon) / MANHATTAN_SPEED_MS; (p50 as i64, (p50 * 1.5) as i64, "L3") }
                 }
             };
             // greedy: urgent work (soonest work-ETA) first; assign its n cheapest unused vehicles
