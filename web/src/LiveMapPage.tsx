@@ -185,6 +185,19 @@ const DEFAULT_TOGGLES: Toggles = {
 const LAYER_TOTAL = 12; // toggle count shown in the panel header
 const EMPTY_FC: GeoJSON.FeatureCollection = { type: "FeatureCollection", features: [] };
 
+// a closed ring approximating a circle of `radiusM` metres around (lat,lon) — used to draw each
+// learned wharf as a filled zone (radius from its learned spread).
+function circleRing(lat: number, lon: number, radiusM: number, n = 28): number[][] {
+  const dLat = radiusM / 111320;
+  const dLon = radiusM / (111320 * Math.cos((lat * Math.PI) / 180));
+  const ring: number[][] = [];
+  for (let i = 0; i <= n; i++) {
+    const a = (i / n) * 2 * Math.PI;
+    ring.push([lon + dLon * Math.cos(a), lat + dLat * Math.sin(a)]);
+  }
+  return ring;
+}
+
 // Stage-B advisory: build a line per recommended truck→work move. Start anchored to the truck's LIVE
 // position (join by id, fall back to the logged position); end at the work pickup point.
 function advisoryFC(adv: Stage2Advisory[], devices: { id: string; lat: number; lon: number }[]): GeoJSON.FeatureCollection {
@@ -423,7 +436,15 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
           geometry: { type: "Point", coordinates: [p.lon, p.lat] },
           properties: { topos: p.topos, n: p.n, spread: p.spread_m != null ? Math.round(p.spread_m) : null },
         }));
-        (mapRef.current?.getSource("wharf") as maplibregl.GeoJSONSource | undefined)?.setData({ type: "FeatureCollection", features: feats });
+        // zone = filled circle sized by the learned spread (clamped so tiny/huge ones stay readable)
+        const zones: GeoJSON.Feature[] = pts.map((p) => ({
+          type: "Feature",
+          geometry: { type: "Polygon", coordinates: [circleRing(p.lat, p.lon, Math.min(150, Math.max(22, (p.spread_m ?? 30) * 1.3)))] },
+          properties: { topos: p.topos },
+        }));
+        const src = mapRef.current?.getSource("wharf") as maplibregl.GeoJSONSource | undefined;
+        src?.setData({ type: "FeatureCollection", features: feats });
+        (mapRef.current?.getSource("wharf-zone") as maplibregl.GeoJSONSource | undefined)?.setData({ type: "FeatureCollection", features: zones });
       }).catch(() => {});
     load();
     const iv = setInterval(load, 60000);
@@ -434,7 +455,7 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
   useEffect(() => {
     const map = mapRef.current;
     if (!map) return;
-    for (const id of ["wharf-pt", "wharf-label"]) {
+    for (const id of ["wharf-zone-fill", "wharf-zone-line", "wharf-pt", "wharf-label"]) {
       if (map.getLayer(id)) map.setLayoutProperty(id, "visibility", showWharf ? "visible" : "none");
     }
   }, [showWharf, ready]);
@@ -502,6 +523,10 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
       });
 
       // ── learned wharf/quay positions (from cur_loc=WHARF_*) — empty until polled ──
+      // zone (filled area sized by the learned spread) renders first, point+label on top.
+      map.addSource("wharf-zone", { type: "geojson", data: EMPTY_FC });
+      map.addLayer({ id: "wharf-zone-fill", type: "fill", source: "wharf-zone", layout: { visibility: "none" }, paint: { "fill-color": "#38bdf8", "fill-opacity": 0.13 } });
+      map.addLayer({ id: "wharf-zone-line", type: "line", source: "wharf-zone", layout: { visibility: "none" }, paint: { "line-color": "#38bdf8", "line-opacity": 0.55, "line-width": 1 } });
       map.addSource("wharf", { type: "geojson", data: EMPTY_FC });
       map.addLayer({
         id: "wharf-pt",
