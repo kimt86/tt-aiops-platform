@@ -7,7 +7,7 @@ import maplibregl from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { type Lang } from "./i18n";
-import { api, type Stage2Advisory } from "./api";
+import { api, type Stage2Advisory, type WharfPoint } from "./api";
 import { LiveVehicleDetail, type SelVeh } from "./LiveVehicleDetail";
 
 const ESRI = "https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}";
@@ -185,17 +185,40 @@ const DEFAULT_TOGGLES: Toggles = {
 const LAYER_TOTAL = 12; // toggle count shown in the panel header
 const EMPTY_FC: GeoJSON.FeatureCollection = { type: "FeatureCollection", features: [] };
 
-// a closed ring approximating a circle of `radiusM` metres around (lat,lon) — used to draw each
-// learned wharf as a filled zone (radius from its learned spread).
-function circleRing(lat: number, lon: number, radiusM: number, n = 28): number[][] {
-  const dLat = radiusM / 111320;
-  const dLon = radiusM / (111320 * Math.cos((lat * Math.PI) / 180));
-  const ring: number[][] = [];
-  for (let i = 0; i <= n; i++) {
-    const a = (i / n) * 2 * Math.PI;
-    ring.push([lon + dLon * Math.cos(a), lat + dLat * Math.sin(a)]);
-  }
-  return ring;
+// Learned-wharf zones as rectangles ALIGNED to the local quay direction: for each point, estimate
+// the quay bearing from its 2 nearest wharf neighbours (axial mean), then box it — long axis along
+// the quay (length ≈ neighbour spacing), short axis = its learned depth (spread).
+function wharfZonesFC(pts: WharfPoint[]): GeoJSON.FeatureCollection {
+  const M = 111320;
+  const distM = (a: WharfPoint, b: WharfPoint) => {
+    const dn = (a.lat - b.lat) * M;
+    const de = (a.lon - b.lon) * M * Math.cos(((a.lat + b.lat) / 2) * Math.PI / 180);
+    return Math.hypot(dn, de);
+  };
+  const feats: GeoJSON.Feature[] = pts.map((p) => {
+    const near = pts.filter((q) => q !== p).map((q) => ({ q, d: distM(p, q) })).sort((a, b) => a.d - b.d).slice(0, 2);
+    // axial mean of bearings to the nearest neighbours (a line has no head/tail → double-angle mean)
+    let zr = 0, zi = 0;
+    for (const { q } of near) {
+      const de = (q.lon - p.lon) * M * Math.cos(((p.lat + q.lat) / 2) * Math.PI / 180);
+      const dn = (q.lat - p.lat) * M;
+      const th = Math.atan2(de, dn);
+      zr += Math.cos(2 * th);
+      zi += Math.sin(2 * th);
+    }
+    const theta = near.length ? Math.atan2(zi, zr) / 2 : 0;
+    const L = Math.max(30, Math.min(90, near.length ? near[0].d : 50)); // along quay
+    const W = Math.max(18, Math.min(45, (p.spread_m ?? 30) * 0.9)); // depth
+    const u = [Math.sin(theta), Math.cos(theta)]; // along (east, north)
+    const v = [Math.cos(theta), -Math.sin(theta)]; // perpendicular
+    const ring = [[1, 1], [1, -1], [-1, -1], [-1, 1], [1, 1]].map(([su, sv]) => {
+      const e = su * (L / 2) * u[0] + sv * (W / 2) * v[0];
+      const n = su * (L / 2) * u[1] + sv * (W / 2) * v[1];
+      return [p.lon + e / (M * Math.cos((p.lat * Math.PI) / 180)), p.lat + n / M];
+    });
+    return { type: "Feature", properties: { topos: p.topos }, geometry: { type: "Polygon", coordinates: [ring] } };
+  });
+  return { type: "FeatureCollection", features: feats };
 }
 
 // Stage-B advisory: build a line per recommended truck→work move. Start anchored to the truck's LIVE
@@ -436,15 +459,10 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
           geometry: { type: "Point", coordinates: [p.lon, p.lat] },
           properties: { topos: p.topos, n: p.n, spread: p.spread_m != null ? Math.round(p.spread_m) : null },
         }));
-        // zone = filled circle sized by the learned spread (clamped so tiny/huge ones stay readable)
-        const zones: GeoJSON.Feature[] = pts.map((p) => ({
-          type: "Feature",
-          geometry: { type: "Polygon", coordinates: [circleRing(p.lat, p.lon, Math.min(150, Math.max(22, (p.spread_m ?? 30) * 1.3)))] },
-          properties: { topos: p.topos },
-        }));
+        // zone = rectangle aligned to the local quay direction (from neighbouring wharf points)
         const src = mapRef.current?.getSource("wharf") as maplibregl.GeoJSONSource | undefined;
         src?.setData({ type: "FeatureCollection", features: feats });
-        (mapRef.current?.getSource("wharf-zone") as maplibregl.GeoJSONSource | undefined)?.setData({ type: "FeatureCollection", features: zones });
+        (mapRef.current?.getSource("wharf-zone") as maplibregl.GeoJSONSource | undefined)?.setData(wharfZonesFC(pts));
       }).catch(() => {});
     load();
     const iv = setInterval(load, 60000);
