@@ -3189,6 +3189,102 @@ fn quay_manhattan_m(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
     u.abs() + v.abs()
 }
 
+// Min-cost max-flow (SPFA successive-shortest-paths). Tiny graphs (≤ a few hundred nodes) — used to
+// compute the OPTIMAL vehicle→work assignment cost as a benchmark for the greedy solver (phase-2
+// shadow). Edges are added in forward/reverse pairs so `e ^ 1` is the residual twin.
+struct Mcmf {
+    to: Vec<usize>,
+    cap: Vec<i64>,
+    cost: Vec<i64>,
+    head: Vec<Vec<usize>>,
+}
+impl Mcmf {
+    fn new(n: usize) -> Self {
+        Mcmf { to: Vec::new(), cap: Vec::new(), cost: Vec::new(), head: vec![Vec::new(); n] }
+    }
+    fn add(&mut self, u: usize, v: usize, cap: i64, cost: i64) {
+        let e = self.to.len();
+        self.to.push(v); self.cap.push(cap); self.cost.push(cost); self.head[u].push(e);
+        self.to.push(u); self.cap.push(0); self.cost.push(-cost); self.head[v].push(e + 1);
+    }
+    fn run(&mut self, s: usize, t: usize) -> (i64, i64) {
+        let n = self.head.len();
+        let (mut total_cost, mut total_flow) = (0i64, 0i64);
+        loop {
+            let mut dist = vec![i64::MAX; n];
+            let mut in_q = vec![false; n];
+            let mut pe = vec![usize::MAX; n];
+            dist[s] = 0;
+            let mut q = std::collections::VecDeque::new();
+            q.push_back(s);
+            in_q[s] = true;
+            while let Some(u) = q.pop_front() {
+                in_q[u] = false;
+                let du = dist[u];
+                for &e in &self.head[u] {
+                    if self.cap[e] > 0 {
+                        let v = self.to[e];
+                        let nd = du + self.cost[e];
+                        if nd < dist[v] {
+                            dist[v] = nd;
+                            pe[v] = e;
+                            if !in_q[v] {
+                                in_q[v] = true;
+                                q.push_back(v);
+                            }
+                        }
+                    }
+                }
+            }
+            if dist[t] == i64::MAX {
+                break;
+            }
+            let mut f = i64::MAX;
+            let mut v = t;
+            while v != s {
+                let e = pe[v];
+                f = f.min(self.cap[e]);
+                v = self.to[e ^ 1];
+            }
+            let mut v = t;
+            while v != s {
+                let e = pe[v];
+                self.cap[e] -= f;
+                self.cap[e ^ 1] += f;
+                v = self.to[e ^ 1];
+            }
+            total_cost += f * dist[t];
+            total_flow += f;
+        }
+        (total_cost, total_flow)
+    }
+}
+
+/// Optimal min-cost assignment of trucks (each → ≤1 work) to works (each → ≤ cap_j trucks): source →
+/// truck (cap 1) → work (cost=arrival) → sink (cap n_j). Returns (Σ arrival over the optimum, #assigned).
+fn optimal_assign(n_trucks: usize, caps: &[i64], edges: &[(usize, usize, i64)]) -> (i64, i64) {
+    let w = caps.len();
+    if n_trucks == 0 || w == 0 {
+        return (0, 0);
+    }
+    let trucks0 = 1usize;
+    let works0 = 1 + n_trucks;
+    let t = 1 + n_trucks + w;
+    let mut g = Mcmf::new(t + 1);
+    for i in 0..n_trucks {
+        g.add(0, trucks0 + i, 1, 0);
+    }
+    for &(u, v, c) in edges {
+        g.add(trucks0 + u, works0 + v, 1, c);
+    }
+    for (j, &cap) in caps.iter().enumerate() {
+        if cap > 0 {
+            g.add(works0 + j, t, cap, 0);
+        }
+    }
+    g.run(0, t)
+}
+
 /// Every 60s, recommend vehicle→work matches and log them (SHADOW; never drives live dispatch).
 /// Candidates = idle + soon-free TTs. Work = Stage-1 unassigned demand (build_workpool) with its
 /// QC's work-ETA + pickup coord (LD=block centroid, DS=QC GPS). Cost = time-to-free + OD travel
@@ -3278,32 +3374,50 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                     None => { let p50 = quay_manhattan_m(vlat, vlon, wlat, wlon) / MANHATTAN_SPEED_MS; (p50 as i64, (p50 * 1.5) as i64, "L3") }
                 }
             };
-            // greedy: urgent work (soonest work-ETA) first; assign its n cheapest unused vehicles
-            let mut order: Vec<&(usize, f64, f64, i64)> = works.iter().collect();
-            order.sort_by_key(|w| w.3);
-            let mut used: std::collections::HashSet<usize> = std::collections::HashSet::new();
-            let ts = Utc::now();
-            for &&(wi, wlat, wlon, eta_ms) in &order {
+            // precompute the full cost matrix (all vehicles × all works) once: feeds BOTH the greedy
+            // solver and the min-cost-flow optimum we benchmark it against. Work order = urgent first.
+            let mut order: Vec<usize> = (0..works.len()).collect();
+            order.sort_by_key(|i| works[*i].3);
+            let mut caps: Vec<i64> = Vec::with_capacity(order.len());
+            let mut edges: Vec<(usize, usize, i64)> = Vec::new(); // (truck, work-pos, real arrival)
+            let mut matrix: Vec<Vec<(i64, i64, &'static str, bool)>> = Vec::with_capacity(order.len()); // [wpos][vi]
+            for &oi in &order {
+                let (wi, wlat, wlon, _eta) = works[oi];
                 let w = &work[wi];
+                caps.push(w.n.max(0) as i64);
                 let this_key = (w.qc.clone(), w.vessel.clone(), w.queuename.clone());
-                // (vi, sort_cost = arrival + switch_penalty, arrival, p90, tier, switched)
-                let mut cand: Vec<(usize, i64, i64, i64, &'static str, bool)> = vehicles.iter().enumerate()
-                    .filter(|(vi, _)| !used.contains(vi))
-                    .map(|(vi, v)| {
-                        let (p50, p90, tier) = cost(v.1, v.2, wlat, wlon);
-                        let arr = v.3 + p50;
-                        // switched = this vehicle was recommended a DIFFERENT bucket last tick
-                        let switched = prev.get(&v.0).map(|pk| pk != &this_key).unwrap_or(false);
-                        let pen = if switched { SWITCH_PENALTY_S } else { 0 };
-                        (vi, arr + pen, arr, v.3 + p90, tier, switched)
-                    })
+                let wpos = matrix.len();
+                let mut row = Vec::with_capacity(vehicles.len());
+                for (vi, v) in vehicles.iter().enumerate() {
+                    let (p50, p90, tier) = cost(v.1, v.2, wlat, wlon);
+                    let arr = v.3 + p50;
+                    let switched = prev.get(&v.0).map(|pk| pk != &this_key).unwrap_or(false);
+                    if arr < 1800 {
+                        edges.push((vi, wpos, arr)); // prune the far tail (never in the optimum)
+                    }
+                    row.push((arr, v.3 + p90, tier, switched));
+                }
+                matrix.push(row);
+            }
+            // greedy: urgent work first, assign its n cheapest unused vehicles (switch-penalised order)
+            let mut used: std::collections::HashSet<usize> = std::collections::HashSet::new();
+            let mut greedy_cost: i64 = 0;
+            let mut greedy_n: i32 = 0;
+            let ts = Utc::now();
+            for (wpos, &oi) in order.iter().enumerate() {
+                let (wi, _wlat, _wlon, eta_ms) = works[oi];
+                let w = &work[wi];
+                let mut cand: Vec<(usize, i64)> = (0..vehicles.len())
+                    .filter(|vi| !used.contains(vi))
+                    .map(|vi| { let (arr, _p90, _t, sw) = matrix[wpos][vi]; (vi, arr + if sw { SWITCH_PENALTY_S } else { 0 }) })
                     .collect();
-                cand.sort_by_key(|c| c.1); // penalized cost → keep prior bucket unless clearly cheaper
+                cand.sort_by_key(|c| c.1);
                 let mut taken = 0i32;
-                for (vi, _sort, arr, arr_p90, tier, switched) in cand {
+                for (vi, _pen) in cand {
                     if taken >= w.n {
                         break;
                     }
+                    let (arr, arr_p90, tier, switched) = matrix[wpos][vi];
                     let arrival_at = now + arr_p90 * 1000;
                     let slack = (eta_ms - arrival_at) / 1000;
                     let v = &vehicles[vi];
@@ -3318,10 +3432,23 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                     .execute(&pool).await;
                     used.insert(vi);
                     taken += 1;
+                    greedy_cost += arr;
+                    greedy_n += 1;
                 }
             }
+            // PHASE-2 (shadow): min-cost-flow optimum on the same matrix → how much does greedy leave?
+            let (opt_cost, opt_flow) = optimal_assign(vehicles.len(), &caps, &edges);
+            let gap_pct = if opt_cost > 0 { 100.0 * (greedy_cost - opt_cost) as f64 / opt_cost as f64 } else { 0.0 };
+            let _ = sqlx::query(
+                "INSERT INTO stage2_solver_shadow (ts,tick,n_trucks,n_works,greedy_n,greedy_cost_s,optimal_n,optimal_cost_s,gap_pct)
+                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT (ts) DO NOTHING",
+            )
+            .bind(ts).bind(tick as i64).bind(vehicles.len() as i32).bind(order.len() as i32)
+            .bind(greedy_n).bind(greedy_cost).bind(opt_flow as i32).bind(opt_cost).bind(gap_pct as f32)
+            .execute(&pool).await;
             if tick % 30 == 0 {
                 let _ = sqlx::query("DELETE FROM stage2_match_shadow WHERE ts < now() - interval '21 days'").execute(&pool).await;
+                let _ = sqlx::query("DELETE FROM stage2_solver_shadow WHERE ts < now() - interval '21 days'").execute(&pool).await;
             }
         }
     });
