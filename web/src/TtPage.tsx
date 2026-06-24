@@ -2,8 +2,7 @@
 // vehicle pool are LIVE: the work pool comes from /api/workpool (TOS JOB_QUEUE_SCHEDULE
 // + JOB_ORDER_LIST, refreshed ~90s into Postgres) fused with /api/livemap/positions
 // (websocket PLC = crane physically cycling, GPS = where the assigned TT actually is).
-// Status distribution is live from the dispatch counts. Last Decision + Utilization
-// remain visual mocks (future AI-dispatch panels).
+// Status distribution is live from the dispatch counts. (Fully live — no mock panels.)
 import { useEffect, useState } from "react";
 import { type Lang } from "./i18n";
 import { api, type WorkpoolResponse, type WpQc, type WpMove } from "./api";
