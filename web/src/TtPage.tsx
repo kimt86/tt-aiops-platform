@@ -5,7 +5,7 @@
 // Status distribution is live from the dispatch counts. (Fully live — no mock panels.)
 import { useEffect, useState } from "react";
 import { type Lang } from "./i18n";
-import { api, type WorkpoolResponse, type WpQc, type WpMove } from "./api";
+import { api, type WorkpoolResponse, type WpQc, type WpMove, type Stage2Advisory } from "./api";
 
 const ko = (lang: Lang) => lang === "ko";
 
@@ -255,9 +255,22 @@ function LiveQcSequence({ lang, wp, snap }: { lang: Lang; wp: WorkpoolResponse |
   // "auto" (default) = all assigned work + the next 3 unassigned; a number = max containers per QC.
   const [maxN, setMaxN] = useState<number | "auto">("auto");
   const [showDl, setShowDl] = useState(true); // show the computed deadline overlay (shadow)
+  const [showOurs, setShowOurs] = useState(true); // show OUR (Stage-2) dispatch pick beside TOS's
   // 1s ticker so relative times (ETW, deadline, slack) keep counting down between 15s data polls.
   const [, setTick] = useState(0);
   useEffect(() => { const iv = setInterval(() => setTick((t) => t + 1), 1000); return () => clearInterval(iv); }, []);
+  // our Stage-2 recommendation (latest tick), grouped per QC and sorted closest-arrival first
+  const [advisory, setAdvisory] = useState<Stage2Advisory[]>([]);
+  useEffect(() => {
+    let alive = true;
+    const poll = () => api.stage2Advisory().then((d) => { if (alive) setAdvisory(d); }).catch(() => {});
+    poll();
+    const iv = setInterval(poll, 15000);
+    return () => { alive = false; clearInterval(iv); };
+  }, []);
+  const recsByQc = new Map<string, Stage2Advisory[]>();
+  for (const r of advisory) { if (!r.qc) continue; const a = recsByQc.get(r.qc) ?? []; a.push(r); recsByQc.set(r.qc, a); }
+  for (const a of recsByQc.values()) a.sort((x, y) => (x.arrival_s ?? 1e9) - (y.arrival_s ?? 1e9));
   // fuse: live crane PLC (cycling now + live move/hr) + per-TT dispatch state
   const ttState = new Map<string, Dev>();
   const craneFresh = new Map<string, boolean>();
@@ -299,6 +312,9 @@ function LiveQcSequence({ lang, wp, snap }: { lang: Lang; wp: WorkpoolResponse |
           <label className="qc-pastsel" title={ko(lang) ? "예측(출항·여유·배차 마감, 그림자) 표시 켜고 끄기" : "toggle the forecast overlay (departure·slack·dispatch deadline, shadow)"}>
             <input type="checkbox" checked={showDl} onChange={(e) => setShowDl(e.target.checked)} /> {ko(lang) ? "예측" : "forecast"}
           </label>
+          <label className="qc-pastsel" title={ko(lang) ? "TOS 배정 차량 옆에 우리 배차 권고(🤖 Stage-2) 표시 켜고 끄기" : "toggle our (Stage-2) dispatch pick beside the TOS-assigned truck"}>
+            <input type="checkbox" checked={showOurs} onChange={(e) => setShowOurs(e.target.checked)} /> {ko(lang) ? "🤖 우리 배차" : "🤖 our pick"}
+          </label>
           <span className="muted">{ageS != null ? `⟳ ${ageS}s` : ""}</span>
         </div>
       </div>
@@ -324,7 +340,7 @@ function LiveQcSequence({ lang, wp, snap }: { lang: Lang; wp: WorkpoolResponse |
               <div className="qc-vbar-track"><div className="fill" style={{ width: `${vpct}%` }} /></div>
             </div>
             <div className="qc-panel">
-              {g.items.map((q) => <QcCol key={q.qc} q={q} lang={lang} ttState={ttState} working={craneFresh.get(q.qc) ?? false} mph={craneMph.get(q.qc)} maxN={maxN} showDl={showDl} />)}
+              {g.items.map((q) => <QcCol key={q.qc} q={q} lang={lang} ttState={ttState} working={craneFresh.get(q.qc) ?? false} mph={craneMph.get(q.qc)} maxN={maxN} showDl={showDl} ourRecs={showOurs ? recsByQc.get(q.qc) : undefined} />)}
             </div>
           </div>
           );
@@ -342,7 +358,7 @@ const agoMin = (ts?: string | null): number | null =>
 // containers] → NOW → [future N containers]; N counts CONTAINERS (not bays). "future" is mostly the
 // not-yet-dispatched (candidate) work. TOS has no per-container order within a bay, so within-bay
 // unassigned order is by bay only. Label = Vessel(QC) ↔ Block(RTG).
-function QcCol({ q, lang, ttState, working, mph, maxN, showDl }: { q: WpQc; lang: Lang; ttState: Map<string, Dev>; working: boolean; mph?: number; maxN: number | "auto"; showDl: boolean }) {
+function QcCol({ q, lang, ttState, working, mph, maxN, showDl, ourRecs }: { q: WpQc; lang: Lang; ttState: Map<string, Dev>; working: boolean; mph?: number; maxN: number | "auto"; showDl: boolean; ourRecs?: Stage2Advisory[] }) {
   const k = ko(lang);
   const tot = q.queues.reduce((a, x) => a + x.total, 0);
   const done = q.queues.reduce((a, x) => a + x.done, 0);
@@ -401,6 +417,22 @@ function QcCol({ q, lang, ttState, working, mph, maxN, showDl }: { q: WpQc; lang
     }
   }
 
+  // Attach OUR Stage-2 pick to this QC's pending (unassigned) demands. Our matcher recommends the
+  // next truck per QC demand (closest-arrival first), so we lay them onto the unassigned containers
+  // in sequence order, preferring a same-jobtype match. (Assigned containers are TOS's done deals.)
+  const recForMove = new Map<string, Stage2Advisory>();
+  if (ourRecs && ourRecs.length) {
+    const pool = ourRecs.slice();
+    for (const m of shown) {
+      if (assigned(m) || pool.length === 0) continue;
+      let idx = pool.findIndex((r) => (r.jobtype ?? null) === (m.jobtype ?? null));
+      if (idx < 0) idx = 0;
+      recForMove.set(mkey(m), pool[idx]);
+      pool.splice(idx, 1);
+    }
+  }
+  const fmtEta = (s: number) => `${Math.floor(s / 60)}:${String(Math.round(s % 60)).padStart(2, "0")}`;
+
   const row = (m: WpMove, role: "past" | "now" | "future") => {
     const tt = assigned(m) ? ttState.get((m.ytno as string).trim()) : undefined;
     const dot = tt?.dispatch ? DSP_META[tt.dispatch]?.color : undefined;
@@ -433,7 +465,21 @@ function QcCol({ q, lang, ttState, working, mph, maxN, showDl }: { q: WpQc; lang
           </div>
         </div>
         <div className="assign">
-          {assigned(m) ? <span className="tt" title={dspTitle(tt?.dispatch, lang)}>{dot && <span className="dot" style={{ background: dot, marginRight: 4 }} />}{m.ytno}</span> : <span className="tt-none">{k ? "미배차" : "Unassigned"}</span>}
+          <span style={{ display: "inline-flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+            {assigned(m) ? <span className="tt" title={dspTitle(tt?.dispatch, lang)}>{dot && <span className="dot" style={{ background: dot, marginRight: 4 }} />}{m.ytno}</span> : <span className="tt-none">{k ? "미배차" : "Unassigned"}</span>}
+            {(() => {
+              const our = recForMove.get(mkey(m));
+              if (!our) return null;
+              return (
+                <span className="tt-ours" style={{ display: "inline-flex", alignItems: "center", gap: 3, padding: "0 5px", borderRadius: 4, fontSize: 11, fontWeight: 700, color: "#a78bfa", background: "rgba(167,139,250,0.14)", border: "1px solid rgba(167,139,250,0.4)" }}
+                  title={k
+                    ? `우리 배차 권고 (Stage-2 매처): ${our.ytno}${our.arrival_s != null ? ` · 픽업 도착 ${fmtEta(our.arrival_s)}` : ""}${our.feasible === false ? " · ⚠ 마감 빠듯" : ""}`
+                    : `our Stage-2 pick: ${our.ytno}${our.arrival_s != null ? ` · arrival ${fmtEta(our.arrival_s)}` : ""}`}>
+                  🤖 {our.ytno}{our.arrival_s != null ? <span style={{ color: "var(--text-mute)", fontWeight: 400 }}>{fmtEta(our.arrival_s)}</span> : null}
+                </span>
+              );
+            })()}
+          </span>
           {(() => { const w = ttWhere(tt, m.jobtype, lang); return w && <span className="tt-status" style={{ color: tt?.dispatch ? DSP_META[tt.dispatch]?.color : undefined }}>{w}</span>; })()}
         </div>
       </div>
