@@ -269,6 +269,21 @@ function workLinesFC(p: WorkPoint, devices: { id: string; lat: number; lon: numb
   return { type: "FeatureCollection", features: feats };
 }
 
+// a ring marker on each truck dispatched to the selected work point (highlights them on the map).
+function workTruckPtsFC(p: WorkPoint, devices: { id: string; lat: number; lon: number }[]): GeoJSON.FeatureCollection {
+  const byId = new Map(devices.map((d) => [d.id, d]));
+  const feats: GeoJSON.Feature[] = [];
+  for (const yt of p.tos_trucks ?? []) {
+    const d = byId.get(yt);
+    if (d) feats.push({ type: "Feature", properties: { kind: "tos", ytno: yt }, geometry: { type: "Point", coordinates: [d.lon, d.lat] } });
+  }
+  if (p.our_ytno && !(p.tos_trucks ?? []).includes(p.our_ytno)) {
+    const d = byId.get(p.our_ytno);
+    if (d) feats.push({ type: "Feature", properties: { kind: "our", ytno: p.our_ytno }, geometry: { type: "Point", coordinates: [d.lon, d.lat] } });
+  }
+  return { type: "FeatureCollection", features: feats };
+}
+
 // a teardrop map-pin icon (filled + white center), drawn to a canvas for map.addImage.
 function pinImage(fill: string): ImageData {
   const S = 40;
@@ -618,8 +633,11 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
     }).catch(() => {});
     const anchorLines = () => {
       const sel = selectedWpRef.current;
+      const devs = liveRef.current?.devices ?? [];
       const ls = mapRef.current?.getSource("workpts-lines") as maplibregl.GeoJSONSource | undefined;
-      if (ls) ls.setData(sel ? workLinesFC(sel, liveRef.current?.devices ?? []) : EMPTY_FC);
+      if (ls) ls.setData(sel ? workLinesFC(sel, devs) : EMPTY_FC);
+      const ts = mapRef.current?.getSource("workpts-trucks") as maplibregl.GeoJSONSource | undefined;
+      if (ts) ts.setData(sel ? workTruckPtsFC(sel, devs) : EMPTY_FC);
     };
     poll();
     const iv = setInterval(poll, 15000);
@@ -631,13 +649,12 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
   useEffect(() => {
     const map = mapRef.current;
     if (!map) return;
-    for (const id of ["workpts-lines", "workpts-pt", "workpts-label"]) {
+    for (const id of ["workpts-lines", "workpts-trucks", "workpts-pt", "workpts-label"]) {
       if (map.getLayer(id)) map.setLayoutProperty(id, "visibility", showWorkPts ? "visible" : "none");
     }
     if (!showWorkPts) {
       selectedWpRef.current = null;
-      const ls = map.getSource("workpts-lines") as maplibregl.GeoJSONSource | undefined;
-      if (ls) ls.setData(EMPTY_FC);
+      for (const sid of ["workpts-lines", "workpts-trucks"]) { const s = map.getSource(sid) as maplibregl.GeoJSONSource | undefined; if (s) s.setData(EMPTY_FC); }
     }
   }, [showWorkPts, ready]);
 
@@ -725,6 +742,21 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
           "line-color": ["case", ["==", ["get", "kind"], "our"], "#a78bfa", "#22d3ee"],
           "line-width": ["case", ["==", ["get", "kind"], "our"], 2.8, 1.6],
           "line-opacity": 0.9,
+        },
+      });
+      // a ring around each truck dispatched to the selected work point
+      map.addSource("workpts-trucks", { type: "geojson", data: EMPTY_FC });
+      map.addLayer({
+        id: "workpts-trucks",
+        type: "circle",
+        source: "workpts-trucks",
+        layout: { visibility: "none" },
+        paint: {
+          "circle-radius": ["interpolate", ["linear"], ["zoom"], 12, 7, 17, 15],
+          "circle-color": ["case", ["==", ["get", "kind"], "our"], "rgba(167,139,250,0.18)", "rgba(34,211,238,0.16)"],
+          "circle-stroke-width": 2.5,
+          "circle-stroke-color": ["case", ["==", ["get", "kind"], "our"], "#a78bfa", "#22d3ee"],
+          "circle-stroke-opacity": 0.95,
         },
       });
       map.addSource("workpts", { type: "geojson", data: EMPTY_FC });
@@ -840,8 +872,11 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
       // click popups for learned overlays + metric-grid cells (koRef/gridMRef = fresh values)
       const lpop = new maplibregl.Popup({ closeButton: true, closeOnClick: true, maxWidth: "260px", className: "lm-popup" });
       const showPopup = (at: [number, number] | maplibregl.LngLat, html: string) => lpop.setLngLat(at).setHTML(html).addTo(map);
-      // closing the popup clears the selected work point's truck lines
-      lpop.on("close", () => { selectedWpRef.current = null; const ls = map.getSource("workpts-lines") as maplibregl.GeoJSONSource | undefined; if (ls) ls.setData(EMPTY_FC); });
+      // closing the popup clears the selected work point's truck lines + rings
+      lpop.on("close", () => {
+        selectedWpRef.current = null;
+        for (const sid of ["workpts-lines", "workpts-trucks"]) { const s = map.getSource(sid) as maplibregl.GeoJSONSource | undefined; if (s) s.setData(EMPTY_FC); }
+      });
       map.on("click", "lt-pt", (e) => {
         const f = e.features?.[0]; if (!f) return; const k = koRef.current;
         const p = f.properties as { topos: string; crane: boolean; n: number; obs: number; spread: number | null; conf: string };
@@ -879,8 +914,11 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
         const p = f.properties as { qc: string; queuename: string; jobtype: string; tos: string; our: string; tos_arr: number; our_arr: number; agree: number; delta: number; n: number; agree_n: number };
         const wp = workPtsRef.current.find((w) => w.qc === p.qc && w.queuename === p.queuename) ?? null;
         selectedWpRef.current = wp;
+        const devs = liveRef.current?.devices ?? [];
         const ls = map.getSource("workpts-lines") as maplibregl.GeoJSONSource | undefined;
-        if (ls) ls.setData(wp ? workLinesFC(wp, liveRef.current?.devices ?? []) : EMPTY_FC);
+        if (ls) ls.setData(wp ? workLinesFC(wp, devs) : EMPTY_FC);
+        const ts = map.getSource("workpts-trucks") as maplibregl.GeoJSONSource | undefined;
+        if (ts) ts.setData(wp ? workTruckPtsFC(wp, devs) : EMPTY_FC);
         const fmt = (s: number) => s >= 0 ? `${Math.floor(s / 60)}:${String(Math.round(s % 60)).padStart(2, "0")}` : "—";
         const agree = Number(p.agree) === 1;
         const delta = Number(p.delta);
