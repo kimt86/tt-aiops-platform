@@ -65,8 +65,8 @@ export default function Stage2Page({ lang }: { lang: Lang }) {
       {c && c.n > 0 && (
         <div className="ls-note">
           {k
-            ? `사유: 우리가 더 가까운 트럭 ${c.ours_closer_n}건 · TOS가 더 가까움 ${c.tos_closer_n}건 · 같은 트럭 ${c.same_n}건. 평균 격차 ${signMin(c.avg_delta_s)}분(이상치 포함). ⓘ 같은 작업에 '가용 트럭 기준'으로 비교합니다 — TOS가 다른 작업 중인 트럭을 배차했다면 그 도착(현재 위치 기준)은 과대평가될 수 있어, 중앙값을 함께 봅니다.`
-            : `reasons: ours closer ${c.ours_closer_n} · TOS closer ${c.tos_closer_n} · same truck ${c.same_n}. avg gap ${signMin(c.avg_delta_s)}min. ⓘ compares vs the available truck; if TOS used a mid-cycle truck its arrival (current pos) may overstate — see the median.`}
+            ? `사유: 우리가 더 가까운 트럭 ${c.ours_closer_n}건 · TOS가 더 가까움 ${c.tos_closer_n}건 · 같은 트럭 ${c.same_n}건. 평균 격차 ${signMin(c.avg_delta_s)}분 / 중앙 ${signMin(c.median_delta_s)}분. ⓘ 도착=트럭의 픽업까지 빈 차 이동. 큰 격차는 TOS가 안벽의 빈 트럭을 야드 픽업이 먼 적하에 보낸 실제 경우(버그 아님) — 우리는 픽업 가까운 트럭 선택. 권고-배차 시점 시차가 있어 방향 지표이며 중앙값이 robust.`
+            : `reasons: ours closer ${c.ours_closer_n} · TOS closer ${c.tos_closer_n} · same truck ${c.same_n}. avg ${signMin(c.avg_delta_s)}min / median ${signMin(c.median_delta_s)}min. ⓘ arrival = empty travel to pickup. large gaps = TOS sent a quay-idle truck to a far yard-pickup load (real) — we pick a truck near the pickup. directional (recommendation vs dispatch timing); median is robust.`}
         </div>
       )}
 
