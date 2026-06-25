@@ -1051,6 +1051,60 @@ pub async fn stage2_compare_picks(State(pool): State<PgPool>) -> Result<Json<Vec
     Ok(Json(rows))
 }
 
+#[derive(Serialize, sqlx::FromRow)]
+pub struct WorkPoint {
+    qc: String,
+    queuename: String,
+    jobtype: Option<String>,
+    lat: f64,
+    lon: f64,
+    src_block: Option<String>,
+    tos_ytno: Option<String>,
+    tos_arrival_s: Option<i32>,
+    our_ytno: Option<String>,
+    our_arrival_s: Option<i32>,
+    agree: Option<bool>,
+    delta_s: Option<i32>,
+    n: i64,
+    agree_n: i64,
+}
+
+/// `GET /api/stage2/work-points` — currently-dispatched work points (last hour) for the live map:
+/// each point's coordinate (from the matcher's dest_lat/lon) joined with the timing-skew-free
+/// TOS-vs-ours comparison (latest TOS truck + who WE'd have picked, agreement, gap). Clicking a
+/// point on the map shows TOS's dispatch beside ours.
+pub async fn stage2_work_points(State(pool): State<PgPool>) -> Result<Json<Vec<WorkPoint>>, AppError> {
+    let rows = sqlx::query_as::<_, WorkPoint>(
+        "WITH coords AS (
+           SELECT DISTINCT ON (qc, queuename) qc, queuename, dest_lat AS lat, dest_lon AS lon, src_block
+             FROM stage2_match_shadow
+            WHERE dest_lat IS NOT NULL AND ts > now() - interval '60 minutes'
+            ORDER BY qc, queuename, ts DESC
+         ),
+         agg AS (
+           SELECT qc, queuename,
+                  count(*) AS n,
+                  count(*) FILTER (WHERE agree) AS agree_n,
+                  max(jobtype) AS jobtype,
+                  (array_agg(tos_ytno      ORDER BY tos_upd DESC))[1] AS tos_ytno,
+                  (array_agg(tos_arrival_s ORDER BY tos_upd DESC))[1] AS tos_arrival_s,
+                  (array_agg(our_ytno      ORDER BY tos_upd DESC))[1] AS our_ytno,
+                  (array_agg(our_arrival_s ORDER BY tos_upd DESC))[1] AS our_arrival_s,
+                  (array_agg(agree         ORDER BY tos_upd DESC))[1] AS agree,
+                  (array_agg(delta_s       ORDER BY tos_upd DESC))[1] AS delta_s
+             FROM dispatch_compare_shadow
+            WHERE ts > now() - interval '60 minutes'
+            GROUP BY qc, queuename
+         )
+         SELECT a.qc, a.queuename, a.jobtype, c.lat, c.lon, c.src_block,
+                a.tos_ytno, a.tos_arrival_s, a.our_ytno, a.our_arrival_s, a.agree, a.delta_s, a.n, a.agree_n
+           FROM agg a JOIN coords c USING (qc, queuename)",
+    )
+    .fetch_all(&pool)
+    .await?;
+    Ok(Json(rows))
+}
+
 /// `GET /api/stage2/compare` — TOS's actual dispatch vs our recommendation, per work: divergence
 /// rate, who'd arrive sooner, the performance gap, reason breakdown, and recent divergence examples.
 pub async fn dispatch_compare(State(pool): State<PgPool>) -> Result<Json<DispatchCompareOut>, AppError> {

@@ -7,7 +7,7 @@ import maplibregl from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { type Lang } from "./i18n";
-import { api, type Stage2Advisory, type WharfPoint } from "./api";
+import { api, type WorkPoint, type WharfPoint } from "./api";
 import { LiveVehicleDetail, type SelVeh } from "./LiveVehicleDetail";
 
 const ESRI = "https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}";
@@ -233,24 +233,23 @@ function wharfZonesFC(pts: WharfPoint[]): GeoJSON.FeatureCollection {
   return { type: "FeatureCollection", features: feats };
 }
 
-// Stage-B advisory: build a line per recommended truck→work move. Start anchored to the truck's LIVE
-// position (join by id, fall back to the logged position); end at the work pickup point.
-function advisoryFC(adv: Stage2Advisory[], devices: { id: string; lat: number; lon: number }[]): GeoJSON.FeatureCollection {
-  const byId = new Map(devices.map((d) => [d.id, d]));
-  const feats: GeoJSON.Feature[] = [];
-  for (const a of adv) {
-    if (a.dest_lat == null || a.dest_lon == null) continue;
-    const live = byId.get(a.ytno);
-    const sy = live?.lat ?? a.src_lat;
-    const sx = live?.lon ?? a.src_lon;
-    if (sy == null || sx == null) continue;
-    feats.push({
+// Dispatched work points: one marker per currently-dispatched work point (last hour). Clicking it
+// shows TOS's dispatched truck beside ours (from the timing-skew-free comparison). Replaces the old
+// truck→work advisory lines.
+function workPointsFC(pts: WorkPoint[]): GeoJSON.FeatureCollection {
+  return {
+    type: "FeatureCollection",
+    features: pts.filter((p) => p.lat && p.lon).map((p) => ({
       type: "Feature",
-      properties: { feasible: a.feasible ? 1 : 0, label: `${a.ytno}→${a.qc ?? ""}${a.arrival_s != null ? ` ${Math.round(a.arrival_s / 60)}분` : ""}` },
-      geometry: { type: "LineString", coordinates: [[sx, sy], [a.dest_lon, a.dest_lat]] },
-    });
-  }
-  return { type: "FeatureCollection", features: feats };
+      geometry: { type: "Point", coordinates: [p.lon, p.lat] },
+      properties: {
+        qc: p.qc, queuename: p.queuename, jobtype: p.jobtype ?? "",
+        tos: p.tos_ytno ?? "", our: p.our_ytno ?? "",
+        tos_arr: p.tos_arrival_s ?? -1, our_arr: p.our_arrival_s ?? -1,
+        agree: p.agree ? 1 : 0, delta: p.delta_s ?? 0, n: p.n, agree_n: p.agree_n,
+      },
+    })),
+  };
 }
 
 // Metric grid: terminal split into uniform `m`-metre cells; each occupied cell becomes a filled
@@ -489,8 +488,7 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
   const [dispatchFilter, setDispatchFilter] = useState<Dispatch | null>(null);
   const [toggles, setToggles] = useState<Toggles>(DEFAULT_TOGGLES);
   const [showGrid, setShowGrid] = useState(false); // metric grid overlay
-  const [showAdvisory, setShowAdvisory] = useState(false); // Stage-B AI dispatch advisory overlay
-  const advisoryRef = useRef<Stage2Advisory[]>([]);
+  const [showWorkPts, setShowWorkPts] = useState(false); // dispatched work points (TOS vs ours); replaces the old advisory
   const [showWharf, setShowWharf] = useState(false); // learned wharf/quay positions overlay
   const [showWeatherFx, setShowWeatherFx] = useState(true); // game-like weather effect overlay (default on; toggle via the weather chip)
   const [gridM, setGridM] = useState(100); // grid cell size (m), adjustable
@@ -565,32 +563,27 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
     return () => clearInterval(iv);
   }, [showGrid, gridM, gridMetric, ready]);
 
-  // Stage-B advisory overlay: poll the latest recommended moves (10s) + re-anchor lines to live
-  // truck positions (2.5s). Display only — never drives dispatch.
-  const showAdvisoryRef = useRef(false);
-  useEffect(() => { showAdvisoryRef.current = showAdvisory; }, [showAdvisory]);
+  // Dispatched work points overlay: poll the current points (15s) when shown. Display only.
   useEffect(() => {
-    if (!ready) return;
+    if (!ready || !showWorkPts) return;
     let alive = true;
-    const apply = () => {
-      const src = mapRef.current?.getSource("advisory") as maplibregl.GeoJSONSource | undefined;
-      if (src) src.setData(advisoryFC(advisoryRef.current, liveRef.current?.devices ?? []));
-    };
-    const poll = () => api.stage2Advisory().then((a) => { if (alive) { advisoryRef.current = a; apply(); } }).catch(() => {});
+    const poll = () => api.stage2WorkPoints().then((pts) => {
+      const src = mapRef.current?.getSource("workpts") as maplibregl.GeoJSONSource | undefined;
+      if (alive && src) src.setData(workPointsFC(pts));
+    }).catch(() => {});
     poll();
-    const iv = setInterval(poll, 10000);
-    const iv2 = setInterval(() => { if (alive && showAdvisoryRef.current) apply(); }, 2500);
-    return () => { alive = false; clearInterval(iv); clearInterval(iv2); };
-  }, [ready]);
+    const iv = setInterval(poll, 15000);
+    return () => { alive = false; clearInterval(iv); };
+  }, [ready, showWorkPts]);
 
-  // advisory overlay visibility
+  // work-points overlay visibility
   useEffect(() => {
     const map = mapRef.current;
     if (!map) return;
-    for (const id of ["advisory-line", "advisory-label"]) {
-      if (map.getLayer(id)) map.setLayoutProperty(id, "visibility", showAdvisory ? "visible" : "none");
+    for (const id of ["workpts-pt", "workpts-label"]) {
+      if (map.getLayer(id)) map.setLayoutProperty(id, "visibility", showWorkPts ? "visible" : "none");
     }
-  }, [showAdvisory, ready]);
+  }, [showWorkPts, ready]);
 
   // wharf overlay: learned quay-segment positions (changes slowly → poll 60s when shown)
   useEffect(() => {
@@ -662,26 +655,28 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
         map.addLayer({ id: `nd-${k}`, type: "circle", source: "nodes", filter: ["==", ["get", "cat"], N.cat], layout: { visibility: "none" }, paint: { "circle-radius": ["interpolate", ["linear"], ["zoom"], 13, 1.3, 17, 3.5], "circle-color": N.color, "circle-opacity": 0.85 } });
       }
 
-      // ── Stage-B AI dispatch advisory (recommended truck→work lines) — empty until polled ──
-      map.addSource("advisory", { type: "geojson", data: EMPTY_FC });
+      // ── Dispatched work points (TOS vs ours) — click a point to compare. Empty until polled. ──
+      // green = we'd pick the same truck as TOS; amber = we differ. Replaces the old advisory lines.
+      map.addSource("workpts", { type: "geojson", data: EMPTY_FC });
       map.addLayer({
-        id: "advisory-line",
-        type: "line",
-        source: "advisory",
-        layout: { visibility: "none", "line-cap": "round" },
+        id: "workpts-pt",
+        type: "circle",
+        source: "workpts",
+        layout: { visibility: "none" },
         paint: {
-          "line-color": ["case", ["==", ["get", "feasible"], 1], "#34d399", "#f59e0b"],
-          "line-width": ["interpolate", ["linear"], ["zoom"], 13, 1.2, 17, 3],
-          "line-opacity": 0.75,
-          "line-dasharray": [2, 1.5],
+          "circle-radius": ["interpolate", ["linear"], ["zoom"], 12, 4, 17, 9],
+          "circle-color": ["case", ["==", ["get", "agree"], 1], "#34d399", "#f59e0b"],
+          "circle-opacity": 0.85,
+          "circle-stroke-width": 1.5,
+          "circle-stroke-color": "#0a0f1d",
         },
       });
       map.addLayer({
-        id: "advisory-label",
+        id: "workpts-label",
         type: "symbol",
-        source: "advisory",
-        minzoom: 15,
-        layout: { visibility: "none", "symbol-placement": "line-center", "text-field": ["get", "label"], "text-size": 10 },
+        source: "workpts",
+        minzoom: 14,
+        layout: { visibility: "none", "text-field": ["concat", ["get", "qc"], " ", ["get", "queuename"]], "text-size": 10, "text-offset": [0, 1.2], "text-anchor": "top" },
         paint: { "text-color": "#e2e8f0", "text-halo-color": "#0a0f1d", "text-halo-width": 1.2 },
       });
 
@@ -807,7 +802,25 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
           + `<div class="lmp-r">${k ? "트럭" : "trucks"}: ${p.count}${k ? "대" : ""}</div>`
           + `<div class="lmp-r">${k ? "평균속도" : "avg speed"}: ${p.speed} km/h</div>`);
       });
-      for (const id of ["lt-pt", "ll-seg", "mgrid-fill"]) {
+      // click a dispatched work point → TOS's dispatch beside ours
+      map.on("click", "workpts-pt", (e) => {
+        const f = e.features?.[0]; if (!f) return; const k = koRef.current;
+        const p = f.properties as { qc: string; queuename: string; jobtype: string; tos: string; our: string; tos_arr: number; our_arr: number; agree: number; delta: number; n: number; agree_n: number };
+        const fmt = (s: number) => s >= 0 ? `${Math.floor(s / 60)}:${String(Math.round(s % 60)).padStart(2, "0")}` : "—";
+        const agree = Number(p.agree) === 1;
+        const delta = Number(p.delta);
+        const job = p.jobtype === "LD" ? (k ? "적하" : "LD") : p.jobtype === "DS" ? (k ? "양하" : "DS") : p.jobtype;
+        const cmp = agree ? (k ? "✓ 우리도 같은 트럭" : "✓ same as TOS")
+          : delta > 0 ? (k ? `우리가 ${fmt(Math.abs(delta))} 더 빨리 도착` : `ours ${fmt(Math.abs(delta))} sooner`)
+          : (k ? `우리가 ${fmt(Math.abs(delta))} 더 늦게` : `ours ${fmt(Math.abs(delta))} later`);
+        showPopup((f.geometry as GeoJSON.Point).coordinates as [number, number],
+          `<div class="lmp-t">${p.qc} · ${p.queuename} <span style="color:#94a3b8;font-weight:400">${job}</span></div>`
+          + `<div class="lmp-r" style="display:flex;justify-content:space-between;gap:14px"><span style="color:#94a3b8">TOS ${k ? "배차" : "dispatch"}</span><b>${p.tos || "—"}</b><span style="color:#94a3b8">${fmt(Number(p.tos_arr))}</span></div>`
+          + `<div class="lmp-r" style="display:flex;justify-content:space-between;gap:14px"><span style="color:#a78bfa">🤖 ${k ? "우리 배차" : "ours"}</span><b style="color:#a78bfa">${p.our || "—"}</b><span style="color:#94a3b8">${fmt(Number(p.our_arr))}</span></div>`
+          + `<div class="lmp-r" style="color:${agree ? "#34d399" : "#f59e0b"};font-weight:600;margin-top:3px">${cmp}</div>`
+          + `<div class="lmp-r" style="color:#64748b;font-size:10px">${k ? `최근 ${p.n}건 중 동일 ${p.agree_n}건` : `recent ${p.n}, agreed ${p.agree_n}`}</div>`);
+      });
+      for (const id of ["lt-pt", "ll-seg", "mgrid-fill", "workpts-pt"]) {
         map.on("mouseenter", id, () => { map.getCanvas().style.cursor = "pointer"; });
         map.on("mouseleave", id, () => { map.getCanvas().style.cursor = ""; });
       }
@@ -1178,7 +1191,7 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
               <header>{ko ? "영역" : "Areas"}</header>
               <Row on={toggles.areas} color="#7eb6ff" label={ko ? "도로/블록 영역" : "Road/Block"} onChange={(v) => set("areas", v)} />
               <Row on={showGrid} color={gridMetric === "speed" ? "#22c55e" : "#22d3ee"} label={ko ? `메트릭 격자 (${gridM}m)` : `Metric grid (${gridM}m)`} onChange={setShowGrid} />
-              <Row on={showAdvisory} color="#34d399" label={ko ? "AI 배차 권고 (참고)" : "AI dispatch advisory"} onChange={setShowAdvisory} />
+              <Row on={showWorkPts} color="#34d399" label={ko ? "배차 작업지점 (클릭: TOS vs 우리)" : "Dispatched work points (click: TOS vs ours)"} onChange={setShowWorkPts} />
               <Row on={showWharf} color="#38bdf8" label={ko ? "안벽 위치 (WHARF)" : "Wharf positions"} onChange={setShowWharf} />
               {showGrid && (
                 <div className="llp-gridctl" style={{ padding: "2px 0 6px 18px", display: "flex", flexDirection: "column", gap: 5 }}>
