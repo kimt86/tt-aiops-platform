@@ -261,23 +261,22 @@ function workTrucks(p: WorkPoint): { yt: string; kind: "tos" | "our" | "both" }[
 }
 
 // lines from a work point to each involved truck (TOS=cyan, ours=purple, both=green).
-function workLinesFC(p: WorkPoint, devices: { id: string; lat: number; lon: number }[]): GeoJSON.FeatureCollection {
-  const byId = new Map(devices.map((d) => [d.id, d]));
+// `pos` = each truck's CURRENTLY DISPLAYED position (smoothed), so lines stay glued to the markers.
+function workLinesFC(p: WorkPoint, pos: Map<string, [number, number]>): GeoJSON.FeatureCollection {
   const feats: GeoJSON.Feature[] = [];
   for (const { yt, kind } of workTrucks(p)) {
-    const d = byId.get(yt);
-    if (d) feats.push({ type: "Feature", properties: { kind, ytno: yt }, geometry: { type: "LineString", coordinates: [[p.lon, p.lat], [d.lon, d.lat]] } });
+    const c = pos.get(yt);
+    if (c) feats.push({ type: "Feature", properties: { kind, ytno: yt }, geometry: { type: "LineString", coordinates: [[p.lon, p.lat], c] } });
   }
   return { type: "FeatureCollection", features: feats };
 }
 
-// a ring marker on each involved truck (same color coding), to highlight them on the map.
-function workTruckPtsFC(p: WorkPoint, devices: { id: string; lat: number; lon: number }[]): GeoJSON.FeatureCollection {
-  const byId = new Map(devices.map((d) => [d.id, d]));
+// a ring marker on each involved truck (same color coding), at its displayed (smoothed) position.
+function workTruckPtsFC(p: WorkPoint, pos: Map<string, [number, number]>): GeoJSON.FeatureCollection {
   const feats: GeoJSON.Feature[] = [];
   for (const { yt, kind } of workTrucks(p)) {
-    const d = byId.get(yt);
-    if (d) feats.push({ type: "Feature", properties: { kind, ytno: yt }, geometry: { type: "Point", coordinates: [d.lon, d.lat] } });
+    const c = pos.get(yt);
+    if (c) feats.push({ type: "Feature", properties: { kind, ytno: yt }, geometry: { type: "Point", coordinates: c } });
   }
   return { type: "FeatureCollection", features: feats };
 }
@@ -541,6 +540,7 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
   const [showWorkPts, setShowWorkPts] = useState(false); // dispatched work points (TOS vs ours); replaces the old advisory
   const workPtsRef = useRef<WorkPoint[]>([]);
   const selectedWpRef = useRef<WorkPoint | null>(null); // the clicked work point (for re-anchoring its truck lines)
+  const dispPosRef = useRef<Map<string, [number, number]>>(new Map()); // each device's currently DISPLAYED (smoothed) position
   const [showWharf, setShowWharf] = useState(false); // learned wharf/quay positions overlay
   const [showWeatherFx, setShowWeatherFx] = useState(true); // game-like weather effect overlay (default on; toggle via the weather chip)
   const [gridM, setGridM] = useState(100); // grid cell size (m), adjustable
@@ -615,8 +615,8 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
     return () => clearInterval(iv);
   }, [showGrid, gridM, gridMetric, ready]);
 
-  // Dispatched work points overlay: poll the current points (15s) when shown; re-anchor the selected
-  // point's truck lines to live positions (2.5s). Display only.
+  // Dispatched work points overlay: poll the current points (15s) when shown. The selected point's
+  // truck lines + rings are re-drawn every frame by the render loop (glued to smoothed positions).
   useEffect(() => {
     if (!ready || !showWorkPts) return;
     let alive = true;
@@ -629,18 +629,9 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
       const sel = selectedWpRef.current;
       if (sel) selectedWpRef.current = pts.find((p) => p.qc === sel.qc && p.queuename === sel.queuename) ?? sel;
     }).catch(() => {});
-    const anchorLines = () => {
-      const sel = selectedWpRef.current;
-      const devs = liveRef.current?.devices ?? [];
-      const ls = mapRef.current?.getSource("workpts-lines") as maplibregl.GeoJSONSource | undefined;
-      if (ls) ls.setData(sel ? workLinesFC(sel, devs) : EMPTY_FC);
-      const ts = mapRef.current?.getSource("workpts-trucks") as maplibregl.GeoJSONSource | undefined;
-      if (ts) ts.setData(sel ? workTruckPtsFC(sel, devs) : EMPTY_FC);
-    };
     poll();
     const iv = setInterval(poll, 15000);
-    const iv2 = setInterval(() => { if (alive) anchorLines(); }, 2500);
-    return () => { alive = false; clearInterval(iv); clearInterval(iv2); selectedWpRef.current = null; };
+    return () => { alive = false; clearInterval(iv); selectedWpRef.current = null; };
   }, [ready, showWorkPts]);
 
   // work-points overlay visibility
@@ -911,12 +902,12 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
         const f = e.features?.[0]; if (!f) return; const k = koRef.current;
         const p = f.properties as { qc: string; queuename: string; jobtype: string; tos: string; our: string; tos_arr: number; our_arr: number; agree: number; delta: number; n: number; agree_n: number };
         const wp = workPtsRef.current.find((w) => w.qc === p.qc && w.queuename === p.queuename) ?? null;
-        selectedWpRef.current = wp;
-        const devs = liveRef.current?.devices ?? [];
+        selectedWpRef.current = wp; // the render loop draws/updates its lines+rings each frame (smoothed)
+        const pos = dispPosRef.current;
         const ls = map.getSource("workpts-lines") as maplibregl.GeoJSONSource | undefined;
-        if (ls) ls.setData(wp ? workLinesFC(wp, devs) : EMPTY_FC);
+        if (ls) ls.setData(wp ? workLinesFC(wp, pos) : EMPTY_FC);
         const ts = map.getSource("workpts-trucks") as maplibregl.GeoJSONSource | undefined;
-        if (ts) ts.setData(wp ? workTruckPtsFC(wp, devs) : EMPTY_FC);
+        if (ts) ts.setData(wp ? workTruckPtsFC(wp, pos) : EMPTY_FC);
         const fmt = (s: number) => s >= 0 ? `${Math.floor(s / 60)}:${String(Math.round(s % 60)).padStart(2, "0")}` : "—";
         const job = p.jobtype === "LD" ? (k ? "적하" : "LD") : p.jobtype === "DS" ? (k ? "양하" : "DS") : p.jobtype;
         const tosN = wp?.tos_trucks?.length ?? 0;
@@ -1103,6 +1094,7 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
       if (map && map.getSource("vehicles")) {
         const { equip: ef, state: sf, dispatch: df } = filterRef.current;
         const feats: GeoJSON.Feature[] = [];
+        const dispPos = new Map<string, [number, number]>(); // displayed (smoothed) position per device id
         let moving = 0, idle = 0, off = 0;
         const live = liveRef.current;
         const liveOn = useLiveRef.current && live != null && live.devices.length > 0;
@@ -1128,6 +1120,7 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
             const t = Math.min(Math.max(displayMs, firstT), lastT);
             const p = posAt({ id, cls: e.cls, pts: arr }, t);
             if (!p) continue;
+            dispPos.set(id, [p.lon, p.lat]);
             if (p.state === "moving") moving++; else if (p.state === "idle") idle++; else off++;
             const eq = equip(e.cls);
             if (!ef.has(eq)) continue;
@@ -1139,6 +1132,7 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
         } else if (liveOn) {
           // live GPS: place each device at its latest fix (no interpolation).
           for (const d of live!.devices) {
+            dispPos.set(d.id, [d.lon, d.lat]);
             const st = stateOf(d.speed, d.engine);
             if (st === "moving") moving++; else if (st === "idle") idle++; else off++;
             const eq = equip(d.cls);
@@ -1166,6 +1160,15 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
         }
         (map.getSource("vehicles") as maplibregl.GeoJSONSource).setData({ type: "FeatureCollection", features: feats });
         setCounts({ total: moving + idle + off, moving, idle, off });
+        // keep the selected work point's truck lines + rings glued to the smoothed marker positions
+        dispPosRef.current = dispPos;
+        const sel = selectedWpRef.current;
+        if (sel) {
+          const ls = map.getSource("workpts-lines") as maplibregl.GeoJSONSource | undefined;
+          if (ls) ls.setData(workLinesFC(sel, dispPos));
+          const ts = map.getSource("workpts-trucks") as maplibregl.GeoJSONSource | undefined;
+          if (ts) ts.setData(workTruckPtsFC(sel, dispPos));
+        }
       }
       raf = requestAnimationFrame(tick);
     };
