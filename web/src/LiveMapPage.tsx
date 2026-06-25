@@ -445,8 +445,7 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
   const [showAdvisory, setShowAdvisory] = useState(false); // Stage-B AI dispatch advisory overlay
   const advisoryRef = useRef<Stage2Advisory[]>([]);
   const [showWharf, setShowWharf] = useState(false); // learned wharf/quay positions overlay
-  const [showWeatherFx, setShowWeatherFx] = useState(false); // game-like weather effect overlay
-  const [wxFxMode, setWxFxMode] = useState<"auto" | "clear" | "cloud" | "rain">("auto"); // manual override
+  const [showWeatherFx, setShowWeatherFx] = useState(true); // game-like weather effect overlay (default on; toggle via the weather chip)
   const [gridM, setGridM] = useState(100); // grid cell size (m), adjustable
   const [gridMetric, setGridMetric] = useState<"speed" | "count">("speed"); // what the cell color shows
   const [panelOpen, setPanelOpen] = useState(true);
@@ -1079,14 +1078,19 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
           const rain = wx.precip_mm_hr ?? 0;
           const vis = wx.visibility_km;
           const squall = rain >= 2 || (vis != null && vis < 2); // heavy rain or crashed visibility
-          const icon = rain >= 2 ? "⛈" : rain >= 0.1 ? "🌧" : "☀";
+          // icon + label use the SAME classification as the on-map effect, so they always agree
+          const m = wxMode(wx).mode;
+          const icon = m === "rain" ? (rain >= 2 ? "⛈" : "🌧") : m === "cloud" ? "☁️" : "☀️";
+          const lbl = m === "rain" ? `${rain.toFixed(1)}mm/h` : m === "cloud" ? (ko ? "흐림" : "cloudy") : (ko ? "맑음" : "clear");
           return (
-            <span className={`map-gps mono ${squall ? "bad" : "ok"}`}
+            <button className={`map-gps mono ${squall ? "bad" : "ok"}`}
+              onClick={() => setShowWeatherFx((v) => !v)}
+              style={{ cursor: "pointer", ...(showWeatherFx ? { borderColor: "#fcd34d", boxShadow: "0 0 0 1px rgba(252,211,77,0.7), 0 0 12px rgba(252,211,77,0.55)" } : {}) }}
               title={ko
-                ? `날씨 ${wx.age_s}s 전 · 강수 ${rain.toFixed(1)}mm/h · 시정 ${vis?.toFixed(1) ?? "—"}km · 바람 ${wx.wind_ms?.toFixed(0) ?? "—"}m/s${squall ? " · 스콜" : ""}`
-                : `weather ${wx.age_s}s ago · rain ${rain.toFixed(1)}mm/h · vis ${vis?.toFixed(1) ?? "—"}km${squall ? " · SQUALL" : ""}`}>
-              {icon} {rain >= 0.1 ? `${rain.toFixed(1)}mm/h` : (ko ? "맑음" : "clear")}{vis != null && vis < 5 ? ` · ${vis.toFixed(1)}km` : ""}
-            </span>
+                ? `클릭 = 날씨 효과 ${showWeatherFx ? "끄기" : "켜기"} (현재 ${showWeatherFx ? "ON" : "OFF"}) · 날씨 ${wx.age_s}s 전 · 강수 ${rain.toFixed(1)}mm/h · 시정 ${vis?.toFixed(1) ?? "—"}km · 바람 ${wx.wind_ms?.toFixed(0) ?? "—"}m/s${squall ? " · 스콜" : ""}`
+                : `click to ${showWeatherFx ? "disable" : "enable"} weather effect · weather ${wx.age_s}s ago · rain ${rain.toFixed(1)}mm/h · vis ${vis?.toFixed(1) ?? "—"}km${squall ? " · SQUALL" : ""}`}>
+              {icon} {lbl}{vis != null && vis < 5 ? ` · ${vis.toFixed(1)}km` : ""}
+            </button>
           );
         })()}
       </div>
@@ -1112,13 +1116,7 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
       )}
 
       <div className="map-canvas" ref={mapEl} />
-      {showWeatherFx && (() => {
-        const auto = wx && wx.age_s < 1800 ? wxMode(wx) : null;
-        const mode = wxFxMode === "auto" ? auto?.mode : wxFxMode;
-        if (!mode) return null;
-        const intensity = wxFxMode === "auto" ? (auto?.intensity ?? 0.6) : mode === "rain" ? 0.7 : mode === "cloud" ? 0.6 : 1;
-        return <WeatherFx mode={mode} intensity={intensity} />;
-      })()}
+      {showWeatherFx && wx && wx.age_s < 1800 && (() => { const f = wxMode(wx); return <WeatherFx mode={f.mode} intensity={f.intensity} />; })()}
 
       {/* right: TOS layer panel (areas / nodes / links) */}
       <aside className={`llp ${panelOpen ? "open" : "closed"}`}>
@@ -1135,21 +1133,6 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
               <Row on={showGrid} color={gridMetric === "speed" ? "#22c55e" : "#22d3ee"} label={ko ? `메트릭 격자 (${gridM}m)` : `Metric grid (${gridM}m)`} onChange={setShowGrid} />
               <Row on={showAdvisory} color="#34d399" label={ko ? "AI 배차 권고 (참고)" : "AI dispatch advisory"} onChange={setShowAdvisory} />
               <Row on={showWharf} color="#38bdf8" label={ko ? "안벽 위치 (WHARF)" : "Wharf positions"} onChange={setShowWharf} />
-              <Row on={showWeatherFx} color="#fcd34d" label={ko ? "날씨 효과 (비·흐림·맑음)" : "Weather effect"} onChange={setShowWeatherFx} />
-              {showWeatherFx && (
-                <div style={{ padding: "2px 0 6px 18px", display: "flex", flexDirection: "column", gap: 5 }}>
-                  <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
-                    {([["auto", ko ? "자동" : "Auto"], ["clear", "☀️ " + (ko ? "맑음" : "Clear")], ["cloud", "☁️ " + (ko ? "흐림" : "Cloudy")], ["rain", "☔ " + (ko ? "비" : "Rain")]] as const).map(([m, lbl]) => (
-                      <button key={m} className={`mdl${wxFxMode === m ? " on" : ""}`} onClick={() => setWxFxMode(m)}>{lbl}</button>
-                    ))}
-                  </div>
-                  <div style={{ fontSize: 10, color: "var(--text-mute)" }}>
-                    {wxFxMode === "auto"
-                      ? (ko ? `실제 날씨 반영 (지금: ${wx ? (wx.precip_mm_hr ?? 0) > 0.03 ? "비" : (wx.weather_code === 1000 || wx.weather_code === 1100) ? "맑음" : "흐림" : "—"})` : "follows live weather")
-                      : (ko ? "수동 강제 (미리보기)" : "forced (preview)")}
-                  </div>
-                </div>
-              )}
               {showGrid && (
                 <div className="llp-gridctl" style={{ padding: "2px 0 6px 18px", display: "flex", flexDirection: "column", gap: 5 }}>
                   <div style={{ display: "flex", gap: 4 }}>
