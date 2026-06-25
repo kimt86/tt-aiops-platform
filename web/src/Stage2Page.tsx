@@ -65,8 +65,8 @@ export default function Stage2Page({ lang }: { lang: Lang }) {
       {c && c.n > 0 && (
         <div className="ls-note">
           {k
-            ? `사유: 우리가 더 가까운 트럭 ${c.ours_closer_n}건 · TOS가 더 가까움 ${c.tos_closer_n}건 · 같은 트럭 ${c.same_n}건. 평균 격차 ${signMin(c.avg_delta_s)}분 / 중앙 ${signMin(c.median_delta_s)}분. ⓘ 도착=트럭의 픽업까지 빈 차 이동. 큰 격차는 TOS가 안벽의 빈 트럭을 야드 픽업이 먼 적하에 보낸 실제 경우(버그 아님) — 우리는 픽업 가까운 트럭 선택. 권고-배차 시점 시차가 있어 방향 지표이며 중앙값이 robust.`
-            : `reasons: ours closer ${c.ours_closer_n} · TOS closer ${c.tos_closer_n} · same truck ${c.same_n}. avg ${signMin(c.avg_delta_s)}min / median ${signMin(c.median_delta_s)}min. ⓘ arrival = empty travel to pickup. large gaps = TOS sent a quay-idle truck to a far yard-pickup load (real) — we pick a truck near the pickup. directional (recommendation vs dispatch timing); median is robust.`}
+            ? `사유: 우리가 더 가까운 트럭 ${c.ours_closer_n}건 · TOS가 더 가까움 ${c.tos_closer_n}건 · 같은 트럭 ${c.same_n}건. 평균 격차 ${signMin(c.avg_delta_s)}분 / 중앙 ${signMin(c.median_delta_s)}분. ⓘ 도착=트럭의 픽업까지 빈 차 이동. 배차 순간(T1)의 트럭 위치·유휴 풀을 그대로 재현해 같은 작업으로 비교 — 시차 없는 1:1. 큰 격차는 TOS가 안벽 빈 트럭을 먼 야드 픽업 적하에 보낸 실제 경우.`
+            : `reasons: ours closer ${c.ours_closer_n} · TOS closer ${c.tos_closer_n} · same truck ${c.same_n}. avg ${signMin(c.avg_delta_s)}min / median ${signMin(c.median_delta_s)}min. ⓘ arrival = empty travel to pickup. reconstructed from the truck pool AT the dispatch instant (T1) — a skew-free 1:1. large gaps = TOS sent a quay-idle truck to a far yard pickup (real).`}
         </div>
       )}
 
