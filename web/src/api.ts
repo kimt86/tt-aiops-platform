@@ -256,6 +256,11 @@ export interface Stage2Advisory {
   dest_lat: number | null; dest_lon: number | null; src_lat: number | null; src_lon: number | null;
   arrival_s: number | null; feasible: boolean | null;
 }
+export interface ComparePick {
+  qc: string; queuename: string; tos_ytno: string;
+  our_ytno: string | null; our_arrival_s: number | null; tos_arrival_s: number | null;
+  agree: boolean | null; delta_s: number | null;
+}
 
 async function get<T>(path: string): Promise<T> {
   const r = await fetch(path);
@@ -285,6 +290,7 @@ export const api = {
   learnDispatchPred: () => get<DispatchPredData>("/api/learn/dispatch-pred"),
   stage2Shadow: () => get<Stage2Shadow>("/api/stage2/shadow"),
   stage2Advisory: () => get<Stage2Advisory[]>("/api/stage2/advisory"),
+  stage2ComparePicks: () => get<ComparePick[]>("/api/stage2/compare-picks"),
   dispatchCompare: () => get<DispatchCompare>("/api/stage2/compare"),
   livemapWharf: () => get<WharfPoint[]>("/api/livemap/wharf"),
   healthDispatch: () => get<HealthDispatch>("/api/health/dispatch"),

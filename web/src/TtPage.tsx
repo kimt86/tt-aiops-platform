@@ -5,7 +5,7 @@
 // Status distribution is live from the dispatch counts. (Fully live — no mock panels.)
 import { useEffect, useState } from "react";
 import { type Lang } from "./i18n";
-import { api, type WorkpoolResponse, type WpQc, type WpMove, type Stage2Advisory } from "./api";
+import { api, type WorkpoolResponse, type WpQc, type WpMove, type Stage2Advisory, type ComparePick } from "./api";
 
 const ko = (lang: Lang) => lang === "ko";
 
@@ -259,11 +259,16 @@ function LiveQcSequence({ lang, wp, snap }: { lang: Lang; wp: WorkpoolResponse |
   // 1s ticker so relative times (ETW, deadline, slack) keep counting down between 15s data polls.
   const [, setTick] = useState(0);
   useEffect(() => { const iv = setInterval(() => setTick((t) => t + 1), 1000); return () => clearInterval(iv); }, []);
-  // our Stage-2 recommendation (latest tick), grouped per QC and sorted closest-arrival first
+  // OUR pick on every row: unassigned demands ← live Stage-2 advisory; TOS-assigned rows ← the
+  // timing-skew-free comparison (who we'd have picked at the dispatch moment).
   const [advisory, setAdvisory] = useState<Stage2Advisory[]>([]);
+  const [picks, setPicks] = useState<ComparePick[]>([]);
   useEffect(() => {
     let alive = true;
-    const poll = () => api.stage2Advisory().then((d) => { if (alive) setAdvisory(d); }).catch(() => {});
+    const poll = () => {
+      api.stage2Advisory().then((d) => { if (alive) setAdvisory(d); }).catch(() => {});
+      api.stage2ComparePicks().then((d) => { if (alive) setPicks(d); }).catch(() => {});
+    };
     poll();
     const iv = setInterval(poll, 15000);
     return () => { alive = false; clearInterval(iv); };
@@ -271,6 +276,9 @@ function LiveQcSequence({ lang, wp, snap }: { lang: Lang; wp: WorkpoolResponse |
   const recsByQc = new Map<string, Stage2Advisory[]>();
   for (const r of advisory) { if (!r.qc) continue; const a = recsByQc.get(r.qc) ?? []; a.push(r); recsByQc.set(r.qc, a); }
   for (const a of recsByQc.values()) a.sort((x, y) => (x.arrival_s ?? 1e9) - (y.arrival_s ?? 1e9));
+  // assigned-row lookup: key = qc|queuename|tos_ytno
+  const picksByKey = new Map<string, ComparePick>();
+  for (const p of picks) picksByKey.set(`${p.qc}|${p.queuename}|${p.tos_ytno}`, p);
   // fuse: live crane PLC (cycling now + live move/hr) + per-TT dispatch state
   const ttState = new Map<string, Dev>();
   const craneFresh = new Map<string, boolean>();
@@ -340,7 +348,7 @@ function LiveQcSequence({ lang, wp, snap }: { lang: Lang; wp: WorkpoolResponse |
               <div className="qc-vbar-track"><div className="fill" style={{ width: `${vpct}%` }} /></div>
             </div>
             <div className="qc-panel">
-              {g.items.map((q) => <QcCol key={q.qc} q={q} lang={lang} ttState={ttState} working={craneFresh.get(q.qc) ?? false} mph={craneMph.get(q.qc)} maxN={maxN} showDl={showDl} ourRecs={showOurs ? recsByQc.get(q.qc) : undefined} />)}
+              {g.items.map((q) => <QcCol key={q.qc} q={q} lang={lang} ttState={ttState} working={craneFresh.get(q.qc) ?? false} mph={craneMph.get(q.qc)} maxN={maxN} showDl={showDl} ourRecs={showOurs ? recsByQc.get(q.qc) : undefined} ourPicks={showOurs ? picksByKey : undefined} />)}
             </div>
           </div>
           );
@@ -358,7 +366,7 @@ const agoMin = (ts?: string | null): number | null =>
 // containers] → NOW → [future N containers]; N counts CONTAINERS (not bays). "future" is mostly the
 // not-yet-dispatched (candidate) work. TOS has no per-container order within a bay, so within-bay
 // unassigned order is by bay only. Label = Vessel(QC) ↔ Block(RTG).
-function QcCol({ q, lang, ttState, working, mph, maxN, showDl, ourRecs }: { q: WpQc; lang: Lang; ttState: Map<string, Dev>; working: boolean; mph?: number; maxN: number | "auto"; showDl: boolean; ourRecs?: Stage2Advisory[] }) {
+function QcCol({ q, lang, ttState, working, mph, maxN, showDl, ourRecs, ourPicks }: { q: WpQc; lang: Lang; ttState: Map<string, Dev>; working: boolean; mph?: number; maxN: number | "auto"; showDl: boolean; ourRecs?: Stage2Advisory[]; ourPicks?: Map<string, ComparePick> }) {
   const k = ko(lang);
   const tot = q.queues.reduce((a, x) => a + x.total, 0);
   const done = q.queues.reduce((a, x) => a + x.done, 0);
@@ -417,18 +425,23 @@ function QcCol({ q, lang, ttState, working, mph, maxN, showDl, ourRecs }: { q: W
     }
   }
 
-  // Attach OUR Stage-2 pick to this QC's pending (unassigned) demands. Our matcher recommends the
-  // next truck per QC demand (closest-arrival first), so we lay them onto the unassigned containers
-  // in sequence order, preferring a same-jobtype match. (Assigned containers are TOS's done deals.)
-  const recForMove = new Map<string, Stage2Advisory>();
-  if (ourRecs && ourRecs.length) {
-    const pool = ourRecs.slice();
+  // OUR pick on every row. Unassigned demands → live Stage-2 advisory (next truck per QC, laid onto
+  // the unassigned containers in sequence order, same-jobtype first). TOS-assigned rows → the
+  // timing-skew-free comparison (who we'd have picked at the dispatch moment for that exact work).
+  type OurPick = { ytno: string; arrival_s: number | null; kind: "live" | "cmp"; agree?: boolean | null; delta_s?: number | null };
+  const recForMove = new Map<string, OurPick>();
+  {
+    const pool = (ourRecs ?? []).slice();
     for (const m of shown) {
-      if (assigned(m) || pool.length === 0) continue;
-      let idx = pool.findIndex((r) => (r.jobtype ?? null) === (m.jobtype ?? null));
-      if (idx < 0) idx = 0;
-      recForMove.set(mkey(m), pool[idx]);
-      pool.splice(idx, 1);
+      if (assigned(m)) {
+        const p = ourPicks?.get(`${q.qc}|${m.queuename}|${(m.ytno as string).trim()}`);
+        if (p && p.our_ytno) recForMove.set(mkey(m), { ytno: p.our_ytno, arrival_s: p.our_arrival_s, kind: "cmp", agree: p.agree, delta_s: p.delta_s });
+      } else if (pool.length) {
+        let idx = pool.findIndex((r) => (r.jobtype ?? null) === (m.jobtype ?? null));
+        if (idx < 0) idx = 0;
+        recForMove.set(mkey(m), { ytno: pool[idx].ytno, arrival_s: pool[idx].arrival_s, kind: "live" });
+        pool.splice(idx, 1);
+      }
     }
   }
   const fmtEta = (s: number) => `${Math.floor(s / 60)}:${String(Math.round(s % 60)).padStart(2, "0")}`;
@@ -470,12 +483,17 @@ function QcCol({ q, lang, ttState, working, mph, maxN, showDl, ourRecs }: { q: W
             {(() => {
               const our = recForMove.get(mkey(m));
               if (!our) return null;
+              const agree = our.kind === "cmp" && our.agree === true;
+              const col = agree ? "#34d399" : "#a78bfa";
+              const detail = agree ? "✓" : our.arrival_s != null ? fmtEta(our.arrival_s) : "";
+              const title = our.kind === "cmp"
+                ? (k
+                  ? (agree ? `우리도 같은 트럭 선택 (배차 순간 비교)` : `우리라면 ${our.ytno}${our.delta_s != null ? (our.delta_s > 0 ? ` · ${fmtEta(our.delta_s)} 더 빨리 도착` : ` · ${fmtEta(-our.delta_s)} 더 늦게`) : ""} (배차 순간 비교)`)
+                  : (agree ? `same truck as TOS (at dispatch)` : `we'd pick ${our.ytno}${our.delta_s != null ? (our.delta_s > 0 ? ` · ${fmtEta(our.delta_s)} sooner` : ` · ${fmtEta(-our.delta_s)} later`) : ""}`))
+                : (k ? `우리 배차 권고 (Stage-2): ${our.ytno}${our.arrival_s != null ? ` · 픽업 도착 ${fmtEta(our.arrival_s)}` : ""}` : `our Stage-2 pick: ${our.ytno}`);
               return (
-                <span className="tt-ours" style={{ display: "inline-flex", alignItems: "center", gap: 3, padding: "0 5px", borderRadius: 4, fontSize: 11, fontWeight: 700, color: "#a78bfa", background: "rgba(167,139,250,0.14)", border: "1px solid rgba(167,139,250,0.4)" }}
-                  title={k
-                    ? `우리 배차 권고 (Stage-2 매처): ${our.ytno}${our.arrival_s != null ? ` · 픽업 도착 ${fmtEta(our.arrival_s)}` : ""}${our.feasible === false ? " · ⚠ 마감 빠듯" : ""}`
-                    : `our Stage-2 pick: ${our.ytno}${our.arrival_s != null ? ` · arrival ${fmtEta(our.arrival_s)}` : ""}`}>
-                  🤖 {our.ytno}{our.arrival_s != null ? <span style={{ color: "var(--text-mute)", fontWeight: 400 }}>{fmtEta(our.arrival_s)}</span> : null}
+                <span className="tt-ours" style={{ display: "inline-flex", alignItems: "center", gap: 3, padding: "0 5px", borderRadius: 4, fontSize: 11, fontWeight: 700, color: col, background: `${col}22`, border: `1px solid ${col}66` }} title={title}>
+                  🤖 {our.ytno}{detail ? <span style={{ color: agree ? col : "var(--text-mute)", fontWeight: 400 }}>{detail}</span> : null}
                 </span>
               );
             })()}

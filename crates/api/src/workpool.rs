@@ -1023,6 +1023,34 @@ pub struct DispatchCompareOut {
     recent: Vec<CompareRow>,
 }
 
+#[derive(Serialize, sqlx::FromRow)]
+pub struct ComparePick {
+    qc: String,
+    queuename: String,
+    tos_ytno: String,
+    our_ytno: Option<String>,
+    our_arrival_s: Option<i32>,
+    tos_arrival_s: Option<i32>,
+    agree: Option<bool>,
+    delta_s: Option<i32>,
+}
+
+/// `GET /api/stage2/compare-picks` — per (qc, queuename, tos_ytno) the latest "who WE'd have picked"
+/// for works TOS already assigned (from the timing-skew-free comparison). Lets the TT page show OUR
+/// pick beside the TOS-assigned truck on assigned rows too (unassigned rows use /api/stage2/advisory).
+pub async fn stage2_compare_picks(State(pool): State<PgPool>) -> Result<Json<Vec<ComparePick>>, AppError> {
+    let rows = sqlx::query_as::<_, ComparePick>(
+        "SELECT DISTINCT ON (qc, queuename, tos_ytno)
+                qc, queuename, tos_ytno, our_ytno, our_arrival_s, tos_arrival_s, agree, delta_s
+           FROM dispatch_compare_shadow
+          WHERE ts > now() - interval '2 days'
+          ORDER BY qc, queuename, tos_ytno, ts DESC",
+    )
+    .fetch_all(&pool)
+    .await?;
+    Ok(Json(rows))
+}
+
 /// `GET /api/stage2/compare` — TOS's actual dispatch vs our recommendation, per work: divergence
 /// rate, who'd arrive sooner, the performance gap, reason breakdown, and recent divergence examples.
 pub async fn dispatch_compare(State(pool): State<PgPool>) -> Result<Json<DispatchCompareOut>, AppError> {
