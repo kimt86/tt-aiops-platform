@@ -3470,6 +3470,34 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
             // (efficiency objective, anti-thrash, deadline as a soft pull). Work order = urgent first.
             let mut order: Vec<usize> = (0..works.len()).collect();
             order.sort_by_key(|i| works[*i].3);
+            // POINT 1 — cap the work pool to the available-truck count, most deadline-urgent first.
+            // Walk works in deadline order, summing each bucket's QC-capped demand (= the slots a crane
+            // can actually consume within the horizon); keep buckets until we've gathered as many slots
+            // as there are trucks. Buckets whose QC is already full are dropped. Guarantees works ≤
+            // trucks AND that trucks always go to the most deadline-urgent work first.
+            {
+                let truck_n = vehicles.len() as i64;
+                let mut qc_room: HashMap<String, i64> = HashMap::new();
+                let mut acc: i64 = 0;
+                let mut kept: Vec<usize> = Vec::with_capacity(order.len());
+                for &oi in &order {
+                    if acc >= truck_n {
+                        break;
+                    }
+                    let w = &work[works[oi].0];
+                    let move_s = if w.jobtype == "LD" { LD_MOVE_S } else { DS_MOVE_S };
+                    let qc_cap = (NEED_HORIZON_S / move_s).max(1);
+                    let room = qc_room.entry(w.qc.clone()).or_insert(qc_cap);
+                    let take = (w.n.max(0) as i64).min(*room);
+                    if take <= 0 {
+                        continue; // this QC can't consume more trucks this horizon → skip its bucket
+                    }
+                    *room -= take;
+                    acc += take;
+                    kept.push(oi);
+                }
+                order = kept;
+            }
             let now_s = now / 1000;
             // QC layer: a crane consumes trucks at ~horizon/move-time regardless of how many buckets
             // it has → cap by QC, not by bucket (else a multi-bucket crane hoards trucks).
