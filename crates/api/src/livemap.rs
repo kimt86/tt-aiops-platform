@@ -3605,9 +3605,10 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
     });
 }
 
-/// TOS-vs-ours dispatch comparison (SHADOW). Each minute, for works TOS just assigned that we had
-/// also recommended a truck for, compute TOS's truck arrival to the SAME work point (reusing the
-/// stored dest coord) and compare to our pick — logging divergence + the performance gap.
+/// TOS-vs-ours dispatch comparison (SHADOW). Timing-skew-free: for works TOS just assigned, we
+/// reconstruct the truck pool AT the dispatch instant (T1=upd_ts) from `truck_pos_hist`, then — for
+/// that one work — recompute OUR pick (closest available truck to the pickup) and TOS's truck arrival
+/// from the SAME T1 positions. Same instant, same pool, same work → a clean 1:1 comparison.
 pub fn spawn_dispatch_compare(lm: Arc<LiveMap>, pool: PgPool) {
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(Duration::from_secs(60));
@@ -3616,14 +3617,6 @@ pub fn spawn_dispatch_compare(lm: Arc<LiveMap>, pool: PgPool) {
             if !lm.connected.load(Ordering::Relaxed) {
                 continue;
             }
-            let now = Utc::now().timestamp_millis();
-            let pos: HashMap<String, (f64, f64)> = {
-                let map = lm.devices.read().await;
-                map.iter()
-                    .filter(|(_, p)| p.cls == "TT" && (now - p.last_seen_ms) / 1000 <= STALE_AFTER_S)
-                    .map(|(id, p)| (id.clone(), (p.lat, p.lon)))
-                    .collect()
-            };
             let od: HashMap<(String, String), i64> = sqlx::query_as::<_, (String, String, i32)>(
                 "SELECT oz, dz, p50_s FROM learn_travel_zone225 WHERE n >= 10",
             )
@@ -3635,23 +3628,47 @@ pub fn spawn_dispatch_compare(lm: Arc<LiveMap>, pool: PgPool) {
                     None => (quay_manhattan_m(vlat, vlon, wlat, wlon) / MANHATTAN_SPEED_MS) as i64,
                 }
             };
-            let rows = sqlx::query_as::<_, (String, String, Option<String>, String, DateTime<Utc>, String, Option<i32>, f64, f64)>(
+            // truck pool snapshots (last 6 min), keyed by snapshot time → reconstruct T1 state
+            let hist = sqlx::query_as::<_, (DateTime<Utc>, String, f64, f64, Option<String>)>(
+                "SELECT ts, ytno, lat, lon, state FROM truck_pos_hist WHERE ts > now() - interval '6 minutes'",
+            )
+            .fetch_all(&pool).await.unwrap_or_default();
+            let mut snaps: std::collections::BTreeMap<i64, Vec<(String, f64, f64, String)>> = std::collections::BTreeMap::new();
+            for (t, yt, la, lo, st) in hist {
+                snaps.entry(t.timestamp_millis()).or_default().push((yt, la, lo, st.unwrap_or_default()));
+            }
+            // works TOS just assigned (≤120s) that we had a recommendation (→ the work pickup coord)
+            let rows = sqlx::query_as::<_, (String, String, Option<String>, String, DateTime<Utc>, f64, f64)>(
                 "SELECT DISTINCT ON (w.qc, w.queuename)
-                        w.qc, w.queuename, w.jobtype, w.ytno, w.upd_ts,
-                        r.ytno, r.arrival_s, r.dest_lat, r.dest_lon
+                        w.qc, w.queuename, w.jobtype, w.ytno, w.upd_ts, r.dest_lat, r.dest_lon
                    FROM live_workpool w
-                   JOIN LATERAL (SELECT ytno, arrival_s, dest_lat, dest_lon FROM stage2_match_shadow s
+                   JOIN LATERAL (SELECT dest_lat, dest_lon FROM stage2_match_shadow s
                                   WHERE s.qc = w.qc AND s.queuename = w.queuename AND s.dest_lat IS NOT NULL
                                   ORDER BY s.ts DESC LIMIT 1) r ON true
                   WHERE w.ytno IS NOT NULL AND w.ytno <> '' AND w.upd_ts > now() - interval '120 seconds'
                   ORDER BY w.qc, w.queuename, w.upd_ts DESC",
             )
             .fetch_all(&pool).await.unwrap_or_default();
-            for (qc, queue, jobtype, tos_ytno, tos_upd, our_ytno, our_arr, dlat, dlon) in rows {
-                let Some(&(tlat, tlon)) = pos.get(&tos_ytno) else { continue };
-                let tos_arrival = cost(tlat, tlon, dlat, dlon);
-                let our_arrival = our_arr.unwrap_or(0) as i64;
-                let agree = tos_ytno == our_ytno;
+            for (qc, queue, jobtype, tos_ytno, tos_upd, dlat, dlon) in rows {
+                let t1 = tos_upd.timestamp_millis();
+                // the truck pool as it was at/just-before the dispatch instant T1
+                let Some((_, trucks)) = snaps.range(..=t1).next_back() else { continue };
+                // TOS's truck position at T1 → its arrival to the pickup
+                let Some((_, tlat, tlon, _)) = trucks.iter().find(|(yt, _, _, _)| *yt == tos_ytno) else { continue };
+                let tos_arrival = cost(*tlat, *tlon, dlat, dlon);
+                // OUR pick = the available truck (idle/soon-free) closest to the pickup AT T1
+                let mut best: Option<(String, i64)> = None;
+                for (yt, la, lo, st) in trucks {
+                    if !matches!(st.as_str(), "idle" | "soon_idle" | "approaching" | "wait_rtg") {
+                        continue;
+                    }
+                    let a = cost(*la, *lo, dlat, dlon);
+                    if best.as_ref().map(|b| a < b.1).unwrap_or(true) {
+                        best = Some((yt.clone(), a));
+                    }
+                }
+                let Some((our_ytno, our_arrival)) = best else { continue };
+                let agree = our_ytno == tos_ytno;
                 let delta = tos_arrival - our_arrival; // + = ours would arrive sooner
                 let reason = if agree { "same" } else if our_arrival < tos_arrival { "ours_closer" } else { "tos_closer" };
                 let _ = sqlx::query(
@@ -3664,6 +3681,61 @@ pub fn spawn_dispatch_compare(lm: Arc<LiveMap>, pool: PgPool) {
                 .execute(&pool).await;
             }
             let _ = sqlx::query("DELETE FROM dispatch_compare_shadow WHERE ts < now() - interval '21 days'").execute(&pool).await;
+        }
+    });
+}
+
+/// Truck position + dispatch-state history (every 30s, from live GPS — no TOS load). Powers the
+/// timing-skew-free TOS-vs-ours comparison (reconstructs the truck pool at the dispatch moment).
+pub fn spawn_pos_hist(lm: Arc<LiveMap>, pool: PgPool) {
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(Duration::from_secs(30));
+        let mut n = 0u64;
+        loop {
+            ticker.tick().await;
+            if !lm.connected.load(Ordering::Relaxed) {
+                continue;
+            }
+            let now = Utc::now().timestamp_millis();
+            let ts = Utc::now();
+            let rows: Vec<(String, f64, f64, &'static str)> = {
+                let map = lm.devices.read().await;
+                let plc = lm.plc.read().await;
+                let centroids = lm.centroids.read().await;
+                let assigned_pool = lm.assigned_pool.read().await;
+                let rtgs: Vec<(f64, f64)> = map.values()
+                    .filter(|p| p.cls == "RTG" && (now - p.last_seen_ms) / 1000 <= STALE_AFTER_S)
+                    .map(|p| (p.lat, p.lon)).collect();
+                let cranes: HashMap<String, (f64, f64)> = map.iter()
+                    .filter(|(_, p)| matches!(p.cls.as_str(), "C" | "M" | "Z") && (now - p.last_seen_ms) / 1000 <= STALE_AFTER_S)
+                    .map(|(id, p)| (id.clone(), (p.lat, p.lon))).collect();
+                map.iter()
+                    .filter(|(_, p)| p.cls == "TT" && (now - p.last_seen_ms) / 1000 <= STALE_AFTER_S)
+                    .map(|(id, p)| {
+                        let c = classify_tt(p, assigned_pool.get(id), &rtgs, &plc, &cranes, &centroids, now);
+                        (id.clone(), p.lat, p.lon, c.state)
+                    })
+                    .collect()
+            };
+            if rows.is_empty() {
+                continue;
+            }
+            let ytnos: Vec<String> = rows.iter().map(|r| r.0.clone()).collect();
+            let lats: Vec<f64> = rows.iter().map(|r| r.1).collect();
+            let lons: Vec<f64> = rows.iter().map(|r| r.2).collect();
+            let states: Vec<String> = rows.iter().map(|r| r.3.to_string()).collect();
+            let _ = sqlx::query(
+                "INSERT INTO truck_pos_hist (ts, ytno, lat, lon, state)
+                 SELECT $1::timestamptz, u.ytno, u.lat, u.lon, u.state
+                   FROM unnest($2::text[], $3::float8[], $4::float8[], $5::text[]) AS u(ytno, lat, lon, state)
+                 ON CONFLICT (ytno, ts) DO NOTHING",
+            )
+            .bind(ts).bind(&ytnos).bind(&lats).bind(&lons).bind(&states)
+            .execute(&pool).await;
+            n += 1;
+            if n % 120 == 0 {
+                let _ = sqlx::query("DELETE FROM truck_pos_hist WHERE ts < now() - interval '2 days'").execute(&pool).await;
+            }
         }
     });
 }
