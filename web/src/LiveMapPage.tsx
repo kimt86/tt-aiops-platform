@@ -341,6 +341,82 @@ function posAt(d: Device, t: number) {
   return { lat: a[1] + (b[1] - a[1]) * f, lon: a[2] + (b[2] - a[2]) * f, state: stateOf(a[3], a[4]), speed: a[3] };
 }
 
+// ── game-like weather effect overlay (rain / cloud / sun), driven by /api/weather ──
+type WxData = { precip_mm_hr: number | null; visibility_km: number | null; wind_ms: number | null; weather_code: number | null; age_s: number };
+function wxMode(wx: WxData): { mode: "rain" | "cloud" | "clear"; intensity: number } {
+  const rain = wx.precip_mm_hr ?? 0;
+  const c = wx.weather_code ?? 0;
+  const vis = wx.visibility_km ?? 20;
+  // rain: any measurable precip, or a rain/storm code (Tomorrow.io 4xxx/8000, WMO 51-99)
+  if (rain > 0.03 || (c >= 4000 && c < 9000) || (c >= 51 && c <= 99)) {
+    return { mode: "rain", intensity: Math.min(1, Math.max(0.3, rain / 6)) };
+  }
+  // clear: a clear/mostly-clear code (Tomorrow.io 1000/1100, WMO 0/1) with good visibility
+  if ((c === 1000 || c === 1100 || c === 0 || c === 1) && vis >= 8) return { mode: "clear", intensity: 1 };
+  // otherwise cloudy/hazy — dim by how poor the visibility is
+  return { mode: "cloud", intensity: Math.min(1, Math.max(0.25, (12 - Math.min(vis, 12)) / 9)) };
+}
+
+function WeatherFx({ mode, intensity }: { mode: "rain" | "cloud" | "clear"; intensity: number }) {
+  const cv = useRef<HTMLCanvasElement>(null);
+  useEffect(() => {
+    if (mode !== "rain") return;
+    const c = cv.current;
+    if (!c) return;
+    const ctx = c.getContext("2d");
+    if (!ctx) return;
+    let raf = 0;
+    const fit = () => { c.width = c.clientWidth; c.height = c.clientHeight; };
+    fit();
+    const ro = new ResizeObserver(fit);
+    ro.observe(c);
+    const n = Math.round(140 + intensity * 260);
+    const wind = 1.5 + intensity * 2.5;
+    const drops = Array.from({ length: n }, () => ({ x: Math.random(), y: Math.random(), l: 0.012 + Math.random() * 0.022, v: 0.011 + Math.random() * 0.013 + intensity * 0.012 }));
+    const loop = () => {
+      const w = c.width, h = c.height;
+      ctx.clearRect(0, 0, w, h);
+      ctx.strokeStyle = `rgba(185,205,235,${0.22 + intensity * 0.28})`;
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      for (const d of drops) {
+        const x = d.x * w, y = d.y * h;
+        ctx.moveTo(x, y);
+        ctx.lineTo(x + wind, y + d.l * h);
+        d.y += d.v;
+        d.x += wind * 0.0015;
+        if (d.y > 1) { d.y = -0.05; d.x = Math.random(); }
+        if (d.x > 1.06) d.x -= 1.12;
+      }
+      ctx.stroke();
+      raf = requestAnimationFrame(loop);
+    };
+    loop();
+    return () => { cancelAnimationFrame(raf); ro.disconnect(); };
+  }, [mode, intensity]);
+
+  const fill = { position: "absolute", inset: 0 } as const;
+  return (
+    <div style={{ position: "absolute", inset: 0, pointerEvents: "none", zIndex: 4, overflow: "hidden" }}>
+      {mode === "rain" && (
+        <>
+          <div style={{ ...fill, background: `linear-gradient(180deg, rgba(18,26,44,${0.15 + intensity * 0.18}), rgba(10,18,36,${0.24 + intensity * 0.2}))` }} />
+          <canvas ref={cv} style={{ ...fill, width: "100%", height: "100%" }} />
+        </>
+      )}
+      {mode === "cloud" && (
+        <div style={{ ...fill, background: `radial-gradient(135% 100% at 50% -12%, rgba(155,165,185,${0.05 + intensity * 0.1}), rgba(64,74,96,${0.18 + intensity * 0.18}))` }} />
+      )}
+      {mode === "clear" && (
+        <>
+          <div style={{ ...fill, background: "radial-gradient(46% 42% at 84% 6%, rgba(255,234,172,0.34), rgba(255,212,132,0) 66%)", mixBlendMode: "screen" }} />
+          <div style={{ ...fill, background: "linear-gradient(180deg, rgba(255,246,214,0.07), rgba(255,242,206,0))" }} />
+        </>
+      )}
+    </div>
+  );
+}
+
 export default function LiveMapPage({ lang }: { lang: Lang }) {
   const ko = lang === "ko";
   const mapEl = useRef<HTMLDivElement>(null);
@@ -360,6 +436,7 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
   const [showAdvisory, setShowAdvisory] = useState(false); // Stage-B AI dispatch advisory overlay
   const advisoryRef = useRef<Stage2Advisory[]>([]);
   const [showWharf, setShowWharf] = useState(false); // learned wharf/quay positions overlay
+  const [showWeatherFx, setShowWeatherFx] = useState(false); // game-like weather effect overlay
   const [gridM, setGridM] = useState(100); // grid cell size (m), adjustable
   const [gridMetric, setGridMetric] = useState<"speed" | "count">("speed"); // what the cell color shows
   const [panelOpen, setPanelOpen] = useState(true);
@@ -1025,6 +1102,7 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
       )}
 
       <div className="map-canvas" ref={mapEl} />
+      {showWeatherFx && wx && wx.age_s < 1800 && (() => { const f = wxMode(wx); return <WeatherFx mode={f.mode} intensity={f.intensity} />; })()}
 
       {/* right: TOS layer panel (areas / nodes / links) */}
       <aside className={`llp ${panelOpen ? "open" : "closed"}`}>
@@ -1041,6 +1119,7 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
               <Row on={showGrid} color={gridMetric === "speed" ? "#22c55e" : "#22d3ee"} label={ko ? `메트릭 격자 (${gridM}m)` : `Metric grid (${gridM}m)`} onChange={setShowGrid} />
               <Row on={showAdvisory} color="#34d399" label={ko ? "AI 배차 권고 (참고)" : "AI dispatch advisory"} onChange={setShowAdvisory} />
               <Row on={showWharf} color="#38bdf8" label={ko ? "안벽 위치 (WHARF)" : "Wharf positions"} onChange={setShowWharf} />
+              <Row on={showWeatherFx} color="#fcd34d" label={ko ? "날씨 효과 (비·흐림·맑음)" : "Weather effect"} onChange={setShowWeatherFx} />
               {showGrid && (
                 <div className="llp-gridctl" style={{ padding: "2px 0 6px 18px", display: "flex", flexDirection: "column", gap: 5 }}>
                   <div style={{ display: "flex", gap: 4 }}>
