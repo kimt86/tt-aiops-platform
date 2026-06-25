@@ -493,7 +493,6 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
   const advisoryRef = useRef<Stage2Advisory[]>([]);
   const [showWharf, setShowWharf] = useState(false); // learned wharf/quay positions overlay
   const [showWeatherFx, setShowWeatherFx] = useState(true); // game-like weather effect overlay (default on; toggle via the weather chip)
-  const [wxFxMode, setWxFxMode] = useState<"auto" | "clear" | "cloud" | "rain" | "storm">("auto"); // preview override
   const [gridM, setGridM] = useState(100); // grid cell size (m), adjustable
   const [gridMetric, setGridMetric] = useState<"speed" | "count">("speed"); // what the cell color shows
   const [panelOpen, setPanelOpen] = useState(true);
@@ -1164,11 +1163,7 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
       )}
 
       <div className="map-canvas" ref={mapEl} />
-      {showWeatherFx && (() => {
-        if (wxFxMode === "auto") { const f = wx && wx.age_s < 1800 ? wxInfo(wx) : null; return f ? <WeatherFx mode={f.mode} intensity={f.intensity} storm={f.storm} /> : null; }
-        if (wxFxMode === "storm") return <WeatherFx mode="rain" intensity={1} storm />;
-        return <WeatherFx mode={wxFxMode} intensity={wxFxMode === "rain" ? 0.7 : wxFxMode === "cloud" ? 0.6 : 1} />;
-      })()}
+      {showWeatherFx && wx && wx.age_s < 1800 && (() => { const f = wxInfo(wx); return <WeatherFx mode={f.mode} intensity={f.intensity} storm={f.storm} />; })()}
 
       {/* right: TOS layer panel (areas / nodes / links) */}
       <aside className={`llp ${panelOpen ? "open" : "closed"}`}>
@@ -1185,17 +1180,6 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
               <Row on={showGrid} color={gridMetric === "speed" ? "#22c55e" : "#22d3ee"} label={ko ? `메트릭 격자 (${gridM}m)` : `Metric grid (${gridM}m)`} onChange={setShowGrid} />
               <Row on={showAdvisory} color="#34d399" label={ko ? "AI 배차 권고 (참고)" : "AI dispatch advisory"} onChange={setShowAdvisory} />
               <Row on={showWharf} color="#38bdf8" label={ko ? "안벽 위치 (WHARF)" : "Wharf positions"} onChange={setShowWharf} />
-              {showWeatherFx && (
-                <div style={{ padding: "2px 0 6px 18px", display: "flex", flexDirection: "column", gap: 4 }}>
-                  <div style={{ fontSize: 10, color: "var(--text-mute)" }}>{ko ? "날씨 효과 미리보기" : "Weather preview"}</div>
-                  <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
-                    {([["auto", ko ? "자동" : "Auto", ko ? "실제 날씨" : "live weather"], ["clear", "☀️", ko ? "맑음" : "Clear"], ["cloud", "☁️", ko ? "흐림" : "Cloudy"], ["rain", "☔", ko ? "비" : "Rain"], ["storm", "⛈️", ko ? "뇌우 (번개)" : "Thunderstorm"]] as const).map(([m, lbl, tip]) => (
-                      <button key={m} className={`mdl${wxFxMode === m ? " on" : ""}`} onClick={() => setWxFxMode(m)} title={tip}>{lbl}</button>
-                    ))}
-                  </div>
-                  {wxFxMode !== "auto" && <div style={{ fontSize: 10, color: "#fcd34d" }}>{ko ? "수동 미리보기 중 · '자동'=실제 날씨" : "preview (forced) · 'Auto' = live"}</div>}
-                </div>
-              )}
               {showGrid && (
                 <div className="llp-gridctl" style={{ padding: "2px 0 6px 18px", display: "flex", flexDirection: "column", gap: 5 }}>
                   <div style={{ display: "flex", gap: 4 }}>
