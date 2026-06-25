@@ -264,7 +264,7 @@ export interface ComparePick {
 export interface WorkPoint {
   qc: string; queuename: string; jobtype: string | null; lat: number; lon: number; src_block: string | null;
   tos_ytno: string | null; tos_arrival_s: number | null; our_ytno: string | null; our_arrival_s: number | null;
-  agree: boolean | null; delta_s: number | null; n: number; agree_n: number;
+  agree: boolean | null; delta_s: number | null; n: number; agree_n: number; tos_trucks: string[];
 }
 
 async function get<T>(path: string): Promise<T> {

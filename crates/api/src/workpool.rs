@@ -1067,6 +1067,7 @@ pub struct WorkPoint {
     delta_s: Option<i32>,
     n: i64,
     agree_n: i64,
+    tos_trucks: Vec<String>,
 }
 
 /// `GET /api/stage2/work-points` — currently-dispatched work points (last hour) for the live map:
@@ -1095,10 +1096,18 @@ pub async fn stage2_work_points(State(pool): State<PgPool>) -> Result<Json<Vec<W
              FROM dispatch_compare_shadow
             WHERE ts > now() - interval '60 minutes'
             GROUP BY qc, queuename
+         ),
+         trucks AS (  -- trucks currently assigned to each work point (live TOS state)
+           SELECT qc, queuename, array_agg(DISTINCT ytno ORDER BY ytno) AS tos_trucks
+             FROM live_workpool
+            WHERE ytno IS NOT NULL AND ytno <> '' AND qc IS NOT NULL
+            GROUP BY qc, queuename
          )
          SELECT a.qc, a.queuename, a.jobtype, c.lat, c.lon, c.src_block,
-                a.tos_ytno, a.tos_arrival_s, a.our_ytno, a.our_arrival_s, a.agree, a.delta_s, a.n, a.agree_n
-           FROM agg a JOIN coords c USING (qc, queuename)",
+                a.tos_ytno, a.tos_arrival_s, a.our_ytno, a.our_arrival_s, a.agree, a.delta_s, a.n, a.agree_n,
+                COALESCE(t.tos_trucks, ARRAY[]::text[]) AS tos_trucks
+           FROM agg a JOIN coords c USING (qc, queuename)
+                      LEFT JOIN trucks t USING (qc, queuename)",
     )
     .fetch_all(&pool)
     .await?;
