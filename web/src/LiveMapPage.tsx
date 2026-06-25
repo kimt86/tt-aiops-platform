@@ -405,12 +405,21 @@ function WeatherFx({ mode, intensity }: { mode: "rain" | "cloud" | "clear"; inte
         </>
       )}
       {mode === "cloud" && (
-        <div style={{ ...fill, background: `radial-gradient(135% 100% at 50% -12%, rgba(155,165,185,${0.05 + intensity * 0.1}), rgba(64,74,96,${0.18 + intensity * 0.18}))` }} />
+        <>
+          <div style={{ ...fill, background: `radial-gradient(140% 110% at 50% -15%, rgba(160,170,190,${0.10 + intensity * 0.12}), rgba(56,66,88,${0.30 + intensity * 0.22}))` }} />
+          <div style={{ ...fill, background: "rgba(110,120,140,0.10)", mixBlendMode: "saturation" }} />
+        </>
       )}
       {mode === "clear" && (
         <>
-          <div style={{ ...fill, background: "radial-gradient(46% 42% at 84% 6%, rgba(255,234,172,0.34), rgba(255,212,132,0) 66%)", mixBlendMode: "screen" }} />
-          <div style={{ ...fill, background: "linear-gradient(180deg, rgba(255,246,214,0.07), rgba(255,242,206,0))" }} />
+          {/* the sun: a bright disc + soft halo, placed lower-left so the right-side panel never hides it */}
+          <div style={{ position: "absolute", top: "16%", left: "12%", width: 130, height: 130, borderRadius: "50%",
+            background: "radial-gradient(circle, rgba(255,252,225,0.98) 0%, rgba(255,232,150,0.85) 26%, rgba(255,212,120,0.35) 52%, rgba(255,200,110,0) 74%)",
+            filter: "blur(1px)", mixBlendMode: "screen" }} />
+          {/* broad warm sunlight wash from that corner */}
+          <div style={{ ...fill, background: "radial-gradient(75% 70% at 14% 16%, rgba(255,234,165,0.42), rgba(255,214,135,0) 68%)", mixBlendMode: "screen" }} />
+          {/* gentle overall warm brighten */}
+          <div style={{ ...fill, background: "linear-gradient(135deg, rgba(255,243,200,0.16), rgba(255,238,195,0.03) 55%)" }} />
         </>
       )}
     </div>
@@ -437,6 +446,7 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
   const advisoryRef = useRef<Stage2Advisory[]>([]);
   const [showWharf, setShowWharf] = useState(false); // learned wharf/quay positions overlay
   const [showWeatherFx, setShowWeatherFx] = useState(false); // game-like weather effect overlay
+  const [wxFxMode, setWxFxMode] = useState<"auto" | "clear" | "cloud" | "rain">("auto"); // manual override
   const [gridM, setGridM] = useState(100); // grid cell size (m), adjustable
   const [gridMetric, setGridMetric] = useState<"speed" | "count">("speed"); // what the cell color shows
   const [panelOpen, setPanelOpen] = useState(true);
@@ -1102,7 +1112,13 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
       )}
 
       <div className="map-canvas" ref={mapEl} />
-      {showWeatherFx && wx && wx.age_s < 1800 && (() => { const f = wxMode(wx); return <WeatherFx mode={f.mode} intensity={f.intensity} />; })()}
+      {showWeatherFx && (() => {
+        const auto = wx && wx.age_s < 1800 ? wxMode(wx) : null;
+        const mode = wxFxMode === "auto" ? auto?.mode : wxFxMode;
+        if (!mode) return null;
+        const intensity = wxFxMode === "auto" ? (auto?.intensity ?? 0.6) : mode === "rain" ? 0.7 : mode === "cloud" ? 0.6 : 1;
+        return <WeatherFx mode={mode} intensity={intensity} />;
+      })()}
 
       {/* right: TOS layer panel (areas / nodes / links) */}
       <aside className={`llp ${panelOpen ? "open" : "closed"}`}>
@@ -1120,6 +1136,20 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
               <Row on={showAdvisory} color="#34d399" label={ko ? "AI 배차 권고 (참고)" : "AI dispatch advisory"} onChange={setShowAdvisory} />
               <Row on={showWharf} color="#38bdf8" label={ko ? "안벽 위치 (WHARF)" : "Wharf positions"} onChange={setShowWharf} />
               <Row on={showWeatherFx} color="#fcd34d" label={ko ? "날씨 효과 (비·흐림·맑음)" : "Weather effect"} onChange={setShowWeatherFx} />
+              {showWeatherFx && (
+                <div style={{ padding: "2px 0 6px 18px", display: "flex", flexDirection: "column", gap: 5 }}>
+                  <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
+                    {([["auto", ko ? "자동" : "Auto"], ["clear", "☀️ " + (ko ? "맑음" : "Clear")], ["cloud", "☁️ " + (ko ? "흐림" : "Cloudy")], ["rain", "☔ " + (ko ? "비" : "Rain")]] as const).map(([m, lbl]) => (
+                      <button key={m} className={`mdl${wxFxMode === m ? " on" : ""}`} onClick={() => setWxFxMode(m)}>{lbl}</button>
+                    ))}
+                  </div>
+                  <div style={{ fontSize: 10, color: "var(--text-mute)" }}>
+                    {wxFxMode === "auto"
+                      ? (ko ? `실제 날씨 반영 (지금: ${wx ? (wx.precip_mm_hr ?? 0) > 0.03 ? "비" : (wx.weather_code === 1000 || wx.weather_code === 1100) ? "맑음" : "흐림" : "—"})` : "follows live weather")
+                      : (ko ? "수동 강제 (미리보기)" : "forced (preview)")}
+                  </div>
+                </div>
+              )}
               {showGrid && (
                 <div className="llp-gridctl" style={{ padding: "2px 0 6px 18px", display: "flex", flexDirection: "column", gap: 5 }}>
                   <div style={{ display: "flex", gap: 4 }}>
