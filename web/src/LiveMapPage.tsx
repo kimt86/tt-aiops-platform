@@ -253,33 +253,31 @@ function workPointsFC(pts: WorkPoint[]): GeoJSON.FeatureCollection {
   };
 }
 
-// lines from a work point to every truck currently dispatched there (TOS) + our pick (distinct).
+// classify every truck involved at a work point: dispatched by TOS, picked by us, or both.
+function workTrucks(p: WorkPoint): { yt: string; kind: "tos" | "our" | "both" }[] {
+  const tos = new Set(p.tos_trucks ?? []);
+  const our = new Set(p.our_trucks ?? []);
+  return [...new Set([...tos, ...our])].map((yt) => ({ yt, kind: tos.has(yt) && our.has(yt) ? "both" : tos.has(yt) ? "tos" : "our" }));
+}
+
+// lines from a work point to each involved truck (TOS=cyan, ours=purple, both=green).
 function workLinesFC(p: WorkPoint, devices: { id: string; lat: number; lon: number }[]): GeoJSON.FeatureCollection {
   const byId = new Map(devices.map((d) => [d.id, d]));
   const feats: GeoJSON.Feature[] = [];
-  for (const yt of p.tos_trucks ?? []) {
+  for (const { yt, kind } of workTrucks(p)) {
     const d = byId.get(yt);
-    if (!d) continue;
-    feats.push({ type: "Feature", properties: { kind: "tos", ytno: yt }, geometry: { type: "LineString", coordinates: [[p.lon, p.lat], [d.lon, d.lat]] } });
-  }
-  if (p.our_ytno && !(p.tos_trucks ?? []).includes(p.our_ytno)) {
-    const d = byId.get(p.our_ytno);
-    if (d) feats.push({ type: "Feature", properties: { kind: "our", ytno: p.our_ytno }, geometry: { type: "LineString", coordinates: [[p.lon, p.lat], [d.lon, d.lat]] } });
+    if (d) feats.push({ type: "Feature", properties: { kind, ytno: yt }, geometry: { type: "LineString", coordinates: [[p.lon, p.lat], [d.lon, d.lat]] } });
   }
   return { type: "FeatureCollection", features: feats };
 }
 
-// a ring marker on each truck dispatched to the selected work point (highlights them on the map).
+// a ring marker on each involved truck (same color coding), to highlight them on the map.
 function workTruckPtsFC(p: WorkPoint, devices: { id: string; lat: number; lon: number }[]): GeoJSON.FeatureCollection {
   const byId = new Map(devices.map((d) => [d.id, d]));
   const feats: GeoJSON.Feature[] = [];
-  for (const yt of p.tos_trucks ?? []) {
+  for (const { yt, kind } of workTrucks(p)) {
     const d = byId.get(yt);
-    if (d) feats.push({ type: "Feature", properties: { kind: "tos", ytno: yt }, geometry: { type: "Point", coordinates: [d.lon, d.lat] } });
-  }
-  if (p.our_ytno && !(p.tos_trucks ?? []).includes(p.our_ytno)) {
-    const d = byId.get(p.our_ytno);
-    if (d) feats.push({ type: "Feature", properties: { kind: "our", ytno: p.our_ytno }, geometry: { type: "Point", coordinates: [d.lon, d.lat] } });
+    if (d) feats.push({ type: "Feature", properties: { kind, ytno: yt }, geometry: { type: "Point", coordinates: [d.lon, d.lat] } });
   }
   return { type: "FeatureCollection", features: feats };
 }
@@ -739,8 +737,8 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
         source: "workpts-lines",
         layout: { visibility: "none", "line-cap": "round" },
         paint: {
-          "line-color": ["case", ["==", ["get", "kind"], "our"], "#a78bfa", "#22d3ee"],
-          "line-width": ["case", ["==", ["get", "kind"], "our"], 2.8, 1.6],
+          "line-color": ["match", ["get", "kind"], "both", "#22c55e", "our", "#a78bfa", "#22d3ee"],
+          "line-width": ["match", ["get", "kind"], "tos", 1.6, 2.4],
           "line-opacity": 0.9,
         },
       });
@@ -753,9 +751,9 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
         layout: { visibility: "none" },
         paint: {
           "circle-radius": ["interpolate", ["linear"], ["zoom"], 12, 7, 17, 15],
-          "circle-color": ["case", ["==", ["get", "kind"], "our"], "rgba(167,139,250,0.18)", "rgba(34,211,238,0.16)"],
+          "circle-color": ["match", ["get", "kind"], "both", "rgba(34,197,94,0.18)", "our", "rgba(167,139,250,0.18)", "rgba(34,211,238,0.16)"],
           "circle-stroke-width": 2.5,
-          "circle-stroke-color": ["case", ["==", ["get", "kind"], "our"], "#a78bfa", "#22d3ee"],
+          "circle-stroke-color": ["match", ["get", "kind"], "both", "#22c55e", "our", "#a78bfa", "#22d3ee"],
           "circle-stroke-opacity": 0.95,
         },
       });
@@ -920,23 +918,17 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
         const ts = map.getSource("workpts-trucks") as maplibregl.GeoJSONSource | undefined;
         if (ts) ts.setData(wp ? workTruckPtsFC(wp, devs) : EMPTY_FC);
         const fmt = (s: number) => s >= 0 ? `${Math.floor(s / 60)}:${String(Math.round(s % 60)).padStart(2, "0")}` : "—";
-        const agree = Number(p.agree) === 1;
-        const delta = Number(p.delta);
         const job = p.jobtype === "LD" ? (k ? "적하" : "LD") : p.jobtype === "DS" ? (k ? "양하" : "DS") : p.jobtype;
-        const cmp = agree ? (k ? "✓ 우리도 같은 트럭" : "✓ same as TOS")
-          : delta > 0 ? (k ? `우리가 ${fmt(Math.abs(delta))} 더 빨리 도착` : `ours ${fmt(Math.abs(delta))} sooner`)
-          : (k ? `우리가 ${fmt(Math.abs(delta))} 더 늦게` : `ours ${fmt(Math.abs(delta))} later`);
-        const trucks = wp?.tos_trucks ?? [];
-        const trucksHtml = trucks.length
-          ? `<div class="lmp-r" style="margin-top:4px;color:#22d3ee;font-size:10px">🔗 ${k ? "배정 트럭" : "trucks"} ${trucks.length}${k ? "대" : ""}: ${trucks.join(", ")}</div>`
-          : `<div class="lmp-r" style="margin-top:4px;color:#64748b;font-size:10px">${k ? "현재 배정 트럭 없음" : "no trucks now"}</div>`;
+        const tosN = wp?.tos_trucks?.length ?? 0;
+        const ourN = wp?.our_trucks?.length ?? 0;
+        const common = wp ? (wp.tos_trucks ?? []).filter((t) => (wp.our_trucks ?? []).includes(t)).length : 0;
+        const avg = wp?.avg_delta_s ?? null;
+        const avgTxt = avg == null ? "" : avg > 0 ? (k ? `평균 우리가 ${fmt(Math.abs(avg))} 빠름` : `avg ours ${fmt(Math.abs(avg))} sooner`) : (k ? `평균 우리가 ${fmt(Math.abs(avg))} 늦음` : `avg ours ${fmt(Math.abs(avg))} later`);
         showPopup((f.geometry as GeoJSON.Point).coordinates as [number, number],
           `<div class="lmp-t">${p.qc} · ${p.queuename} <span style="color:#94a3b8;font-weight:400">${job}</span></div>`
-          + trucksHtml
-          + `<div class="lmp-r" style="display:flex;justify-content:space-between;gap:14px;margin-top:3px"><span style="color:#94a3b8">TOS ${k ? "배차(최근)" : "dispatch"}</span><b>${p.tos || "—"}</b><span style="color:#94a3b8">${fmt(Number(p.tos_arr))}</span></div>`
-          + `<div class="lmp-r" style="display:flex;justify-content:space-between;gap:14px"><span style="color:#a78bfa">🤖 ${k ? "우리 배차" : "ours"}</span><b style="color:#a78bfa">${p.our || "—"}</b><span style="color:#94a3b8">${fmt(Number(p.our_arr))}</span></div>`
-          + `<div class="lmp-r" style="color:${agree ? "#22c55e" : "#e0218a"};font-weight:600;margin-top:3px">${cmp}</div>`
-          + `<div class="lmp-r" style="color:#64748b;font-size:10px">${k ? `최근 ${p.n}건 중 동일 ${p.agree_n}건` : `recent ${p.n}, agreed ${p.agree_n}`}</div>`);
+          + `<div class="lmp-r" style="margin-top:4px">🔗 ${k ? "최근 1시간 배차 트럭" : "trucks (last hour)"}</div>`
+          + `<div class="lmp-r" style="display:flex;gap:11px;font-weight:600"><span style="color:#22d3ee">TOS ${tosN}${k ? "대" : ""}</span><span style="color:#a78bfa">🤖 ${k ? "우리" : "ours"} ${ourN}${k ? "대" : ""}</span><span style="color:#22c55e">${k ? "공통" : "both"} ${common}</span></div>`
+          + `<div class="lmp-r" style="color:#64748b;font-size:10px">${k ? `배차 결정 ${p.n}건 · 동일 트럭 ${p.agree_n}건` : `${p.n} decisions · ${p.agree_n} same`}${avgTxt ? ` · ${avgTxt}` : ""}</div>`);
       });
       for (const id of ["lt-pt", "ll-seg", "mgrid-fill", "workpts-pt"]) {
         map.on("mouseenter", id, () => { map.getCanvas().style.cursor = "pointer"; });

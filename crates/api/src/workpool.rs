@@ -1065,9 +1065,11 @@ pub struct WorkPoint {
     our_arrival_s: Option<i32>,
     agree: Option<bool>,
     delta_s: Option<i32>,
+    avg_delta_s: Option<i32>,
     n: i64,
     agree_n: i64,
     tos_trucks: Vec<String>,
+    our_trucks: Vec<String>,
 }
 
 /// `GET /api/stage2/work-points` — currently-dispatched work points (last hour) for the live map:
@@ -1092,22 +1094,18 @@ pub async fn stage2_work_points(State(pool): State<PgPool>) -> Result<Json<Vec<W
                   (array_agg(our_ytno      ORDER BY tos_upd DESC))[1] AS our_ytno,
                   (array_agg(our_arrival_s ORDER BY tos_upd DESC))[1] AS our_arrival_s,
                   (array_agg(agree         ORDER BY tos_upd DESC))[1] AS agree,
-                  (array_agg(delta_s       ORDER BY tos_upd DESC))[1] AS delta_s
+                  (array_agg(delta_s       ORDER BY tos_upd DESC))[1] AS delta_s,
+                  avg(delta_s)::int AS avg_delta_s,
+                  array_agg(DISTINCT tos_ytno)                  AS tos_trucks,  -- all trucks TOS dispatched here (last hour)
+                  array_remove(array_agg(DISTINCT our_ytno), NULL) AS our_trucks   -- all trucks WE'd have dispatched
              FROM dispatch_compare_shadow
             WHERE ts > now() - interval '60 minutes'
             GROUP BY qc, queuename
-         ),
-         trucks AS (  -- trucks currently assigned to each work point (live TOS state)
-           SELECT qc, queuename, array_agg(DISTINCT ytno ORDER BY ytno) AS tos_trucks
-             FROM live_workpool
-            WHERE ytno IS NOT NULL AND ytno <> '' AND qc IS NOT NULL
-            GROUP BY qc, queuename
          )
          SELECT a.qc, a.queuename, a.jobtype, c.lat, c.lon, c.src_block,
-                a.tos_ytno, a.tos_arrival_s, a.our_ytno, a.our_arrival_s, a.agree, a.delta_s, a.n, a.agree_n,
-                COALESCE(t.tos_trucks, ARRAY[]::text[]) AS tos_trucks
-           FROM agg a JOIN coords c USING (qc, queuename)
-                      LEFT JOIN trucks t USING (qc, queuename)",
+                a.tos_ytno, a.tos_arrival_s, a.our_ytno, a.our_arrival_s, a.agree, a.delta_s, a.avg_delta_s, a.n, a.agree_n,
+                a.tos_trucks, a.our_trucks
+           FROM agg a JOIN coords c USING (qc, queuename)",
     )
     .fetch_all(&pool)
     .await?;
