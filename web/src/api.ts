@@ -235,6 +235,19 @@ export interface HealthDispatch {
     cost_tier: string | null; switched: boolean | null;
   }[];
 }
+export interface DispatchCompare {
+  summary: {
+    n: number; divergence_pct: number | null; ours_faster_pct: number | null;
+    avg_delta_s: number | null; median_delta_s: number | null;
+    avg_our_arrival_s: number | null; avg_tos_arrival_s: number | null;
+    same_n: number; ours_closer_n: number; tos_closer_n: number;
+  };
+  recent: {
+    ts: string; qc: string; queuename: string; jobtype: string | null;
+    tos_ytno: string; tos_arrival_s: number | null; our_ytno: string | null; our_arrival_s: number | null;
+    agree: boolean | null; reason: string | null; delta_s: number | null;
+  }[];
+}
 export interface WharfPoint {
   topos: string; lat: number; lon: number; n: number; spread_m: number | null;
 }
@@ -272,6 +285,7 @@ export const api = {
   learnDispatchPred: () => get<DispatchPredData>("/api/learn/dispatch-pred"),
   stage2Shadow: () => get<Stage2Shadow>("/api/stage2/shadow"),
   stage2Advisory: () => get<Stage2Advisory[]>("/api/stage2/advisory"),
+  dispatchCompare: () => get<DispatchCompare>("/api/stage2/compare"),
   livemapWharf: () => get<WharfPoint[]>("/api/livemap/wharf"),
   healthDispatch: () => get<HealthDispatch>("/api/health/dispatch"),
 };

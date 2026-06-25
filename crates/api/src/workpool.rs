@@ -988,3 +988,65 @@ pub async fn health_dispatch(State(pool): State<PgPool>) -> Result<Json<HealthDi
         arrival_hist, trend, decisions,
     }))
 }
+
+// ── TOS-vs-ours dispatch comparison feed ─────────────────────────────────────────────────────
+#[derive(Serialize, sqlx::FromRow)]
+struct CompareSummary {
+    n: i64,
+    divergence_pct: Option<f64>,    // % where the chosen truck differs
+    ours_faster_pct: Option<f64>,   // % where our truck would arrive sooner
+    avg_delta_s: Option<f64>,       // avg (tos − ours); + = we'd be faster
+    median_delta_s: Option<f64>,    // robust to mid-cycle-TOS-truck outliers
+    avg_our_arrival_s: Option<f64>,
+    avg_tos_arrival_s: Option<f64>,
+    same_n: i64,
+    ours_closer_n: i64,
+    tos_closer_n: i64,
+}
+#[derive(Serialize, sqlx::FromRow)]
+struct CompareRow {
+    ts: DateTime<Utc>,
+    qc: String,
+    queuename: String,
+    jobtype: Option<String>,
+    tos_ytno: String,
+    tos_arrival_s: Option<i32>,
+    our_ytno: Option<String>,
+    our_arrival_s: Option<i32>,
+    agree: Option<bool>,
+    reason: Option<String>,
+    delta_s: Option<i32>,
+}
+#[derive(Serialize)]
+pub struct DispatchCompareOut {
+    summary: CompareSummary,
+    recent: Vec<CompareRow>,
+}
+
+/// `GET /api/stage2/compare` — TOS's actual dispatch vs our recommendation, per work: divergence
+/// rate, who'd arrive sooner, the performance gap, reason breakdown, and recent divergence examples.
+pub async fn dispatch_compare(State(pool): State<PgPool>) -> Result<Json<DispatchCompareOut>, AppError> {
+    let summary: CompareSummary = sqlx::query_as(
+        "SELECT count(*) AS n,
+                (100.0*count(*) FILTER (WHERE NOT agree)/nullif(count(*),0))::float8 AS divergence_pct,
+                (100.0*count(*) FILTER (WHERE delta_s > 0)/nullif(count(*),0))::float8 AS ours_faster_pct,
+                avg(delta_s)::float8 AS avg_delta_s,
+                (percentile_cont(0.5) WITHIN GROUP (ORDER BY delta_s))::float8 AS median_delta_s,
+                avg(our_arrival_s)::float8 AS avg_our_arrival_s,
+                avg(tos_arrival_s)::float8 AS avg_tos_arrival_s,
+                count(*) FILTER (WHERE reason='same') AS same_n,
+                count(*) FILTER (WHERE reason='ours_closer') AS ours_closer_n,
+                count(*) FILTER (WHERE reason='tos_closer') AS tos_closer_n
+           FROM dispatch_compare_shadow WHERE ts > now() - interval '24 hours'",
+    )
+    .fetch_one(&pool)
+    .await?;
+    let recent: Vec<CompareRow> = sqlx::query_as(
+        "SELECT ts, qc, queuename, jobtype, tos_ytno, tos_arrival_s, our_ytno, our_arrival_s, agree, reason, delta_s
+           FROM dispatch_compare_shadow WHERE ts > now() - interval '24 hours' AND NOT agree
+          ORDER BY ts DESC LIMIT 25",
+    )
+    .fetch_all(&pool)
+    .await?;
+    Ok(Json(DispatchCompareOut { summary, recent }))
+}

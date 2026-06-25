@@ -55,6 +55,7 @@ fn app(state: AppState) -> Router {
         .route("/api/workpool", get(workpool::workpool))
         .route("/api/stage2/shadow", get(workpool::stage2_shadow))
         .route("/api/stage2/advisory", get(workpool::stage2_advisory))
+        .route("/api/stage2/compare", get(workpool::dispatch_compare))
         .route("/api/health/dispatch", get(workpool::health_dispatch))
         .route("/api/tt-cycles/summary", get(cycles::summary))
         .route("/api/tt-cycles/detail", get(cycles::detail))
@@ -113,6 +114,7 @@ async fn main() -> anyhow::Result<()> {
     livemap::spawn_qc_wait_kpi(pool.clone()); // 5min: qc_wait_sample → kpi_daily/shift (K_QC_TT_WAIT_GPS 영속)
     workpool::spawn_dispatch_pred_logger(pool.clone()); // 2min: 배차 1단계 예측 검증 로그(dispatch_pred_sample)
     livemap::spawn_stage2_shadow(livemap.clone(), pool.clone()); // 60s: Stage-2 매칭 그림자(stage2_match_shadow)
+    livemap::spawn_dispatch_compare(livemap.clone(), pool.clone()); // 60s: TOS vs 우리 배차 비교(dispatch_compare_shadow)
     let state = AppState { pool, livemap };
 
     let addr = std::env::var("API_ADDR").unwrap_or_else(|_| "127.0.0.1:8080".to_string());

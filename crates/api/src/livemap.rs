@@ -3604,3 +3604,66 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
         }
     });
 }
+
+/// TOS-vs-ours dispatch comparison (SHADOW). Each minute, for works TOS just assigned that we had
+/// also recommended a truck for, compute TOS's truck arrival to the SAME work point (reusing the
+/// stored dest coord) and compare to our pick — logging divergence + the performance gap.
+pub fn spawn_dispatch_compare(lm: Arc<LiveMap>, pool: PgPool) {
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(Duration::from_secs(60));
+        loop {
+            ticker.tick().await;
+            if !lm.connected.load(Ordering::Relaxed) {
+                continue;
+            }
+            let now = Utc::now().timestamp_millis();
+            let pos: HashMap<String, (f64, f64)> = {
+                let map = lm.devices.read().await;
+                map.iter()
+                    .filter(|(_, p)| p.cls == "TT" && (now - p.last_seen_ms) / 1000 <= STALE_AFTER_S)
+                    .map(|(id, p)| (id.clone(), (p.lat, p.lon)))
+                    .collect()
+            };
+            let od: HashMap<(String, String), i64> = sqlx::query_as::<_, (String, String, i32)>(
+                "SELECT oz, dz, p50_s FROM learn_travel_zone225 WHERE n >= 10",
+            )
+            .fetch_all(&pool).await.unwrap_or_default()
+            .into_iter().map(|(oz, dz, p50)| ((oz, dz), p50 as i64)).collect();
+            let cost = |vlat: f64, vlon: f64, wlat: f64, wlon: f64| -> i64 {
+                match od.get(&(grid225(vlat, vlon), grid225(wlat, wlon))) {
+                    Some(&p50) => p50,
+                    None => (quay_manhattan_m(vlat, vlon, wlat, wlon) / MANHATTAN_SPEED_MS) as i64,
+                }
+            };
+            let rows = sqlx::query_as::<_, (String, String, Option<String>, String, DateTime<Utc>, String, Option<i32>, f64, f64)>(
+                "SELECT DISTINCT ON (w.qc, w.queuename)
+                        w.qc, w.queuename, w.jobtype, w.ytno, w.upd_ts,
+                        r.ytno, r.arrival_s, r.dest_lat, r.dest_lon
+                   FROM live_workpool w
+                   JOIN LATERAL (SELECT ytno, arrival_s, dest_lat, dest_lon FROM stage2_match_shadow s
+                                  WHERE s.qc = w.qc AND s.queuename = w.queuename AND s.dest_lat IS NOT NULL
+                                  ORDER BY s.ts DESC LIMIT 1) r ON true
+                  WHERE w.ytno IS NOT NULL AND w.ytno <> '' AND w.upd_ts > now() - interval '120 seconds'
+                  ORDER BY w.qc, w.queuename, w.upd_ts DESC",
+            )
+            .fetch_all(&pool).await.unwrap_or_default();
+            for (qc, queue, jobtype, tos_ytno, tos_upd, our_ytno, our_arr, dlat, dlon) in rows {
+                let Some(&(tlat, tlon)) = pos.get(&tos_ytno) else { continue };
+                let tos_arrival = cost(tlat, tlon, dlat, dlon);
+                let our_arrival = our_arr.unwrap_or(0) as i64;
+                let agree = tos_ytno == our_ytno;
+                let delta = tos_arrival - our_arrival; // + = ours would arrive sooner
+                let reason = if agree { "same" } else if our_arrival < tos_arrival { "ours_closer" } else { "tos_closer" };
+                let _ = sqlx::query(
+                    "INSERT INTO dispatch_compare_shadow
+                       (qc,queuename,jobtype,tos_ytno,tos_arrival_s,our_ytno,our_arrival_s,agree,reason,delta_s,tos_upd)
+                     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) ON CONFLICT (qc,queuename,tos_ytno,tos_upd) DO NOTHING",
+                )
+                .bind(&qc).bind(&queue).bind(&jobtype).bind(&tos_ytno).bind(tos_arrival as i32)
+                .bind(&our_ytno).bind(our_arrival as i32).bind(agree).bind(reason).bind(delta as i32).bind(tos_upd)
+                .execute(&pool).await;
+            }
+            let _ = sqlx::query("DELETE FROM dispatch_compare_shadow WHERE ts < now() - interval '21 days'").execute(&pool).await;
+        }
+    });
+}

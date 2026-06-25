@@ -600,7 +600,7 @@ type PageKey = "kpi" | "tt" | "stage2" | "cycles" | "learn" | "map" | "health" |
 const PAGES: { key: PageKey; label: string; Icon: () => ReactElement; ko: string; en: string }[] = [
   { key: "kpi", label: "KPI", Icon: IconKpi, ko: "KPI 운영 지표", en: "KPI Metrics" },
   { key: "tt", label: "TT", Icon: IconTt, ko: "TT 배차 현황", en: "TT Dispatch" },
-  { key: "stage2", label: "MATCH", Icon: IconStage2, ko: "2단계 매칭", en: "Stage-2 Match" },
+  { key: "stage2", label: "VS TOS", Icon: IconStage2, ko: "배차 비교", en: "Dispatch vs TOS" },
   { key: "cycles", label: "CYCLES", Icon: IconCycles, ko: "사이클 이력", en: "Cycle History" },
   { key: "learn", label: "LEARN", Icon: IconLearn, ko: "학습 센터", en: "Learning Center" },
   { key: "map", label: "MAP", Icon: IconMap, ko: "라이브 맵", en: "Live Map" },
