@@ -343,18 +343,40 @@ function posAt(d: Device, t: number) {
 
 // ── game-like weather effect overlay (rain / cloud / sun), driven by /api/weather ──
 type WxData = { precip_mm_hr: number | null; visibility_km: number | null; wind_ms: number | null; weather_code: number | null; age_s: number };
-function wxMode(wx: WxData): { mode: "rain" | "cloud" | "clear"; intensity: number } {
+type FxMode = "clear" | "cloud" | "rain";
+// Tomorrow.io weather codes → real condition label + icon + which on-map effect to play.
+const WX_CODES: Record<number, { ko: string; en: string; icon: string; mode: FxMode }> = {
+  1000: { ko: "맑음", en: "Clear", icon: "☀️", mode: "clear" },
+  1100: { ko: "대체로 맑음", en: "Mostly clear", icon: "🌤️", mode: "clear" },
+  1101: { ko: "구름 조금", en: "Partly cloudy", icon: "⛅", mode: "cloud" },
+  1102: { ko: "구름 많음", en: "Mostly cloudy", icon: "🌥️", mode: "cloud" },
+  1001: { ko: "흐림", en: "Cloudy", icon: "☁️", mode: "cloud" },
+  2000: { ko: "안개", en: "Fog", icon: "🌫️", mode: "cloud" },
+  2100: { ko: "옅은 안개", en: "Light fog", icon: "🌫️", mode: "cloud" },
+  4000: { ko: "이슬비", en: "Drizzle", icon: "🌦️", mode: "rain" },
+  4001: { ko: "비", en: "Rain", icon: "🌧️", mode: "rain" },
+  4200: { ko: "약한 비", en: "Light rain", icon: "🌦️", mode: "rain" },
+  4201: { ko: "강한 비", en: "Heavy rain", icon: "🌧️", mode: "rain" },
+  5000: { ko: "눈", en: "Snow", icon: "🌨️", mode: "cloud" },
+  5100: { ko: "약한 눈", en: "Light snow", icon: "🌨️", mode: "cloud" },
+  5101: { ko: "강한 눈", en: "Heavy snow", icon: "❄️", mode: "cloud" },
+  8000: { ko: "뇌우", en: "Thunderstorm", icon: "⛈️", mode: "rain" },
+};
+// single source of truth — the chip AND the on-map effect both read this, so they always agree
+function wxInfo(wx: WxData): { ko: string; en: string; icon: string; mode: FxMode; intensity: number } {
+  const code = wx.weather_code ?? -1;
   const rain = wx.precip_mm_hr ?? 0;
-  const c = wx.weather_code ?? 0;
   const vis = wx.visibility_km ?? 20;
-  // rain: any measurable precip, or a rain/storm code (Tomorrow.io 4xxx/8000, WMO 51-99)
-  if (rain > 0.03 || (c >= 4000 && c < 9000) || (c >= 51 && c <= 99)) {
-    return { mode: "rain", intensity: Math.min(1, Math.max(0.3, rain / 6)) };
-  }
-  // clear: a clear/mostly-clear code (Tomorrow.io 1000/1100, WMO 0/1) with good visibility
-  if ((c === 1000 || c === 1100 || c === 0 || c === 1) && vis >= 8) return { mode: "clear", intensity: 1 };
-  // otherwise cloudy/hazy — dim by how poor the visibility is
-  return { mode: "cloud", intensity: Math.min(1, Math.max(0.25, (12 - Math.min(vis, 12)) / 9)) };
+  let info = WX_CODES[code] ?? (rain > 0.03
+    ? { ko: "비", en: "Rain", icon: "🌧️", mode: "rain" as FxMode }
+    : vis < 8 ? { ko: "흐림", en: "Cloudy", icon: "☁️", mode: "cloud" as FxMode }
+    : { ko: "맑음", en: "Clear", icon: "☀️", mode: "clear" as FxMode });
+  // if it's actually precipitating, trust the live precip over a possibly-stale code
+  if (rain > 0.05 && info.mode !== "rain") info = { ...info, mode: "rain", icon: rain >= 2 ? "⛈️" : "🌧️", ko: rain >= 2 ? "강한 비" : "비", en: rain >= 2 ? "Heavy rain" : "Rain" };
+  const intensity = info.mode === "rain" ? Math.min(1, Math.max(0.3, rain / 6))
+    : info.mode === "cloud" ? Math.min(1, Math.max(0.35, 0.4 + (12 - Math.min(vis, 12)) / 14))
+    : 1;
+  return { ...info, intensity };
 }
 
 function WeatherFx({ mode, intensity }: { mode: "rain" | "cloud" | "clear"; intensity: number }) {
@@ -1078,10 +1100,10 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
           const rain = wx.precip_mm_hr ?? 0;
           const vis = wx.visibility_km;
           const squall = rain >= 2 || (vis != null && vis < 2); // heavy rain or crashed visibility
-          // icon + label use the SAME classification as the on-map effect, so they always agree
-          const m = wxMode(wx).mode;
-          const icon = m === "rain" ? (rain >= 2 ? "⛈" : "🌧") : m === "cloud" ? "☁️" : "☀️";
-          const lbl = m === "rain" ? `${rain.toFixed(1)}mm/h` : m === "cloud" ? (ko ? "흐림" : "cloudy") : (ko ? "맑음" : "clear");
+          // icon + label come from the SAME source as the on-map effect (wxInfo), so they always agree
+          const info = wxInfo(wx);
+          const icon = info.icon;
+          const lbl = ko ? info.ko : info.en;
           return (
             <button className={`map-gps mono ${squall ? "bad" : "ok"}`}
               onClick={() => setShowWeatherFx((v) => !v)}
@@ -1089,7 +1111,7 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
               title={ko
                 ? `클릭 = 날씨 효과 ${showWeatherFx ? "끄기" : "켜기"} (현재 ${showWeatherFx ? "ON" : "OFF"}) · 날씨 ${wx.age_s}s 전 · 강수 ${rain.toFixed(1)}mm/h · 시정 ${vis?.toFixed(1) ?? "—"}km · 바람 ${wx.wind_ms?.toFixed(0) ?? "—"}m/s${squall ? " · 스콜" : ""}`
                 : `click to ${showWeatherFx ? "disable" : "enable"} weather effect · weather ${wx.age_s}s ago · rain ${rain.toFixed(1)}mm/h · vis ${vis?.toFixed(1) ?? "—"}km${squall ? " · SQUALL" : ""}`}>
-              {icon} {lbl}{vis != null && vis < 5 ? ` · ${vis.toFixed(1)}km` : ""}
+              {icon} {lbl}{info.mode === "rain" ? ` ${rain.toFixed(1)}mm/h` : ""}{vis != null && vis < 5 ? ` · ${vis.toFixed(1)}km` : ""}
             </button>
           );
         })()}
@@ -1116,7 +1138,7 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
       )}
 
       <div className="map-canvas" ref={mapEl} />
-      {showWeatherFx && wx && wx.age_s < 1800 && (() => { const f = wxMode(wx); return <WeatherFx mode={f.mode} intensity={f.intensity} />; })()}
+      {showWeatherFx && wx && wx.age_s < 1800 && (() => { const f = wxInfo(wx); return <WeatherFx mode={f.mode} intensity={f.intensity} />; })()}
 
       {/* right: TOS layer panel (areas / nodes / links) */}
       <aside className={`llp ${panelOpen ? "open" : "closed"}`}>
