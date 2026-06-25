@@ -344,23 +344,25 @@ function posAt(d: Device, t: number) {
 // ── game-like weather effect overlay (rain / cloud / sun), driven by /api/weather ──
 type WxData = { precip_mm_hr: number | null; visibility_km: number | null; wind_ms: number | null; weather_code: number | null; age_s: number };
 type FxMode = "clear" | "cloud" | "rain";
-// Tomorrow.io weather codes → real condition label + icon + which on-map effect to play.
-const WX_CODES: Record<number, { ko: string; en: string; icon: string; mode: FxMode }> = {
-  1000: { ko: "맑음", en: "Clear", icon: "☀️", mode: "clear" },
-  1100: { ko: "대체로 맑음", en: "Mostly clear", icon: "🌤️", mode: "clear" },
-  1101: { ko: "구름 조금", en: "Partly cloudy", icon: "⛅", mode: "cloud" },
-  1102: { ko: "구름 많음", en: "Mostly cloudy", icon: "🌥️", mode: "cloud" },
-  1001: { ko: "흐림", en: "Cloudy", icon: "☁️", mode: "cloud" },
-  2000: { ko: "안개", en: "Fog", icon: "🌫️", mode: "cloud" },
-  2100: { ko: "옅은 안개", en: "Light fog", icon: "🌫️", mode: "cloud" },
-  4000: { ko: "이슬비", en: "Drizzle", icon: "🌦️", mode: "rain" },
-  4001: { ko: "비", en: "Rain", icon: "🌧️", mode: "rain" },
-  4200: { ko: "약한 비", en: "Light rain", icon: "🌦️", mode: "rain" },
-  4201: { ko: "강한 비", en: "Heavy rain", icon: "🌧️", mode: "rain" },
-  5000: { ko: "눈", en: "Snow", icon: "🌨️", mode: "cloud" },
-  5100: { ko: "약한 눈", en: "Light snow", icon: "🌨️", mode: "cloud" },
-  5101: { ko: "강한 눈", en: "Heavy snow", icon: "❄️", mode: "cloud" },
-  8000: { ko: "뇌우", en: "Thunderstorm", icon: "⛈️", mode: "rain" },
+// Tomorrow.io weather codes → real condition label + icon + on-map effect + its base strength (i).
+// i = how strong that effect plays (구름 조금 옅게 ↔ 흐림 짙게, 약한 비 ↔ 강한 비), so the look
+// changes per code, not just per the 3 groups.
+const WX_CODES: Record<number, { ko: string; en: string; icon: string; mode: FxMode; i: number }> = {
+  1000: { ko: "맑음", en: "Clear", icon: "☀️", mode: "clear", i: 1.0 },
+  1100: { ko: "대체로 맑음", en: "Mostly clear", icon: "🌤️", mode: "clear", i: 0.7 },
+  1101: { ko: "구름 조금", en: "Partly cloudy", icon: "⛅", mode: "cloud", i: 0.3 },
+  1102: { ko: "구름 많음", en: "Mostly cloudy", icon: "🌥️", mode: "cloud", i: 0.6 },
+  1001: { ko: "흐림", en: "Cloudy", icon: "☁️", mode: "cloud", i: 0.85 },
+  2000: { ko: "안개", en: "Fog", icon: "🌫️", mode: "cloud", i: 1.0 },
+  2100: { ko: "옅은 안개", en: "Light fog", icon: "🌫️", mode: "cloud", i: 0.55 },
+  4000: { ko: "이슬비", en: "Drizzle", icon: "🌦️", mode: "rain", i: 0.35 },
+  4001: { ko: "비", en: "Rain", icon: "🌧️", mode: "rain", i: 0.7 },
+  4200: { ko: "약한 비", en: "Light rain", icon: "🌦️", mode: "rain", i: 0.45 },
+  4201: { ko: "강한 비", en: "Heavy rain", icon: "🌧️", mode: "rain", i: 1.0 },
+  5000: { ko: "눈", en: "Snow", icon: "🌨️", mode: "cloud", i: 0.7 },
+  5100: { ko: "약한 눈", en: "Light snow", icon: "🌨️", mode: "cloud", i: 0.5 },
+  5101: { ko: "강한 눈", en: "Heavy snow", icon: "❄️", mode: "cloud", i: 0.9 },
+  8000: { ko: "뇌우", en: "Thunderstorm", icon: "⛈️", mode: "rain", i: 1.0 },
 };
 // single source of truth — the chip AND the on-map effect both read this, so they always agree
 function wxInfo(wx: WxData): { ko: string; en: string; icon: string; mode: FxMode; intensity: number } {
@@ -368,15 +370,16 @@ function wxInfo(wx: WxData): { ko: string; en: string; icon: string; mode: FxMod
   const rain = wx.precip_mm_hr ?? 0;
   const vis = wx.visibility_km ?? 20;
   let info = WX_CODES[code] ?? (rain > 0.03
-    ? { ko: "비", en: "Rain", icon: "🌧️", mode: "rain" as FxMode }
-    : vis < 8 ? { ko: "흐림", en: "Cloudy", icon: "☁️", mode: "cloud" as FxMode }
-    : { ko: "맑음", en: "Clear", icon: "☀️", mode: "clear" as FxMode });
+    ? { ko: "비", en: "Rain", icon: "🌧️", mode: "rain" as FxMode, i: 0.6 }
+    : vis < 8 ? { ko: "흐림", en: "Cloudy", icon: "☁️", mode: "cloud" as FxMode, i: 0.8 }
+    : { ko: "맑음", en: "Clear", icon: "☀️", mode: "clear" as FxMode, i: 1.0 });
   // if it's actually precipitating, trust the live precip over a possibly-stale code
-  if (rain > 0.05 && info.mode !== "rain") info = { ...info, mode: "rain", icon: rain >= 2 ? "⛈️" : "🌧️", ko: rain >= 2 ? "강한 비" : "비", en: rain >= 2 ? "Heavy rain" : "Rain" };
-  const intensity = info.mode === "rain" ? Math.min(1, Math.max(0.3, rain / 6))
-    : info.mode === "cloud" ? Math.min(1, Math.max(0.35, 0.4 + (12 - Math.min(vis, 12)) / 14))
-    : 1;
-  return { ...info, intensity };
+  if (rain > 0.05 && info.mode !== "rain") info = { ko: rain >= 2 ? "강한 비" : "비", en: rain >= 2 ? "Heavy rain" : "Rain", icon: rain >= 2 ? "⛈️" : "🌧️", mode: "rain", i: 0.7 };
+  // effect strength: code's base, but rain also scales up with live precip amount
+  const intensity = info.mode === "rain"
+    ? Math.min(1, Math.max(info.i, rain / 6))
+    : info.i;
+  return { ko: info.ko, en: info.en, icon: info.icon, mode: info.mode, intensity };
 }
 
 function WeatherFx({ mode, intensity }: { mode: "rain" | "cloud" | "clear"; intensity: number }) {
@@ -434,14 +437,13 @@ function WeatherFx({ mode, intensity }: { mode: "rain" | "cloud" | "clear"; inte
       )}
       {mode === "clear" && (
         <>
-          {/* the sun: a bright disc + soft halo, placed lower-left so the right-side panel never hides it */}
+          {/* the sun: a bright disc + soft halo, lower-left so the right-side panel never hides it.
+              opacities scale with intensity → 대체로 맑음(0.7) 보다 맑음(1.0)이 더 쨍하게 */}
           <div style={{ position: "absolute", top: "16%", left: "12%", width: 130, height: 130, borderRadius: "50%",
-            background: "radial-gradient(circle, rgba(255,252,225,0.98) 0%, rgba(255,232,150,0.85) 26%, rgba(255,212,120,0.35) 52%, rgba(255,200,110,0) 74%)",
+            background: `radial-gradient(circle, rgba(255,252,225,${0.98 * intensity}) 0%, rgba(255,232,150,${0.85 * intensity}) 26%, rgba(255,212,120,${0.35 * intensity}) 52%, rgba(255,200,110,0) 74%)`,
             filter: "blur(1px)", mixBlendMode: "screen" }} />
-          {/* broad warm sunlight wash from that corner */}
-          <div style={{ ...fill, background: "radial-gradient(75% 70% at 14% 16%, rgba(255,234,165,0.42), rgba(255,214,135,0) 68%)", mixBlendMode: "screen" }} />
-          {/* gentle overall warm brighten */}
-          <div style={{ ...fill, background: "linear-gradient(135deg, rgba(255,243,200,0.16), rgba(255,238,195,0.03) 55%)" }} />
+          <div style={{ ...fill, background: `radial-gradient(75% 70% at 14% 16%, rgba(255,234,165,${0.42 * intensity}), rgba(255,214,135,0) 68%)`, mixBlendMode: "screen" }} />
+          <div style={{ ...fill, background: `linear-gradient(135deg, rgba(255,243,200,${0.16 * intensity}), rgba(255,238,195,0.03) 55%)` }} />
         </>
       )}
     </div>
