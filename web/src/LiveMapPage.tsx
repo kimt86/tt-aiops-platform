@@ -365,7 +365,7 @@ const WX_CODES: Record<number, { ko: string; en: string; icon: string; mode: FxM
   8000: { ko: "뇌우", en: "Thunderstorm", icon: "⛈️", mode: "rain", i: 1.0 },
 };
 // single source of truth — the chip AND the on-map effect both read this, so they always agree
-function wxInfo(wx: WxData): { ko: string; en: string; icon: string; mode: FxMode; intensity: number } {
+function wxInfo(wx: WxData): { ko: string; en: string; icon: string; mode: FxMode; intensity: number; storm: boolean } {
   const code = wx.weather_code ?? -1;
   const rain = wx.precip_mm_hr ?? 0;
   const vis = wx.visibility_km ?? 20;
@@ -379,11 +379,32 @@ function wxInfo(wx: WxData): { ko: string; en: string; icon: string; mode: FxMod
   const intensity = info.mode === "rain"
     ? Math.min(1, Math.max(info.i, rain / 6))
     : info.i;
-  return { ko: info.ko, en: info.en, icon: info.icon, mode: info.mode, intensity };
+  return { ko: info.ko, en: info.en, icon: info.icon, mode: info.mode, intensity, storm: code === 8000 };
 }
 
-function WeatherFx({ mode, intensity }: { mode: "rain" | "cloud" | "clear"; intensity: number }) {
+function WeatherFx({ mode, intensity, storm }: { mode: "rain" | "cloud" | "clear"; intensity: number; storm?: boolean }) {
   const cv = useRef<HTMLCanvasElement>(null);
+  const flashRef = useRef<HTMLDivElement>(null);
+  // lightning: random strikes (sometimes a quick double flash). Driven via a ref so it never
+  // re-renders the component; the flash fades out each animation frame.
+  useEffect(() => {
+    if (!storm) return;
+    let alive = true, raf = 0, schedule = 0, dbl = 0, level = 0;
+    const tick = () => {
+      level = level > 0.012 ? level * 0.78 - 0.006 : 0;
+      if (flashRef.current) flashRef.current.style.opacity = String(Math.max(0, level));
+      raf = requestAnimationFrame(tick);
+    };
+    const strike = () => {
+      if (!alive) return;
+      level = 0.7 + Math.random() * 0.3;
+      if (Math.random() < 0.45) dbl = window.setTimeout(() => { if (alive) level = 0.55 + Math.random() * 0.3; }, 90 + Math.random() * 80);
+      schedule = window.setTimeout(strike, 2600 + Math.random() * 6500);
+    };
+    const start = window.setTimeout(strike, 700 + Math.random() * 1800);
+    raf = requestAnimationFrame(tick);
+    return () => { alive = false; cancelAnimationFrame(raf); clearTimeout(start); clearTimeout(schedule); clearTimeout(dbl); };
+  }, [storm]);
   useEffect(() => {
     if (mode !== "rain") return;
     const c = cv.current;
@@ -446,6 +467,8 @@ function WeatherFx({ mode, intensity }: { mode: "rain" | "cloud" | "clear"; inte
           <div style={{ ...fill, background: `linear-gradient(135deg, rgba(255,243,200,${0.16 * intensity}), rgba(255,238,195,0.03) 55%)` }} />
         </>
       )}
+      {/* lightning flash (thunderstorm) — opacity driven by the ref, fades each frame */}
+      {storm && <div ref={flashRef} style={{ ...fill, background: "radial-gradient(95% 80% at 50% 26%, rgba(228,238,255,0.95), rgba(175,200,255,0.5) 58%, rgba(150,180,255,0) 84%)", mixBlendMode: "screen", opacity: 0 }} />}
     </div>
   );
 }
@@ -1140,7 +1163,7 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
       )}
 
       <div className="map-canvas" ref={mapEl} />
-      {showWeatherFx && wx && wx.age_s < 1800 && (() => { const f = wxInfo(wx); return <WeatherFx mode={f.mode} intensity={f.intensity} />; })()}
+      {showWeatherFx && wx && wx.age_s < 1800 && (() => { const f = wxInfo(wx); return <WeatherFx mode={f.mode} intensity={f.intensity} storm={f.storm} />; })()}
 
       {/* right: TOS layer panel (areas / nodes / links) */}
       <aside className={`llp ${panelOpen ? "open" : "closed"}`}>
