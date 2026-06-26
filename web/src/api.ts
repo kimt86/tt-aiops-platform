@@ -267,6 +267,10 @@ export interface WorkPoint {
   agree: boolean | null; delta_s: number | null; avg_delta_s: number | null; n: number; agree_n: number;
   tos_trucks: string[]; our_trucks: string[];
 }
+export interface FairCompare {
+  ts: string; window_min: number; n: number; tos_total_s: number; our_total_s: number; savings_pct: number; same_n: number;
+}
+export interface FairCompareOut { latest: FairCompare | null; avg_savings_pct: number | null; recent: FairCompare[]; }
 
 async function get<T>(path: string): Promise<T> {
   const r = await fetch(path);
@@ -299,6 +303,7 @@ export const api = {
   stage2ComparePicks: () => get<ComparePick[]>("/api/stage2/compare-picks"),
   stage2WorkPoints: () => get<WorkPoint[]>("/api/stage2/work-points"),
   dispatchCompare: () => get<DispatchCompare>("/api/stage2/compare"),
+  stage2FairCompare: () => get<FairCompareOut>("/api/stage2/fair-compare"),
   livemapWharf: () => get<WharfPoint[]>("/api/livemap/wharf"),
   healthDispatch: () => get<HealthDispatch>("/api/health/dispatch"),
 };

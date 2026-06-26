@@ -3812,3 +3812,154 @@ pub fn spawn_pos_hist(lm: Arc<LiveMap>, pool: PgPool) {
         }
     });
 }
+
+/// FAIR head-to-head (SHADOW). Every 5 min, take a recent window of TOS dispatch DECISIONS (the
+/// trucks TOS assigned + the works, each truck at its own dispatch-time position), build the
+/// truck×work arrival matrix, and compare TOS's actual matching (its diagonal) to OUR solver's
+/// optimal 1:1 matching (min-cost perfect matching — each truck used once, reservation respected).
+/// This is the apples-to-apples efficiency comparison; unlike the per-work "closest truck" metric it
+/// can NOT double-book the nearest truck, so it tells the true empty-travel saving over TOS.
+pub fn spawn_fair_compare(lm: Arc<LiveMap>, pool: PgPool) {
+    tokio::spawn(async move {
+        const WINDOW_MIN: i64 = 15;
+        const MAX_N: usize = 120; // bound the assignment problem (keeps the solve sub-second)
+        let mut ticker = tokio::time::interval(Duration::from_secs(300));
+        loop {
+            ticker.tick().await;
+            if !lm.connected.load(Ordering::Relaxed) {
+                continue;
+            }
+            let now = Utc::now().timestamp_millis();
+            let od: HashMap<(String, String), i64> = sqlx::query_as::<_, (String, String, i32)>(
+                "SELECT oz, dz, p50_s FROM learn_travel_zone225 WHERE n >= 10",
+            )
+            .fetch_all(&pool).await.unwrap_or_default()
+            .into_iter().map(|(oz, dz, p50)| ((oz, dz), p50 as i64)).collect();
+            let cost = |vlat: f64, vlon: f64, wlat: f64, wlon: f64| -> i64 {
+                match od.get(&(grid225(vlat, vlon), grid225(wlat, wlon))) {
+                    Some(&p50) => p50,
+                    None => (quay_manhattan_m(vlat, vlon, wlat, wlon) / MANHATTAN_SPEED_MS) as i64,
+                }
+            };
+            // truck positions over the window → per-truck position nearest its dispatch instant
+            let hist = sqlx::query_as::<_, (DateTime<Utc>, String, f64, f64)>(
+                "SELECT ts, ytno, lat, lon FROM truck_pos_hist WHERE ts > now() - interval '20 minutes'",
+            )
+            .fetch_all(&pool).await.unwrap_or_default();
+            let mut snaps: std::collections::BTreeMap<i64, Vec<(String, f64, f64)>> = std::collections::BTreeMap::new();
+            let mut latest_pos: HashMap<String, (f64, f64)> = HashMap::new();
+            for (t, yt, la, lo) in hist {
+                snaps.entry(t.timestamp_millis()).or_default().push((yt.clone(), la, lo));
+                latest_pos.insert(yt, (la, lo));
+            }
+            let (cranes, centroids): (HashMap<String, (f64, f64)>, HashMap<String, (f64, f64)>) = {
+                let map = lm.devices.read().await;
+                let cr = map.iter()
+                    .filter(|(_, p)| matches!(p.cls.as_str(), "C" | "M" | "Z") && (now - p.last_seen_ms) / 1000 <= STALE_AFTER_S)
+                    .map(|(id, p)| (id.clone(), (p.lat, p.lon))).collect();
+                let ce = lm.centroids.read().await;
+                let cem = ce.iter().map(|(k, c)| (k.clone(), (c.lat, c.lon))).collect();
+                (cr, cem)
+            };
+            // the window's TOS decisions (distinct bay×truck, most recent first, capped)
+            let rows = sqlx::query_as::<_, (String, String, String, String, DateTime<Utc>, Option<String>)>(
+                "SELECT DISTINCT ON (w.qc, w.queuename, w.ytno) w.qc, w.queuename, w.jobtype, w.ytno, w.upd_ts, w.yt_topos
+                   FROM live_workpool w
+                  WHERE w.ytno IS NOT NULL AND w.ytno <> '' AND w.qc IS NOT NULL AND w.jobtype IN ('DS','LD')
+                    AND w.upd_ts > now() - interval '15 minutes'
+                  ORDER BY w.qc, w.queuename, w.ytno, w.upd_ts DESC LIMIT 400",
+            )
+            .fetch_all(&pool).await.unwrap_or_default();
+            // Group TOS assignments by the snapshot instant just before each. Only trucks that were
+            // idle at the SAME instant form a valid pool to re-match — pooling trucks across different
+            // times would hand the optimum an unreal pick (a truck that was only free at another moment).
+            // Truck position = its position in THAT snapshot, so every batch is instant-consistent.
+            let mut groups: HashMap<i64, Vec<((f64, f64), (f64, f64))>> = HashMap::new();
+            let mut considered = 0usize;
+            for (qc, _queue, jobtype, ytno, upd, yt_topos) in rows {
+                if considered >= MAX_N {
+                    break;
+                }
+                let wc = if jobtype == "LD" {
+                    yt_topos.as_deref().and_then(|t| centroids.get(t).or_else(|| centroids.get(block_prefix(t))).copied())
+                } else {
+                    cranes.get(&qc).or_else(|| centroids.get(&qc)).copied()
+                };
+                let Some(wc) = wc else { continue };
+                let t1 = upd.timestamp_millis();
+                // truck position at ~T1 (snapshot ≤ T1 with the truck, else its latest fix)
+                let tp = snaps.range(..=t1).next_back()
+                    .and_then(|(_, v)| v.iter().find(|(yt, _, _)| *yt == ytno).map(|(_, la, lo)| (*la, *lo)))
+                    .or_else(|| latest_pos.get(&ytno).copied());
+                let Some(tp) = tp else { continue };
+                // group into 60-second buckets ≈ "the same operational moment" — trucks dispatched
+                // within the same minute are an ~simultaneous pool to re-match (no cross-time pooling).
+                let bucket = t1 / 60_000;
+                groups.entry(bucket).or_default().push((tp, wc));
+                considered += 1;
+            }
+            // per-instant optimal permutation (min-cost perfect matching), summed across instants
+            let mut n = 0i32;
+            let mut tos_total = 0i64;
+            let mut our_total = 0i64;
+            let mut same = 0i32;
+            for batch in groups.values() {
+                let m = batch.len();
+                if m == 0 {
+                    continue;
+                }
+                n += m as i32;
+                for (tp, wc) in batch {
+                    tos_total += cost(tp.0, tp.1, wc.0, wc.1);
+                }
+                if m == 1 {
+                    let (tp, wc) = &batch[0];
+                    our_total += cost(tp.0, tp.1, wc.0, wc.1);
+                    same += 1;
+                    continue;
+                }
+                let (s, t) = (0usize, 2 * m + 1);
+                let mut g = Mcmf::new(2 * m + 2);
+                for i in 0..m {
+                    g.add(s, 1 + i, 1, 0);
+                    g.add(1 + m + i, t, 1, 0);
+                }
+                for i in 0..m {
+                    for j in 0..m {
+                        let c = cost(batch[i].0 .0, batch[i].0 .1, batch[j].1 .0, batch[j].1 .1);
+                        g.add(1 + i, 1 + m + j, 1, c);
+                    }
+                }
+                let (gc, flow) = g.run(s, t);
+                if (flow as usize) < m {
+                    for (tp, wc) in batch { our_total += cost(tp.0, tp.1, wc.0, wc.1); }
+                    same += m as i32;
+                    continue;
+                }
+                our_total += gc;
+                for i in 0..m {
+                    for &e in &g.head[1 + i] {
+                        let v = g.to[e];
+                        if v >= 1 + m && v < 1 + 2 * m && g.cap[e] == 0 {
+                            if v - (1 + m) == i {
+                                same += 1;
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+            if n < 4 {
+                continue;
+            }
+            let savings = if tos_total > 0 { 100.0 * (tos_total - our_total) as f64 / tos_total as f64 } else { 0.0 };
+            let _ = sqlx::query(
+                "INSERT INTO fair_compare_shadow (window_min, n, tos_total_s, our_total_s, savings_pct, same_n)
+                 VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (ts) DO NOTHING",
+            )
+            .bind(WINDOW_MIN as i32).bind(n as i32).bind(tos_total).bind(our_total).bind(savings).bind(same)
+            .execute(&pool).await;
+            let _ = sqlx::query("DELETE FROM fair_compare_shadow WHERE ts < now() - interval '21 days'").execute(&pool).await;
+        }
+    });
+}

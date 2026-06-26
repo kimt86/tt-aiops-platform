@@ -24,12 +24,14 @@ export default function Stage2Page({ lang }: { lang: Lang }) {
   const k = ko(lang);
   const [d, setD] = useState<Stage2Shadow | null>(null);
   const [cmp, setCmp] = useState<DispatchCompare | null>(null);
+  const [fair, setFair] = useState<import("./api").FairCompareOut | null>(null);
   const [err, setErr] = useState(false);
   useEffect(() => {
     let alive = true;
     const poll = () => {
       api.stage2Shadow().then((r) => { if (alive) { setD(r); setErr(false); } }).catch(() => alive && setErr(true));
       api.dispatchCompare().then((r) => { if (alive) setCmp(r); }).catch(() => {});
+      api.stage2FairCompare().then((r) => { if (alive) setFair(r); }).catch(() => {});
     };
     poll();
     const iv = setInterval(poll, 15000);
@@ -54,7 +56,24 @@ export default function Stage2Page({ lang }: { lang: Lang }) {
         </div>
       </div>
 
-      {/* ── MAIN: TOS vs ours ── */}
+      {/* ── HEADLINE: the FAIR metric (reservation-respected optimal matching vs TOS) ── */}
+      {fair?.latest && (() => {
+        const f = fair.latest;
+        const sav = fair.avg_savings_pct != null ? Math.round(fair.avg_savings_pct) : Math.round(f.savings_pct);
+        return (
+          <div className="ls-note" style={{ borderLeft: "3px solid #34d399", background: "rgba(52,211,153,0.08)", padding: "10px 12px", marginBottom: 12 }}>
+            <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 3 }}>
+              {k ? `⚖️ 공정 비교 — 빈 차 이동 ${sav}% 절감 (우리 최적 매칭 vs TOS)` : `⚖️ Fair: ${sav}% less empty travel (our optimal matching vs TOS)`}
+            </div>
+            {k
+              ? `같은 순간 TOS가 배차한 트럭들(${f.n}쌍)을 우리 솔버가 1:1로 다시 최적 매칭하면 빈 차 이동 총량이 TOS보다 ${sav}% 적습니다(최근 평균). 같은 트럭 선택 ${Math.round(100 * f.same_n / Math.max(f.n, 1))}%. ⓘ 트럭 1대=작업 1개(예약 지킴)·같은 순간 유휴 풀만 사용 → 정직한 효율 지표. (아래 '각 작업 최근접'은 같은 트럭을 여러 작업이 중복 차지해 우리 이득을 과장합니다.)`
+              : `re-matching TOS's own dispatched trucks (${f.n} pairs) optimally (1:1, reservation-respected, same-instant pool) cuts total empty travel by ${sav}% (recent avg). The honest efficiency metric.`}
+          </div>
+        );
+      })()}
+
+      {/* ── reference: per-work "closest truck" (optimistic — double-books the nearest truck) ── */}
+      <div className="area-divider"><span>{k ? "참고 — 각 작업 최근접 (낙관적)" : "Reference — per-work closest (optimistic)"}</span></div>
       <div className="ls-chips" style={{ marginBottom: 10 }}>
         <Chip label={k ? "비교 건수 (24h)" : "compared (24h)"} value={c ? String(c.n) : "—"} accent="#f472b6" />
         <Chip label={k ? "우리가 더 가까움" : "ours closer"} value={pct(c?.ours_faster_pct)} accent="#34d399" />

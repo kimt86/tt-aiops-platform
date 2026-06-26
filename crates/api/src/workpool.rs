@@ -1112,6 +1112,42 @@ pub async fn stage2_work_points(State(pool): State<PgPool>) -> Result<Json<Vec<W
     Ok(Json(rows))
 }
 
+#[derive(Serialize, sqlx::FromRow, Clone)]
+pub struct FairCompare {
+    ts: DateTime<Utc>,
+    window_min: i32,
+    n: i32,
+    tos_total_s: i64,
+    our_total_s: i64,
+    savings_pct: f64,
+    same_n: i32,
+}
+#[derive(Serialize)]
+pub struct FairCompareOut {
+    latest: Option<FairCompare>,
+    avg_savings_pct: Option<f64>, // averaged over the recent rows (stabler than one window)
+    recent: Vec<FairCompare>,
+}
+
+/// `GET /api/stage2/fair-compare` — the FAIR head-to-head: our solver's optimal 1:1 matching vs TOS's
+/// actual matching on the SAME trucks+works+positions (reservation-respected). The honest efficiency
+/// number, unlike the per-work "closest truck" metric which double-books the nearest truck.
+pub async fn stage2_fair_compare(State(pool): State<PgPool>) -> Result<Json<FairCompareOut>, AppError> {
+    let recent: Vec<FairCompare> = sqlx::query_as(
+        "SELECT ts, window_min, n, tos_total_s, our_total_s, savings_pct, same_n
+           FROM fair_compare_shadow ORDER BY ts DESC LIMIT 48",
+    )
+    .fetch_all(&pool)
+    .await?;
+    let latest = recent.first().cloned();
+    let avg_savings_pct = if recent.is_empty() {
+        None
+    } else {
+        Some(recent.iter().map(|r| r.savings_pct).sum::<f64>() / recent.len() as f64)
+    };
+    Ok(Json(FairCompareOut { latest, avg_savings_pct, recent }))
+}
+
 /// `GET /api/stage2/compare` — TOS's actual dispatch vs our recommendation, per work: divergence
 /// rate, who'd arrive sooner, the performance gap, reason breakdown, and recent divergence examples.
 pub async fn dispatch_compare(State(pool): State<PgPool>) -> Result<Json<DispatchCompareOut>, AppError> {
