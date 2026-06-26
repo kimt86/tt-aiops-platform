@@ -330,14 +330,22 @@ pub(crate) async fn build_workpool(pool: PgPool) -> Result<WorkpoolOut, AppError
                 .fetch_all(&pool).await.unwrap_or_default()
                 .into_iter().filter_map(|(v, f)| f.map(|f| (v, f))).collect();
         // per-crane per-jobtype median move time (rolling 3-day, from learn_qc_move_time); key
-        // ('D'=discharge,'L'=load). Falls back to the jobtype constant when a crane has no sample.
-        let move_time: std::collections::HashMap<(String, char), f64> =
-            sqlx::query_as::<_, (String, String, Option<i32>)>(
-                "SELECT qc, jobtype, med_sec FROM learn_qc_move_time WHERE med_sec IS NOT NULL")
-                .fetch_all(&pool).await.unwrap_or_default()
-                .into_iter()
-                .filter_map(|(qc, jt, ms)| ms.map(|ms| ((qc, if jt == "LD" { 'L' } else { 'D' }), ms as f64)))
-                .collect();
+        // ('D'=discharge,'L'=load). SHIFT-aware: prefer the current terminal shift (D=06–17 / N=18–05
+        // MYT, ~±30% day/night), fall back to 'ALL' when a shift is sparse, then to the jobtype constant.
+        let cur_shift = if (6..18).contains(&(((Utc::now().timestamp() / 3600) + 8) % 24)) { "D" } else { "N" };
+        let mt_rows: Vec<(String, String, String, Option<i32>)> =
+            sqlx::query_as("SELECT qc, jobtype, shift, med_sec FROM learn_qc_move_time WHERE med_sec IS NOT NULL")
+                .fetch_all(&pool).await.unwrap_or_default();
+        let mut move_time: std::collections::HashMap<(String, char), f64> = std::collections::HashMap::new();
+        for pass in ["ALL", cur_shift] { // ALL first (base), then overwrite with the current shift where present
+            for (qc, jt, sh, ms) in &mt_rows {
+                if sh == pass {
+                    if let Some(ms) = ms {
+                        move_time.insert((qc.clone(), if jt == "LD" { 'L' } else { 'D' }), *ms as f64);
+                    }
+                }
+            }
+        }
         let now = Utc::now();
         // work-ETA is a FIXED future instant (when the QC reaches a bay); anchor it to the data
         // snapshot (as_of), NOT now — else every poll re-anchors to a later "now" and the countdown

@@ -18,6 +18,7 @@ const SQL: &str = include_str!("../../sql/qc_move_time.sql");
 pub struct Row {
     pub qc: String,
     pub jobtype: String,
+    pub shift: String, // 'D' | 'N' | 'ALL'
     pub med_sec: Option<f64>,
     pub n: Option<f64>,
 }
@@ -30,11 +31,12 @@ pub async fn extract(pool: &PgPool, date: NaiveDate, target: &str) -> Result<u64
         sqlx::query("DELETE FROM learn_qc_move_time").execute(&mut *tx).await?;
         for r in &rows {
             sqlx::query(
-                "INSERT INTO learn_qc_move_time (qc, jobtype, med_sec, n, as_of_ts)
-                 VALUES ($1,$2,$3,$4,now())",
+                "INSERT INTO learn_qc_move_time (qc, jobtype, shift, med_sec, n, as_of_ts)
+                 VALUES ($1,$2,$3,$4,$5,now())",
             )
             .bind(&r.qc)
             .bind(&r.jobtype)
+            .bind(&r.shift)
             .bind(r.med_sec.map(|v| v as i32))
             .bind(r.n.map(|v| v as i32))
             .execute(&mut *tx)
