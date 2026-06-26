@@ -3665,6 +3665,14 @@ pub fn spawn_dispatch_compare(lm: Arc<LiveMap>, pool: PgPool) {
             for (t, yt, la, lo, st) in hist {
                 snaps.entry(t.timestamp_millis()).or_default().push((yt, la, lo, st.unwrap_or_default()));
             }
+            // each truck's MOST-RECENT position+state — fallback when the T1 snapshot doesn't contain
+            // a given truck (captured a frame apart) or for assignments older than the 6-min history.
+            let mut latest_pos: HashMap<String, (f64, f64, String)> = HashMap::new();
+            for trucks in snaps.values() {
+                for (yt, la, lo, st) in trucks {
+                    latest_pos.insert(yt.clone(), (*la, *lo, st.clone()));
+                }
+            }
             // work-pickup coords, computed DIRECTLY from live crane GPS / learned block centroids —
             // NOT from our advisory. This is the key to completeness: every truck TOS assigned gets
             // compared, even works we never recommended for. (We run in parallel — we don't skip a
@@ -3702,21 +3710,30 @@ pub fn spawn_dispatch_compare(lm: Arc<LiveMap>, pool: PgPool) {
                 };
                 let Some((dlat, dlon)) = coord else { continue };
                 let t1 = tos_upd.timestamp_millis();
-                // truck pool at the dispatch instant T1 (precise) — or, for assignments older than our
-                // 6-min position history, the latest snapshot (a "now-estimate", tagged reason='now').
-                let at_t1 = snaps.range(..=t1).next_back();
-                let precise = at_t1.is_some();
-                let Some((_, trucks)) = at_t1.or_else(|| snaps.iter().next_back()) else { continue };
-                // TOS's truck position at T1 → its arrival to the pickup
-                let Some((_, tlat, tlon, _)) = trucks.iter().find(|(yt, _, _, _)| *yt == tos_ytno) else { continue };
-                let tos_arrival = cost(*tlat, *tlon, dlat, dlon);
-                // OUR pick = the available truck (idle/soon-free) closest to the pickup AT T1
+                // PRECISE = the snapshot ≤ T1 exists AND contains the TOS truck → tos + our pool are
+                // read from that same instant (timing-skew-free). Otherwise fall back to each truck's
+                // latest position (a "now-estimate", reason='now') so EVERY assignment still gets a pick.
+                let at_t1 = snaps.range(..=t1).next_back().map(|(_, v)| v);
+                let tos_at_t1 = at_t1.and_then(|tk| tk.iter().find(|(yt, _, _, _)| *yt == tos_ytno).map(|(_, la, lo, _)| (*la, *lo)));
+                let precise = tos_at_t1.is_some();
+                let (tlat, tlon) = match tos_at_t1.or_else(|| latest_pos.get(&tos_ytno).map(|(la, lo, _)| (*la, *lo))) {
+                    Some(p) => p,
+                    None => continue,
+                };
+                let tos_arrival = cost(tlat, tlon, dlat, dlon);
+                // OUR pick = the available (idle/soon-free) truck closest to the pickup — from the same
+                // T1 snapshot when precise, else from the latest per-truck positions.
+                let avail: Vec<(&String, f64, f64, &str)> = if precise {
+                    at_t1.unwrap().iter().map(|(yt, la, lo, st)| (yt, *la, *lo, st.as_str())).collect()
+                } else {
+                    latest_pos.iter().map(|(yt, (la, lo, st))| (yt, *la, *lo, st.as_str())).collect()
+                };
                 let mut best: Option<(String, i64)> = None;
-                for (yt, la, lo, st) in trucks {
-                    if !matches!(st.as_str(), "idle" | "soon_idle" | "approaching" | "wait_rtg") {
+                for (yt, la, lo, st) in avail {
+                    if !matches!(st, "idle" | "soon_idle" | "approaching" | "wait_rtg") {
                         continue;
                     }
-                    let a = cost(*la, *lo, dlat, dlon);
+                    let a = cost(la, lo, dlat, dlon);
                     if best.as_ref().map(|b| a < b.1).unwrap_or(true) {
                         best = Some((yt.clone(), a));
                     }
