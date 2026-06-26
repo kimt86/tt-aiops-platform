@@ -1126,13 +1126,13 @@ pub async fn dispatch_compare(State(pool): State<PgPool>) -> Result<Json<Dispatc
                 count(*) FILTER (WHERE reason='same') AS same_n,
                 count(*) FILTER (WHERE reason='ours_closer') AS ours_closer_n,
                 count(*) FILTER (WHERE reason='tos_closer') AS tos_closer_n
-           FROM dispatch_compare_shadow WHERE ts > now() - interval '24 hours'",
+           FROM dispatch_compare_shadow WHERE ts > now() - interval '24 hours' AND reason <> 'now'",
     )
     .fetch_one(&pool)
     .await?;
     let recent: Vec<CompareRow> = sqlx::query_as(
         "SELECT ts, qc, queuename, jobtype, tos_ytno, tos_arrival_s, our_ytno, our_arrival_s, agree, reason, delta_s
-           FROM dispatch_compare_shadow WHERE ts > now() - interval '24 hours' AND NOT agree
+           FROM dispatch_compare_shadow WHERE ts > now() - interval '24 hours' AND NOT agree AND reason <> 'now'
           ORDER BY ts DESC LIMIT 25",
     )
     .fetch_all(&pool)

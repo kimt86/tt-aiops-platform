@@ -3679,14 +3679,17 @@ pub fn spawn_dispatch_compare(lm: Arc<LiveMap>, pool: PgPool) {
                 let cem = ce.iter().map(|(k, c)| (k.clone(), (c.lat, c.lon))).collect();
                 (cr, cem)
             };
-            // EVERY truck TOS assigned in the last 5 min (one row per bay×truck), not just where we
-            // had a recommendation. 5 min so the truck-position history (6 min) still covers T1.
+            // EVERY truck TOS has assigned that we haven't compared yet (one row per bay×truck). No
+            // time window → covers the whole current backlog, not just the last few minutes.
             let rows = sqlx::query_as::<_, (String, String, String, String, DateTime<Utc>, Option<String>)>(
                 "SELECT DISTINCT ON (w.qc, w.queuename, w.ytno)
                         w.qc, w.queuename, w.jobtype, w.ytno, w.upd_ts, w.yt_topos
                    FROM live_workpool w
                   WHERE w.ytno IS NOT NULL AND w.ytno <> '' AND w.qc IS NOT NULL
-                    AND w.jobtype IN ('DS','LD') AND w.upd_ts > now() - interval '300 seconds'
+                    AND w.jobtype IN ('DS','LD')
+                    AND NOT EXISTS (SELECT 1 FROM dispatch_compare_shadow d
+                                     WHERE d.qc=w.qc AND d.queuename=w.queuename
+                                       AND d.tos_ytno=w.ytno AND d.tos_upd=w.upd_ts)
                   ORDER BY w.qc, w.queuename, w.ytno, w.upd_ts DESC",
             )
             .fetch_all(&pool).await.unwrap_or_default();
@@ -3699,8 +3702,11 @@ pub fn spawn_dispatch_compare(lm: Arc<LiveMap>, pool: PgPool) {
                 };
                 let Some((dlat, dlon)) = coord else { continue };
                 let t1 = tos_upd.timestamp_millis();
-                // the truck pool as it was at/just-before the dispatch instant T1
-                let Some((_, trucks)) = snaps.range(..=t1).next_back() else { continue };
+                // truck pool at the dispatch instant T1 (precise) — or, for assignments older than our
+                // 6-min position history, the latest snapshot (a "now-estimate", tagged reason='now').
+                let at_t1 = snaps.range(..=t1).next_back();
+                let precise = at_t1.is_some();
+                let Some((_, trucks)) = at_t1.or_else(|| snaps.iter().next_back()) else { continue };
                 // TOS's truck position at T1 → its arrival to the pickup
                 let Some((_, tlat, tlon, _)) = trucks.iter().find(|(yt, _, _, _)| *yt == tos_ytno) else { continue };
                 let tos_arrival = cost(*tlat, *tlon, dlat, dlon);
@@ -3718,7 +3724,7 @@ pub fn spawn_dispatch_compare(lm: Arc<LiveMap>, pool: PgPool) {
                 let Some((our_ytno, our_arrival)) = best else { continue };
                 let agree = our_ytno == tos_ytno;
                 let delta = tos_arrival - our_arrival; // + = ours would arrive sooner
-                let reason = if agree { "same" } else if our_arrival < tos_arrival { "ours_closer" } else { "tos_closer" };
+                let reason = if !precise { "now" } else if agree { "same" } else if our_arrival < tos_arrival { "ours_closer" } else { "tos_closer" };
                 let _ = sqlx::query(
                     "INSERT INTO dispatch_compare_shadow
                        (qc,queuename,jobtype,tos_ytno,tos_arrival_s,our_ytno,our_arrival_s,agree,reason,delta_s,tos_upd)
