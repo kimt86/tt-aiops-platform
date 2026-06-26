@@ -320,8 +320,8 @@ function LiveQcSequence({ lang, wp, snap }: { lang: Lang; wp: WorkpoolResponse |
           <label className="qc-pastsel" title={ko(lang) ? "예측(출항·여유·배차 마감, 그림자) 표시 켜고 끄기" : "toggle the forecast overlay (departure·slack·dispatch deadline, shadow)"}>
             <input type="checkbox" checked={showDl} onChange={(e) => setShowDl(e.target.checked)} /> {ko(lang) ? "예측" : "forecast"}
           </label>
-          <label className="qc-pastsel" title={ko(lang) ? "TOS 배정 차량 옆에 우리 배차 권고(🤖 Stage-2) 표시 켜고 끄기" : "toggle our (Stage-2) dispatch pick beside the TOS-assigned truck"}>
-            <input type="checkbox" checked={showOurs} onChange={(e) => setShowOurs(e.target.checked)} /> {ko(lang) ? "🤖 우리 배차" : "🤖 our pick"}
+          <label className="qc-pastsel" title={ko(lang) ? "미배차 행엔 🤖 우리 배차(권고), TOS 배정 행엔 ↔ TOS와 비교(우리라면 누구) 표시 — 켜고 끄기" : "🤖 = our dispatch on pending rows; ↔ = comparison vs TOS on assigned rows"}>
+            <input type="checkbox" checked={showOurs} onChange={(e) => setShowOurs(e.target.checked)} /> {ko(lang) ? "🤖 우리 배차 / ↔ 비교" : "🤖 ours / ↔ vs TOS"}
           </label>
           <span className="muted">{ageS != null ? `⟳ ${ageS}s` : ""}</span>
         </div>
@@ -483,17 +483,25 @@ function QcCol({ q, lang, ttState, working, mph, maxN, showDl, ourRecs, ourPicks
             {(() => {
               const our = recForMove.get(mkey(m));
               if (!our) return null;
-              const agree = our.kind === "cmp" && our.agree === true;
-              const col = agree ? "#34d399" : "#a78bfa";
-              const detail = agree ? "✓" : our.arrival_s != null ? fmtEta(our.arrival_s) : "";
-              const title = our.kind === "cmp"
-                ? (k
-                  ? (agree ? `우리도 같은 트럭 선택 (배차 순간 비교)` : `우리라면 ${our.ytno}${our.delta_s != null ? (our.delta_s > 0 ? ` · ${fmtEta(our.delta_s)} 더 빨리 도착` : ` · ${fmtEta(-our.delta_s)} 더 늦게`) : ""} (배차 순간 비교)`)
-                  : (agree ? `same truck as TOS (at dispatch)` : `we'd pick ${our.ytno}${our.delta_s != null ? (our.delta_s > 0 ? ` · ${fmtEta(our.delta_s)} sooner` : ` · ${fmtEta(-our.delta_s)} later`) : ""}`))
-                : (k ? `우리 배차 권고 (Stage-2): ${our.ytno}${our.arrival_s != null ? ` · 픽업 도착 ${fmtEta(our.arrival_s)}` : ""}` : `our Stage-2 pick: ${our.ytno}`);
+              if (our.kind === "live") {
+                // OUR actual dispatch (on a pending/unassigned work) — prominent purple chip
+                return (
+                  <span className="tt-ours" style={{ display: "inline-flex", alignItems: "center", gap: 3, padding: "0 5px", borderRadius: 4, fontSize: 11, fontWeight: 700, color: "#a78bfa", background: "#a78bfa22", border: "1px solid #a78bfa66" }}
+                    title={k ? `우리 배차: ${our.ytno}${our.arrival_s != null ? ` · 픽업 도착 ${fmtEta(our.arrival_s)}` : ""}` : `our dispatch: ${our.ytno}${our.arrival_s != null ? ` · arrival ${fmtEta(our.arrival_s)}` : ""}`}>
+                    🤖 {our.ytno}{our.arrival_s != null ? <span style={{ color: "var(--text-mute)", fontWeight: 400 }}>{fmtEta(our.arrival_s)}</span> : null}
+                  </span>
+                );
+              }
+              // comparison on a TOS-assigned row — muted ↔ chip, clearly "vs TOS" not our dispatch
+              const agree = our.agree === true;
+              const col = agree ? "#34d399" : "#64748b";
+              const detail = agree ? "✓" : our.delta_s != null ? (our.delta_s > 0 ? `▲${fmtEta(our.delta_s)}` : `▼${fmtEta(-our.delta_s)}`) : "";
+              const title = k
+                ? (agree ? `참고(비교): 우리도 같은 트럭` : `참고(비교): 우리라면 ${our.ytno}${our.delta_s != null ? (our.delta_s > 0 ? ` · ${fmtEta(our.delta_s)} 더 빨리` : ` · ${fmtEta(-our.delta_s)} 더 늦게`) : ""}`)
+                : (agree ? `vs TOS: same truck` : `vs TOS: we'd pick ${our.ytno}`);
               return (
-                <span className="tt-ours" style={{ display: "inline-flex", alignItems: "center", gap: 3, padding: "0 5px", borderRadius: 4, fontSize: 11, fontWeight: 700, color: col, background: `${col}22`, border: `1px solid ${col}66` }} title={title}>
-                  🤖 {our.ytno}{detail ? <span style={{ color: agree ? col : "var(--text-mute)", fontWeight: 400 }}>{detail}</span> : null}
+                <span style={{ display: "inline-flex", alignItems: "center", gap: 2, padding: "0 4px", borderRadius: 4, fontSize: 10, fontWeight: 600, color: col, background: "transparent", border: `1px dashed ${col}66`, opacity: 0.8 }} title={title}>
+                  ↔ {our.ytno}{detail ? <span style={{ fontWeight: 400 }}>{detail}</span> : null}
                 </span>
               );
             })()}
