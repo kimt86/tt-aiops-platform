@@ -3665,19 +3665,39 @@ pub fn spawn_dispatch_compare(lm: Arc<LiveMap>, pool: PgPool) {
             for (t, yt, la, lo, st) in hist {
                 snaps.entry(t.timestamp_millis()).or_default().push((yt, la, lo, st.unwrap_or_default()));
             }
-            // works TOS just assigned (≤120s) that we had a recommendation (→ the work pickup coord)
-            let rows = sqlx::query_as::<_, (String, String, Option<String>, String, DateTime<Utc>, f64, f64)>(
-                "SELECT DISTINCT ON (w.qc, w.queuename)
-                        w.qc, w.queuename, w.jobtype, w.ytno, w.upd_ts, r.dest_lat, r.dest_lon
+            // work-pickup coords, computed DIRECTLY from live crane GPS / learned block centroids —
+            // NOT from our advisory. This is the key to completeness: every truck TOS assigned gets
+            // compared, even works we never recommended for. (We run in parallel — we don't skip a
+            // work just because TOS dispatched it.)
+            let now = Utc::now().timestamp_millis();
+            let (cranes, centroids): (HashMap<String, (f64, f64)>, HashMap<String, (f64, f64)>) = {
+                let map = lm.devices.read().await;
+                let cr = map.iter()
+                    .filter(|(_, p)| matches!(p.cls.as_str(), "C" | "M" | "Z") && (now - p.last_seen_ms) / 1000 <= STALE_AFTER_S)
+                    .map(|(id, p)| (id.clone(), (p.lat, p.lon))).collect();
+                let ce = lm.centroids.read().await;
+                let cem = ce.iter().map(|(k, c)| (k.clone(), (c.lat, c.lon))).collect();
+                (cr, cem)
+            };
+            // EVERY truck TOS assigned in the last 5 min (one row per bay×truck), not just where we
+            // had a recommendation. 5 min so the truck-position history (6 min) still covers T1.
+            let rows = sqlx::query_as::<_, (String, String, String, String, DateTime<Utc>, Option<String>)>(
+                "SELECT DISTINCT ON (w.qc, w.queuename, w.ytno)
+                        w.qc, w.queuename, w.jobtype, w.ytno, w.upd_ts, w.yt_topos
                    FROM live_workpool w
-                   JOIN LATERAL (SELECT dest_lat, dest_lon FROM stage2_match_shadow s
-                                  WHERE s.qc = w.qc AND s.queuename = w.queuename AND s.dest_lat IS NOT NULL
-                                  ORDER BY s.ts DESC LIMIT 1) r ON true
-                  WHERE w.ytno IS NOT NULL AND w.ytno <> '' AND w.upd_ts > now() - interval '120 seconds'
-                  ORDER BY w.qc, w.queuename, w.upd_ts DESC",
+                  WHERE w.ytno IS NOT NULL AND w.ytno <> '' AND w.qc IS NOT NULL
+                    AND w.jobtype IN ('DS','LD') AND w.upd_ts > now() - interval '300 seconds'
+                  ORDER BY w.qc, w.queuename, w.ytno, w.upd_ts DESC",
             )
             .fetch_all(&pool).await.unwrap_or_default();
-            for (qc, queue, jobtype, tos_ytno, tos_upd, dlat, dlon) in rows {
+            for (qc, queue, jobtype, tos_ytno, tos_upd, yt_topos) in rows {
+                // pickup coord: LD = the source block centroid, DS = the QC crane (live or learned)
+                let coord = if jobtype == "LD" {
+                    yt_topos.as_deref().and_then(|t| centroids.get(t).or_else(|| centroids.get(block_prefix(t))).copied())
+                } else {
+                    cranes.get(&qc).or_else(|| centroids.get(&qc)).copied()
+                };
+                let Some((dlat, dlon)) = coord else { continue };
                 let t1 = tos_upd.timestamp_millis();
                 // the truck pool as it was at/just-before the dispatch instant T1
                 let Some((_, trucks)) = snaps.range(..=t1).next_back() else { continue };
