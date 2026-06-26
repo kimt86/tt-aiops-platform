@@ -311,11 +311,16 @@ pub(crate) async fn build_workpool(pool: PgPool) -> Result<WorkpoolOut, AppError
     // moves = containers × (1 − twin_frac/2) per vessel (a twin lift = 2 containers in 1 move);
     // work must finish a buffer before departure; move time per jobtype constant (per-crane below).
     {
+        // ESTDEP (departure) + ESTWKC (all-crane-work-complete) per vessel. ESTWKC is the terminal's
+        // planned finish — often EARLIER than departure — so the real work deadline = the tighter of
+        // the two. Verified vs TOS source (VSB_VOYAGE): both fields are authoritative.
+        let sched: Vec<(String, Option<DateTime<Utc>>, Option<DateTime<Utc>>)> =
+            sqlx::query_as("SELECT vessel, estdep_ts, estwkc_ts FROM live_vessel_schedule WHERE estdep_ts IS NOT NULL")
+                .fetch_all(&pool).await.unwrap_or_default();
         let estdep: std::collections::HashMap<String, DateTime<Utc>> =
-            sqlx::query_as::<_, (String, Option<DateTime<Utc>>)>(
-                "SELECT vessel, estdep_ts FROM live_vessel_schedule WHERE estdep_ts IS NOT NULL")
-                .fetch_all(&pool).await.unwrap_or_default()
-                .into_iter().filter_map(|(v, t)| t.map(|t| (v, t))).collect();
+            sched.iter().filter_map(|(v, d, _)| d.map(|d| (v.clone(), d))).collect();
+        let estwkc: std::collections::HashMap<String, DateTime<Utc>> =
+            sched.iter().filter_map(|(v, _, w)| w.map(|w| (v.clone(), w))).collect();
         // per-vessel twin fraction of remaining containers (from the dispatchable pool) — a proxy
         // for the whole remaining queue. moves ≈ containers × (1 − frac/2).
         let twin_frac: std::collections::HashMap<String, f64> =
@@ -366,6 +371,15 @@ pub(crate) async fn build_workpool(pool: PgPool) -> Result<WorkpoolOut, AppError
             }
             for (vessel, mut idxs) in by_vessel {
                 let Some(&dep) = estdep.get(&vessel) else { continue };
+                // must-finish target = the tighter of (departure − buffer) and ESTWKC. GUARD: this
+                // terminal's ESTWKC is often stale garbage (verified: many vessels show work-complete
+                // DAYS before berthing — impossible), so only trust it when it's a plausible
+                // work-complete time, i.e. 0–6h before departure. Otherwise fall back to departure−buffer.
+                let dep_target = dep - chrono::Duration::seconds(FINISH_BUFFER_S);
+                let finish_by = match estwkc.get(&vessel) {
+                    Some(&w) if w < dep_target && (dep - w) <= chrono::Duration::hours(6) => w,
+                    _ => dep_target,
+                };
                 let twin = twin_frac.get(&vessel).copied().unwrap_or(0.0).clamp(0.0, 1.0);
                 let move_factor = 1.0 - twin / 2.0; // containers → moves
                 idxs.sort_by_key(|&i| qc.queues[i].seq.unwrap_or(i32::MAX));
@@ -395,7 +409,7 @@ pub(crate) async fn build_workpool(pool: PgPool) -> Result<WorkpoolOut, AppError
                 let mut cum_after = 0.0_f64; // work scheduled after bay k
                 for k in (0..idxs.len()).rev() {
                     let qi = idxs[k];
-                    qc.queues[qi].deadline_ts = Some(dep - chrono::Duration::seconds(cum_after as i64));
+                    qc.queues[qi].deadline_ts = Some(finish_by - chrono::Duration::seconds(cum_after as i64));
                     // when the QC starts this bay = now + work scheduled before it (+ DS calibration)
                     let before = (total - cum_after - procs[k]).max(0.0);
                     let job = parse_q(&qc.queues[qi].queuename).map(|c| c.2).unwrap_or('D');
@@ -407,8 +421,8 @@ pub(crate) async fn build_workpool(pool: PgPool) -> Result<WorkpoolOut, AppError
                 if qc.vessels.first().map(|v| v == &vessel).unwrap_or(false) {
                     qc.estdep_ts = Some(dep);
                     qc.work_left_s = Some(total as i64);
-                    // slack vs the must-finish target (departure − buffer); work-ETA stays buffer-free
-                    qc.slack_s = Some((dep - now).num_seconds() - FINISH_BUFFER_S - total as i64);
+                    // slack vs the must-finish target = min(departure − buffer, ESTWKC); work-ETA stays buffer-free
+                    qc.slack_s = Some((finish_by - now).num_seconds() - total as i64);
                 }
             }
         }

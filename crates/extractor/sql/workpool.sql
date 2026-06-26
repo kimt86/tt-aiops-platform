@@ -28,7 +28,8 @@ SELECT
   l.JOB_ODR_YT_TOPOS   AS yt_topos,
   l.CRNT_PSN_IDX_NO1   AS from_pos,
   l.YT_TO_PSN_IDX_NO1  AS to_pos,
-  l.JOB_ODR_TWINTANDEM AS twintandem
+  l.JOB_ODR_TWINTANDEM AS twintandem,
+  l.JOB_ODR_TWINKEY    AS twinkey   -- twin pair grouping: same twinkey = 2 different containers, 1 truck
 FROM TOSADM.JOB_ORDER_LIST l
 WHERE l.JOB_ODR_COMPDATE IS NULL
   AND l.JOB_ODR_JOBTYPE IN ('DS', 'LD')

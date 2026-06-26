@@ -75,6 +75,7 @@ pub struct MoveRow {
     pub from_pos: Option<String>,
     pub to_pos: Option<String>,
     pub twintandem: Option<String>,
+    pub twinkey: Option<String>, // twin pair grouping (same twinkey = 2 containers, 1 truck)
 }
 
 /// Parse an ETW field ("YYYYMMDDHH24MISS[mmm]", terminal MYT) to a UTC instant.
@@ -267,7 +268,8 @@ async fn src_workpool(pool: &PgPool, target: &str, date: chrono::NaiveDate, as_o
         // candidate (unassigned) aggregation: key = (queue, vessel, jobtype, src_block);
         // value = (count, representative rtg). Discharge groups by QC (src_block = None,
         // pickup = the crane); load groups by source block (pickup varies per container).
-        let mut cand: HashMap<(String, String, String, Option<String>), (i64, Option<String>)> =
+        // value = (truck-load count, representative rtg, twinkeys already counted in this bucket)
+        let mut cand: HashMap<(String, String, String, Option<String>), (i64, Option<String>, std::collections::HashSet<String>)> =
             HashMap::new();
 
         let mut tx = pool.begin().await?;
@@ -305,8 +307,14 @@ async fn src_workpool(pool: &PgPool, target: &str, date: chrono::NaiveDate, as_o
                     };
                     let e = cand
                         .entry((r.queuename.clone(), r.vessel.clone(), jt, src_block))
-                        .or_insert((0, None));
-                    e.0 += 1;
+                        .or_insert((0, None, std::collections::HashSet::new()));
+                    // demand = TRUCK-LOADS, not containers: a twin lift (2 containers sharing a
+                    // twinkey) needs ONE truck → count each twinkey once. Non-twin rows (no twinkey)
+                    // count individually. (Verified vs TOS: twinkey is the real twin pairing, not contno.)
+                    let twin_dup = r.twinkey.as_deref().filter(|s| !s.is_empty()).map(|tk| !e.2.insert(tk.to_string())).unwrap_or(false);
+                    if !twin_dup {
+                        e.0 += 1;
+                    }
                     if e.1.is_none() {
                         e.1 = r.armgc.clone().filter(|s| !s.is_empty());
                     }
@@ -331,7 +339,7 @@ async fn src_workpool(pool: &PgPool, target: &str, date: chrono::NaiveDate, as_o
             }
         }
 
-        for ((queuename, vessel, jobtype, src_block), (n, rtg)) in &cand {
+        for ((queuename, vessel, jobtype, src_block), (n, rtg, _seen)) in &cand {
             sqlx::query(
                 "INSERT INTO live_candidate (queuename, vessel, jobtype, src_block, rtg, n, as_of_ts)
                  VALUES ($1,$2,$3,$4,$5,$6,$7)",
