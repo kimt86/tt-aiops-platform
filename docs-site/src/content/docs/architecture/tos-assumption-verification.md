@@ -53,15 +53,15 @@ sidebar:
 
 TOS는 **자체 ITV(트럭) 배차기**(`mover.dispatcher.itv-chooser` + `itv.supervisor.factor/filter`)를 갖고 있어, 그 결정 인자·필터를 우리 비용행렬에 반영할 수 있습니다.
 
-| 우선 | 개선 | 출처(TOS) | 적용 |
+| 우선 | 개선 | 출처(TOS) | 현황 |
 |---|---|---|---|
-| **A** (低노력) | **Lane Affinity 보너스** — 같은 차선/열 연속작업에 비용 보너스 | `SAME_LANE_DUAL_CYCLE` | 비용행렬 (OD 재격자화 중이라 Lane ID만 추가) |
-| **B** (中) | 크레인 부하분산 인자 `1−할당수/최대` | `QcPriorityAppPow` | 비용행렬 (과배정 회피) |
-| **C** (中) | ETW lookahead + committed window(ETW<now+10분 재배정 금지) | `JobPrefetching` | anti-thrash 강화 |
-| **D** (中) | 시간대/크레인별 무브타임(밤낮 ±30%) | `learn_qc_move_time` 이중인덱싱 | 작업ETA 정밀화 |
-| **E** (高) | 특별취급(냉동·위험물·OOG) 제약층 | `Reefer/Hazardous/TwinConstrainer` 필터 | 실배차 거부 감소·안전 |
+| **A** | Lane Affinity 보너스 | `SAME_LANE_DUAL_CYCLE` | ⏭️ **생략** — TOS DualCycle은 적부계획 수준이고, 우리 OD(빈 위치 근접)가 이미 그 효과를 냄 |
+| **B** | 크레인 부하분산 `LOAD_BALANCE 300×미공급도` | `QcPriorityAppPow` | ✅ **구현**(9fb41b3) 비용행렬 보너스 |
+| **C** | committed window(직전 권고 ETW<10분 near-lock) | `JobPrefetching` | ✅ **구현**(9fb41b3) `COMMIT_LOCK 1200` |
+| **D** | 무브타임 shift(주/야)별 + ALL 폴백 | `learn_qc_move_time` | ✅ **구현**(792f37f) 야간 ~10-16% 느림 확인 |
+| **E** | 특별취급(냉동·위험물·OOG) 제약층 | `Reefer/Hazardous` 필터 | ⏸️ **보류** — ITV는 범용 섀시라 트럭선택 제약 거의 없음(특별취급은 야드/크레인 사안). 실배차 롤아웃 시 **특별 컨테이너를 범위에서 제외**하는 게 맞음(별도 추출층 신설은 이득 대비 과도) |
 
-후속 조사 필요: **ACTV_DT 실측보정**(시스템 활성화 시각 vs 물리 핸드오버 분포) — 곧-유휴 예측 정확도를 좌우.
+**ACTV_DT 실측보정 (별도 연구)**: 측정 결과 ACTV_DT는 dispatch(YT_DIS_DT)보다 약 9분 **뒤**(DS 중앙 546초) — 트럭 이동+대기 후 QC 양하 시점에 활성화됨이 정합. 다만 "ACTV vs **물리** 핸드오버 완료" 편차는 **우리 GPS 핸드오버 검출과 짝지어** 측정해야 하는 별도 연구(곧-유휴 정확도 좌우). 빠른 쿼리로는 불가 — 데이터 축적 후 진행.
 
 ## 유지보수
 TOS 추출/해석을 바꾸면 이 문서의 해당 판정도 갱신합니다. 새 가정을 추가하면 **실제 TOS 소스 + 실데이터 양쪽으로** 확인하는 것을 기본으로 합니다(이번에 ESTWKC·yt_topos 모두 코드만 봤으면 틀렸을 것).
