@@ -3716,13 +3716,9 @@ pub fn spawn_dispatch_compare(lm: Arc<LiveMap>, pool: PgPool) {
                 let at_t1 = snaps.range(..=t1).next_back().map(|(_, v)| v);
                 let tos_at_t1 = at_t1.and_then(|tk| tk.iter().find(|(yt, _, _, _)| *yt == tos_ytno).map(|(_, la, lo, _)| (*la, *lo)));
                 let precise = tos_at_t1.is_some();
-                let (tlat, tlon) = match tos_at_t1.or_else(|| latest_pos.get(&tos_ytno).map(|(la, lo, _)| (*la, *lo))) {
-                    Some(p) => p,
-                    None => continue,
-                };
-                let tos_arrival = cost(tlat, tlon, dlat, dlon);
-                // OUR pick = the available (idle/soon-free) truck closest to the pickup — from the same
-                // T1 snapshot when precise, else from the latest per-truck positions.
+                // OUR pick = closest available (idle/soon-free) truck to the pickup. From the T1 snapshot
+                // when precise, else the latest per-truck positions. Computed even if the TOS truck's own
+                // GPS is currently stale (its position only affects the arrival/gap, not our pick).
                 let avail: Vec<(&String, f64, f64, &str)> = if precise {
                     at_t1.unwrap().iter().map(|(yt, la, lo, st)| (yt, *la, *lo, st.as_str())).collect()
                 } else {
@@ -3739,16 +3735,22 @@ pub fn spawn_dispatch_compare(lm: Arc<LiveMap>, pool: PgPool) {
                     }
                 }
                 let Some((our_ytno, our_arrival)) = best else { continue };
+                // TOS truck's arrival (for the gap) — None if its GPS is currently stale (no position)
+                let tos_pos = tos_at_t1.or_else(|| latest_pos.get(&tos_ytno).map(|(la, lo, _)| (*la, *lo)));
+                let tos_arrival: Option<i64> = tos_pos.map(|(tl, to)| cost(tl, to, dlat, dlon));
                 let agree = our_ytno == tos_ytno;
-                let delta = tos_arrival - our_arrival; // + = ours would arrive sooner
-                let reason = if !precise { "now" } else if agree { "same" } else if our_arrival < tos_arrival { "ours_closer" } else { "tos_closer" };
+                let delta: Option<i64> = tos_arrival.map(|t| t - our_arrival); // + = ours sooner
+                let reason = if !precise { "now" }
+                    else if agree { "same" }
+                    else if tos_arrival.map(|t| our_arrival < t).unwrap_or(false) { "ours_closer" }
+                    else { "tos_closer" };
                 let _ = sqlx::query(
                     "INSERT INTO dispatch_compare_shadow
                        (qc,queuename,jobtype,tos_ytno,tos_arrival_s,our_ytno,our_arrival_s,agree,reason,delta_s,tos_upd)
                      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) ON CONFLICT (qc,queuename,tos_ytno,tos_upd) DO NOTHING",
                 )
-                .bind(&qc).bind(&queue).bind(&jobtype).bind(&tos_ytno).bind(tos_arrival as i32)
-                .bind(&our_ytno).bind(our_arrival as i32).bind(agree).bind(reason).bind(delta as i32).bind(tos_upd)
+                .bind(&qc).bind(&queue).bind(&jobtype).bind(&tos_ytno).bind(tos_arrival.map(|x| x as i32))
+                .bind(&our_ytno).bind(our_arrival as i32).bind(agree).bind(reason).bind(delta.map(|x| x as i32)).bind(tos_upd)
                 .execute(&pool).await;
             }
             let _ = sqlx::query("DELETE FROM dispatch_compare_shadow WHERE ts < now() - interval '21 days'").execute(&pool).await;
