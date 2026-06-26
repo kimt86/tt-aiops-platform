@@ -3215,6 +3215,11 @@ fn grid225(lat: f64, lon: f64) -> String {
 // anti-thrash: a vehicle keeps its previous-tick work bucket unless another is >= this many
 // arrival-seconds cheaper. Damps reassignment from small OD/GPS noise.
 const SWITCH_PENALTY_S: i64 = 180;
+// committed window (anti-thrash, TOS prefetch "early-decide, stable-execute"): once a truck's prior
+// recommendation is on the verge of dispatch (its work-ETA within this window), switching it away
+// costs COMMIT_LOCK_S — a near-lock so GPS jitter can't flip an about-to-go truck off its work.
+const COMMIT_WINDOW_MS: i64 = 600_000; // 10 min
+const COMMIT_LOCK_S: i64 = 1200;
 // deadline-awareness: a work bucket due sooner gets a cost reward, ramped from 0 at the horizon to
 // the base when due now and KEEPING to climb (to the cap) for OVERDUE work — so the solver can still
 // rank the many already-late buckets (74% of demand) by how far behind they are, not lump them.
@@ -3225,6 +3230,10 @@ const URGENCY_HORIZON_S: i64 = 1800;
 // trucks go to the starving cranes (mostly discharge) instead of merely-nearby load work. This ties
 // the matcher to the live starvation signal (qc_wait_qc_sample), not just the work-ETA prediction.
 const STARVE_BONUS_S: i64 = 1500;
+// graded load-balance pull (TOS QcPriorityAppPow analog): a work's QC that is under-supplied vs its
+// truck need gets up to this bonus, scaled by how empty it is. A soft tiebreaker (≪ urgency/starve)
+// that spreads trucks across cranes; full/over-supplied cranes get 0.
+const LOAD_BALANCE_S: i64 = 300;
 // per-container QC handling time (for the bucket's service window + the needed-trucks cap)
 const DS_MOVE_S: i64 = 90;
 const LD_MOVE_S: i64 = 110;
@@ -3400,6 +3409,14 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                 "SELECT DISTINCT qc FROM qc_wait_qc_sample WHERE ts > now() - interval '90 seconds' AND starving_real",
             )
             .fetch_all(&pool).await.unwrap_or_default().into_iter().collect();
+            // per-QC trucks currently assigned (live state) → graded load-balancing (TOS QcPriorityAppPow:
+            // a crane under-supplied relative to its need gets a pull, so trucks spread across cranes
+            // instead of piling onto one). Distinct ytno = twin counts once.
+            let qc_load: HashMap<String, i64> = sqlx::query_as::<_, (String, i64)>(
+                "SELECT qc, count(DISTINCT ytno) FROM live_workpool
+                  WHERE ytno IS NOT NULL AND ytno <> '' AND qc IS NOT NULL GROUP BY qc",
+            )
+            .fetch_all(&pool).await.unwrap_or_default().into_iter().collect();
             // candidate vehicles: idle (free now) + soon-free; committed/moving (delivering/empty) skipped
             let vehicles: Vec<(String, f64, f64, i64, &'static str)> = {
                 let map = lm.devices.read().await;
@@ -3499,6 +3516,10 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                 order = kept;
             }
             let now_s = now / 1000;
+            // (qc,vessel,queuename) → work-ETA ms, for the committed-window check on prior recommendations
+            let eta_by_key: HashMap<(String, String, String), i64> = work.iter()
+                .filter_map(|w| w.work_eta_ts.map(|e| ((w.qc.clone(), w.vessel.clone(), w.queuename.clone()), e.timestamp_millis())))
+                .collect();
             // QC layer: a crane consumes trucks at ~horizon/move-time regardless of how many buckets
             // it has → cap by QC, not by bucket (else a multi-bucket crane hoards trucks).
             let mut qc_idx: HashMap<String, usize> = HashMap::new();
@@ -3539,13 +3560,27 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                 if starving.contains(&w.qc) {
                     bonus += STARVE_BONUS_S;
                 }
+                // graded load-balance: under-supplied crane (current trucks < its need cap) gets a soft
+                // pull ∝ how empty it is → spreads trucks; full/over-supplied → 0.
+                let cur_load = qc_load.get(&w.qc).copied().unwrap_or(0);
+                let under = ((qc_cap - cur_load) as f64 / qc_cap as f64).clamp(0.0, 1.0);
+                bonus += (LOAD_BALANCE_S as f64 * under) as i64;
                 let mut row = Vec::with_capacity(vehicles.len());
                 for (vi, v) in vehicles.iter().enumerate() {
                     let (p50, p90, tier) = cost(v.1, v.2, wlat, wlon);
                     let arr = v.3 + p50; // empty travel to the pickup
-                    let switched = prev.get(&v.0).map(|pk| pk != &this_key).unwrap_or(false);
+                    let prevk = prev.get(&v.0);
+                    let switched = prevk.map(|pk| pk != &this_key).unwrap_or(false);
+                    // committed window: if this truck's PRIOR work is on the verge of dispatch, switching
+                    // it away is near-locked (COMMIT_LOCK_S); otherwise the normal switch penalty.
+                    let switch_pen = if switched {
+                        let prev_imminent = prevk.and_then(|pk| eta_by_key.get(pk)).map(|&e| e - now < COMMIT_WINDOW_MS).unwrap_or(false);
+                        if prev_imminent { COMMIT_LOCK_S } else { SWITCH_PENALTY_S }
+                    } else {
+                        0
+                    };
                     if arr < 1800 {
-                        let eff = arr + if switched { SWITCH_PENALTY_S } else { 0 } - bonus;
+                        let eff = arr + switch_pen - bonus;
                         edges.push((vi, wpos, eff)); // prune the far tail (never in the optimum)
                     }
                     row.push((arr, v.3 + p90, tier, switched));
