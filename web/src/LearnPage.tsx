@@ -10,7 +10,7 @@ const ko = (lang: Lang) => lang === "ko";
 const fmtN = (n: number) => n.toLocaleString();
 const mPrec = (m: number | null | undefined) => (m == null ? "—" : `${m.toFixed(1)}m`);
 const stamp = (iso: string | null | undefined) =>
-  iso ? new Date(iso).toLocaleString([], { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false }) : "—";
+  iso ? new Date(iso).toLocaleString([], { timeZone: "Asia/Kuala_Lumpur", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false }) : "—";
 const mmss = (s: number | null | undefined) => (s == null ? "—" : `${Math.floor(s / 60)}:${String(Math.round(s % 60)).padStart(2, "0")}`);
 const mDist = (m: number | null | undefined) => (m == null ? "—" : m >= 1000 ? `${(m / 1000).toFixed(2)}km` : `${Math.round(m)}m`);
 const kmh = (v: number | null | undefined) => (v == null ? "—" : `${v.toFixed(1)}`);

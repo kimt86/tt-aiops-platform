@@ -9,7 +9,7 @@ const ko = (l: Lang) => l === "ko";
 const pct = (v: number | null | undefined) => (v == null ? "—" : `${v.toFixed(0)}%`);
 const mmss = (s: number | null | undefined) => (s == null ? "—" : `${Math.floor(s / 60)}:${String(Math.round(s % 60)).padStart(2, "0")}`);
 const signMin = (s: number | null | undefined) => (s == null ? "—" : `${s >= 0 ? "+" : ""}${(s / 60).toFixed(1)}`);
-const hhmm = (iso: string) => new Date(iso).toLocaleTimeString("en-GB", { timeZone: "Asia/Seoul", hour12: false });
+const hhmm = (iso: string) => new Date(iso).toLocaleTimeString("en-GB", { timeZone: "Asia/Kuala_Lumpur", hour12: false }); // MYT (terminal local)
 
 function Chip({ label, value, accent }: { label: string; value: string; accent?: string }) {
   return (

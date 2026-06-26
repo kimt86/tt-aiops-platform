@@ -162,7 +162,7 @@ export default function FeedHealthPage({ lang }: { lang: Lang }) {
           <Kv k={ko ? "시동 ON" : "engine on"} v={`${h.engine_on} / ${active}`} />
           <Kv k={ko ? "작업 배정" : "with job"} v={`${h.with_job} / ${active}`} />
           <Kv k={ko ? "평균 GPS 정확도" : "avg gps acc"} v={h.avg_accuracy_m != null ? `${h.avg_accuracy_m} m` : "—"} mono />
-          <Kv k={ko ? "최근 수신 시각" : "last at"} v={h.last_message_at ? new Date(h.last_message_at).toLocaleTimeString() : "—"} mono />
+          <Kv k={ko ? "최근 수신 시각" : "last at"} v={h.last_message_at ? new Date(h.last_message_at).toLocaleTimeString("en-GB", { timeZone: "Asia/Kuala_Lumpur", hour12: false }) : "—"} mono />
         </div>
       </div>
     </div>

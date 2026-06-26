@@ -77,7 +77,7 @@ function fmtRel(sec: number): string {
 
 // HH:MM clock in the terminal/user TZ.
 function clockOf(ts: string | null | undefined, ko: boolean): string | null {
-  return ts ? new Date(ts).toLocaleTimeString(ko ? "ko-KR" : "en-US", { hour: "2-digit", minute: "2-digit", hour12: false }) : null;
+  return ts ? new Date(ts).toLocaleTimeString(ko ? "ko-KR" : "en-US", { timeZone: "Asia/Kuala_Lumpur", hour: "2-digit", minute: "2-digit", hour12: false }) : null;
 }
 // "MM-DD HH:MM" — departure can fall on a different day, so include the date.
 function dayClockOf(ts: string | null | undefined, ko: boolean): string | null {

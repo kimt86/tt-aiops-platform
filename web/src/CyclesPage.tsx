@@ -91,7 +91,7 @@ const mmss = (s: number | null | undefined) =>
   s == null ? "—" : `${Math.floor(s / 60)}:${String(Math.round(s % 60)).padStart(2, "0")}`;
 const km2 = (m: number | null | undefined) => (m == null ? "—" : (m / 1000).toFixed(2));
 const hhmm = (iso: string | null | undefined) =>
-  iso ? new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false }) : "—";
+  iso ? new Date(iso).toLocaleTimeString([], { timeZone: "Asia/Kuala_Lumpur", hour: "2-digit", minute: "2-digit", hour12: false }) : "—";
 
 const RANGES = [
   { h: 1, ko: "1시간", en: "1h" },
