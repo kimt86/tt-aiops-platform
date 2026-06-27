@@ -271,6 +271,11 @@ export interface FairCompare {
   ts: string; window_min: number; n: number; tos_total_s: number; our_total_s: number; savings_pct: number; same_n: number;
 }
 export interface FairCompareOut { latest: FairCompare | null; avg_savings_pct: number | null; recent: FairCompare[]; }
+export interface FairBucket { key: string; pairs: number; savings_pct: number | null; worse_pct: number | null; }
+export interface FairBreakdown {
+  by_job: FairBucket[]; by_hour: FairBucket[]; by_dist: FairBucket[]; by_crane: FairBucket[];
+  pairs: number; worse_pct: number | null; same_pct: number | null; median_save_s: number | null; mean_save_s: number | null;
+}
 
 async function get<T>(path: string): Promise<T> {
   const r = await fetch(path);
@@ -304,6 +309,7 @@ export const api = {
   stage2WorkPoints: () => get<WorkPoint[]>("/api/stage2/work-points"),
   dispatchCompare: () => get<DispatchCompare>("/api/stage2/compare"),
   stage2FairCompare: () => get<FairCompareOut>("/api/stage2/fair-compare"),
+  stage2FairBreakdown: () => get<FairBreakdown>("/api/stage2/fair-breakdown"),
   livemapWharf: () => get<WharfPoint[]>("/api/livemap/wharf"),
   healthDispatch: () => get<HealthDispatch>("/api/health/dispatch"),
 };

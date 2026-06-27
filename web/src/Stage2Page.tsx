@@ -20,11 +20,41 @@ function Chip({ label, value, accent }: { label: string; value: string; accent?:
   );
 }
 
+// one breakdown dimension as diverging savings bars (green right = we save, red left = we're worse)
+function BdGroup({ title, rows }: { title: string; rows: import("./api").FairBucket[] }) {
+  return (
+    <div className="ls-card" style={{ padding: 8 }}>
+      <div style={{ fontWeight: 600, fontSize: 12, marginBottom: 6 }}>{title}</div>
+      {rows.length === 0
+        ? <div style={{ fontSize: 11, color: "#888" }}>—</div>
+        : rows.map((r) => {
+            const sv = r.savings_pct ?? 0;
+            const pos = sv >= 0;
+            const half = Math.min(Math.abs(sv), 50) / 2; // bar half-width %, capped at ±50%
+            return (
+              <div key={r.key} title={`절감 ${sv.toFixed(0)}% · ${r.pairs}짝 · 우리가 더 나쁨 ${(r.worse_pct ?? 0).toFixed(0)}%`}
+                   style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 3, fontSize: 11 }}>
+                <div style={{ width: 86, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{r.key}</div>
+                <div style={{ flex: 1, height: 12, background: "#1f2937", borderRadius: 3, position: "relative", overflow: "hidden" }}>
+                  <div style={{ position: "absolute", left: pos ? "50%" : `${50 - half}%`, width: `${half}%`, height: "100%", background: pos ? "#34d399" : "#ef4444" }} />
+                  <div style={{ position: "absolute", left: "50%", top: 0, bottom: 0, width: 1, background: "#4b5563" }} />
+                </div>
+                <div style={{ width: 64, textAlign: "right", color: pos ? "#34d399" : "#ef4444" }}>
+                  {sv.toFixed(0)}%<span style={{ color: "#9ca3af" }}> ·{r.pairs}</span>
+                </div>
+              </div>
+            );
+          })}
+    </div>
+  );
+}
+
 export default function Stage2Page({ lang }: { lang: Lang }) {
   const k = ko(lang);
   const [d, setD] = useState<Stage2Shadow | null>(null);
   const [cmp, setCmp] = useState<DispatchCompare | null>(null);
   const [fair, setFair] = useState<import("./api").FairCompareOut | null>(null);
+  const [bd, setBd] = useState<import("./api").FairBreakdown | null>(null);
   const [err, setErr] = useState(false);
   useEffect(() => {
     let alive = true;
@@ -32,6 +62,7 @@ export default function Stage2Page({ lang }: { lang: Lang }) {
       api.stage2Shadow().then((r) => { if (alive) { setD(r); setErr(false); } }).catch(() => alive && setErr(true));
       api.dispatchCompare().then((r) => { if (alive) setCmp(r); }).catch(() => {});
       api.stage2FairCompare().then((r) => { if (alive) setFair(r); }).catch(() => {});
+      api.stage2FairBreakdown().then((r) => { if (alive) setBd(r); }).catch(() => {});
     };
     poll();
     const iv = setInterval(poll, 15000);
@@ -71,6 +102,30 @@ export default function Stage2Page({ lang }: { lang: Lang }) {
           </div>
         );
       })()}
+
+      {/* ── VALUE BREAKDOWN: where the saving comes from + bias check (is the headline trustworthy?) ── */}
+      {bd && bd.pairs > 0 && (
+        <div style={{ marginBottom: 14 }}>
+          <div className="area-divider"><span>{k ? "가치 입증 — 절감의 출처와 신뢰성 (최근 24h)" : "Value breakdown — where it comes from (24h)"}</span></div>
+          <div className="ls-chips" style={{ marginBottom: 8 }}>
+            <Chip label={k ? "표본 (짝)" : "pairs"} value={String(bd.pairs)} accent="#60a5fa" />
+            <Chip label={k ? "우리가 더 나쁨" : "we're worse"} value={pct(bd.worse_pct)} accent={(bd.worse_pct ?? 0) > 20 ? "#f59e0b" : "#34d399"} />
+            <Chip label={k ? "TOS와 동일 선택" : "same as TOS"} value={pct(bd.same_pct)} accent="#a3a3a3" />
+            <Chip label={k ? "짝당 절감 (중앙)" : "median save/pair"} value={bd.median_save_s != null ? mmss(bd.median_save_s) : "—"} accent="#34d399" />
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(250px,1fr))", gap: 10 }}>
+            <BdGroup title={k ? "거리대별 — 이득의 출처" : "by distance — source of the win"} rows={bd.by_dist} />
+            <BdGroup title={k ? "작업유형별" : "by jobtype"} rows={bd.by_job.map((r) => ({ ...r, key: jobKo(r.key) }))} />
+            <BdGroup title={k ? "시간대별 (MYT)" : "by hour (MYT)"} rows={bd.by_hour} />
+            <BdGroup title={k ? "크레인별 (상위 표본)" : "by crane (top sample)"} rows={bd.by_crane} />
+          </div>
+          <div className="ls-note" style={{ marginTop: 8 }}>
+            {k
+              ? "ⓘ 절감은 거의 전부 원거리에서 나옵니다 — TOS가 트럭을 긴 공차주행 보낸 경우를 우리가 더 가까운 트럭으로 교체. 단거리는 TOS가 이미 좋아 우리가 살짝 나쁠 수 있고, 그게 '우리가 더 나쁨' 비율(꼬리)입니다. 짝별 1:1·같은 순간 유휴 풀로 정직하게 측정. 막대: 초록=우리 절감, 빨강=우리가 더 나쁨(±50% 상한)."
+              : "ⓘ savings come almost entirely from far hauls (we replace TOS's long empty drives with a closer truck). On short hauls TOS is already good and we can be marginally worse — that's the 'worse' tail. Honest per-pair 1:1, same-instant pool."}
+          </div>
+        </div>
+      )}
 
       {/* ── reference: per-work "closest truck" (optimistic — double-books the nearest truck) ── */}
       <div className="area-divider"><span>{k ? "참고 — 각 작업 최근접 (낙관적)" : "Reference — per-work closest (optimistic)"}</span></div>

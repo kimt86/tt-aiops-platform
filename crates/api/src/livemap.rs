@@ -3863,7 +3863,7 @@ pub fn spawn_fair_compare(lm: Arc<LiveMap>, pool: PgPool) {
             // idle at the SAME instant form a valid pool to re-match — pooling trucks across different
             // times would hand the optimum an unreal pick (a truck that was only free at another moment).
             // Truck position = its position in THAT snapshot, so every batch is instant-consistent.
-            let mut groups: HashMap<i64, Vec<((f64, f64), (f64, f64))>> = HashMap::new();
+            let mut groups: HashMap<i64, Vec<((f64, f64), (f64, f64), String, String)>> = HashMap::new();
             let mut considered = 0usize;
             for (qc, _queue, jobtype, ytno, upd, yt_topos) in rows {
                 if considered >= MAX_N {
@@ -3884,58 +3884,62 @@ pub fn spawn_fair_compare(lm: Arc<LiveMap>, pool: PgPool) {
                 // group into 60-second buckets ≈ "the same operational moment" — trucks dispatched
                 // within the same minute are an ~simultaneous pool to re-match (no cross-time pooling).
                 let bucket = t1 / 60_000;
-                groups.entry(bucket).or_default().push((tp, wc));
+                groups.entry(bucket).or_default().push((tp, wc, jobtype, qc));
                 considered += 1;
             }
-            // per-instant optimal permutation (min-cost perfect matching), summed across instants
+            // per-instant optimal permutation (min-cost perfect matching), summed across instants.
+            // Also record per-pair detail: each truck's TOS cost (diagonal) vs our re-matched cost,
+            // tagged by its TOS work's jobtype/crane → for breakdown + bias analysis.
             let mut n = 0i32;
             let mut tos_total = 0i64;
             let mut our_total = 0i64;
             let mut same = 0i32;
+            let mut det: Vec<(String, String, i32, i32)> = Vec::new(); // (jobtype, qc, tos_s, our_s)
             for batch in groups.values() {
                 let m = batch.len();
                 if m == 0 {
                     continue;
                 }
                 n += m as i32;
-                for (tp, wc) in batch {
-                    tos_total += cost(tp.0, tp.1, wc.0, wc.1);
+                let tos_each: Vec<i64> = batch.iter().map(|(tp, wc, _, _)| cost(tp.0, tp.1, wc.0, wc.1)).collect();
+                for &c in &tos_each {
+                    tos_total += c;
                 }
-                if m == 1 {
-                    let (tp, wc) = &batch[0];
-                    our_total += cost(tp.0, tp.1, wc.0, wc.1);
-                    same += 1;
-                    continue;
-                }
-                let (s, t) = (0usize, 2 * m + 1);
-                let mut g = Mcmf::new(2 * m + 2);
-                for i in 0..m {
-                    g.add(s, 1 + i, 1, 0);
-                    g.add(1 + m + i, t, 1, 0);
-                }
-                for i in 0..m {
-                    for j in 0..m {
-                        let c = cost(batch[i].0 .0, batch[i].0 .1, batch[j].1 .0, batch[j].1 .1);
-                        g.add(1 + i, 1 + m + j, 1, c);
+                // σ(i) = the work our matching gives truck i (identity for singletons/infeasible)
+                let mut sigma: Vec<usize> = (0..m).collect();
+                if m > 1 {
+                    let (s, t) = (0usize, 2 * m + 1);
+                    let mut g = Mcmf::new(2 * m + 2);
+                    for i in 0..m {
+                        g.add(s, 1 + i, 1, 0);
+                        g.add(1 + m + i, t, 1, 0);
                     }
-                }
-                let (gc, flow) = g.run(s, t);
-                if (flow as usize) < m {
-                    for (tp, wc) in batch { our_total += cost(tp.0, tp.1, wc.0, wc.1); }
-                    same += m as i32;
-                    continue;
-                }
-                our_total += gc;
-                for i in 0..m {
-                    for &e in &g.head[1 + i] {
-                        let v = g.to[e];
-                        if v >= 1 + m && v < 1 + 2 * m && g.cap[e] == 0 {
-                            if v - (1 + m) == i {
-                                same += 1;
-                            }
-                            break;
+                    for i in 0..m {
+                        for j in 0..m {
+                            let c = cost(batch[i].0 .0, batch[i].0 .1, batch[j].1 .0, batch[j].1 .1);
+                            g.add(1 + i, 1 + m + j, 1, c);
                         }
                     }
+                    let (_gc, flow) = g.run(s, t);
+                    if (flow as usize) >= m {
+                        for i in 0..m {
+                            for &e in &g.head[1 + i] {
+                                let v = g.to[e];
+                                if v >= 1 + m && v < 1 + 2 * m && g.cap[e] == 0 {
+                                    sigma[i] = v - (1 + m);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+                for i in 0..m {
+                    let our_s = cost(batch[i].0 .0, batch[i].0 .1, batch[sigma[i]].1 .0, batch[sigma[i]].1 .1);
+                    our_total += our_s;
+                    if sigma[i] == i {
+                        same += 1;
+                    }
+                    det.push((batch[i].2.clone(), batch[i].3.clone(), tos_each[i] as i32, our_s as i32));
                 }
             }
             if n < 4 {
@@ -3949,6 +3953,20 @@ pub fn spawn_fair_compare(lm: Arc<LiveMap>, pool: PgPool) {
             .bind(WINDOW_MIN as i32).bind(n as i32).bind(tos_total).bind(our_total).bind(savings).bind(same)
             .execute(&pool).await;
             let _ = sqlx::query("DELETE FROM fair_compare_shadow WHERE ts < now() - interval '21 days'").execute(&pool).await;
+            // per-pair detail for breakdown/bias analysis (bulk insert via UNNEST)
+            if !det.is_empty() {
+                let jts: Vec<String> = det.iter().map(|d| d.0.clone()).collect();
+                let qcs: Vec<String> = det.iter().map(|d| d.1.clone()).collect();
+                let toss: Vec<i32> = det.iter().map(|d| d.2).collect();
+                let ours: Vec<i32> = det.iter().map(|d| d.3).collect();
+                let _ = sqlx::query(
+                    "INSERT INTO fair_compare_detail (jobtype, qc, tos_s, our_s)
+                     SELECT * FROM UNNEST($1::text[], $2::text[], $3::int[], $4::int[])",
+                )
+                .bind(&jts).bind(&qcs).bind(&toss).bind(&ours)
+                .execute(&pool).await;
+                let _ = sqlx::query("DELETE FROM fair_compare_detail WHERE ts < now() - interval '7 days'").execute(&pool).await;
+            }
         }
     });
 }

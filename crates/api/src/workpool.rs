@@ -1170,6 +1170,61 @@ pub async fn stage2_fair_compare(State(pool): State<PgPool>) -> Result<Json<Fair
     Ok(Json(FairCompareOut { latest, avg_savings_pct, recent }))
 }
 
+#[derive(Serialize, sqlx::FromRow)]
+pub struct FairBucket {
+    key: String,
+    pairs: i64,
+    savings_pct: Option<f64>, // % empty-travel saved (Σtos−Σour)/Σtos
+    worse_pct: Option<f64>,   // % of pairs where OUR matching is worse than TOS (bias check)
+}
+#[derive(Serialize)]
+pub struct FairBreakdown {
+    by_job: Vec<FairBucket>,
+    by_hour: Vec<FairBucket>,
+    by_dist: Vec<FairBucket>,
+    by_crane: Vec<FairBucket>,
+    pairs: i64,
+    worse_pct: Option<f64>,     // overall % of pairs we make worse
+    same_pct: Option<f64>,      // overall % identical to TOS
+    median_save_s: Option<f64>, // per-pair median saving (robust to outliers)
+    mean_save_s: Option<f64>,
+}
+
+/// `GET /api/stage2/fair-breakdown` — breaks the headline empty-travel saving down by jobtype, hour,
+/// distance tier and crane, plus bias stats (% of pairs we make WORSE, median per-pair saving) so the
+/// ~25% number can be trusted, not taken on faith. Over the last 24h of per-pair fair-compare detail.
+pub async fn stage2_fair_breakdown(State(pool): State<PgPool>) -> Result<Json<FairBreakdown>, AppError> {
+    // shared aggregate columns; only the GROUP key expression changes per dimension
+    const COLS: &str = "count(*) AS pairs,
+        round((100.0*(sum(tos_s)-sum(our_s))/nullif(sum(tos_s),0))::numeric,1)::float8 AS savings_pct,
+        round((100.0*count(*) FILTER (WHERE our_s>tos_s)/count(*))::numeric,1)::float8 AS worse_pct";
+    let win = "ts > now() - interval '24 hours'";
+    let by_job: Vec<FairBucket> = sqlx::query_as(&format!(
+        "SELECT jobtype AS key, {COLS} FROM fair_compare_detail WHERE {win} GROUP BY jobtype ORDER BY jobtype"
+    )).fetch_all(&pool).await?;
+    let by_hour: Vec<FairBucket> = sqlx::query_as(&format!(
+        "SELECT lpad((extract(hour FROM ts AT TIME ZONE 'Asia/Kuala_Lumpur'))::int::text,2,'0') AS key, {COLS}
+           FROM fair_compare_detail WHERE {win} GROUP BY 1 ORDER BY 1"
+    )).fetch_all(&pool).await?;
+    let by_dist: Vec<FairBucket> = sqlx::query_as(&format!(
+        "SELECT CASE WHEN tos_s<120 THEN '1·근거리 <2분' WHEN tos_s<300 THEN '2·중거리 2-5분' ELSE '3·원거리 >5분' END AS key,
+           {COLS} FROM fair_compare_detail WHERE {win} GROUP BY 1 ORDER BY 1"
+    )).fetch_all(&pool).await?;
+    let by_crane: Vec<FairBucket> = sqlx::query_as(&format!(
+        "SELECT qc AS key, {COLS} FROM fair_compare_detail WHERE {win} GROUP BY qc ORDER BY count(*) DESC LIMIT 12"
+    )).fetch_all(&pool).await?;
+    let (pairs, worse_pct, same_pct, median_save_s, mean_save_s): (i64, Option<f64>, Option<f64>, Option<f64>, Option<f64>) =
+        sqlx::query_as(&format!(
+            "SELECT count(*),
+               round((100.0*count(*) FILTER (WHERE our_s>tos_s)/nullif(count(*),0))::numeric,1)::float8,
+               round((100.0*count(*) FILTER (WHERE our_s=tos_s)/nullif(count(*),0))::numeric,1)::float8,
+               (percentile_cont(0.5) WITHIN GROUP (ORDER BY (tos_s-our_s)))::float8,
+               round(avg(tos_s-our_s)::numeric,0)::float8
+             FROM fair_compare_detail WHERE {win}"
+        )).fetch_one(&pool).await?;
+    Ok(Json(FairBreakdown { by_job, by_hour, by_dist, by_crane, pairs, worse_pct, same_pct, median_save_s, mean_save_s }))
+}
+
 /// `GET /api/stage2/compare` — TOS's actual dispatch vs our recommendation, per work: divergence
 /// rate, who'd arrive sooner, the performance gap, reason breakdown, and recent divergence examples.
 pub async fn dispatch_compare(State(pool): State<PgPool>) -> Result<Json<DispatchCompareOut>, AppError> {
