@@ -3220,20 +3220,9 @@ const SWITCH_PENALTY_S: i64 = 180;
 // costs COMMIT_LOCK_S — a near-lock so GPS jitter can't flip an about-to-go truck off its work.
 const COMMIT_WINDOW_MS: i64 = 600_000; // 10 min
 const COMMIT_LOCK_S: i64 = 1200;
-// deadline-awareness: a work bucket due sooner gets a cost reward, ramped from 0 at the horizon to
-// the base when due now and KEEPING to climb (to the cap) for OVERDUE work — so the solver can still
-// rank the many already-late buckets (74% of demand) by how far behind they are, not lump them.
-const URGENCY_BONUS_S: i64 = 600; // reward when due exactly now
-const URGENCY_BONUS_MAX_S: i64 = 1000; // ceiling — most-overdue work
-const URGENCY_HORIZON_S: i64 = 1800;
-// a crane that is ACTUALLY stuck right now (idle, work pending, no truck) gets a decisive pull so
-// trucks go to the starving cranes (mostly discharge) instead of merely-nearby load work. This ties
-// the matcher to the live starvation signal (qc_wait_qc_sample), not just the work-ETA prediction.
-const STARVE_BONUS_S: i64 = 1500;
-// graded load-balance pull (TOS QcPriorityAppPow analog): a work's QC that is under-supplied vs its
-// truck need gets up to this bonus, scaled by how empty it is. A soft tiebreaker (≪ urgency/starve)
-// that spreads trucks across cranes; full/over-supplied cranes get 0.
-const LOAD_BALANCE_S: i64 = 300;
+// NOTE: urgency / starvation / load-balance are NOT cost-matrix terms — Stage 2 is pure empty-travel
+// efficiency. Urgency is decided in Stage 1 (work-pool ordering: starving cranes first, then deadline)
+// and the per-crane truck cap (NEED_HORIZON/move) bounds demand there. See spawn_stage2_shadow.
 // per-container QC handling time (for the bucket's service window + the needed-trucks cap)
 const DS_MOVE_S: i64 = 90;
 const LD_MOVE_S: i64 = 110;
@@ -3328,26 +3317,22 @@ impl Mcmf {
     }
 }
 
-/// Optimal min-cost assignment, four layers: source → truck (cap 1) → bucket (cost = effective edge)
-/// → QC (cap = how many trucks the crane can consume in the horizon) → sink. The QC layer is the real
-/// "needed trucks" cap — a crane works through ALL its buckets sequentially, so capping per bucket
-/// would let a multi-bucket QC hoard trucks. Returns the chosen (truck, bucket-pos) pairs.
+/// Optimal min-cost assignment (PURE efficiency), three layers: source → truck (cap 1) → bucket
+/// (cost = empty-travel edge) → sink (cap = the bucket's Stage-1-capped demand). The per-crane cap is
+/// already baked into the bucket demand by Stage 1, so no QC layer is needed here. Returns the chosen
+/// (truck, bucket-pos) pairs.
 fn optimal_assign(
     n_trucks: usize,
     bucket_caps: &[i64],
-    bucket_qc: &[usize],
-    qc_caps: &[i64],
     edges: &[(usize, usize, i64)],
 ) -> Vec<(usize, usize)> {
     let b = bucket_caps.len();
-    let nq = qc_caps.len();
-    if n_trucks == 0 || b == 0 || nq == 0 {
+    if n_trucks == 0 || b == 0 {
         return Vec::new();
     }
     let trucks0 = 1usize;
     let buckets0 = 1 + n_trucks;
-    let qcs0 = 1 + n_trucks + b;
-    let t = 1 + n_trucks + b + nq;
+    let t = 1 + n_trucks + b;
     let mut g = Mcmf::new(t + 1);
     for i in 0..n_trucks {
         g.add(0, trucks0 + i, 1, 0);
@@ -3357,12 +3342,7 @@ fn optimal_assign(
     }
     for (j, &cap) in bucket_caps.iter().enumerate() {
         if cap > 0 {
-            g.add(buckets0 + j, qcs0 + bucket_qc[j], cap, 0);
-        }
-    }
-    for (q, &cap) in qc_caps.iter().enumerate() {
-        if cap > 0 {
-            g.add(qcs0 + q, t, cap, 0);
+            g.add(buckets0 + j, t, cap, 0);
         }
     }
     g.run(0, t);
@@ -3371,7 +3351,7 @@ fn optimal_assign(
     for truck in 0..n_trucks {
         for &e in &g.head[trucks0 + truck] {
             let v = g.to[e];
-            if v >= buckets0 && v < qcs0 && g.cap[e] == 0 {
+            if v >= buckets0 && v < t && g.cap[e] == 0 {
                 assign.push((truck, v - buckets0));
             }
         }
@@ -3407,14 +3387,6 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
             // these get a decisive urgency pull so trucks go to them, not to merely-nearby load work.
             let starving: std::collections::HashSet<String> = sqlx::query_scalar::<_, String>(
                 "SELECT DISTINCT qc FROM qc_wait_qc_sample WHERE ts > now() - interval '90 seconds' AND starving_real",
-            )
-            .fetch_all(&pool).await.unwrap_or_default().into_iter().collect();
-            // per-QC trucks currently assigned (live state) → graded load-balancing (TOS QcPriorityAppPow:
-            // a crane under-supplied relative to its need gets a pull, so trucks spread across cranes
-            // instead of piling onto one). Distinct ytno = twin counts once.
-            let qc_load: HashMap<String, i64> = sqlx::query_as::<_, (String, i64)>(
-                "SELECT qc, count(DISTINCT ytno) FROM live_workpool
-                  WHERE ytno IS NOT NULL AND ytno <> '' AND qc IS NOT NULL GROUP BY qc",
             )
             .fetch_all(&pool).await.unwrap_or_default().into_iter().collect();
             // candidate vehicles: idle (free now) + soon-free; committed/moving (delivering/empty) skipped
@@ -3482,16 +3454,24 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                     None => { let p50 = quay_manhattan_m(vlat, vlon, wlat, wlon) / MANHATTAN_SPEED_MS; (p50 as i64, (p50 * 1.5) as i64, "L3") }
                 }
             };
-            // precompute the cost matrix (all vehicles × all works) once. Greedy reads raw arrival;
-            // the optimal solver reads EFFECTIVE edge cost = arrival + switch-penalty − urgency-bonus
-            // (efficiency objective, anti-thrash, deadline as a soft pull). Work order = urgent first.
+            // STAGE 1 owns urgency + per-crane demand caps; STAGE 2 (the matching below) is then PURE
+            // efficiency: edge cost = empty-travel arrival only (+ anti-thrash switch penalty). Order the
+            // work pool by urgency HERE — starving cranes first, then deadline (work-ETA) — so urgency is
+            // decided in SELECTION, not leaked into the matching cost.
             let mut order: Vec<usize> = (0..works.len()).collect();
-            order.sort_by_key(|i| works[*i].3);
+            order.sort_by_key(|&i| {
+                let qc = &work[works[i].0].qc;
+                (if starving.contains(qc) { 0 } else { 1 }, works[i].3)
+            });
             // POINT 1 — cap the work pool to the available-truck count, most deadline-urgent first.
             // Walk works in deadline order, summing each bucket's QC-capped demand (= the slots a crane
             // can actually consume within the horizon); keep buckets until we've gathered as many slots
             // as there are trucks. Buckets whose QC is already full are dropped. Guarantees works ≤
             // trucks AND that trucks always go to the most deadline-urgent work first.
+            // The CAPPED per-bucket demand (take) — the truck-loads each bucket may receive after the
+            // per-crane horizon cap. This is the bucket cap carried into the matching, so STAGE 2 needs
+            // NO separate QC layer (the per-crane limit is already baked into the demand here).
+            let mut cap_by_oi: HashMap<usize, i64> = HashMap::new();
             {
                 let truck_n = vehicles.len() as i64;
                 let mut qc_room: HashMap<String, i64> = HashMap::new();
@@ -3511,39 +3491,30 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                     }
                     *room -= take;
                     acc += take;
+                    cap_by_oi.insert(oi, take);
                     kept.push(oi);
                 }
                 order = kept;
             }
-            let now_s = now / 1000;
             // (qc,vessel,queuename) → work-ETA ms, for the committed-window check on prior recommendations
             let eta_by_key: HashMap<(String, String, String), i64> = work.iter()
                 .filter_map(|w| w.work_eta_ts.map(|e| ((w.qc.clone(), w.vessel.clone(), w.queuename.clone()), e.timestamp_millis())))
                 .collect();
-            // QC layer: a crane consumes trucks at ~horizon/move-time regardless of how many buckets
-            // it has → cap by QC, not by bucket (else a multi-bucket crane hoards trucks).
-            let mut qc_idx: HashMap<String, usize> = HashMap::new();
-            let mut qc_caps: Vec<i64> = Vec::new();
-            let mut bucket_qc: Vec<usize> = Vec::with_capacity(order.len());
-            let mut caps: Vec<i64> = Vec::with_capacity(order.len()); // per-bucket demand cap
+            // STAGE 2 — PURE EFFICIENCY MATCHING. The work pool + per-crane demand caps are already
+            // fixed by Stage 1; here each edge cost is just the truck's empty travel (+ anti-thrash
+            // switch penalty). No urgency/starve/load-balance terms and no QC layer — those are Stage-1.
+            let mut caps: Vec<i64> = Vec::with_capacity(order.len()); // per-bucket demand (Stage-1 capped)
             let mut deadlines: Vec<i64> = Vec::with_capacity(order.len()); // feasibility deadline ms per wpos
-            let mut edges: Vec<(usize, usize, i64)> = Vec::new(); // (truck, work-pos, EFFECTIVE cost)
+            let mut edges: Vec<(usize, usize, i64)> = Vec::new(); // (truck, work-pos, cost)
             let mut matrix: Vec<Vec<(i64, i64, &'static str, bool)>> = Vec::with_capacity(order.len()); // [wpos][vi]=(arr,p90,tier,switched)
             for &oi in &order {
                 let (wi, wlat, wlon, eta_ms) = works[oi];
                 let w = &work[wi];
                 let move_s = if w.jobtype == "LD" { LD_MOVE_S } else { DS_MOVE_S };
-                let qc_cap = (NEED_HORIZON_S / move_s).max(1);
-                let qi = *qc_idx.entry(w.qc.clone()).or_insert_with(|| {
-                    qc_caps.push(qc_cap);
-                    qc_caps.len() - 1
-                });
-                bucket_qc.push(qi);
-                let cap_j = w.n.max(0) as i64; // full bucket demand (QC layer does the real capping)
+                let cap_j = *cap_by_oi.get(&oi).unwrap_or(&0); // Stage-1 capped demand (truck-loads)
                 caps.push(cap_j);
-                // feasibility deadline: bucket served from max(eta,now) over its near slots (capped by
-                // the QC rate) — realistic midpoint vs the old bay-start-for-all.
-                let spread_ms = (cap_j.min(qc_cap) / 2) * move_s * 1000;
+                // feasibility deadline: bucket served from max(eta,now) over its near slots — midpoint.
+                let spread_ms = (cap_j / 2) * move_s * 1000;
                 deadlines.push(eta_ms.max(now) + spread_ms);
                 let this_key = (w.qc.clone(), w.vessel.clone(), w.queuename.clone());
                 let wpos = matrix.len();
@@ -3551,20 +3522,6 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                 // pickup = the QC, load pickup = the yard block. The loaded delivery leg (block→QC for
                 // load) is PRODUCTIVE work, not waste — penalising it would push idle yard trucks into
                 // long empty drives to the quay (worse) and starve load work. So we minimise empty travel.
-                // urgency reward: ramps from 0 at the horizon to the base when due now, and keeps
-                // climbing (to the cap) for overdue work so the many late buckets stay rankable.
-                let slack_to_eta = eta_ms / 1000 - now_s;
-                let mut bonus = (URGENCY_BONUS_S as f64 * (URGENCY_HORIZON_S - slack_to_eta) as f64 / URGENCY_HORIZON_S as f64)
-                    .clamp(0.0, URGENCY_BONUS_MAX_S as f64) as i64;
-                // decisive pull for a crane that is stuck waiting for a truck RIGHT NOW
-                if starving.contains(&w.qc) {
-                    bonus += STARVE_BONUS_S;
-                }
-                // graded load-balance: under-supplied crane (current trucks < its need cap) gets a soft
-                // pull ∝ how empty it is → spreads trucks; full/over-supplied → 0.
-                let cur_load = qc_load.get(&w.qc).copied().unwrap_or(0);
-                let under = ((qc_cap - cur_load) as f64 / qc_cap as f64).clamp(0.0, 1.0);
-                bonus += (LOAD_BALANCE_S as f64 * under) as i64;
                 let mut row = Vec::with_capacity(vehicles.len());
                 for (vi, v) in vehicles.iter().enumerate() {
                     let (p50, p90, tier) = cost(v.1, v.2, wlat, wlon);
@@ -3580,7 +3537,7 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                         0
                     };
                     if arr < 1800 {
-                        let eff = arr + switch_pen - bonus;
+                        let eff = arr + switch_pen; // PURE efficiency (+ anti-thrash); urgency is Stage-1
                         edges.push((vi, wpos, eff)); // prune the far tail (never in the optimum)
                     }
                     row.push((arr, v.3 + p90, tier, switched));
@@ -3590,13 +3547,11 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
             // greedy BASELINE (urgent-first, n cheapest) — computed only to measure what we'd lose;
             // NOT logged as the recommendation anymore.
             let mut used: std::collections::HashSet<usize> = std::collections::HashSet::new();
-            let mut qc_used: Vec<i64> = vec![0; qc_caps.len()];
             let mut greedy_cost: i64 = 0;
             let mut greedy_n: i32 = 0;
             let mut greedy_miss: i32 = 0;
             for (wpos, _oi) in order.iter().enumerate() {
-                let qi = bucket_qc[wpos];
-                let limit = caps[wpos].min(qc_caps[qi] - qc_used[qi]); // bucket demand AND QC room
+                let limit = caps[wpos]; // bucket demand (already Stage-1 per-crane capped)
                 if limit <= 0 {
                     continue;
                 }
@@ -3617,13 +3572,12 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                     }
                     used.insert(vi);
                     taken += 1;
-                    qc_used[qi] += 1;
                     greedy_cost += arr;
                     greedy_n += 1;
                 }
             }
-            // PHASE-2: deadline-aware MIN-COST optimum = the actual recommendation (logged).
-            let assign = optimal_assign(vehicles.len(), &caps, &bucket_qc, &qc_caps, &edges);
+            // STAGE 2: min-cost (pure empty-travel) optimal matching = the recommendation (logged).
+            let assign = optimal_assign(vehicles.len(), &caps, &edges);
             let ts = Utc::now();
             let mut opt_cost: i64 = 0;
             let mut opt_miss: i32 = 0;
