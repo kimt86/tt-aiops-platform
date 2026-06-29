@@ -680,17 +680,23 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
     }
   }, [showWharf, ready]);
 
-  // GPS-inferred road graph: static GeoJSON, loaded once when first shown
+  // GPS-inferred road graph: centerlines (static GeoJSON) + direction arrows (learned lane field) —
+  // both loaded once when first shown. The lane field IS the road's learned directionality (one-way/flow).
   useEffect(() => {
     if (!ready || !showRoadGraph || roadGraphLoaded.current) return;
     roadGraphLoaded.current = true;
     fetch("/livemap-roadgraph.geojson").then((r) => r.json()).then((fc) => {
       (mapRef.current?.getSource("roadgraph") as maplibregl.GeoJSONSource | undefined)?.setData(fc);
     }).catch(() => { roadGraphLoaded.current = false; });
+    api.learnLanes().then((l) => {
+      (mapRef.current?.getSource("learn-lanes") as maplibregl.GeoJSONSource | undefined)?.setData({ type: "FeatureCollection", features: laneSegments(l.grid) });
+    }).catch(() => {});
   }, [showRoadGraph, ready]);
   useEffect(() => {
     const map = mapRef.current;
-    if (map?.getLayer("roadgraph-line")) map.setLayoutProperty("roadgraph-line", "visibility", showRoadGraph ? "visible" : "none");
+    const v = showRoadGraph ? "visible" : "none";
+    if (map?.getLayer("roadgraph-line")) map.setLayoutProperty("roadgraph-line", "visibility", v);
+    if (map?.getLayer("ll-seg")) map.setLayoutProperty("ll-seg", "visibility", v);
   }, [showRoadGraph, ready]);
 
   // init map once
@@ -1040,7 +1046,6 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
     for (const k of Object.keys(NODE_LAYERS)) if (map.getLayer(`nd-${k}`)) map.setLayoutProperty(`nd-${k}`, "visibility", vis(toggles[NODE_LAYERS[k].key]));
     for (const k of Object.keys(LINK_LAYERS)) if (map.getLayer(`lnk-${k}`)) map.setLayoutProperty(`lnk-${k}`, "visibility", vis(toggles[LINK_LAYERS[k].key]));
     if (map.getLayer("lt-pt")) map.setLayoutProperty("lt-pt", "visibility", vis(toggles.learnTopos));
-    if (map.getLayer("ll-seg")) map.setLayoutProperty("ll-seg", "visibility", vis(toggles.learnLanes));
     if (map.getLayer("dm-bub")) map.setLayoutProperty("dm-bub", "visibility", vis(toggles.demand));
   }, [toggles, ready]);
 
@@ -1049,7 +1054,7 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
     const map = mapRef.current;
     if (!map || !ready) return;
     const wantTopos = toggles.learnTopos || toggles.demand; // demand reuses topos coords
-    if (!wantTopos && !toggles.learnLanes) return;
+    if (!wantTopos) return;
     let alive = true;
     const load = async () => {
       try {
@@ -1090,17 +1095,12 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
             (map.getSource("demand") as maplibregl.GeoJSONSource | undefined)?.setData({ type: "FeatureCollection", features: feats });
           }
         }
-        if (toggles.learnLanes) {
-          const l = await api.learnLanes();
-          if (!alive) return;
-          (map.getSource("learn-lanes") as maplibregl.GeoJSONSource | undefined)?.setData({ type: "FeatureCollection", features: laneSegments(l.grid) });
-        }
       } catch { /* keep last good data */ }
     };
     load();
     const iv = setInterval(load, 15000);
     return () => { alive = false; clearInterval(iv); };
-  }, [toggles.learnTopos, toggles.learnLanes, toggles.demand, ready]);
+  }, [toggles.learnTopos, toggles.demand, ready]);
 
   // render loop — prefers the live feed, falls back to the captured replay.
   useEffect(() => {
@@ -1336,10 +1336,9 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
             <section className="llp-sec">
               <header>{ko ? "학습 (GPS)" : "Learned (GPS)"}</header>
               <Row on={toggles.learnTopos} color="#5eead4" label={ko ? "작업지점 좌표 (학습)" : "Work-points (learned)"} onChange={(v) => set("learnTopos", v)} />
-              <Row on={toggles.learnLanes} color="#34d399" label={ko ? "주행 차선 (학습)" : "Driving lanes (learned)"} onChange={(v) => set("learnLanes", v)} />
               <Row on={showWharf} color="#38bdf8" label={ko ? "안벽 위치 (WHARF)" : "Wharf positions"} onChange={setShowWharf} />
-              <Row on={showRoadGraph} color="#a78bfa" label={ko ? "추론 도로망 (GPS)" : "Inferred roads (GPS)"} onChange={setShowRoadGraph} />
-              <div className="llp-hint">{ko ? "작업점: 채움=신뢰도(🟢높음·🟠보통·🔴낮음)·테두리=블록(청록)/크레인(주황) · 차선: 화살표=흐름·초록=일방·회색=양방 · 안벽: ARRIVED GPS로 학습한 선석 위치 · 도로망: GPS 궤적 추론" : "work-points: fill=confidence (🟢🟠🔴), ring=block/crane · lanes: arrow=flow · wharf: berth positions learned from ARRIVED GPS · roads: inferred from GPS traces"}</div>
+              <Row on={showRoadGraph} color="#a78bfa" label={ko ? "추론 도로망 (GPS, 방향)" : "Inferred roads (GPS, directed)"} onChange={setShowRoadGraph} />
+              <div className="llp-hint">{ko ? "작업점: 채움=신뢰도(🟢높음·🟠보통·🔴낮음)·테두리=블록(청록)/크레인(주황) · 안벽: ARRIVED GPS로 학습한 선석 위치 · 도로망: GPS 궤적 추론(보라 선) + 방향 화살표(초록=일방·회색=양방)" : "work-points: fill=confidence (🟢🟠🔴), ring=block/crane · wharf: berth positions from ARRIVED GPS · roads: inferred centerlines (purple) + direction arrows (green=one-way, grey=two-way)"}</div>
             </section>
             <section className="llp-sec">
               <header>{ko ? "배차 (DISPATCH)" : "Dispatch"}</header>
