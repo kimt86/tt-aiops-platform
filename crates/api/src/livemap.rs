@@ -3896,6 +3896,59 @@ pub fn spawn_pos_hist_hifreq(lm: Arc<LiveMap>, pool: PgPool) {
     });
 }
 
+/// Hourly learning evaluation → `learn_eval` (mig 0068): holdout accuracy of the travel-time predictor
+/// (OD-pure vs Manhattan MAE/MAPE on recent legs) + data-accumulation volumes. Powers the Learning
+/// Center's learning-status view (is data accumulating + is performance improving over time?).
+pub fn spawn_learn_eval(pool: PgPool) {
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(Duration::from_secs(3600));
+        loop {
+            ticker.tick().await;
+            let _ = sqlx::query(
+                "INSERT INTO learn_eval (n_legs, od_mae_s, od_mape, manh_mae_s, manh_mape, hifreq_pts, drive_samples, pure_pairs)
+                 WITH f AS (
+                   SELECT ytno, ts, lat, lon, lag(ts) OVER w pts, lag(lat) OVER w plat, lag(lon) OVER w plon
+                   FROM truck_pos_hist WHERE state='empty_travel' WINDOW w AS (PARTITION BY ytno ORDER BY ts)
+                 ),
+                 seg AS (
+                   SELECT ytno, ts, lat, lon,
+                     CASE WHEN pts IS NULL OR ts-pts>interval '90 seconds' THEN 1 ELSE 0 END nl,
+                     extract(epoch FROM ts-pts) dt,
+                     CASE WHEN pts IS NULL THEN NULL ELSE 2*6371000*asin(sqrt(power(sin(radians(lat-plat)/2),2)
+                       + cos(radians(plat))*cos(radians(lat))*power(sin(radians(lon-plon)/2),2))) END disp
+                   FROM f
+                 ),
+                 lg AS (SELECT *, sum(nl) OVER (PARTITION BY ytno ORDER BY ts) leg FROM seg),
+                 legs AS (
+                   SELECT (array_agg(lat ORDER BY ts))[1] ola,(array_agg(lon ORDER BY ts))[1] olo,
+                          (array_agg(lat ORDER BY ts DESC))[1] dla,(array_agg(lon ORDER BY ts DESC))[1] dlo,
+                          sum(dt) FILTER (WHERE disp>=8 AND dt BETWEEN 20 AND 60) drive_s
+                   FROM lg GROUP BY ytno, leg HAVING count(*)>=4
+                 ),
+                 m AS (
+                   SELECT drive_s,
+                     abs(((dla-ola)*111320.0)*0.86777 + ((dlo-olo)*111320.0*cos(radians((ola+dla)/2)))*0.49697)
+                     + abs(-((dla-ola)*111320.0)*0.49697 + ((dlo-olo)*111320.0*cos(radians((ola+dla)/2)))*0.86777) manh_m,
+                     travel_grid225(ola,olo) oz, travel_grid225(dla,dlo) dz
+                   FROM legs WHERE drive_s BETWEEN 30 AND 1200
+                 ),
+                 p AS (
+                   SELECT m.drive_s, coalesce(z.p50_s, m.manh_m/6.61) od_pred, m.manh_m/6.61 manh_pred
+                   FROM m LEFT JOIN learn_travel_zone225_pure z ON z.oz=m.oz AND z.dz=m.dz
+                 )
+                 SELECT count(*)::int,
+                   round(avg(abs(od_pred-drive_s)))::int, (100*avg(abs(od_pred-drive_s)/drive_s))::real,
+                   round(avg(abs(manh_pred-drive_s)))::int, (100*avg(abs(manh_pred-drive_s)/drive_s))::real,
+                   (SELECT count(*) FROM truck_pos_hifreq),
+                   (SELECT count(*) FROM learn_travel_drive_sample),
+                   (SELECT count(*)::int FROM learn_travel_zone225_pure WHERE n>=10)
+                 FROM p HAVING count(*) > 0",
+            ).execute(&pool).await;
+            let _ = sqlx::query("DELETE FROM learn_eval WHERE ts < now() - interval '90 days'").execute(&pool).await;
+        }
+    });
+}
+
 /// FAIR head-to-head (SHADOW). Every 5 min, take a recent window of TOS dispatch DECISIONS (the
 /// trucks TOS assigned + the works, each truck at its own dispatch-time position), build the
 /// truck×work arrival matrix, and compare TOS's actual matching (its diagonal) to OUR solver's

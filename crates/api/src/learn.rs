@@ -607,3 +607,28 @@ pub async fn dispatch_pred(State(pool): State<PgPool>) -> Result<Json<DispatchPr
         ld_med_err_min: test.ld_med_err_min,
     }))
 }
+
+/// Travel-time learning status: accuracy trend (OD-pure vs Manhattan MAE/MAPE) + data-accumulation
+/// volumes over time, from `learn_eval` (logged hourly). Powers the Learning Center status view.
+#[derive(Serialize, sqlx::FromRow)]
+pub struct EvalPoint {
+    ts: DateTime<Utc>,
+    n_legs: Option<i32>,
+    od_mae_s: Option<i32>,
+    od_mape: Option<f32>,
+    manh_mae_s: Option<i32>,
+    manh_mape: Option<f32>,
+    hifreq_pts: Option<i64>,
+    drive_samples: Option<i64>,
+    pure_pairs: Option<i32>,
+}
+
+pub async fn eval(State(pool): State<PgPool>) -> Result<Json<Vec<EvalPoint>>, AppError> {
+    let rows: Vec<EvalPoint> = sqlx::query_as(
+        "SELECT ts, n_legs, od_mae_s, od_mape, manh_mae_s, manh_mape, hifreq_pts, drive_samples, pure_pairs
+           FROM learn_eval ORDER BY ts DESC LIMIT 240",
+    )
+    .fetch_all(&pool)
+    .await?;
+    Ok(Json(rows))
+}

@@ -267,6 +267,12 @@ export interface WorkPoint {
   agree: boolean | null; delta_s: number | null; avg_delta_s: number | null; n: number; agree_n: number;
   tos_trucks: string[]; our_trucks: string[];
 }
+export interface EvalPoint {
+  ts: string; n_legs: number | null;
+  od_mae_s: number | null; od_mape: number | null;
+  manh_mae_s: number | null; manh_mape: number | null;
+  hifreq_pts: number | null; drive_samples: number | null; pure_pairs: number | null;
+}
 export interface FairCompare {
   ts: string; window_min: number; n: number; tos_total_s: number; our_total_s: number; savings_pct: number; same_n: number;
 }
@@ -303,6 +309,7 @@ export const api = {
   learnTravel: () => get<TravelData>("/api/learn/travel"),
   learnSoonIdle: () => get<SoonIdleData>("/api/learn/soon-idle"),
   learnDispatchPred: () => get<DispatchPredData>("/api/learn/dispatch-pred"),
+  learnEval: () => get<EvalPoint[]>("/api/learn/eval"),
   stage2Shadow: () => get<Stage2Shadow>("/api/stage2/shadow"),
   stage2Advisory: () => get<Stage2Advisory[]>("/api/stage2/advisory"),
   stage2ComparePicks: () => get<ComparePick[]>("/api/stage2/compare-picks"),
