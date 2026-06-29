@@ -3846,6 +3846,56 @@ pub fn spawn_pos_hist(lm: Arc<LiveMap>, pool: PgPool) {
     });
 }
 
+/// High-frequency (~3s) truck GPS capture for road-network MAP INFERENCE → `truck_pos_hifreq` (mig 0067).
+/// Separate from the 30s `truck_pos_hist` (whose cadence the pure-OD motion segmentation depends on).
+/// Logs a truck only when it MOVED >5m since its last log (dense road trails, no parked dupes). 5-day prune.
+pub fn spawn_pos_hist_hifreq(lm: Arc<LiveMap>, pool: PgPool) {
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(Duration::from_secs(3));
+        let mut last: HashMap<String, (f64, f64)> = HashMap::new();
+        let mut n = 0u64;
+        loop {
+            ticker.tick().await;
+            if !lm.connected.load(Ordering::Relaxed) {
+                continue;
+            }
+            let now = Utc::now().timestamp_millis();
+            let ts = Utc::now();
+            let rows: Vec<(String, f64, f64)> = {
+                let map = lm.devices.read().await;
+                map.iter()
+                    .filter(|(_, p)| p.cls == "TT" && (now - p.last_seen_ms) / 1000 <= STALE_AFTER_S)
+                    .filter_map(|(id, p)| {
+                        let moved = last.get(id).map(|&(la, lo)| dist_m((la, lo), (p.lat, p.lon)) > 5.0).unwrap_or(true);
+                        moved.then(|| (id.clone(), p.lat, p.lon))
+                    })
+                    .collect()
+            };
+            for r in &rows {
+                last.insert(r.0.clone(), (r.1, r.2));
+            }
+            if rows.is_empty() {
+                continue;
+            }
+            let ytnos: Vec<String> = rows.iter().map(|r| r.0.clone()).collect();
+            let lats: Vec<f64> = rows.iter().map(|r| r.1).collect();
+            let lons: Vec<f64> = rows.iter().map(|r| r.2).collect();
+            let _ = sqlx::query(
+                "INSERT INTO truck_pos_hifreq (ts, ytno, lat, lon)
+                 SELECT $1::timestamptz, u.ytno, u.lat, u.lon
+                   FROM unnest($2::text[], $3::float8[], $4::float8[]) AS u(ytno, lat, lon)
+                 ON CONFLICT (ytno, ts) DO NOTHING",
+            )
+            .bind(ts).bind(&ytnos).bind(&lats).bind(&lons)
+            .execute(&pool).await;
+            n += 1;
+            if n % 200 == 0 {
+                let _ = sqlx::query("DELETE FROM truck_pos_hifreq WHERE ts < now() - interval '5 days'").execute(&pool).await;
+            }
+        }
+    });
+}
+
 /// FAIR head-to-head (SHADOW). Every 5 min, take a recent window of TOS dispatch DECISIONS (the
 /// trucks TOS assigned + the works, each truck at its own dispatch-time position), build the
 /// truck×work arrival matrix, and compare TOS's actual matching (its diagonal) to OUR solver's
