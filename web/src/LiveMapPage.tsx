@@ -333,37 +333,6 @@ function buildMetricGrid(devs: { cls: string; lat: number; lon: number; speed: n
   return { type: "FeatureCollection", features: feats };
 }
 
-// heading-oriented ARROWS for the learned driving-lane field — pure geometry (shaft + 2 barbs at
-// the head), no text glyphs. The arrowhead shows which way traffic actually flows through the cell.
-function laneSegments(
-  grid: { lat: number; lon: number; passes: number; heading_deg: number | null; directionality: number | null; mean_speed: number | null }[],
-): GeoJSON.Feature[] {
-  const L = 11; // half-shaft (m) — ~22m arrow per 22m cell
-  const B = 6;  // arrowhead barb length (m)
-  // step `m` metres from (lat,lon) along compass bearing `degB` (0=N, 90=E) → [lon, lat]
-  const step = (lat: number, lon: number, degB: number, m: number): [number, number] => {
-    const b = (degB * Math.PI) / 180;
-    const dLat = (m / 111320) * Math.cos(b);
-    const dLon = (m / (111320 * Math.cos((lat * Math.PI) / 180))) * Math.sin(b);
-    return [lon + dLon, lat + dLat];
-  };
-  return grid.map((c) => {
-    const h = c.heading_deg ?? 0;
-    const tail = step(c.lat, c.lon, h, -L);
-    const head = step(c.lat, c.lon, h, L);
-    const barbA = step(head[1], head[0], h + 145, B); // barbs splay backward from the head
-    const barbB = step(head[1], head[0], h - 145, B);
-    return {
-      type: "Feature",
-      geometry: { type: "MultiLineString", coordinates: [[tail, head], [barbA, head, barbB]] },
-      properties: {
-        dir: c.directionality ?? 0, passes: c.passes,
-        heading: Math.round(c.heading_deg ?? 0),
-        speed: c.mean_speed != null ? Math.round(c.mean_speed * 10) / 10 : null,
-      },
-    } as GeoJSON.Feature;
-  });
-}
 // toggle → maplibre layer ids + swatch color
 const NODE_LAYERS: Record<string, { key: LayerKey; cat: string; color: string; ko: string; en: string }> = {
   q: { key: "pointsQuay", cat: "quay", color: "#ffae6e", ko: "안벽 작업", en: "Quay" },
