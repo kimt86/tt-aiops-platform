@@ -682,7 +682,7 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
   }, [showWharf, ready]);
 
   // GPS-inferred road graph: centerlines (static GeoJSON) + direction arrows (learned lane field) —
-  // both loaded once when first shown. The lane field IS the road's learned directionality (one-way/flow).
+  // loaded once when first shown — a clean node+edge graph (no floating lane arrows).
   useEffect(() => {
     if (!ready || !showRoadGraph || roadGraphLoaded.current) return;
     roadGraphLoaded.current = true;
@@ -690,9 +690,6 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
       (mapRef.current?.getSource("roadgraph") as maplibregl.GeoJSONSource | undefined)?.setData(fc);
       if (fc.stats) setRoadGraphStats(fc.stats);
     }).catch(() => { roadGraphLoaded.current = false; });
-    api.learnLanes().then((l) => {
-      (mapRef.current?.getSource("learn-lanes") as maplibregl.GeoJSONSource | undefined)?.setData({ type: "FeatureCollection", features: laneSegments(l.grid) });
-    }).catch(() => {});
   }, [showRoadGraph, ready]);
   useEffect(() => {
     const map = mapRef.current;
@@ -804,9 +801,11 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
       map.addSource("roadgraph", { type: "geojson", data: EMPTY_FC });
       // work-points first (subtle anchor cloud), then edges, then junction NODES on top (the graph reads
       // as nodes+edges, not just roads).
-      map.addLayer({ id: "roadgraph-wp", type: "circle", source: "roadgraph", filter: ["==", ["get", "kind"], "workpoint"], layout: { visibility: "none" }, paint: { "circle-radius": ["interpolate", ["linear"], ["zoom"], 13, 0.5, 17, 1.6], "circle-color": "#22d3ee", "circle-opacity": 0.28 } });
-      map.addLayer({ id: "roadgraph-line", type: "line", source: "roadgraph", filter: ["==", ["get", "kind"], "road"], layout: { visibility: "none" }, paint: { "line-color": "#a78bfa", "line-opacity": 0.9, "line-width": ["interpolate", ["linear"], ["zoom"], 13, 1.2, 17, 3] } });
-      map.addLayer({ id: "roadgraph-node", type: "circle", source: "roadgraph", filter: ["==", ["get", "kind"], "node"], layout: { visibility: "none" }, paint: { "circle-radius": ["interpolate", ["linear"], ["zoom"], 13, 2, 17, 5], "circle-color": "#fde68a", "circle-stroke-color": "#7c3aed", "circle-stroke-width": 1.3, "circle-opacity": 0.95 } });
+      // work-points = faint background texture (anchors); edges = bright cyan; junction NODES = white dots
+      // on top → reads as a connected node+edge graph, high-contrast on satellite.
+      map.addLayer({ id: "roadgraph-wp", type: "circle", source: "roadgraph", filter: ["==", ["get", "kind"], "workpoint"], layout: { visibility: "none" }, paint: { "circle-radius": ["interpolate", ["linear"], ["zoom"], 13, 0.4, 17, 1], "circle-color": "#67e8f9", "circle-opacity": 0.12 } });
+      map.addLayer({ id: "roadgraph-line", type: "line", source: "roadgraph", filter: ["==", ["get", "kind"], "road"], layout: { visibility: "none", "line-cap": "round", "line-join": "round" }, paint: { "line-color": "#22d3ee", "line-opacity": 0.95, "line-width": ["interpolate", ["linear"], ["zoom"], 13, 1.5, 17, 4] } });
+      map.addLayer({ id: "roadgraph-node", type: "circle", source: "roadgraph", filter: ["==", ["get", "kind"], "node"], layout: { visibility: "none" }, paint: { "circle-radius": ["interpolate", ["linear"], ["zoom"], 13, 2.5, 17, 6], "circle-color": "#ffffff", "circle-stroke-color": "#0e7490", "circle-stroke-width": 1.6, "circle-opacity": 1 } });
       map.addSource("wharf", { type: "geojson", data: EMPTY_FC });
       map.addLayer({
         id: "wharf-pt",
