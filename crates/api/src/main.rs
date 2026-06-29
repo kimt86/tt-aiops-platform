@@ -122,6 +122,7 @@ async fn main() -> anyhow::Result<()> {
     livemap::spawn_pos_hist(livemap.clone(), pool.clone()); // 30s: 트럭 위치·상태 이력(truck_pos_hist)
     livemap::spawn_pos_hist_hifreq(livemap.clone(), pool.clone()); // 3s: 도로망 추론용 고빈도 GPS(truck_pos_hifreq)
     livemap::spawn_learn_eval(pool.clone()); // 1h: 학습 평가(정확도 추이+누적량) → learn_eval
+    livemap::spawn_congestion_hourly(pool.clone()); // 1h: 셀별 중위속도·통행량 영속 적재(congestion_hourly, 180일)
     livemap::spawn_dispatch_compare(livemap.clone(), pool.clone()); // 60s: TOS vs 우리 배차 비교(dispatch_compare_shadow)
     livemap::spawn_fair_compare(livemap.clone(), pool.clone()); // 5min: 공정 1:1 최적매칭 vs TOS(fair_compare_shadow)
     let state = AppState { pool, livemap };

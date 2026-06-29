@@ -3896,6 +3896,40 @@ pub fn spawn_pos_hist_hifreq(lm: Arc<LiveMap>, pool: PgPool) {
     });
 }
 
+/// Hourly congestion history → `congestion_hourly` (mig 0069): per ~100m cell, the median moving speed
+/// + traffic of the PREVIOUS full hour, from 3s GPS (truck_pos_hifreq). Compact + 180-day retention so
+/// we can later derive a road-segment congestion index (speed ÷ free-flow) and study bottlenecks.
+pub fn spawn_congestion_hourly(pool: PgPool) {
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(Duration::from_secs(3600));
+        loop {
+            ticker.tick().await;
+            let _ = sqlx::query(
+                "INSERT INTO congestion_hourly (hour, cx, cy, med_speed_kmh, passes)
+                 WITH f AS (
+                   SELECT ytno, ts, lat, lon, lag(ts) OVER w pt, lag(lat) OVER w pla, lag(lon) OVER w plo
+                   FROM truck_pos_hifreq
+                   WHERE ts >= date_trunc('hour', now()) - interval '1 hour' AND ts < date_trunc('hour', now())
+                   WINDOW w AS (PARTITION BY ytno ORDER BY ts)
+                 ),
+                 seg AS (
+                   SELECT round(((lat+pla)/2)/0.0009)::int cx, round(((lon+plo)/2)/0.0009)::int cy,
+                     2*6371000*asin(sqrt(power(sin(radians(lat-pla)/2),2)
+                       + cos(radians(pla))*cos(radians(lat))*power(sin(radians(lon-plo)/2),2))) disp,
+                     extract(epoch FROM ts-pt) dt
+                   FROM f WHERE pt IS NOT NULL
+                 )
+                 SELECT date_trunc('hour', now()) - interval '1 hour', cx, cy,
+                   percentile_cont(0.5) WITHIN GROUP (ORDER BY disp/dt*3.6)::real, count(*)::int
+                 FROM seg WHERE dt BETWEEN 2 AND 15 AND disp BETWEEN 5 AND 400
+                 GROUP BY cx, cy HAVING count(*) >= 3
+                 ON CONFLICT (hour, cx, cy) DO NOTHING",
+            ).execute(&pool).await;
+            let _ = sqlx::query("DELETE FROM congestion_hourly WHERE hour < now() - interval '180 days'").execute(&pool).await;
+        }
+    });
+}
+
 /// Hourly learning evaluation → `learn_eval` (mig 0068): holdout accuracy of the travel-time predictor
 /// (OD-pure vs Manhattan MAE/MAPE on recent legs) + data-accumulation volumes. Powers the Learning
 /// Center's learning-status view (is data accumulating + is performance improving over time?).
