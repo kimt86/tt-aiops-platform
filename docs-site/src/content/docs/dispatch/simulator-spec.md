@@ -9,7 +9,7 @@ sidebar:
 > **독자**: 시뮬레이터 구현자(다른 Claude Code/사람).
 > **전제**: **레이아웃 + 라우터는 이미 준비됨.** 빠진 건 **에뮬레이터의 장비 모듈 + 시뮬레이션 시나리오**다.
 > **범위(지금)**: **해측(quayside)만** — QC(안벽크레인) ↔ 야드 블록을 TT(내부 트럭)가 나르는 양하(DS)·적하(LD). **게이트(외부트럭·반출입)는 나중.**
-> 모든 수치/공식/출처는 라이브 코드·DB로 검증됨(2026-06-28, 시간축 MYT=UTC+8).
+> 모든 수치/공식/출처는 라이브 코드·DB로 검증됨(2026-06-29, 시간축 MYT=UTC+8).
 
 ---
 
@@ -169,9 +169,9 @@ LD는 대칭: 트럭이 **블록 먼저**(YC 적재) → **QC**(적재), QC STAL
 - **(A) 실측 집계** — `learn_qc_move_time` 중앙값 + 평탄 상수. 현실 보정은 자동이나 **거리·단(tier)·블록내 위치 의존을 뭉갠다.** 근거: 실측 YC 무브가 **p10 10s · p50 76s · p90 164s · max 592s**(24h, LD) — 16배 분산은 갠트리 거리·tier·재취급에서 온다. 단일 median이 이를 가린다.
 - **(B) 스펙 분해** — 장비 사이클을 **물리 동작으로 분해**하고 **장비 스펙(속도)** 으로 계산. **레이아웃이 거리를 주므로** 거리/위치 의존을 정확히 반영.
 
-**레이아웃·라우터가 있으니 (B)를 골격, (A)를 보정 앵커**로 하는 하이브리드를 권장.
+> **결론(아래 ★ 검증됨): (B) 스펙 분해는 시도했으나 우리 운영로그로는 신뢰 불가 → (A) 실측 *분포*를 채택.** 아래 "분해 모델" 표는 *가능했다면* 이런 형태(거리/단 의존)였다는 참고일 뿐, **실제 채택값은 그 다음 "추정된 유효 작업시간" 표**다.
 
-**분해 모델**
+**분해 모델 (참고 — 채택 아님)**
 
 | 시간 | 분해 = f(거리/단, 스펙) |
 |---|---|
@@ -195,7 +195,7 @@ LD는 대칭: 트럭이 **블록 먼저**(YC 적재) → **QC**(적재), QC STAL
 | **TT 주행속도** | **23.8 km/h**(GPS 실측: 움직이는 30초 구간 중앙, p90 41) — ⚠ 점대점 중앙 7.5는 정지 섞인 값 | `truck_pos_hist` state=empty_travel |
 | **TT 정지(오버헤드)** | empty_travel 시간의 **35%가 정지**(큐·대기·신호) — 주행과 분리 추출 가능(아래) | `truck_pos_hist` 모션분할 |
 
-> **★ 순수 trip 추출(정지 오버헤드 제외) — 구현 완료(배차에 적용됨).** **(A) 모션 분할**(채택): `truck_pos_hist`(state=empty_travel)의 30초 변위로 움직임(≥8m)/정지를 나눠 **주행시간만** 집계 → **`learn_travel_zone225_pure`**(마이그0065, 정지 35% 제외). **배차 cost가 이미 이 순수 OD 사용**(livemap.rs 3개 cost, L3 폴백 속도 `PURE_DRIVE_SPEED_MS=6.61`=23.8km/h). 효과: 순수 OD ≈ 번들의 19~50%(같은셀 228s 오버헤드 제거), L3 도착 722→376s, 공정비교 절감 ~29%(순수 기준 유지). **(B) `empty_trip_m`**(실경로, livemap.rs:78) = 대안. **시뮬도 라우터 속도/정책 비용추정에 이 순수 OD 차용** 가능. ⚠ caveat: 순수 학습뷰 커버리지 ~374쌍(truck_pos_hist 2일)이라 나머지는 기하 폴백 — 향후 순수샘플 30일 누적 시 확대. (TT leg 시간 `tt_cycle_v2`: 공차 191s·적재 441s — 정지 포함.)
+> **★ 순수 trip 추출(정지 오버헤드 제외) — 구현 완료(배차에 적용됨).** **(A) 모션 분할**(채택): `truck_pos_hist`(state=empty_travel)의 30초 변위로 움직임(≥8m)/정지를 나눠 **주행시간만** 집계 → **`learn_travel_zone225_pure`**(마이그0065, 정지 35% 제외). **배차 cost가 이미 이 순수 OD 사용**(livemap.rs 3개 cost, L3 폴백 속도 `PURE_DRIVE_SPEED_MS=6.61`=23.8km/h). 효과: 순수 OD ≈ 번들의 19~50%(같은셀 228s 오버헤드 제거), L3 도착 722→376s, 공정비교 절감 ~29%(순수 기준 유지). **(B) `empty_trip_m`**(실경로, livemap.rs:78) = 대안. **시뮬도 라우터 속도/정책 비용추정에 이 순수 OD 차용** 가능. 커버리지: 순수샘플을 **영속 30일 테이블 `learn_travel_drive_sample`**(마이그0066, 틱마다 settled leg 누적)에 쌓아 뷰가 집계 — 현재 ~375쌍(2일 백필)에서 30일에 걸쳐 번들(~2500쌍)로 성장 중; 미커버 쌍은 기하 폴백(quay_manhattan÷24km/h). (TT leg 시간 `tt_cycle_v2`: 공차 191s·적재 441s — 정지 포함.)
 
 - **베이 이동(갠트리)**: 깨끗한 분해 신호 없음 → 1차는 분포 안에 흡수. 향후 **레이아웃 거리 + TT와 동일 라우터 속도**로 별도 추정.
 - **보정은 자동**: 이 값이 곧 실측이라, TOS-baseline 시뮬은 정의상 §7 C2/C5/C8을 재현(효율계수 불필요 — 명판이 아니라 관측이므로). 시뮬은 분포를 **로그정규로 샘플**(`mu=ln(p50), sigma=(ln(p90)−ln(p50))/1.2816`).
@@ -219,14 +219,14 @@ Scenario {
 
   // QC 모듈  [출처: live_workqueue(qc↔vessel↔seq), cranes GPS]
   cranes: [ {
-    qc_id, vessel_id, class: "QC_PostPanamax",   // → equipment_specs 참조(§3.6)
+    qc_id, vessel_id,
     start_loc: LayoutLoc,                  // 시작 안벽 위치(=현재 베이). 이후 동적(§3.2)
     queue: [ { bay, dh, job, qty, deadline_ts } ]        // seq 순서. work 단위
   } ],
 
   // YC 모듈  [출처: yt_topos→블록, rtg_move_log]
   yards: [ {
-    block_id, class: "RTG_6plus1",          // → equipment_specs 참조(§3.6)
+    block_id,
     loc: LayoutLoc, latlon: [lat,lon],
     dims: { rows, bays, tiers }, pitch: { row_m, bay_m }  // 블록 기하(YC 갠트리 거리)
   } ],
@@ -289,7 +289,7 @@ pub fn run_stage2(s: &Snapshot) -> Vec<(String /*ytno*/, WorkRef)>;
 ```
 공유코드는 `crates/core`로 → 라이브·시뮬 같은 경로. 함정: 1단계 후 `works[order[wpos]]` 복원, `free_in`은 DS만 grounded, `starving`·`prev_assign` 입력 필수.
 
-**정책 비용추정 OD(`env.policy_od`)**: `"router"`(1차, 추정=실제로 배차결정 품질만 격리) | `"learned"`(`learn_travel_zone225` grid225 p50/p90, 추정오차 채널, 끝점 latlon 필요).
+**정책 비용추정 OD(`env.policy_od`)**: `"router"`(1차, 추정=실제로 배차결정 품질만 격리) | `"learned"`(**`learn_travel_zone225_pure`** grid225 p50/p90 — 라이브 배차가 쓰는 순수주행 OD와 동일, 미커버는 quay_manhattan÷6.61; 추정오차 채널, 끝점 latlon 필요).
 
 **TOS = 보정 baseline**(알고리즘 역공학 금지): 알려진 행동(*유휴 트럭만 배차*, 픽업 최단) 휴리스틱 → 같은 에뮬레이터에서 실측 KPI(§7) 재현하면 유효 baseline.
 
@@ -304,7 +304,7 @@ pub fn run_stage2(s: &Snapshot) -> Vec<(String /*ytno*/, WorkRef)>;
 | # | 시뮬 출력 | 실측 타깃 | 허용오차 |
 |---|---|---|---|
 | **C1** | TT 사이클타임 중앙값 | `raw_k_tt_cycle.med` **740s**(p25 419·p75 973) | ±15% |
-| **C2** | QC move 서비스시간 | `learn_qc_move_time` DS **91**·LD **119s** | ±10% |
+| **C2** | QC move 서비스시간 | `learn_qc_move_time` DS **90**·LD **121s**(§3.6) | ±10% |
 | **C3** | QC 처리율 move/hr | K_MPH **24.7~25.2** | ±10% |
 | **C4** | 공차주행 비율 | K_EMPTY_R **46%**(1.24km/job) | ±3%p |
 | C5 | 해치커버 작업시간 | 양하 ~428s·적하 ~496s(research-log) | ±20% |
@@ -337,9 +337,10 @@ queuename = <bay><D|H>-<D|L>   // 02H-D = 베이02·홀드·양하 (parse_q, wor
 # QC 베이 walk 가산(workpool.rs:354-427)
 BAY_CHANGE_S=180  HATCH_DS_S=340  HATCH_LD_S=390  DS_MOVE_S=90  LD_MOVE_S=110
 proc = qty*(1−twin/2)*move_s + (베이바뀜?180 : 적하H→D?390 : 양하D→H?340 : 0)
-# OD(policy_od="learned"일 때만; livemap.rs:3212,3237-3456)
+# OD(policy_od="learned"일 때만; livemap.rs:3212,3237-3456) — 배차는 순수주행 OD 사용
 grid225(lat,lon)='G'||round(lat/0.00202)||'_'||round(lon/0.00202)   # ~225m
-L2: learn_travel_zone225[(oz,dz)](n>=10) ; L3: 안벽축 맨해튼/2.278m·s(8.2km/h), p90=p50*1.5  # 6.55폐기
+L2: learn_travel_zone225_pure[(oz,dz)](n>=10) ; L3: 안벽축 맨해튼 / PURE_DRIVE_SPEED_MS 6.61(23.8km/h), p90=p50*1.5
+# (번들 learn_travel_zone225 / 2.278=8.2km/h 는 정지/큐 포함이라 배차서 폐기, §3.6)
 # 배차(livemap.rs:3217-3239)
 SWITCH_PENALTY_S=180  COMMIT_WINDOW_MS=600_000  COMMIT_LOCK_S=1200  NEED_HORIZON_S=900
 ```
