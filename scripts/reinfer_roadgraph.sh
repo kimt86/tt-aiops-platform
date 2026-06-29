@@ -31,6 +31,10 @@ for e in g['edges']:
     if len(coords) >= 2:
         feats.append({"type":"Feature","properties":{"kind":"road","len_m":e['len_m']},
                       "geometry":{"type":"LineString","coordinates":coords}})
+# graph NODES (junctions/endpoints) — this is what makes it read as a graph, not just roads
+for la, lo in g['nodes'].values():
+    feats.append({"type":"Feature","properties":{"kind":"node"},
+                  "geometry":{"type":"Point","coordinates":[lo, la]}})
 nwp = 0
 for line in open('/tmp/workpoints.tsv'):
     p = line.rstrip("\n").split("\t")

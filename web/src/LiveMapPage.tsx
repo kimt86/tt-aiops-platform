@@ -699,6 +699,7 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
     const v = showRoadGraph ? "visible" : "none";
     if (map?.getLayer("roadgraph-line")) map.setLayoutProperty("roadgraph-line", "visibility", v);
     if (map?.getLayer("roadgraph-wp")) map.setLayoutProperty("roadgraph-wp", "visibility", v);
+    if (map?.getLayer("roadgraph-node")) map.setLayoutProperty("roadgraph-node", "visibility", v);
     if (map?.getLayer("ll-seg")) map.setLayoutProperty("ll-seg", "visibility", v);
   }, [showRoadGraph, ready]);
 
@@ -801,8 +802,11 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
       map.addLayer({ id: "wharf-zone-line", type: "line", source: "wharf-zone", layout: { visibility: "none" }, paint: { "line-color": "#38bdf8", "line-opacity": 0.55, "line-width": 1 } });
       // GPS-inferred road network (static GeoJSON from scripts/build_road_graph.py) — replaces imported links
       map.addSource("roadgraph", { type: "geojson", data: EMPTY_FC });
-      map.addLayer({ id: "roadgraph-line", type: "line", source: "roadgraph", filter: ["==", ["get", "kind"], "road"], layout: { visibility: "none" }, paint: { "line-color": "#a78bfa", "line-opacity": 0.85, "line-width": ["interpolate", ["linear"], ["zoom"], 13, 1, 17, 2.6] } });
-      map.addLayer({ id: "roadgraph-wp", type: "circle", source: "roadgraph", filter: ["==", ["get", "kind"], "workpoint"], layout: { visibility: "none" }, paint: { "circle-radius": ["interpolate", ["linear"], ["zoom"], 13, 0.8, 17, 2.6], "circle-color": "#22d3ee", "circle-opacity": 0.45 } });
+      // work-points first (subtle anchor cloud), then edges, then junction NODES on top (the graph reads
+      // as nodes+edges, not just roads).
+      map.addLayer({ id: "roadgraph-wp", type: "circle", source: "roadgraph", filter: ["==", ["get", "kind"], "workpoint"], layout: { visibility: "none" }, paint: { "circle-radius": ["interpolate", ["linear"], ["zoom"], 13, 0.5, 17, 1.6], "circle-color": "#22d3ee", "circle-opacity": 0.28 } });
+      map.addLayer({ id: "roadgraph-line", type: "line", source: "roadgraph", filter: ["==", ["get", "kind"], "road"], layout: { visibility: "none" }, paint: { "line-color": "#a78bfa", "line-opacity": 0.9, "line-width": ["interpolate", ["linear"], ["zoom"], 13, 1.2, 17, 3] } });
+      map.addLayer({ id: "roadgraph-node", type: "circle", source: "roadgraph", filter: ["==", ["get", "kind"], "node"], layout: { visibility: "none" }, paint: { "circle-radius": ["interpolate", ["linear"], ["zoom"], 13, 2, 17, 5], "circle-color": "#fde68a", "circle-stroke-color": "#7c3aed", "circle-stroke-width": 1.3, "circle-opacity": 0.95 } });
       map.addSource("wharf", { type: "geojson", data: EMPTY_FC });
       map.addLayer({
         id: "wharf-pt",
