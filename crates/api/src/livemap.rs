@@ -2157,6 +2157,46 @@ pub fn spawn_travel_aggregator(pool: PgPool) {
             let _ = sqlx::query("REFRESH MATERIALIZED VIEW CONCURRENTLY learn_travel_zone225")
                 .execute(&pool)
                 .await;
+            // PURE-driving OD (mig 0065/0066): moving-only time from truck_pos_hist motion segmentation —
+            // excludes the ~35% stopped/queue time the bundled view includes. The dispatch cost uses this.
+            // Top up the persistent 30-day sample table with newly-SETTLED empty-travel legs (ended ≥3min
+            // ago), then refresh the view from it. A leg = consecutive empty_travel fixes (gap ≤90s);
+            // drive_s = Σ 30s segments where the truck moved (≥8m). Dedup by (ytno, leg_start).
+            let _ = sqlx::query(
+                "INSERT INTO learn_travel_drive_sample (ytno, leg_start, oz, dz, drive_s)
+                 WITH f AS (
+                   SELECT ytno, ts, lat, lon, lag(ts) OVER w pts, lag(lat) OVER w plat, lag(lon) OVER w plon
+                   FROM truck_pos_hist WHERE state='empty_travel' AND ts > now() - interval '90 minutes'
+                   WINDOW w AS (PARTITION BY ytno ORDER BY ts)
+                 ),
+                 seg AS (
+                   SELECT ytno, ts, lat, lon,
+                     CASE WHEN pts IS NULL OR ts-pts > interval '90 seconds' THEN 1 ELSE 0 END nl,
+                     extract(epoch FROM ts-pts) dt,
+                     CASE WHEN pts IS NULL THEN NULL ELSE 2*6371000*asin(sqrt(power(sin(radians(lat-plat)/2),2)
+                       + cos(radians(plat))*cos(radians(lat))*power(sin(radians(lon-plon)/2),2))) END disp_m
+                   FROM f
+                 ),
+                 lg AS (SELECT *, sum(nl) OVER (PARTITION BY ytno ORDER BY ts) leg FROM seg),
+                 legs AS (
+                   SELECT ytno, min(ts) leg_start,
+                     travel_grid225((array_agg(lat ORDER BY ts))[1],(array_agg(lon ORDER BY ts))[1]) oz,
+                     travel_grid225((array_agg(lat ORDER BY ts DESC))[1],(array_agg(lon ORDER BY ts DESC))[1]) dz,
+                     sum(dt) FILTER (WHERE disp_m>=8 AND dt BETWEEN 20 AND 60) drive_s
+                   FROM lg GROUP BY ytno, leg HAVING count(*)>=2 AND max(ts) < now() - interval '3 minutes'
+                 )
+                 SELECT ytno, leg_start, oz, dz, drive_s FROM legs
+                 WHERE oz IS NOT NULL AND dz IS NOT NULL AND drive_s BETWEEN 5 AND 1800
+                 ON CONFLICT (ytno, leg_start) DO NOTHING",
+            )
+            .execute(&pool)
+            .await;
+            let _ = sqlx::query("DELETE FROM learn_travel_drive_sample WHERE captured_at < now() - interval '30 days'")
+                .execute(&pool)
+                .await;
+            let _ = sqlx::query("REFRESH MATERIALIZED VIEW CONCURRENTLY learn_travel_zone225_pure")
+                .execute(&pool)
+                .await;
             let _ = sqlx::query(
                 "INSERT INTO learn_travel_metric
                    (captured_at, samples, od_pairs, confident_pairs, median_speed_kmh,
@@ -3237,6 +3277,10 @@ const NEED_HORIZON_S: i64 = 900;
 const GRID_COS: f64 = 0.86777; // cos(29.8°)
 const GRID_SIN: f64 = 0.49697; // sin(29.8°)
 const MANHATTAN_SPEED_MS: f64 = 2.278; // ~8.2 km/h, median implied speed over grid-Manhattan distance
+// PURE driving speed (moving-only, GPS-measured 23.8 km/h) for the L3 fallback of the PURE-OD cost.
+// The bundled MANHATTAN_SPEED_MS (2.278) was fit to travel that includes ~35% stopped time; this is
+// the moving-only speed so quay-Manhattan / this = pure driving time (matches learn_travel_zone225_pure).
+const PURE_DRIVE_SPEED_MS: f64 = 6.61; // 23.8 km/h
 fn quay_manhattan_m(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
     const M: f64 = 111_320.0;
     let dn = (lat2 - lat1) * M;
@@ -3444,14 +3488,14 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
             }
             // OD cost summary (225m grid, n>=10) loaded once → in-memory lookup
             let od: HashMap<(String, String), (i64, i64)> = sqlx::query_as::<_, (String, String, i32, i32)>(
-                "SELECT oz, dz, p50_s, p90_s FROM learn_travel_zone225 WHERE n >= 10",
+                "SELECT oz, dz, p50_s, p90_s FROM learn_travel_zone225_pure WHERE n >= 10",
             )
             .fetch_all(&pool).await.unwrap_or_default()
             .into_iter().map(|(oz, dz, p50, p90)| ((oz, dz), (p50 as i64, p90 as i64))).collect();
             let cost = |vlat: f64, vlon: f64, wlat: f64, wlon: f64| -> (i64, i64, &'static str) {
                 match od.get(&(grid225(vlat, vlon), grid225(wlat, wlon))) {
                     Some(&(p50, p90)) => (p50, p90, "L2"),
-                    None => { let p50 = quay_manhattan_m(vlat, vlon, wlat, wlon) / MANHATTAN_SPEED_MS; (p50 as i64, (p50 * 1.5) as i64, "L3") }
+                    None => { let p50 = quay_manhattan_m(vlat, vlon, wlat, wlon) / PURE_DRIVE_SPEED_MS; (p50 as i64, (p50 * 1.5) as i64, "L3") }
                 }
             };
             // STAGE 1 owns urgency + per-crane demand caps; STAGE 2 (the matching below) is then PURE
@@ -3635,14 +3679,14 @@ pub fn spawn_dispatch_compare(lm: Arc<LiveMap>, pool: PgPool) {
                 continue;
             }
             let od: HashMap<(String, String), i64> = sqlx::query_as::<_, (String, String, i32)>(
-                "SELECT oz, dz, p50_s FROM learn_travel_zone225 WHERE n >= 10",
+                "SELECT oz, dz, p50_s FROM learn_travel_zone225_pure WHERE n >= 10",
             )
             .fetch_all(&pool).await.unwrap_or_default()
             .into_iter().map(|(oz, dz, p50)| ((oz, dz), p50 as i64)).collect();
             let cost = |vlat: f64, vlon: f64, wlat: f64, wlon: f64| -> i64 {
                 match od.get(&(grid225(vlat, vlon), grid225(wlat, wlon))) {
                     Some(&p50) => p50,
-                    None => (quay_manhattan_m(vlat, vlon, wlat, wlon) / MANHATTAN_SPEED_MS) as i64,
+                    None => (quay_manhattan_m(vlat, vlon, wlat, wlon) / PURE_DRIVE_SPEED_MS) as i64,
                 }
             };
             // truck pool snapshots (last 6 min), keyed by snapshot time → reconstruct T1 state
@@ -3820,14 +3864,14 @@ pub fn spawn_fair_compare(lm: Arc<LiveMap>, pool: PgPool) {
             }
             let now = Utc::now().timestamp_millis();
             let od: HashMap<(String, String), i64> = sqlx::query_as::<_, (String, String, i32)>(
-                "SELECT oz, dz, p50_s FROM learn_travel_zone225 WHERE n >= 10",
+                "SELECT oz, dz, p50_s FROM learn_travel_zone225_pure WHERE n >= 10",
             )
             .fetch_all(&pool).await.unwrap_or_default()
             .into_iter().map(|(oz, dz, p50)| ((oz, dz), p50 as i64)).collect();
             let cost = |vlat: f64, vlon: f64, wlat: f64, wlon: f64| -> i64 {
                 match od.get(&(grid225(vlat, vlon), grid225(wlat, wlon))) {
                     Some(&p50) => p50,
-                    None => (quay_manhattan_m(vlat, vlon, wlat, wlon) / MANHATTAN_SPEED_MS) as i64,
+                    None => (quay_manhattan_m(vlat, vlon, wlat, wlon) / PURE_DRIVE_SPEED_MS) as i64,
                 }
             };
             // truck positions over the window → per-truck position nearest its dispatch instant
