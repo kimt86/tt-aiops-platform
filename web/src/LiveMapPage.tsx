@@ -1199,11 +1199,6 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
   const liveActive = useLive && liveInfo.connected && liveInfo.count > 0;
   const asOfAge = liveInfo.asOf ? Math.max(0, Math.round((Date.now() - Date.parse(liveInfo.asOf)) / 1000)) : null;
   const set = (k: LayerKey, v: boolean) => setToggles((t) => ({ ...t, [k]: v }));
-  const setGroup = (keys: LayerKey[], v: boolean) => setToggles((t) => { const n = { ...t }; for (const k of keys) n[k] = v; return n; });
-  const pointKeys = Object.values(NODE_LAYERS).map((n) => n.key);
-  const linkKeys = Object.values(LINK_LAYERS).map((l) => l.key);
-  const allPoints = pointKeys.every((k) => toggles[k]);
-  const allLinks = linkKeys.every((k) => toggles[k]);
   const activeCount = Object.values(toggles).filter(Boolean).length;
 
   return (
@@ -1322,7 +1317,6 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
               <header>{ko ? "영역" : "Areas"}</header>
               <Row on={toggles.areas} color="#7eb6ff" label={ko ? "도로/블록 영역" : "Road/Block"} onChange={(v) => set("areas", v)} />
               <Row on={showGrid} color={gridMetric === "speed" ? "#22c55e" : "#22d3ee"} label={ko ? `메트릭 격자 (${gridM}m)` : `Metric grid (${gridM}m)`} onChange={setShowGrid} />
-              <Row on={showWorkPts} color="#34d399" label={ko ? "배차 작업지점 (클릭: TOS vs 우리)" : "Dispatched work points (click: TOS vs ours)"} onChange={setShowWorkPts} />
               <Row on={showWharf} color="#38bdf8" label={ko ? "안벽 위치 (WHARF)" : "Wharf positions"} onChange={setShowWharf} />
               <Row on={showRoadGraph} color="#a78bfa" label={ko ? "추론 도로망 (GPS)" : "Inferred roads (GPS)"} onChange={setShowRoadGraph} />
               {showGrid && (
@@ -1342,25 +1336,16 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
               )}
             </section>
             <section className="llp-sec">
-              <header>{ko ? "포인트 (노드)" : "Points (nodes)"}</header>
-              {Object.values(NODE_LAYERS).map((n) => (
-                <Row key={n.key} on={toggles[n.key]} color={n.color} label={ko ? n.ko : n.en} onChange={(v) => set(n.key, v)} />
-              ))}
-              <button className="llp-meta" onClick={() => setGroup(pointKeys, !allPoints)}>{allPoints ? (ko ? "모든 포인트 OFF" : "All OFF") : (ko ? "모든 포인트 ON" : "All ON")}</button>
-            </section>
-            <section className="llp-sec">
-              <header>{ko ? "링크 (arc)" : "Links (arcs)"}</header>
-              {Object.values(LINK_LAYERS).map((l) => (
-                <Row key={l.key} on={toggles[l.key]} color={l.color} label={ko ? l.ko : l.en} onChange={(v) => set(l.key, v)} />
-              ))}
-              <button className="llp-meta" onClick={() => setGroup(linkKeys, !allLinks)}>{allLinks ? (ko ? "모든 링크 OFF" : "All OFF") : (ko ? "모든 링크 ON" : "All ON")}</button>
-            </section>
-            <section className="llp-sec">
-              <header>{ko ? "학습·배차 (GPS·실시간)" : "Learned · Dispatch"}</header>
+              <header>{ko ? "학습 (GPS)" : "Learned (GPS)"}</header>
               <Row on={toggles.learnTopos} color="#5eead4" label={ko ? "작업지점 좌표 (학습)" : "Work-points (learned)"} onChange={(v) => set("learnTopos", v)} />
               <Row on={toggles.learnLanes} color="#34d399" label={ko ? "주행 차선 (학습)" : "Driving lanes (learned)"} onChange={(v) => set("learnLanes", v)} />
+              <div className="llp-hint">{ko ? "작업점: 채움=신뢰도(🟢높음·🟠보통·🔴낮음)·테두리=블록(청록)/크레인(주황) · 차선: 화살표=흐름·초록=일방·회색=양방" : "work-points: fill=confidence (🟢🟠🔴), ring=block/crane · lanes: arrow=flow, green=one-way"}</div>
+            </section>
+            <section className="llp-sec">
+              <header>{ko ? "배차 (DISPATCH)" : "Dispatch"}</header>
+              <Row on={showWorkPts} color="#34d399" label={ko ? "배차 작업지점 (클릭: TOS vs 우리)" : "Dispatched work points (click: TOS vs ours)"} onChange={setShowWorkPts} />
               <Row on={toggles.demand} color="#fb923c" label={ko ? "작업 수요 · 미배정 (DS/LD)" : "Demand · unassigned"} onChange={(v) => set("demand", v)} />
-              <div className="llp-hint">{ko ? "작업점: 채움=신뢰도(🟢높음·🟠보통·🔴낮음)·테두리=블록(청록)/크레인(주황) · 차선: 화살표=흐름·초록=일방·회색=양방 · 수요: 크기=대수(주황 DS·청록 LD) · 클릭=상세" : "work-points: fill=confidence (🟢🟠🔴), ring=block/crane · lanes: arrow=flow, green=one-way · demand: size=count · click for details"}</div>
+              <div className="llp-hint">{ko ? "작업지점: 클릭=TOS vs 우리 배차 비교 · 수요: 크기=대수(주황 DS·청록 LD)·클릭=상세" : "work points: click = TOS vs ours · demand: size = count (orange DS · teal LD), click for details"}</div>
             </section>
           </div>
         )}
