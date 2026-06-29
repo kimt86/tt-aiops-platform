@@ -2197,6 +2197,53 @@ pub fn spawn_travel_aggregator(pool: PgPool) {
             let _ = sqlx::query("REFRESH MATERIALIZED VIEW CONCURRENTLY learn_travel_zone225_pure")
                 .execute(&pool)
                 .await;
+            // TERRAIN tier-1 (mig 0070): PURE empty-travel time keyed by actual WORK-POINTS, not a 225m
+            // grid. Combine each cycle's empty leg (origin = previous drop topos, dest = this pickup topos +
+            // its window) with the motion-segmented pure moving time within that window. Block↔block only
+            // (the view filters); cranes MOVE so are excluded from id-keyed memory.
+            let _ = sqlx::query(
+                "INSERT INTO learn_travel_topos_sample (ytno, leg_start, origin, dest, drive_s)
+                 WITH cyc AS (
+                   SELECT v2.ytno, v2.empty_travel_start_at AS ets, v2.empty_arrived_at AS eta,
+                          (v2.legs->0->>'target') AS pickup,
+                          lag((v2.legs->(jsonb_array_length(v2.legs)-1)->>'target')) OVER w AS prev_drop
+                     FROM tt_cycle_v2 v2
+                    WHERE v2.dropped_at > now() - interval '30 minutes'
+                      AND v2.empty_travel_start_at IS NOT NULL AND v2.empty_arrived_at IS NOT NULL
+                      AND v2.empty_arrived_at > v2.empty_travel_start_at
+                      AND jsonb_array_length(v2.legs) >= 1
+                   WINDOW w AS (PARTITION BY v2.ytno ORDER BY v2.dropped_at)
+                 ),
+                 seg AS (
+                   SELECT c.ytno, c.ets, c.prev_drop AS origin, c.pickup AS dest, p.ts, p.lat, p.lon,
+                          lag(p.ts) OVER w pts, lag(p.lat) OVER w plat, lag(p.lon) OVER w plon
+                     FROM cyc c
+                     JOIN truck_pos_hist p ON p.ytno = c.ytno AND p.ts BETWEEN c.ets AND c.eta
+                    WHERE c.prev_drop IS NOT NULL AND c.prev_drop <> c.pickup
+                   WINDOW w AS (PARTITION BY c.ytno, c.ets ORDER BY p.ts)
+                 ),
+                 agg AS (
+                   SELECT ytno, ets, min(origin) origin, min(dest) dest,
+                          sum(extract(epoch FROM ts-pts)) FILTER (
+                            WHERE pts IS NOT NULL
+                              AND extract(epoch FROM ts-pts) BETWEEN 20 AND 60
+                              AND 2*6371000*asin(sqrt(power(sin(radians(lat-plat)/2),2)
+                                  + cos(radians(plat))*cos(radians(lat))*power(sin(radians(lon-plon)/2),2))) >= 8
+                          )::int AS drive_s
+                     FROM seg GROUP BY ytno, ets
+                 )
+                 SELECT ytno, ets, origin, dest, drive_s FROM agg
+                  WHERE drive_s BETWEEN 5 AND 1800
+                 ON CONFLICT (ytno, leg_start) DO NOTHING",
+            )
+            .execute(&pool)
+            .await;
+            let _ = sqlx::query("DELETE FROM learn_travel_topos_sample WHERE captured_at < now() - interval '30 days'")
+                .execute(&pool)
+                .await;
+            let _ = sqlx::query("REFRESH MATERIALIZED VIEW CONCURRENTLY learn_travel_topos_pure")
+                .execute(&pool)
+                .await;
             let _ = sqlx::query(
                 "INSERT INTO learn_travel_metric
                    (captured_at, samples, od_pairs, confident_pairs, median_speed_kmh,
