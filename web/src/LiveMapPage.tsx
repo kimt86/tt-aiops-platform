@@ -544,6 +544,7 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
   const [showWharf, setShowWharf] = useState(false); // learned wharf/quay positions overlay
   const [showRoadGraph, setShowRoadGraph] = useState(false); // GPS-inferred road network (replaces imported links)
   const roadGraphLoaded = useRef(false);
+  const [roadGraphStats, setRoadGraphStats] = useState<{ nodes: number; edges: number; km: number; workpoints: number; generated_at: string } | null>(null);
   const [showWeatherFx, setShowWeatherFx] = useState(true); // game-like weather effect overlay (default on; toggle via the weather chip)
   const [gridM, setGridM] = useState(100); // grid cell size (m), adjustable
   const [gridMetric, setGridMetric] = useState<"speed" | "count">("speed"); // what the cell color shows
@@ -685,8 +686,9 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
   useEffect(() => {
     if (!ready || !showRoadGraph || roadGraphLoaded.current) return;
     roadGraphLoaded.current = true;
-    fetch("/livemap-roadgraph.geojson").then((r) => r.json()).then((fc) => {
+    fetch("/livemap-roadgraph.geojson", { cache: "no-store" }).then((r) => r.json()).then((fc) => {
       (mapRef.current?.getSource("roadgraph") as maplibregl.GeoJSONSource | undefined)?.setData(fc);
+      if (fc.stats) setRoadGraphStats(fc.stats);
     }).catch(() => { roadGraphLoaded.current = false; });
     api.learnLanes().then((l) => {
       (mapRef.current?.getSource("learn-lanes") as maplibregl.GeoJSONSource | undefined)?.setData({ type: "FeatureCollection", features: laneSegments(l.grid) });
@@ -696,6 +698,7 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
     const map = mapRef.current;
     const v = showRoadGraph ? "visible" : "none";
     if (map?.getLayer("roadgraph-line")) map.setLayoutProperty("roadgraph-line", "visibility", v);
+    if (map?.getLayer("roadgraph-wp")) map.setLayoutProperty("roadgraph-wp", "visibility", v);
     if (map?.getLayer("ll-seg")) map.setLayoutProperty("ll-seg", "visibility", v);
   }, [showRoadGraph, ready]);
 
@@ -798,7 +801,8 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
       map.addLayer({ id: "wharf-zone-line", type: "line", source: "wharf-zone", layout: { visibility: "none" }, paint: { "line-color": "#38bdf8", "line-opacity": 0.55, "line-width": 1 } });
       // GPS-inferred road network (static GeoJSON from scripts/build_road_graph.py) — replaces imported links
       map.addSource("roadgraph", { type: "geojson", data: EMPTY_FC });
-      map.addLayer({ id: "roadgraph-line", type: "line", source: "roadgraph", layout: { visibility: "none" }, paint: { "line-color": "#a78bfa", "line-opacity": 0.85, "line-width": ["interpolate", ["linear"], ["zoom"], 13, 1, 17, 2.6] } });
+      map.addLayer({ id: "roadgraph-line", type: "line", source: "roadgraph", filter: ["==", ["get", "kind"], "road"], layout: { visibility: "none" }, paint: { "line-color": "#a78bfa", "line-opacity": 0.85, "line-width": ["interpolate", ["linear"], ["zoom"], 13, 1, 17, 2.6] } });
+      map.addLayer({ id: "roadgraph-wp", type: "circle", source: "roadgraph", filter: ["==", ["get", "kind"], "workpoint"], layout: { visibility: "none" }, paint: { "circle-radius": ["interpolate", ["linear"], ["zoom"], 13, 0.8, 17, 2.6], "circle-color": "#22d3ee", "circle-opacity": 0.45 } });
       map.addSource("wharf", { type: "geojson", data: EMPTY_FC });
       map.addLayer({
         id: "wharf-pt",
@@ -1338,6 +1342,13 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
               <Row on={toggles.learnTopos} color="#5eead4" label={ko ? "작업지점 좌표 (학습)" : "Work-points (learned)"} onChange={(v) => set("learnTopos", v)} />
               <Row on={showWharf} color="#38bdf8" label={ko ? "안벽 위치 (WHARF)" : "Wharf positions"} onChange={setShowWharf} />
               <Row on={showRoadGraph} color="#a78bfa" label={ko ? "추론 도로망 (GPS, 방향)" : "Inferred roads (GPS, directed)"} onChange={setShowRoadGraph} />
+              {showRoadGraph && roadGraphStats && (
+                <div className="llp-hint" style={{ paddingLeft: 18 }}>
+                  {ko
+                    ? `밀도: 노드 ${roadGraphStats.nodes} · 엣지 ${roadGraphStats.edges} · ${roadGraphStats.km}km · 작업지점 ${roadGraphStats.workpoints.toLocaleString()} · 갱신 ${roadGraphStats.generated_at}`
+                    : `density: ${roadGraphStats.nodes} nodes · ${roadGraphStats.edges} edges · ${roadGraphStats.km}km · ${roadGraphStats.workpoints.toLocaleString()} work-pts · ${roadGraphStats.generated_at}`}
+                </div>
+              )}
               <div className="llp-hint">{ko ? "작업점: 채움=신뢰도(🟢높음·🟠보통·🔴낮음)·테두리=블록(청록)/크레인(주황) · 안벽: ARRIVED GPS로 학습한 선석 위치 · 도로망: GPS 궤적 추론(보라 선) + 방향 화살표(초록=일방·회색=양방)" : "work-points: fill=confidence (🟢🟠🔴), ring=block/crane · wharf: berth positions from ARRIVED GPS · roads: inferred centerlines (purple) + direction arrows (green=one-way, grey=two-way)"}</div>
             </section>
             <section className="llp-sec">
