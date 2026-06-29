@@ -542,6 +542,8 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
   const selectedWpRef = useRef<WorkPoint | null>(null); // the clicked work point (for re-anchoring its truck lines)
   const dispPosRef = useRef<Map<string, [number, number]>>(new Map()); // each device's currently DISPLAYED (smoothed) position
   const [showWharf, setShowWharf] = useState(false); // learned wharf/quay positions overlay
+  const [showRoadGraph, setShowRoadGraph] = useState(false); // GPS-inferred road network (replaces imported links)
+  const roadGraphLoaded = useRef(false);
   const [showWeatherFx, setShowWeatherFx] = useState(true); // game-like weather effect overlay (default on; toggle via the weather chip)
   const [gridM, setGridM] = useState(100); // grid cell size (m), adjustable
   const [gridMetric, setGridMetric] = useState<"speed" | "count">("speed"); // what the cell color shows
@@ -678,6 +680,19 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
     }
   }, [showWharf, ready]);
 
+  // GPS-inferred road graph: static GeoJSON, loaded once when first shown
+  useEffect(() => {
+    if (!ready || !showRoadGraph || roadGraphLoaded.current) return;
+    roadGraphLoaded.current = true;
+    fetch("/livemap-roadgraph.geojson").then((r) => r.json()).then((fc) => {
+      (mapRef.current?.getSource("roadgraph") as maplibregl.GeoJSONSource | undefined)?.setData(fc);
+    }).catch(() => { roadGraphLoaded.current = false; });
+  }, [showRoadGraph, ready]);
+  useEffect(() => {
+    const map = mapRef.current;
+    if (map?.getLayer("roadgraph-line")) map.setLayoutProperty("roadgraph-line", "visibility", showRoadGraph ? "visible" : "none");
+  }, [showRoadGraph, ready]);
+
   // init map once
   useEffect(() => {
     if (!mapEl.current) return;
@@ -775,6 +790,9 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
       map.addSource("wharf-zone", { type: "geojson", data: EMPTY_FC });
       map.addLayer({ id: "wharf-zone-fill", type: "fill", source: "wharf-zone", layout: { visibility: "none" }, paint: { "fill-color": "#38bdf8", "fill-opacity": 0.13 } });
       map.addLayer({ id: "wharf-zone-line", type: "line", source: "wharf-zone", layout: { visibility: "none" }, paint: { "line-color": "#38bdf8", "line-opacity": 0.55, "line-width": 1 } });
+      // GPS-inferred road network (static GeoJSON from scripts/build_road_graph.py) — replaces imported links
+      map.addSource("roadgraph", { type: "geojson", data: EMPTY_FC });
+      map.addLayer({ id: "roadgraph-line", type: "line", source: "roadgraph", layout: { visibility: "none" }, paint: { "line-color": "#a78bfa", "line-opacity": 0.85, "line-width": ["interpolate", ["linear"], ["zoom"], 13, 1, 17, 2.6] } });
       map.addSource("wharf", { type: "geojson", data: EMPTY_FC });
       map.addLayer({
         id: "wharf-pt",
@@ -1306,6 +1324,7 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
               <Row on={showGrid} color={gridMetric === "speed" ? "#22c55e" : "#22d3ee"} label={ko ? `메트릭 격자 (${gridM}m)` : `Metric grid (${gridM}m)`} onChange={setShowGrid} />
               <Row on={showWorkPts} color="#34d399" label={ko ? "배차 작업지점 (클릭: TOS vs 우리)" : "Dispatched work points (click: TOS vs ours)"} onChange={setShowWorkPts} />
               <Row on={showWharf} color="#38bdf8" label={ko ? "안벽 위치 (WHARF)" : "Wharf positions"} onChange={setShowWharf} />
+              <Row on={showRoadGraph} color="#a78bfa" label={ko ? "추론 도로망 (GPS)" : "Inferred roads (GPS)"} onChange={setShowRoadGraph} />
               {showGrid && (
                 <div className="llp-gridctl" style={{ padding: "2px 0 6px 18px", display: "flex", flexDirection: "column", gap: 5 }}>
                   <div style={{ display: "flex", gap: 4 }}>
