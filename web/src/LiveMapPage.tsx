@@ -1317,8 +1317,6 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
               <header>{ko ? "영역" : "Areas"}</header>
               <Row on={toggles.areas} color="#7eb6ff" label={ko ? "도로/블록 영역" : "Road/Block"} onChange={(v) => set("areas", v)} />
               <Row on={showGrid} color={gridMetric === "speed" ? "#22c55e" : "#22d3ee"} label={ko ? `메트릭 격자 (${gridM}m)` : `Metric grid (${gridM}m)`} onChange={setShowGrid} />
-              <Row on={showWharf} color="#38bdf8" label={ko ? "안벽 위치 (WHARF)" : "Wharf positions"} onChange={setShowWharf} />
-              <Row on={showRoadGraph} color="#a78bfa" label={ko ? "추론 도로망 (GPS)" : "Inferred roads (GPS)"} onChange={setShowRoadGraph} />
               {showGrid && (
                 <div className="llp-gridctl" style={{ padding: "2px 0 6px 18px", display: "flex", flexDirection: "column", gap: 5 }}>
                   <div style={{ display: "flex", gap: 4 }}>
@@ -1339,7 +1337,9 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
               <header>{ko ? "학습 (GPS)" : "Learned (GPS)"}</header>
               <Row on={toggles.learnTopos} color="#5eead4" label={ko ? "작업지점 좌표 (학습)" : "Work-points (learned)"} onChange={(v) => set("learnTopos", v)} />
               <Row on={toggles.learnLanes} color="#34d399" label={ko ? "주행 차선 (학습)" : "Driving lanes (learned)"} onChange={(v) => set("learnLanes", v)} />
-              <div className="llp-hint">{ko ? "작업점: 채움=신뢰도(🟢높음·🟠보통·🔴낮음)·테두리=블록(청록)/크레인(주황) · 차선: 화살표=흐름·초록=일방·회색=양방" : "work-points: fill=confidence (🟢🟠🔴), ring=block/crane · lanes: arrow=flow, green=one-way"}</div>
+              <Row on={showWharf} color="#38bdf8" label={ko ? "안벽 위치 (WHARF)" : "Wharf positions"} onChange={setShowWharf} />
+              <Row on={showRoadGraph} color="#a78bfa" label={ko ? "추론 도로망 (GPS)" : "Inferred roads (GPS)"} onChange={setShowRoadGraph} />
+              <div className="llp-hint">{ko ? "작업점: 채움=신뢰도(🟢높음·🟠보통·🔴낮음)·테두리=블록(청록)/크레인(주황) · 차선: 화살표=흐름·초록=일방·회색=양방 · 안벽: ARRIVED GPS로 학습한 선석 위치 · 도로망: GPS 궤적 추론" : "work-points: fill=confidence (🟢🟠🔴), ring=block/crane · lanes: arrow=flow · wharf: berth positions learned from ARRIVED GPS · roads: inferred from GPS traces"}</div>
             </section>
             <section className="llp-sec">
               <header>{ko ? "배차 (DISPATCH)" : "Dispatch"}</header>
