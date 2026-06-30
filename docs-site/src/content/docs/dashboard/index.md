@@ -130,6 +130,6 @@ KPI·사이클·학습의 재료가 되는 핵심 테이블입니다. (자세한
 | **KPI** | 터미널이 오늘 얼마나 잘 돌아갔나 (6개 점수) | TOS ① | [KPI 페이지 해설](/kc/dashboard/kpi/) |
 | **TT Dispatch** | 지금 트럭들이 어디서 뭐 하나 (실시간 지도·상태) | websocket ② | [TT Dispatch 해설](/kc/dashboard/dispatch/) |
 | **Cycle** | 트럭 한 바퀴(사이클)가 어떻게 쪼개지나 | websocket ② | [Cycle 해설](/kc/dashboard/cycle/) |
-| **러닝 센터** | AI가 무엇을 학습하고 얼마나 잘 맞히나 | ①+② | [러닝 센터 해설](/kc/dashboard/learning/) |
+| **러닝 센터** | AI가 무엇을·어떤 데이터로 학습하고 얼마나 잘 맞히나 (예측 모델 / 데이터 수집 2탭) | ①+② | [러닝 센터 해설](/kc/dashboard/learning/) |
 
 > 다음 → **[KPI 페이지 해설](/kc/dashboard/kpi/)** 부터 한 값씩 뜯어봅니다.
