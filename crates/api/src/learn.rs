@@ -4,10 +4,10 @@
 //! time series so the dashboard can show accumulation + precision improving over time.
 //! Pure Postgres reads.
 
-use axum::extract::State;
+use axum::extract::{Query, State};
 use axum::Json;
 use chrono::{DateTime, Utc};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 
 use crate::routes::AppError;
@@ -631,4 +631,123 @@ pub async fn eval(State(pool): State<PgPool>) -> Result<Json<Vec<EvalPoint>>, Ap
     .fetch_all(&pool)
     .await?;
     Ok(Json(rows))
+}
+
+// ───────────────────────── data-collection catalog (데이터 수집 탭) ─────────────────────────
+// Whitelist of the streams we actively collect. (key, table, recency-ts-column, sample SELECT).
+// `table`/`ts`/`sample_sql` are compile-time constants — never request input — so the formatted SQL
+// carries no injection surface; the only request param (`key`) is matched against this list. The
+// frontend owns the prose (source / usage / description); here we serve just the live numbers + rows.
+
+struct DataStream {
+    key: &'static str,
+    table: &'static str,
+    ts: &'static str, // column used for recency counts + "latest collected"
+    sample_sql: &'static str,
+}
+
+const DATA_STREAMS: &[DataStream] = &[
+    DataStream { key: "truck_pos_hifreq", table: "truck_pos_hifreq", ts: "ts",
+        sample_sql: "SELECT ts, ytno, round(lat::numeric,5) AS lat, round(lon::numeric,5) AS lon \
+                     FROM truck_pos_hifreq ORDER BY ts DESC LIMIT 50" },
+    DataStream { key: "truck_pos_hist", table: "truck_pos_hist", ts: "ts",
+        sample_sql: "SELECT ts, ytno, round(lat::numeric,5) AS lat, round(lon::numeric,5) AS lon, state \
+                     FROM truck_pos_hist ORDER BY ts DESC LIMIT 50" },
+    DataStream { key: "tt_cycle_v2", table: "tt_cycle_v2", ts: "dropped_at",
+        sample_sql: "SELECT dropped_at, ytno, jobtype, opened_at, empty_arrived_at, laden_arrived_at, legs \
+                     FROM tt_cycle_v2 ORDER BY dropped_at DESC LIMIT 50" },
+    DataStream { key: "learn_travel_sample", table: "learn_travel_sample", ts: "captured_at",
+        sample_sql: "SELECT captured_at, ytno, origin_zone, dest_zone, travel_s, round(dist_m::numeric,0) AS dist_m, shift \
+                     FROM learn_travel_sample ORDER BY captured_at DESC LIMIT 50" },
+    DataStream { key: "learn_travel_drive_sample", table: "learn_travel_drive_sample", ts: "captured_at",
+        sample_sql: "SELECT captured_at, ytno, oz, dz, drive_s, leg_start \
+                     FROM learn_travel_drive_sample ORDER BY captured_at DESC LIMIT 50" },
+    DataStream { key: "tt_soon_idle_pred", table: "tt_soon_idle_pred", ts: "predicted_at",
+        sample_sql: "SELECT predicted_at, ytno, jobtype, qc, source, gps_would_fire, \
+                     round(nearest_rtg_m::numeric,0) AS nearest_rtg_m, reason \
+                     FROM tt_soon_idle_pred ORDER BY predicted_at DESC LIMIT 50" },
+    DataStream { key: "dispatch_pred_sample", table: "dispatch_pred_sample", ts: "logged_at",
+        sample_sql: "SELECT logged_at, qc, vessel, contno, jobtype, pred_work_eta_ts, dispatch_deadline_ts, \
+                     slack_s, resolved_at FROM dispatch_pred_sample ORDER BY logged_at DESC LIMIT 50" },
+    DataStream { key: "free_in_sample", table: "free_in_sample", ts: "ts",
+        sample_sql: "SELECT ts, ytno, state, jobtype, qc, secs_in_cycle, round(nearest_rtg_m::numeric,0) AS nearest_rtg_m, \
+                     pred_free_in_s, soon_idle, actual_remaining_s FROM free_in_sample ORDER BY ts DESC LIMIT 50" },
+    DataStream { key: "stage2_match_shadow", table: "stage2_match_shadow", ts: "ts",
+        sample_sql: "SELECT ts, ytno, qc, vessel, jobtype, arrival_s, deadline_slack_s, cost_tier, switched \
+                     FROM stage2_match_shadow ORDER BY ts DESC LIMIT 50" },
+    DataStream { key: "dispatch_compare_shadow", table: "dispatch_compare_shadow", ts: "ts",
+        sample_sql: "SELECT ts, qc, jobtype, tos_ytno, tos_arrival_s, our_ytno, our_arrival_s, agree, delta_s \
+                     FROM dispatch_compare_shadow ORDER BY ts DESC LIMIT 50" },
+    DataStream { key: "fair_compare_detail", table: "fair_compare_detail", ts: "ts",
+        sample_sql: "SELECT ts, jobtype, qc, tos_s, our_s, (tos_s - our_s) AS save_s \
+                     FROM fair_compare_detail ORDER BY ts DESC LIMIT 50" },
+    DataStream { key: "congestion_edge", table: "congestion_edge", ts: "hour",
+        sample_sql: "SELECT hour, round(mlat::numeric,5) AS mlat, round(mlon::numeric,5) AS mlon, \
+                     round(med_speed_kmh::numeric,1) AS med_speed_kmh, n, round(len_m::numeric,0) AS len_m \
+                     FROM congestion_edge ORDER BY hour DESC, n DESC LIMIT 50" },
+    DataStream { key: "qc_wait_sample", table: "qc_wait_sample", ts: "ts",
+        sample_sql: "SELECT ts, working_qc, starving_real, wait_real_s, starving_gps, wait_gps_s, pos_known_qc \
+                     FROM qc_wait_sample ORDER BY ts DESC LIMIT 50" },
+    DataStream { key: "weather_hourly", table: "weather_hourly", ts: "ts",
+        sample_sql: "SELECT ts, precip_mm, wind_kmh, visibility_m, weather_code, captured_at \
+                     FROM weather_hourly ORDER BY ts DESC LIMIT 50" },
+    DataStream { key: "tos_handover_label", table: "tos_handover_label", ts: "captured_at",
+        sample_sql: "SELECT captured_at, contno, ytno, jobtype, topos, dis_ts, comp_ts \
+                     FROM tos_handover_label ORDER BY captured_at DESC LIMIT 50" },
+    DataStream { key: "learn_qc_move_time", table: "learn_qc_move_time", ts: "as_of_ts",
+        sample_sql: "SELECT qc, jobtype, shift, med_sec, n, as_of_ts \
+                     FROM learn_qc_move_time ORDER BY as_of_ts DESC, n DESC LIMIT 50" },
+];
+
+#[derive(Serialize, sqlx::FromRow)]
+pub struct DataStat {
+    key: String,
+    total: i64,   // pg_class.reltuples estimate (fast; autovacuum keeps it close)
+    n_1h: i64,    // exact, last hour
+    n_24h: i64,   // exact, last 24h
+    latest: Option<DateTime<Utc>>,
+}
+
+/// GET /api/learn/data-catalog — per-stream collection volumes (total + recent) and latest timestamp.
+pub async fn data_catalog(State(pool): State<PgPool>) -> Result<Json<Vec<DataStat>>, AppError> {
+    let parts: Vec<String> = DATA_STREAMS
+        .iter()
+        .map(|s| {
+            format!(
+                "SELECT '{k}' AS key,
+                        GREATEST((SELECT reltuples::bigint FROM pg_class WHERE relname='{t}' AND relkind='r' LIMIT 1), 0) AS total,
+                        (SELECT count(*) FROM {t} WHERE {ts} > now() - interval '1 hour') AS n_1h,
+                        (SELECT count(*) FROM {t} WHERE {ts} > now() - interval '24 hours') AS n_24h,
+                        (SELECT max({ts})::timestamptz FROM {t}) AS latest",
+                k = s.key, t = s.table, ts = s.ts
+            )
+        })
+        .collect();
+    let sql = parts.join("\nUNION ALL\n");
+    let rows: Vec<DataStat> = sqlx::query_as(&sql).fetch_all(&pool).await?;
+    Ok(Json(rows))
+}
+
+#[derive(Deserialize)]
+pub struct SampleQ {
+    key: String,
+}
+
+/// GET /api/learn/data-sample?key=… — recent rows of one whitelisted stream. Returns the raw JSON
+/// array straight from Postgres `json_agg` (column order preserved — note serde_json::Value would
+/// re-sort keys alphabetically via its BTreeMap, so we pass the bytes through untouched). Unknown
+/// key → empty array.
+pub async fn data_sample(
+    State(pool): State<PgPool>,
+    Query(q): Query<SampleQ>,
+) -> Result<axum::response::Response, AppError> {
+    use axum::http::header;
+    use axum::response::IntoResponse;
+    let json_ct = [(header::CONTENT_TYPE, "application/json")];
+    let Some(s) = DATA_STREAMS.iter().find(|s| s.key == q.key) else {
+        return Ok((json_ct, "[]").into_response());
+    };
+    let sql = format!("SELECT coalesce(json_agg(t), '[]'::json)::text FROM ({}) t", s.sample_sql);
+    let txt: String = sqlx::query_scalar(&sql).fetch_one(&pool).await?;
+    Ok((json_ct, txt).into_response())
 }

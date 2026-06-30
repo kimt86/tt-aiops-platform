@@ -277,6 +277,10 @@ export interface FairCompare {
   ts: string; window_min: number; n: number; tos_total_s: number; our_total_s: number; savings_pct: number; same_n: number;
 }
 export interface FairCompareOut { latest: FairCompare | null; avg_savings_pct: number | null; recent: FairCompare[]; }
+// 학습 센터 — 데이터 수집 카탈로그(데이터 탭)
+export interface DataStat { key: string; total: number; n_1h: number; n_24h: number; latest: string | null; }
+export type DataRow = Record<string, string | number | boolean | null>;
+
 export interface FairBucket { key: string; pairs: number; savings_pct: number | null; worse_pct: number | null; }
 export interface FairBreakdown {
   by_job: FairBucket[]; by_hour: FairBucket[]; by_dist: FairBucket[]; by_crane: FairBucket[];
@@ -310,6 +314,8 @@ export const api = {
   learnSoonIdle: () => get<SoonIdleData>("/api/learn/soon-idle"),
   learnDispatchPred: () => get<DispatchPredData>("/api/learn/dispatch-pred"),
   learnEval: () => get<EvalPoint[]>("/api/learn/eval"),
+  learnDataCatalog: () => get<DataStat[]>("/api/learn/data-catalog"),
+  learnDataSample: (key: string) => get<DataRow[]>(`/api/learn/data-sample?key=${encodeURIComponent(key)}`),
   stage2Shadow: () => get<Stage2Shadow>("/api/stage2/shadow"),
   stage2Advisory: () => get<Stage2Advisory[]>("/api/stage2/advisory"),
   stage2ComparePicks: () => get<ComparePick[]>("/api/stage2/compare-picks"),

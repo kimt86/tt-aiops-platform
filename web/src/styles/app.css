@@ -979,3 +979,48 @@ td.mono { font-family: "JetBrains Mono", monospace; color: var(--text); }
 .cyc-lane-c2c { font-size: 11px; color: var(--purple); font-weight: 700; }
 .cyc-lane-dur { font-size: 11px; font-weight: 700; color: var(--text); text-align: right; font-family: "JetBrains Mono", monospace; }
 .cyc-empty { padding: 24px; text-align: center; color: var(--text-mute); font-size: 12px; }
+
+/* ───────────────────────── Learning Center — tab shell ───────────────────────── */
+.ls-tabs { display: inline-flex; background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius-md); overflow: hidden; }
+.ls-tab { padding: 6px 15px; font-size: 12px; font-weight: 700; background: transparent; border: 0; border-left: 1px solid var(--border); color: var(--text-dim); cursor: pointer; }
+.ls-tab:first-child { border-left: 0; }
+.ls-tab:hover { color: var(--text); }
+.ls-tab.active { background: var(--brand); color: #fff; }
+
+/* model card — input → output → role strip */
+.ls-io { display: flex; flex-direction: column; gap: 5px; background: var(--surface-2); border: 1px solid var(--border-soft); border-radius: var(--radius-md); padding: 9px 12px; margin-bottom: 12px; }
+.ls-io-row { display: flex; align-items: baseline; gap: 9px; font-size: 12px; line-height: 1.4; }
+.ls-io-k { flex: none; width: 34px; font-size: 9.5px; font-weight: 800; letter-spacing: 0.4px; text-transform: uppercase; color: var(--text-mute); text-align: center; padding: 1px 0; border: 1px solid var(--border-soft); border-radius: 4px; }
+.ls-io-k.role { color: var(--text-dim); }
+.ls-io-v { color: var(--text-dim); min-width: 0; }
+.ls-io-v.role { color: var(--text); font-weight: 600; }
+
+/* ───────────────────────── Learning Center — data-collection tab ───────────────────────── */
+.ds-summary { font-size: 12px; color: var(--text-dim); line-height: 1.6; }
+.ds-grand b { color: var(--text); font-family: "JetBrains Mono", monospace; }
+.ds-group { margin-top: 6px; }
+.ds-group-h { font-size: 13px; font-weight: 800; margin: 6px 0 10px; padding-left: 9px; border-left: 3px solid var(--border-strong); color: var(--text); }
+.ds-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 12px; }
+.ds-card { background: var(--surface); border: 1px solid var(--border); border-top: 2px solid var(--border-strong); border-radius: var(--radius-lg); padding: 13px 15px; display: flex; flex-direction: column; }
+.ds-card-h { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.ds-card-name { font-size: 14px; font-weight: 800; color: var(--text); }
+.ds-card-tbl { font-size: 10px; color: var(--text-mute); font-family: "JetBrains Mono", monospace; background: var(--surface-2); padding: 1px 6px; border-radius: 4px; }
+.ds-card-desc { font-size: 11.5px; color: var(--text-dim); line-height: 1.55; margin: 8px 0 10px; }
+.ds-card-meta { display: flex; flex-direction: column; gap: 4px; margin-bottom: 11px; }
+.ds-mrow { display: flex; gap: 8px; font-size: 11.5px; color: var(--text-dim); }
+.ds-mk { flex: none; width: 46px; font-size: 9.5px; font-weight: 800; letter-spacing: 0.3px; text-transform: uppercase; color: var(--text-mute); padding-top: 1px; }
+.ds-stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 7px; margin-top: auto; }
+.ds-stat { background: var(--surface-2); border: 1px solid var(--border-soft); border-radius: var(--radius-md); padding: 6px 4px; text-align: center; }
+.ds-stat b { display: block; font-size: 15px; font-weight: 800; font-family: "JetBrains Mono", monospace; line-height: 1.15; }
+.ds-stat b.ds-stamp { font-size: 10.5px; }
+.ds-stat span { font-size: 9px; color: var(--text-mute); }
+.ds-toggle { margin-top: 11px; width: 100%; padding: 6px; font-size: 11px; font-weight: 700; background: var(--surface-2); border: 1px solid var(--border-soft); border-radius: var(--radius-md); color: var(--text-dim); cursor: pointer; }
+.ds-toggle:hover { color: var(--text); border-color: var(--border-strong); }
+.ds-toggle.open { color: var(--text); }
+.ds-table-wrap { margin-top: 9px; max-height: 320px; overflow: auto; border: 1px solid var(--border-soft); border-radius: var(--radius-md); }
+.ds-table { border-collapse: collapse; width: 100%; font-size: 11px; }
+.ds-table th { position: sticky; top: 0; background: var(--surface-3); color: var(--text-dim); font-weight: 700; text-align: left; padding: 5px 8px; white-space: nowrap; border-bottom: 1px solid var(--border); z-index: 1; }
+.ds-table td { padding: 4px 8px; white-space: nowrap; color: var(--text-dim); border-bottom: 1px solid var(--border-soft); }
+.ds-table tbody tr:hover td { background: var(--surface-2); }
+.ds-table-note { font-size: 10px; color: var(--text-mute); padding: 5px 8px; }
+@media (max-width: 720px) { .ds-stats { grid-template-columns: repeat(2, 1fr); } .ds-grid { grid-template-columns: 1fr; } }

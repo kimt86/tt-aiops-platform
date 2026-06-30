@@ -1,21 +1,33 @@
-// 학습 센터 — 6개 학습 모델을 "세션 카드"로. 각 카드는 가로 2단:
-//   📈 학습 추이(품질이 시간이 갈수록 좋아지나) | 🧪 최신 테스트(예측 vs 실제, 최근 결과)
-//   ① TT 이동시간  ② 작업지점 좌표  ③ 주행 차선  ④ Soon-idle 예측 정확도
+// 학습 센터 — 2탭 구성:
+//   🧠 예측 모델 — 각 모델 카드(입력·출력·담당역할 + KPI + KPI 트렌드 차트)
+//   🗄️ 데이터 수집 — 수집 스트림 카드(설명·소스·쓰임·총/최근 건수 + 펼치면 최근 데이터)
 import { useEffect, useMemo, useState } from "react";
 import { type Lang } from "./i18n";
-import { api, type LearnTopos, type LearnToposPoint, type LanesData, type TravelData, type TravelOd, type SoonIdleData, type SoonIdleLead, type DispatchPredData } from "./api";
+import { api, type LearnTopos, type LearnToposPoint, type LanesData, type TravelData, type TravelOd, type SoonIdleData, type SoonIdleLead, type DispatchPredData, type EvalPoint, type DataStat, type DataRow } from "./api";
 import { LineChart } from "./charts";
 
 const ko = (lang: Lang) => lang === "ko";
-const fmtN = (n: number) => n.toLocaleString();
+const fmtN = (n: number | null | undefined) => (n == null ? "—" : n.toLocaleString());
 const mPrec = (m: number | null | undefined) => (m == null ? "—" : `${m.toFixed(1)}m`);
 const stamp = (iso: string | null | undefined) =>
   iso ? new Date(iso).toLocaleString([], { timeZone: "Asia/Kuala_Lumpur", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false }) : "—";
+const stampS = (iso: string | null | undefined) =>
+  iso ? new Date(iso).toLocaleString([], { timeZone: "Asia/Kuala_Lumpur", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false }) : "—";
 const mmss = (s: number | null | undefined) => (s == null ? "—" : `${Math.floor(s / 60)}:${String(Math.round(s % 60)).padStart(2, "0")}`);
 const mDist = (m: number | null | undefined) => (m == null ? "—" : m >= 1000 ? `${(m / 1000).toFixed(2)}km` : `${Math.round(m)}m`);
 const kmh = (v: number | null | undefined) => (v == null ? "—" : `${v.toFixed(1)}`);
 const mins = (s: number | null | undefined) => (s == null ? "—" : `${(s / 60).toFixed(1)}`);
 const distLabel = (b: number, k: boolean) => (b === 0 ? "≤30m" : b === 1 ? "30–80m" : b === 2 ? "80–150m" : b === 3 ? ">150m" : k ? "RTG없음" : "no-RTG");
+
+const ISO_RE = /^\d{4}-\d\d-\d\dT\d\d:\d\d/;
+// format one sample-table cell: timestamps→MYT, bools→✓/✗, integers→grouped, floats verbatim.
+function fmtCell(v: string | number | boolean | null): string {
+  if (v == null) return "—";
+  if (typeof v === "boolean") return v ? "✓" : "·";
+  if (typeof v === "number") return Number.isInteger(v) ? v.toLocaleString() : String(v);
+  if (ISO_RE.test(v)) return stampS(v);
+  return v;
+}
 
 // first→last change of a quality series. `higherBetter` decides what counts as "improving".
 function trend(series: number[], higherBetter: boolean): { dir: 1 | -1 | 0; pct: number; improving: boolean } | null {
@@ -64,6 +76,18 @@ function Chip({ label, value, accent }: { label: string; value: string; accent?:
     <div className="ls-chip">
       <div className="ls-chip-l">{label}</div>
       <div className="ls-chip-v" style={accent ? { color: accent } : undefined}>{value}</div>
+    </div>
+  );
+}
+
+// input → output → role-in-our-logic strip. Shown at the top of every model card.
+function IoStrip({ inputs, output, role, accent, lang }: { inputs: string; output: string; role: string; accent: string; lang: Lang }) {
+  const k = ko(lang);
+  return (
+    <div className="ls-io">
+      <div className="ls-io-row"><span className="ls-io-k">{k ? "입력" : "in"}</span><span className="ls-io-v">{inputs}</span></div>
+      <div className="ls-io-row"><span className="ls-io-k">{k ? "출력" : "out"}</span><span className="ls-io-v">{output}</span></div>
+      <div className="ls-io-row"><span className="ls-io-k role" style={{ color: accent, borderColor: accent + "66" }}>{k ? "담당" : "role"}</span><span className="ls-io-v role">{role}</span></div>
     </div>
   );
 }
@@ -125,14 +149,15 @@ function LeadCard({ jt, accent, lead, recall, recallGps, precision, lang }: { jt
   );
 }
 
-export default function LearnPage({ lang }: { lang: Lang }) {
+// ───────────────────────────── 예측 모델 탭 ─────────────────────────────
+function ModelsTab({ lang }: { lang: Lang }) {
   const k = ko(lang);
   const [d, setD] = useState<LearnTopos | null>(null);
   const [ln, setLn] = useState<LanesData | null>(null);
   const [tv, setTv] = useState<TravelData | null>(null);
   const [si, setSi] = useState<SoonIdleData | null>(null);
   const [dp, setDp] = useState<DispatchPredData | null>(null);
-  const [ev, setEv] = useState<import("./api").EvalPoint[] | null>(null);
+  const [ev, setEv] = useState<EvalPoint[] | null>(null);
   const [err, setErr] = useState(false);
   const [onlyBlock, setOnlyBlock] = useState(true);
   const [q, setQ] = useState("");
@@ -154,15 +179,15 @@ export default function LearnPage({ lang }: { lang: Lang }) {
 
   // ① travel — learning = accumulating samples; test = predicted-vs-actual (accuracy block)
   const sampVals = (tv?.metric_series ?? []).map((p) => Number(p.samples));
-  // ② topos — learning = confident points (n≥30); test = positional residual (median spread ↓)
+  // ③ topos — learning = confident points (n≥30); test = positional residual (median spread ↓)
   const ms = d?.metric_series ?? [];
   const confTopoVals = ms.map((p) => p.confident_topos);
   const spreadVals = ms.map((p) => p.median_spread_m ?? 0).filter((v) => v > 0);
-  // ③ lanes — learning = road cells; test = directional consistency (one-way fraction ↑)
+  // ④ lanes — learning = road cells; test = directional consistency (one-way fraction ↑)
   const lms = ln?.metric_series ?? [];
   const roadVals = lms.map((p) => p.road_cells);
   const onewayVals = lms.map((p) => (p.oneway_frac ?? 0) * 100);
-  // ④ soon-idle — per jobtype recall/precision/lead (DS + LD)
+  // ⑤ soon-idle — per jobtype recall/precision/lead (DS + LD)
   const jobAgg = (jt: string) => {
     const rows = (si?.by_source ?? []).filter((s) => s.jobtype === jt);
     const pred = rows.reduce((a, s) => a + s.predictions, 0);
@@ -174,7 +199,7 @@ export default function LearnPage({ lang }: { lang: Lang }) {
   const siRecallSeries = (si?.metric_series ?? []).filter((p) => p.jobtype === "DS" && p.source === "ALL").map((p) => p.recall_pct ?? 0);
   const ldRecallSeries = (si?.metric_series ?? []).filter((p) => p.jobtype === "LD" && p.source === "ALL").map((p) => p.recall_pct ?? 0);
   const siGrid = "50px 84px 56px 64px 64px 72px";
-  const dse = si?.ds_eta; // ⑤ DS minutes-to-idle feature model
+  const dse = si?.ds_eta; // ⑥ DS minutes-to-idle feature model
 
   const points = useMemo(() => {
     let pts = d?.points ?? [];
@@ -186,16 +211,15 @@ export default function LearnPage({ lang }: { lang: Lang }) {
   const acc = tv?.accuracy;
 
   return (
-    <div className="content cyc-page">
-      <div className="cyc-head">
-        <div className="cyc-title">
-          <h2>{k ? "학습 센터" : "Learning Center"}</h2>
-          <span className="cyc-title-sub">{k ? "6개 학습 모델 · 📈 학습 추이 + 🧪 최신 테스트(예측 vs 실제)" : "6 models · 📈 learning trend + 🧪 latest test"}{err && <span className="cyc-err">{k ? " · 연결 오류" : " · offline"}</span>}</span>
-        </div>
-      </div>
+    <>
+      {err && <div className="cyc-err" style={{ marginBottom: 8 }}>{k ? "· 연결 오류" : "· offline"}</div>}
 
       {/* ① TT 이동시간 */}
-      <Session n={1} accent="#60a5fa" title={k ? "TT 이동시간" : "TT travel time"} sub={k ? "사이클에서 수확한 출발→도착 trip + 피처(경로거리·존·밀도·날씨)" : "trips harvested from cycles + features"}>
+      <Session n={1} accent="#60a5fa" title={k ? "TT 이동시간 예측" : "TT travel time"} sub={k ? "사이클에서 수확한 출발→도착 trip + 피처(경로거리·존·밀도·날씨)" : "trips harvested from cycles + features"}>
+        <IoStrip accent="#60a5fa" lang={lang}
+          inputs={k ? "출발존→도착존 + 경로거리(맨해튼)·밀도·시간대·날씨" : "origin→dest zone + route dist, density, hour, weather"}
+          output={k ? "구간 공차 이동시간(초) 분포 — 중앙·p50/p90" : "empty-travel seconds per O→D (median, p50/p90)"}
+          role={k ? "2단계 비용행렬의 '공차 도착시간(arr)' — 배차 효율의 핵심 입력" : "the empty-travel arrival in the Stage-2 cost matrix"} />
         <div className="ls-cols">
           <Panel tag={k ? "학습 추이 — 누적 학습 표본" : "learning — samples"}>
             <Metric series={sampVals} fmt={fmtN} label={k ? "누적 학습 표본 (커버리지)" : "accumulating samples"} color="#60a5fa" higherBetter lang={lang} />
@@ -230,12 +254,17 @@ export default function LearnPage({ lang }: { lang: Lang }) {
         </details>
       </Session>
 
+      {/* ② 순수 주행시간 예측 */}
       {(() => {
         const evA = [...(ev ?? [])].reverse(); // ascending for charts
         const last = ev?.[0];
         const odMape = evA.map((p) => p.od_mape ?? NaN);
         return (
-          <Session n={6} accent="#a78bfa" title={k ? "순수 주행시간 예측 (학습 상황)" : "Pure driving-time prediction (status)"} sub={k ? "정지/큐 제외 순수 주행 — 매시간 자동 학습·테스트(예측 vs 실측) + 데이터 누적 추이" : "stop-excluded driving — hourly train/test + data accumulation"}>
+          <Session n={2} accent="#a78bfa" title={k ? "순수 주행시간 예측" : "Pure driving-time prediction"} sub={k ? "정지/큐 제외 순수 주행 — 매시간 자동 학습·테스트(예측 vs 실측)" : "stop-excluded driving — hourly train/test"}>
+            <IoStrip accent="#a78bfa" lang={lang}
+              inputs={k ? "3초 GPS 트레이스(정지·큐 구간 제외) → 순수 주행 leg" : "3s GPS traces, stop/queue excluded → pure-drive leg"}
+              output={k ? "순수 주행시간(초) + 추론 도로망 그래프" : "pure driving seconds + inferred road graph"}
+              role={k ? "이동시간 예측의 상한 정확도 검증 + 방향 도로 라우팅의 기반" : "upper-bound accuracy check + basis for directed routing"} />
             <div className="ls-cols">
               <Panel tag={k ? "학습 추이 — 예측 정확도 (OD MAPE, 낮을수록 좋음)" : "learning — accuracy (OD MAPE, lower better)"}>
                 <Metric series={odMape} fmt={(v) => `${v.toFixed(0)}%`} label={k ? "OD-순수 모델 오차율" : "OD-pure MAPE"} color="#a78bfa" higherBetter={false} lang={lang} />
@@ -262,8 +291,12 @@ export default function LearnPage({ lang }: { lang: Lang }) {
         );
       })()}
 
-      {/* ② 작업지점 좌표 */}
-      <Session n={2} accent="#0ea5e9" title={k ? "작업지점 좌표" : "Work-point coordinates"} sub={k ? "TT가 작업점에 도착한 GPS를 누적 → 블록·크레인 중심좌표" : "GPS at arrival accumulated → centroid coords"}>
+      {/* ③ 작업지점 좌표 */}
+      <Session n={3} accent="#0ea5e9" title={k ? "작업지점 좌표" : "Work-point coordinates"} sub={k ? "TT가 작업점에 도착한 GPS를 누적 → 블록·크레인 중심좌표" : "GPS at arrival accumulated → centroid coords"}>
+        <IoStrip accent="#0ea5e9" lang={lang}
+          inputs={k ? "TT가 작업점에 도착(ARRIVED)한 순간의 GPS" : "GPS at the moment a TT arrives at a work-point"}
+          output={k ? "블록·크레인 중심좌표(lat,lon) + 신뢰도" : "block/crane centroid coords (lat,lon) + confidence"}
+          role={k ? "존 정의·거리/비용 계산의 위치 앵커 (이동 크레인은 GPS snap)" : "the location anchor for zones & cost distances"} />
         <div className="ls-cols">
           <Panel tag={k ? "학습 추이 — 확신 작업지점 (n≥30)" : "learning — confident points"}>
             <Metric series={confTopoVals} fmt={fmtN} label={k ? "잘 학습된 점 수" : "confident points (n≥30)"} color="#34d399" higherBetter lang={lang} />
@@ -298,8 +331,12 @@ export default function LearnPage({ lang }: { lang: Lang }) {
         </details>
       </Session>
 
-      {/* ③ 주행 차선 */}
-      <Session n={3} accent="#34d399" title={k ? "주행 차선" : "Driving lanes"} sub={k ? "이동 TT의 GPS 트레이스를 22m 격자에 집계 → 도로·방향" : "moving-TT traces aggregated to a 22m grid → roads & direction"}>
+      {/* ④ 주행 차선 */}
+      <Session n={4} accent="#34d399" title={k ? "주행 차선·도로 방향" : "Driving lanes & direction"} sub={k ? "이동 TT의 GPS 트레이스를 22m 격자에 집계 → 도로·방향" : "moving-TT traces aggregated to a 22m grid → roads & direction"}>
+        <IoStrip accent="#34d399" lang={lang}
+          inputs={k ? "이동 TT의 GPS 트레이스 (22m 격자에 집계)" : "moving-TT GPS traces, binned to a 22m grid"}
+          output={k ? "도로 셀·통행 방향(heading)·평균 속도" : "road cells, travel direction (heading), mean speed"}
+          role={k ? "방향성 도로 그래프 → 경로 라우팅(맨해튼 대비 개선)" : "directed road graph → route distances (beats Manhattan)"} />
         <div className="ls-cols">
           <Panel tag={k ? "학습 추이 — 학습된 도로 셀 (통과≥20)" : "learning — road cells"}>
             <Metric series={roadVals} fmt={fmtN} label={k ? "도로 커버리지 (셀 수)" : "road coverage (cells)"} color="#34d399" higherBetter lang={lang} />
@@ -315,8 +352,12 @@ export default function LearnPage({ lang }: { lang: Lang }) {
         <div className="ls-note">{k ? "트럭 GPS가 쌓일수록 더 많은 도로 셀이 학습되고, 셀 방향이 한쪽으로 또렷(일방 비율↑)해집니다 = 학습 방향이 실제 흐름과 일치. 차선망은 라이브맵 → 레이어 → 주행 차선에서 화살표로 확인." : "More GPS → more road cells + clearer per-cell direction (one-way↑). See arrows on the live map."}</div>
       </Session>
 
-      {/* ④ Soon-idle 예측 정확도 */}
-      <Session n={4} accent="#a78bfa" title={k ? "Soon-idle 예측 정확도" : "Soon-idle prediction"} sub={k ? "그림자: 예측 vs 실제 트럭 빔 — GPS 우선(사이클 dropped_at)·TOS 폴백 · DS·LD" : "shadow: prediction vs physical truck-freed — GPS-first (cycle dropped_at), TOS fallback"}>
+      {/* ⑤ Soon-idle 예측 정확도 */}
+      <Session n={5} accent="#a78bfa" title={k ? "Soon-idle (곧 빔) 예측" : "Soon-idle prediction"} sub={k ? "그림자: 예측 vs 실제 트럭 빔 — GPS 우선(사이클 dropped_at)·TOS 폴백 · DS·LD" : "shadow: prediction vs physical truck-freed — GPS-first (cycle dropped_at), TOS fallback"}>
+        <IoStrip accent="#a78bfa" lang={lang}
+          inputs={k ? "트럭 상태·RTG 거리·발화 신호(GPS/PLC/TOS)" : "truck state, RTG distance, firing signal (GPS/PLC/TOS)"}
+          output={k ? "'곧 빔' 여부 + 몇 분 후 유휴(리드타임)" : "soon-idle flag + minutes-to-idle (lead time)"}
+          role={k ? "배차 공급 예측 — 곧 빔 트럭을 2단계 후보 풀에 선편입" : "supply forecast — pre-admit soon-free trucks to the Stage-2 pool"} />
         <div className="ls-ptag" style={{ marginBottom: 8 }}>📈 {k ? "학습 추이 — DS·LD 재현율 (24h 스냅샷)" : "learning — DS·LD recall trend"}</div>
         <div className="learn-charts">
           <div className="cyc-tp">
@@ -338,7 +379,7 @@ export default function LearnPage({ lang }: { lang: Lang }) {
           <Chip label={k ? "적중" : "matched"} value={si ? fmtN(si.matched) : "—"} />
           <Chip label={k ? "전체 정밀도" : "precision"} value={si?.precision_pct != null ? `${si.precision_pct.toFixed(0)}%` : "—"} />
         </div>
-        <div className="ls-note">{k ? "정답 = 트럭 GPS가 잡은 '실제 빈 순간'(tt_cycle_v2.dropped_at) 우선 — TOS 라벨보다 커버리지 넓고(LD 적중 6.4k→11.3k) 물리적 빔과 0.5분 일치. GPS 공백 시 TOS 폴백(LD=dis_ts·DS=comp_ts). 리드·정밀도는 이 GPS-우선 정답, 재현율은 TOS 권위 완료(DS 컨테이너 키 필요) 기준. comp_ts는 LD 실제 빔보다 ~8.8분 늦어(완료=배 적재) 부적합. 분 예측=학습 중앙값이나 per-건은 QC/RTG 큐 변동으로 오차 큼(분포로 사용)." : "Ground truth = GPS-first physical free (tt_cycle_v2.dropped_at) — broader coverage than TOS (LD 6.4k→11.3k matched), within 0.5min of real free. TOS fallback on GPS gaps (LD=dis_ts, DS=comp_ts). Lead/precision use GPS-first; recall stays on TOS authoritative completions (container key)."}</div>
+        <div className="ls-note">{k ? "정답 = 트럭 GPS가 잡은 '실제 빈 순간'(tt_cycle_v2.dropped_at) 우선 — TOS 라벨보다 커버리지 넓고(LD 적중 6.4k→11.3k) 물리적 빔과 0.5분 일치. GPS 공백 시 TOS 폴백. 분 예측=학습 중앙값이나 per-건은 QC/RTG 큐 변동으로 오차 큼(분포로 사용)." : "Ground truth = GPS-first physical free (tt_cycle_v2.dropped_at) — broader coverage than TOS. Per-truck error is large (queue stochasticity) — use as a distribution."}</div>
         <details className="ls-detail">
           <summary>{k ? "상세 — 신호별 정밀도·리드타임" : "detail — precision & lead by signal"}</summary>
           <div className="learn-list" style={{ marginTop: 8 }}>
@@ -359,8 +400,12 @@ export default function LearnPage({ lang }: { lang: Lang }) {
         </details>
       </Session>
 
-      {/* ⑤ 유휴 분 예측 — 피처 정밀화 (DS·LD 통합) */}
-      <Session n={5} accent="#fb923c" title={k ? "유휴 분 예측 — 피처 정밀화 (DS·LD)" : "minutes-to-idle — feature refinement (DS·LD)"} sub={k ? "'몇 분 후 유휴'를 피처로 더 맞출 수 있나 — DS=RTG거리·신호 / LD=안벽이라 피처 없음 (정답 GPS-우선)" : "can features sharpen 'minutes-to-idle' — DS uses RTG distance×signal; LD is quay-side"}>
+      {/* ⑥ 유휴 분 예측 — 피처 정밀화 (DS·LD 통합) */}
+      <Session n={6} accent="#fb923c" title={k ? "유휴 분 예측 — 피처 정밀화 (DS·LD)" : "minutes-to-idle — feature refinement (DS·LD)"} sub={k ? "'몇 분 후 유휴'를 피처로 더 맞출 수 있나 — DS=RTG거리·신호 / LD=안벽이라 피처 없음" : "can features sharpen 'minutes-to-idle' — DS uses RTG distance×signal; LD is quay-side"}>
+        <IoStrip accent="#fb923c" lang={lang}
+          inputs={k ? "DS=RTG 거리 × 발화 신호 / LD=안벽(유효 피처 없음)" : "DS = RTG distance × firing signal / LD = quay-side (no feature)"}
+          output={k ? "셀별 '몇 분 후 유휴' 중앙 예측 + p10~p90" : "per-cell minutes-to-idle median + p10~p90"}
+          role={k ? "Soon-idle 분 예측을 거리·신호로 정밀화 (배차 공급 타이밍)" : "sharpens soon-idle minutes via distance×signal"} />
         <div className="ls-ptag" style={{ marginBottom: 8 }}>📈 {k ? "예측기 — 작업유형별 '몇 분 후 유휴'" : "predictor — minutes-to-idle per jobtype"}</div>
         <div className="ls-cols">
           {/* DS predictor — distance × signal cells */}
@@ -386,7 +431,7 @@ export default function LearnPage({ lang }: { lang: Lang }) {
             <div className="ls-ptag" style={{ color: "#22d3ee" }}>LD · {k ? "적하 — 유효 피처 없음" : "load — no useful feature"}</div>
             <div className="ls-pv">{ldJob.lead?.lead_p50_s != null ? mins(ldJob.lead.lead_p50_s) : "—"}<span className="ls-lead-u">{k ? "분 후 유휴 (중앙)" : "min (median)"}</span></div>
             <div className="ls-plabel">p10~p90 {mins(ldJob.lead?.lead_p10_s)}~{mins(ldJob.lead?.lead_p90_s)}{k ? "분" : "m"} · n {ldJob.lead?.matched ?? "—"}</div>
-            <div className="ls-paside">{k ? "안벽이라 RTG 거리=NULL·신호=qc_plc 고정. QC·시간대·큐 모두 홀드아웃 검증했으나 flat과 동일(~65%) — QC 큐 확률성 지배. 예측=학습 중앙값(분포 p10~p90로 사용)." : "Quay-side: RTG dist=NULL, signal fixed. QC/hour/queue all tested held-out ≈ flat (~65%). Predict the learned median."}</div>
+            <div className="ls-paside">{k ? "안벽이라 RTG 거리=NULL·신호=qc_plc 고정. QC·시간대·큐 모두 홀드아웃 검증했으나 flat과 동일(~65%) — QC 큐 확률성 지배. 예측=학습 중앙값." : "Quay-side: RTG dist=NULL, signal fixed. QC/hour/queue all tested held-out ≈ flat (~65%). Predict the learned median."}</div>
           </div>
         </div>
         <div className="ls-ptag test" style={{ margin: "12px 0 8px" }}>🧪 {k ? "최신 테스트 — 예측 vs 실제 (GPS-우선 정답, 7일)" : "test — predicted vs actual (GPS-first truth, 7d)"}</div>
@@ -404,11 +449,15 @@ export default function LearnPage({ lang }: { lang: Lang }) {
             <div className="ls-plabel">±30% {k ? "적중" : ""} <b style={{ color: "#22d3ee" }}>{ldJob.lead?.within_30pct != null ? `${ldJob.lead.within_30pct.toFixed(0)}%` : "—"}</b> · {k ? "평가" : "n"} {ldJob.lead?.matched ?? "—"}</div>
           </div>
         </div>
-        <div className="ls-note">{k ? "예측기 = 작업유형별 학습 중앙(+DS는 거리·신호 셀). 정답=GPS-우선 빔(tt_cycle_v2.dropped_at·TOS 폴백), 7일. 둘 다 per-건 오차는 QC/RTG 큐 변동으로 큼 — 점이 아닌 분포로 사용." : "Predictor = learned median per jobtype (DS adds distance×signal cells). Truth=GPS-first. Per-truck error is large (queue stochasticity) — use as a distribution."}</div>
+        <div className="ls-note">{k ? "예측기 = 작업유형별 학습 중앙(+DS는 거리·신호 셀). 정답=GPS-우선 빔, 7일. 둘 다 per-건 오차는 QC/RTG 큐 변동으로 큼 — 점이 아닌 분포로 사용." : "Predictor = learned median per jobtype (DS adds distance×signal cells). Truth=GPS-first. Per-truck error is large — use as a distribution."}</div>
       </Session>
 
-      {/* ⑤ 배차 작업시점 예측 (1단계) */}
-      <Session n={5} accent="#f472b6" title={k ? "배차 작업시점 예측" : "Dispatch work-time prediction"} sub={k ? "출항 역산 + 학습한 크레인 속도로 '크레인이 각 컨테이너를 작업할 시각'을 예측 → 배차 마감 산정" : "vessel-departure backsolve + learned crane pace → per-container work time → dispatch deadline"}>
+      {/* ⑦ 배차 작업시점 예측 (1단계) */}
+      <Session n={7} accent="#f472b6" title={k ? "배차 작업시점 예측 (1단계)" : "Dispatch work-time prediction (Stage 1)"} sub={k ? "출항 역산 + 학습한 크레인 속도로 '크레인이 각 컨테이너를 작업할 시각'을 예측 → 배차 마감 산정" : "vessel-departure backsolve + learned crane pace → per-container work time → dispatch deadline"}>
+        <IoStrip accent="#f472b6" lang={lang}
+          inputs={k ? "출항(estdep) 역산 + 학습 크레인 속도(learn_qc_move_time) + 베이 작업큐" : "departure backsolve + learned crane pace + bay work-queue"}
+          output={k ? "컨테이너별 작업 예정시각 → 배차 마감시각" : "per-container work time → dispatch deadline"}
+          role={k ? "1단계 — 긴급도·배차 마감 산정 (위치 무관)" : "Stage 1 — urgency & dispatch deadline (location-independent)"} />
         <div className="ls-cols">
           <Panel tag={k ? "학습 추이 — 누적 검증 표본" : "learning — validated samples"}>
             <Metric series={dp?.samples ?? []} fmt={fmtN} label={k ? "실제와 대조 완료한 예측 (누적)" : "predictions validated vs actual (cumulative)"} color="#f472b6" higherBetter lang={lang} />
@@ -429,8 +478,236 @@ export default function LearnPage({ lang }: { lang: Lang }) {
           <Chip label={k ? "검증된 예측 (누적)" : "validated (total)"} value={dp ? fmtN(dp.resolved_total) : "—"} accent="#34d399" />
           <Chip label={k ? "고유 컨테이너" : "distinct containers"} value={dp ? fmtN(dp.distinct_cont) : "—"} />
         </div>
-        <div className="ls-note">{k ? "운영을 바꾸지 않고 예측만 옆에서 기록 → 실제 작업시각과 대조(그림자 검증). 평균은 잘 맞으나 컨테이너 개별 정밀도는 작업순서 데이터 한계로 거침 — 크레인 단위 신호로 유효. 최근 근거리 낙관(~10분)을 보정해 점차 0에 수렴 중." : "Shadow validation: log predictions without touching operations, compare to actual work time. Average calibrated; per-container precision rough (work-order data limits) — use as a crane-level signal. Recent near-term bias correction is converging toward 0."}</div>
+        <div className="ls-note">{k ? "운영을 바꾸지 않고 예측만 옆에서 기록 → 실제 작업시각과 대조(그림자 검증). 평균은 잘 맞으나 컨테이너 개별 정밀도는 작업순서 데이터 한계로 거침 — 크레인 단위 신호로 유효." : "Shadow validation: log predictions without touching operations, compare to actual work time. Average calibrated; per-container precision rough — use as a crane-level signal."}</div>
       </Session>
+    </>
+  );
+}
+
+// ───────────────────────────── 데이터 수집 탭 ─────────────────────────────
+type StreamMeta = { key: string; name: [string, string]; source: [string, string]; usage: [string, string]; desc: [string, string] };
+type Category = { title: [string, string]; accent: string; streams: StreamMeta[] };
+
+const DATA_CATALOG: Category[] = [
+  {
+    title: ["원시 GPS · 위치", "Raw GPS · position"], accent: "#60a5fa",
+    streams: [
+      { key: "truck_pos_hifreq",
+        name: ["3초 고빈도 GPS", "3s hi-freq GPS"],
+        source: ["WP-TT GPS 웹소켓 (이동 트럭만)", "GPS websocket (moving trucks)"],
+        usage: ["도로망 추론 · 순수 주행시간", "road-graph inference · pure drive-time"],
+        desc: ["이동 중인 트럭의 위치를 3초마다 기록. 도로 중심선(skeleton) 추론과 정지 제외 순수 주행 leg의 원재료. 5일 보존.", "Moving-truck position every 3s. Feeds road-centerline inference + stop-excluded pure-drive legs. 5-day retention."] },
+      { key: "truck_pos_hist",
+        name: ["30초 위치 이력", "30s position history"],
+        source: ["GPS 웹소켓 (전체 트럭)", "GPS websocket (all trucks)"],
+        usage: ["이력 · 리플레이 · 배차 비교", "history · replay · dispatch compare"],
+        desc: ["모든 트럭 위치를 30초마다 기록. 라이브맵 리플레이와 배차 비교의 위치 기준.", "All trucks every 30s. Position basis for live-map replay and dispatch comparison."] },
+    ],
+  },
+  {
+    title: ["사이클 · 이동시간", "Cycles · travel time"], accent: "#34d399",
+    streams: [
+      { key: "tt_cycle_v2",
+        name: ["TT 작업 사이클 (6단계)", "TT work cycle (6-event)"],
+        source: ["GPS+TOS 결합 추론", "derived from GPS + TOS"],
+        usage: ["모든 학습의 백본 · 이동시간/곧빔 정답", "backbone for all learning"],
+        desc: ["트럭 한 사이클(빈차 출발→픽업→적재 도착→하차)을 6개 시점으로 기록. 이동시간 학습과 '곧 빔' 정답의 출처.", "One truck cycle as 6 timestamps. Source of travel labels and the soon-idle ground truth."] },
+      { key: "learn_travel_sample",
+        name: ["이동시간 표본 (OD)", "travel-time samples (OD)"],
+        source: ["사이클에서 수확 (5분)", "harvested from cycles (5min)"],
+        usage: ["TT 이동시간 모델", "TT travel-time model"],
+        desc: ["출발존→도착존 한 leg의 실제 소요시간·거리·피처(밀도·날씨·시간대). 이동시간 예측의 학습 표본.", "Per O→D leg: actual seconds, distance, features (density/weather/hour). Training rows for travel prediction."] },
+      { key: "learn_travel_drive_sample",
+        name: ["순수 주행 표본", "pure-driving samples"],
+        source: ["3초 GPS (정지 제외)", "3s GPS, stop-excluded"],
+        usage: ["순수 주행시간 모델", "pure drive-time model"],
+        desc: ["큐·정지를 뺀 순수 주행 leg. 이동시간 예측의 상한 정확도 검증.", "Pure-drive leg with queue/stop removed. Upper-bound accuracy check for travel prediction."] },
+    ],
+  },
+  {
+    title: ["예측 · 검증 (그림자)", "Predictions · validation (shadow)"], accent: "#a78bfa",
+    streams: [
+      { key: "tt_soon_idle_pred",
+        name: ["곧 빔 예측 로그", "soon-idle predictions"],
+        source: ["라이브 예측기 (30초)", "live predictor (30s)"],
+        usage: ["Soon-idle 정확도 검증", "soon-idle accuracy"],
+        desc: ["'이 트럭이 곧 빈다'고 부른 매 예측을 기록 → 실제 빔과 대조(재현율·정밀도·리드타임).", "Every 'this truck frees soon' call, matched to the real free moment (recall/precision/lead)."] },
+      { key: "dispatch_pred_sample",
+        name: ["1단계 작업시점 예측", "stage-1 work-time prediction"],
+        source: ["배차 1단계 예측기 (2분)", "stage-1 predictor (2min)"],
+        usage: ["배차 마감 예측 검증", "dispatch-deadline validation"],
+        desc: ["크레인이 각 컨테이너를 작업할 시각 예측 + 실제 작업시각 backfill. 운영 미변경 그림자 검증.", "Predicted per-container work time + backfilled actual. Shadow validation without touching ops."] },
+      { key: "free_in_sample",
+        name: ["잔여시간 학습셋", "free-in training set"],
+        source: ["바쁜 트럭 스냅샷 (60초)", "busy-truck snapshot (60s)"],
+        usage: ["free_in 모델 (예정)", "free_in model (planned)"],
+        desc: ["바쁜 트럭의 피처 + 현재 우리 예측을 스냅샷, 10분 뒤 실제 빔까지 잔여초를 backfill = 라벨+검증.", "Busy-truck features + our current prediction; actual remaining-seconds backfilled = label + verification."] },
+      { key: "stage2_match_shadow",
+        name: ["2단계 매칭 그림자", "stage-2 match shadow"],
+        source: ["라이브 2단계 매처 (60초)", "live stage-2 matcher (60s)"],
+        usage: ["배차 권고 기록 · 비교", "dispatch recommendation log"],
+        desc: ["우리 2단계 매처가 미배차 작업에 실제로 낸 트럭 권고(도착초·마감여유·비용티어).", "The truck our Stage-2 matcher actually recommends per unassigned work (arrival, slack, cost-tier)."] },
+      { key: "dispatch_compare_shadow",
+        name: ["TOS vs 우리 배차", "TOS vs ours"],
+        source: ["배차 비교기 (60초)", "dispatch comparator (60s)"],
+        usage: ["배차 일치 / 우열 비교", "agree / divergence compare"],
+        desc: ["같은 작업에 대해 TOS가 고른 트럭과 우리가 고른 트럭의 도착시간 차이.", "For the same work, the arrival-time gap between TOS's truck and ours."] },
+      { key: "fair_compare_detail",
+        name: ["공정 1:1 비교 상세", "fair 1:1 detail"],
+        source: ["공정 비교기 (5분)", "fair comparator (5min)"],
+        usage: ["가치 입증 (절감 분해)", "value breakdown"],
+        desc: ["TOS 실현 풀을 사후 최적 재매칭한 페어별 공차초(TOS vs 우리). 작업유형·거리·크레인별 절감 분해의 원천.", "Per-pair empty-seconds from re-optimizing TOS's realized pool (TOS vs ours). Source of the savings breakdown."] },
+    ],
+  },
+  {
+    title: ["환경 · 외부", "Environment · external"], accent: "#22d3ee",
+    streams: [
+      { key: "congestion_edge",
+        name: ["도로 엣지 혼잡", "road-edge congestion"],
+        source: ["매시간 cron map-match", "hourly cron map-match"],
+        usage: ["혼잡 신호 · 시뮬", "congestion signal · sim"],
+        desc: ["추론 도로 엣지별 중위 통과속도(이번 시간). 라이브맵 혼잡색 + 이동시간 피처.", "Per inferred road-edge median pass speed (this hour). Live-map congestion color + travel feature."] },
+      { key: "weather_hourly",
+        name: ["시간별 날씨", "hourly weather"],
+        source: ["외부 기상 API", "external weather API"],
+        usage: ["이동시간 피처 · 진단", "travel feature · diagnostic"],
+        desc: ["강수·바람·시정. 비 올 때 이동시간 변화(±5%) 신호 + 진단 용도.", "Precip/wind/visibility. Rain→travel-time signal (±5%) + diagnostics."] },
+      { key: "qc_wait_sample",
+        name: ["QC 굶주림 스냅샷", "QC starvation snapshot"],
+        source: ["30초 샘플러", "30s sampler"],
+        usage: ["QC 대기 KPI (GPS)", "QC-wait KPI (GPS)"],
+        desc: ["TT 부족으로 굶는 크레인을 topos·GPS 두 방식으로 측정 → K_QC_TT_WAIT_GPS.", "Cranes starved of TTs, measured by topos and GPS → K_QC_TT_WAIT_GPS."] },
+    ],
+  },
+  {
+    title: ["TOS 정답 · KPI 입력", "TOS ground truth · KPI input"], accent: "#f472b6",
+    streams: [
+      { key: "tos_handover_label",
+        name: ["TOS 권위 완료 라벨", "TOS authoritative completions"],
+        source: ["TOS Oracle (추출기)", "TOS Oracle (extractor)"],
+        usage: ["곧빔 · 작업시점 정답", "ground truth"],
+        desc: ["컨테이너 하역/완료 시각의 권위 기록. 곧빔·작업시점 예측의 정답(검증) 기준.", "Authoritative discharge/complete timestamps. The validation truth for soon-idle and work-time."] },
+      { key: "learn_qc_move_time",
+        name: ["크레인 작업속도 학습", "crane pace (learned)"],
+        source: ["사이클에서 학습 (크레인·작업·주야)", "learned per crane/job/shift"],
+        usage: ["1단계 작업시점 예측 입력", "stage-1 prediction input"],
+        desc: ["크레인별 한 무브 중위 소요초(주야 구분). 배차 마감 역산의 속도 입력.", "Per-crane median seconds per move (day/night). The pace input for deadline backsolve."] },
+    ],
+  },
+];
+
+function SampleTable({ rows, loading, lang }: { rows: DataRow[] | null; loading: boolean; lang: Lang }) {
+  const k = ko(lang);
+  if (loading) return <div className="cyc-empty">{k ? "불러오는 중…" : "loading…"}</div>;
+  if (!rows || rows.length === 0) return <div className="cyc-empty">{k ? "데이터 없음" : "no rows"}</div>;
+  const cols = Object.keys(rows[0]);
+  return (
+    <div className="ds-table-wrap">
+      <table className="ds-table mono">
+        <thead><tr>{cols.map((c) => <th key={c}>{c}</th>)}</tr></thead>
+        <tbody>
+          {rows.map((r, i) => (
+            <tr key={i}>{cols.map((c) => <td key={c}>{fmtCell(r[c])}</td>)}</tr>
+          ))}
+        </tbody>
+      </table>
+      <div className="ds-table-note">{k ? `최근 ${rows.length}행 (수집 시각 내림차순)` : `latest ${rows.length} rows (newest first)`}</div>
+    </div>
+  );
+}
+
+function DataCard({ meta, stat, accent, lang }: { meta: StreamMeta; stat: DataStat | undefined; accent: string; lang: Lang }) {
+  const k = ko(lang);
+  const i = k ? 0 : 1;
+  const [open, setOpen] = useState(false);
+  const [rows, setRows] = useState<DataRow[] | null>(null);
+  const [loading, setLoading] = useState(false);
+  const toggle = () => {
+    const next = !open;
+    setOpen(next);
+    if (next && rows == null && !loading) {
+      setLoading(true);
+      api.learnDataSample(meta.key).then((r) => { setRows(r); setLoading(false); }).catch(() => { setRows([]); setLoading(false); });
+    }
+  };
+  return (
+    <section className="ds-card" style={{ borderTopColor: accent }}>
+      <div className="ds-card-h">
+        <div className="ds-card-name">{meta.name[i]}</div>
+        <code className="ds-card-tbl">{meta.key}</code>
+      </div>
+      <div className="ds-card-desc">{meta.desc[i]}</div>
+      <div className="ds-card-meta">
+        <div className="ds-mrow"><span className="ds-mk">{k ? "소스" : "source"}</span><span>{meta.source[i]}</span></div>
+        <div className="ds-mrow"><span className="ds-mk">{k ? "쓰임" : "used by"}</span><span>{meta.usage[i]}</span></div>
+      </div>
+      <div className="ds-stats">
+        {/* reltuples is an estimate; for young/fast tables it can lag the live 24h count → clamp up */}
+        <div className="ds-stat"><b style={{ color: accent }}>{fmtN(stat ? Math.max(stat.total, stat.n_24h) : undefined)}</b><span>{k ? "총 수집" : "total"}</span></div>
+        <div className="ds-stat"><b>{fmtN(stat?.n_24h)}</b><span>{k ? "최근 24시간" : "24h"}</span></div>
+        <div className="ds-stat"><b>{fmtN(stat?.n_1h)}</b><span>{k ? "최근 1시간" : "1h"}</span></div>
+        <div className="ds-stat"><b className="ds-stamp">{stamp(stat?.latest)}</b><span>{k ? "최근 수집" : "latest"}</span></div>
+      </div>
+      <button className={`ds-toggle${open ? " open" : ""}`} onClick={toggle}>
+        {open ? (k ? "▲ 닫기" : "▲ close") : (k ? "▼ 최근 수집 데이터 보기" : "▼ view recent rows")}
+      </button>
+      {open && <SampleTable rows={rows} loading={loading} lang={lang} />}
+    </section>
+  );
+}
+
+function DataTab({ lang }: { lang: Lang }) {
+  const k = ko(lang);
+  const [cat, setCat] = useState<DataStat[] | null>(null);
+  const [err, setErr] = useState(false);
+  useEffect(() => {
+    let alive = true;
+    const load = () => api.learnDataCatalog().then((r) => { if (alive) { setCat(r); setErr(false); } }).catch(() => alive && setErr(true));
+    load();
+    const id = setInterval(load, 60000);
+    return () => { alive = false; clearInterval(id); };
+  }, []);
+  const statOf = (key: string) => cat?.find((s) => s.key === key);
+  const grand = (cat ?? []).reduce((a, s) => a + Math.max(s.total ?? 0, s.n_24h ?? 0), 0);
+
+  return (
+    <>
+      <div className="ds-summary">
+        {k ? "우리가 실시간으로 수집·축적하는 데이터 스트림. 각 카드에서 소스·쓰임·총/최근 건수를 보고, 펼치면 최근 수집 내역을 직접 확인." : "Data streams we collect and accumulate live. Each card shows source, usage, total/recent counts; expand to inspect the latest rows."}
+        {err && <span className="cyc-err">{k ? " · 연결 오류" : " · offline"}</span>}
+        {cat && <span className="ds-grand"> · {k ? "전체 누적" : "grand total"} <b>{fmtN(grand)}</b> {k ? "건" : "rows"}</span>}
+      </div>
+      {DATA_CATALOG.map((c) => (
+        <div className="ds-group" key={c.title[0]}>
+          <h3 className="ds-group-h" style={{ borderLeftColor: c.accent }}>{k ? c.title[0] : c.title[1]}</h3>
+          <div className="ds-grid">
+            {c.streams.map((m) => <DataCard key={m.key} meta={m} stat={statOf(m.key)} accent={c.accent} lang={lang} />)}
+          </div>
+        </div>
+      ))}
+    </>
+  );
+}
+
+// ───────────────────────────── 학습 센터 (탭 셸) ─────────────────────────────
+export default function LearnPage({ lang }: { lang: Lang }) {
+  const k = ko(lang);
+  const [tab, setTab] = useState<"models" | "data">("models");
+  return (
+    <div className="content cyc-page">
+      <div className="cyc-head">
+        <div className="cyc-title">
+          <h2>{k ? "학습 센터" : "Learning Center"}</h2>
+          <span className="cyc-title-sub">{tab === "models"
+            ? (k ? "우리가 쓰는 예측 모델 — 입력·출력·담당역할 + 검증/학습 추이" : "our prediction models — in/out/role + validation & trend")
+            : (k ? "우리가 수집하는 데이터 — 소스·쓰임·수집량 + 최근 내역" : "data we collect — source/usage/volume + recent rows")}</span>
+        </div>
+        <div className="ls-tabs">
+          <button className={`ls-tab${tab === "models" ? " active" : ""}`} onClick={() => setTab("models")}>🧠 {k ? "예측 모델" : "Models"}</button>
+          <button className={`ls-tab${tab === "data" ? " active" : ""}`} onClick={() => setTab("data")}>🗄️ {k ? "데이터 수집" : "Data"}</button>
+        </div>
+      </div>
+      {tab === "models" ? <ModelsTab lang={lang} /> : <DataTab lang={lang} />}
     </div>
   );
 }
