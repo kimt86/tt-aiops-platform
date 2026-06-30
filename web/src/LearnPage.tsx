@@ -217,7 +217,7 @@ function ModelsTab({ lang }: { lang: Lang }) {
         <IoStrip accent="#60a5fa" lang={lang}
           inputs={k ? "출발존→도착존 + 경로거리(맨해튼)·밀도·시간대·날씨" : "origin→dest zone + route dist, density, hour, weather"}
           output={k ? "구간 공차 이동시간(초) 분포 — 중앙·p50/p90" : "empty-travel seconds per O→D (median, p50/p90)"}
-          role={k ? "2단계 비용행렬의 '공차 도착시간(arr)' — 실측이라 경로 정체 포함, 배차 효율의 핵심 입력" : "the realized (congestion-inclusive) empty-travel arrival filling the Stage-2 cost matrix"} />
+          role={k ? "주행 성분(아래 22.8km/h)이 2단계 비용 = 순수주행. 진입정지(크레인 대기)는 1단계 크레인 신호로 분리. 실측 전체는 참고" : "its DRIVE part (~22.8km/h below) is the Stage-2 cost (pure drive); the approach/handover is split to a Stage-1 per-crane signal. Realized shown for reference"} />
         <div className="ls-cols">
           <Panel tag={k ? "학습 추이 — 누적 학습 표본" : "learning — samples"}>
             <Metric series={sampVals} fmt={fmtN} label={k ? "누적 학습 표본 (커버리지)" : "accumulating samples"} color="#60a5fa" higherBetter lang={lang} />
