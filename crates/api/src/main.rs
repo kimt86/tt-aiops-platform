@@ -68,7 +68,6 @@ fn app(state: AppState) -> Router {
         .route("/api/learn/travel", get(learn::travel))
         .route("/api/learn/soon-idle", get(learn::soon_idle))
         .route("/api/learn/dispatch-pred", get(learn::dispatch_pred))
-        .route("/api/learn/eval", get(learn::eval))
         .route("/api/learn/data-catalog", get(learn::data_catalog))
         .route("/api/learn/data-sample", get(learn::data_sample))
         .route("/api/health", get(routes::health))
@@ -124,7 +123,6 @@ async fn main() -> anyhow::Result<()> {
     livemap::spawn_stage2_shadow(livemap.clone(), pool.clone()); // 60s: Stage-2 매칭 그림자(stage2_match_shadow)
     livemap::spawn_pos_hist(livemap.clone(), pool.clone()); // 30s: 트럭 위치·상태 이력(truck_pos_hist)
     livemap::spawn_pos_hist_hifreq(livemap.clone(), pool.clone()); // 3s: 도로망 추론용 고빈도 GPS(truck_pos_hifreq)
-    livemap::spawn_learn_eval(pool.clone()); // 1h: 학습 평가(정확도 추이+누적량) → learn_eval
     livemap::spawn_dispatch_compare(livemap.clone(), pool.clone()); // 60s: TOS vs 우리 배차 비교(dispatch_compare_shadow)
     livemap::spawn_fair_compare(livemap.clone(), pool.clone()); // 5min: 공정 1:1 최적매칭 vs TOS(fair_compare_shadow)
     let state = AppState { pool, livemap };

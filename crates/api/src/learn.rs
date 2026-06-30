@@ -608,31 +608,6 @@ pub async fn dispatch_pred(State(pool): State<PgPool>) -> Result<Json<DispatchPr
     }))
 }
 
-/// Travel-time learning status: accuracy trend (OD-pure vs Manhattan MAE/MAPE) + data-accumulation
-/// volumes over time, from `learn_eval` (logged hourly). Powers the Learning Center status view.
-#[derive(Serialize, sqlx::FromRow)]
-pub struct EvalPoint {
-    ts: DateTime<Utc>,
-    n_legs: Option<i32>,
-    od_mae_s: Option<i32>,
-    od_mape: Option<f32>,
-    manh_mae_s: Option<i32>,
-    manh_mape: Option<f32>,
-    hifreq_pts: Option<i64>,
-    drive_samples: Option<i64>,
-    pure_pairs: Option<i32>,
-}
-
-pub async fn eval(State(pool): State<PgPool>) -> Result<Json<Vec<EvalPoint>>, AppError> {
-    let rows: Vec<EvalPoint> = sqlx::query_as(
-        "SELECT ts, n_legs, od_mae_s, od_mape, manh_mae_s, manh_mape, hifreq_pts, drive_samples, pure_pairs
-           FROM learn_eval ORDER BY ts DESC LIMIT 240",
-    )
-    .fetch_all(&pool)
-    .await?;
-    Ok(Json(rows))
-}
-
 // ───────────────────────── data-collection catalog (데이터 수집 탭) ─────────────────────────
 // Whitelist of the streams we actively collect. (key, table, recency-ts-column, sample SELECT).
 // `table`/`ts`/`sample_sql` are compile-time constants — never request input — so the formatted SQL
@@ -659,9 +634,6 @@ const DATA_STREAMS: &[DataStream] = &[
     DataStream { key: "learn_travel_sample", table: "learn_travel_sample", ts: "captured_at",
         sample_sql: "SELECT captured_at, ytno, origin_zone, dest_zone, travel_s, round(dist_m::numeric,0) AS dist_m, shift \
                      FROM learn_travel_sample ORDER BY captured_at DESC LIMIT 50" },
-    DataStream { key: "learn_travel_drive_sample", table: "learn_travel_drive_sample", ts: "captured_at",
-        sample_sql: "SELECT captured_at, ytno, oz, dz, drive_s, leg_start \
-                     FROM learn_travel_drive_sample ORDER BY captured_at DESC LIMIT 50" },
     DataStream { key: "tt_soon_idle_pred", table: "tt_soon_idle_pred", ts: "predicted_at",
         sample_sql: "SELECT predicted_at, ytno, jobtype, qc, source, gps_would_fire, \
                      round(nearest_rtg_m::numeric,0) AS nearest_rtg_m, reason \
