@@ -301,37 +301,6 @@ function pinImage(fill: string): ImageData {
   return x.getImageData(0, 0, S, S);
 }
 
-// Metric grid: terminal split into uniform `m`-metre cells; each occupied cell becomes a filled
-// polygon colored by a chosen live metric (avg speed / vehicle count). Cell = (round(lat/deg),
-// round(lon/deg)) — same cell def as the density collector. Computed client-side from the live feed.
-const GRID_MIN = 50, GRID_MAX = 200; // adjustable cell size (m)
-// fill-color ramps (module consts so addLayer + the metric switch stay in sync)
-const SPEED_COLOR: maplibregl.ExpressionSpecification = // slow=red → fast=green (congestion view)
-  ["interpolate", ["linear"], ["get", "speed"], 0, "#ef4444", 8, "#f59e0b", 18, "#22c55e"];
-const COUNT_COLOR: maplibregl.ExpressionSpecification = // few=blue → many=red (density view)
-  ["interpolate", ["linear"], ["get", "count"], 1, "#1e3a8a", 4, "#22d3ee", 7, "#f59e0b", 12, "#ef4444"];
-function buildMetricGrid(devs: { cls: string; lat: number; lon: number; speed: number }[], m: number): GeoJSON.FeatureCollection {
-  const deg = m / 111320;
-  const agg = new Map<string, { cx: number; cy: number; count: number; sumSpeed: number }>();
-  for (const d of devs) {
-    if (d.cls !== "TT" || !d.lat || !d.lon) continue; // road traffic = trucks
-    const cx = Math.round(d.lat / deg), cy = Math.round(d.lon / deg);
-    const key = `${cx},${cy}`;
-    const a = agg.get(key) ?? { cx, cy, count: 0, sumSpeed: 0 };
-    a.count++; a.sumSpeed += d.speed ?? 0; agg.set(key, a);
-  }
-  const feats: GeoJSON.Feature[] = [];
-  for (const a of agg.values()) {
-    const latLo = (a.cx - 0.5) * deg, latHi = (a.cx + 0.5) * deg;
-    const lonLo = (a.cy - 0.5) * deg, lonHi = (a.cy + 0.5) * deg;
-    feats.push({
-      type: "Feature",
-      properties: { count: a.count, speed: Math.round((a.sumSpeed / a.count) * 10) / 10 },
-      geometry: { type: "Polygon", coordinates: [[[lonLo, latLo], [lonHi, latLo], [lonHi, latHi], [lonLo, latHi], [lonLo, latLo]]] },
-    });
-  }
-  return { type: "FeatureCollection", features: feats };
-}
 
 // toggle → maplibre layer ids + swatch color
 const NODE_LAYERS: Record<string, { key: LayerKey; cat: string; color: string; ko: string; en: string }> = {
@@ -505,7 +474,6 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
   const [stateFilter, setStateFilter] = useState<string | null>(null);
   const [dispatchFilter, setDispatchFilter] = useState<Dispatch | null>(null);
   const [toggles, setToggles] = useState<Toggles>(DEFAULT_TOGGLES);
-  const [showGrid, setShowGrid] = useState(false); // metric grid overlay
   const [showWorkPts, setShowWorkPts] = useState(false); // dispatched work points (TOS vs ours); replaces the old advisory
   const workPtsRef = useRef<WorkPoint[]>([]);
   const selectedWpRef = useRef<WorkPoint | null>(null); // the clicked work point (for re-anchoring its truck lines)
@@ -515,8 +483,6 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
   const roadGraphLoaded = useRef(false);
   const [roadGraphStats, setRoadGraphStats] = useState<{ nodes: number; edges: number; km: number; workpoints: number; generated_at: string } | null>(null);
   const [showWeatherFx, setShowWeatherFx] = useState(true); // game-like weather effect overlay (default on; toggle via the weather chip)
-  const [gridM, setGridM] = useState(100); // grid cell size (m), adjustable
-  const [gridMetric, setGridMetric] = useState<"speed" | "count">("speed"); // what the cell color shows
   const [panelOpen, setPanelOpen] = useState(true);
   const [counts, setCounts] = useState({ total: 0, moving: 0, idle: 0, off: 0 });
   const [tpos, setTpos] = useState(0);
@@ -543,7 +509,6 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
   const [selDev, setSelDev] = useState<SelVeh | null>(null);
   const selRef = useRef<string | null>(null);
   const koRef = useRef(ko); koRef.current = ko;        // fresh lang for once-bound map click handlers
-  const gridMRef = useRef(gridM); gridMRef.current = gridM;
   const pickRef = useRef<(id: string, lon: number, lat: number, speed: number) => void>(() => {});
   pickRef.current = (id, lon, lat, speed) => {
     selRef.current = id;
@@ -568,24 +533,6 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
     return () => clearInterval(iv);
   }, []);
 
-  // metric grid overlay: apply color (by metric) + visibility, and rebuild cells from the live
-  // feed (current TT density / avg speed per cell) on a timer + on any control change.
-  useEffect(() => {
-    const m = mapRef.current;
-    if (!m || !m.getLayer("mgrid-fill")) return;
-    m.setPaintProperty("mgrid-fill", "fill-color", gridMetric === "speed" ? SPEED_COLOR : COUNT_COLOR);
-    const vis = showGrid ? "visible" : "none";
-    m.setLayoutProperty("mgrid-fill", "visibility", vis);
-    m.setLayoutProperty("mgrid-line", "visibility", vis);
-    if (!showGrid) return;
-    const rebuild = () =>
-      (m.getSource("mgrid") as maplibregl.GeoJSONSource | undefined)?.setData(
-        buildMetricGrid(liveRef.current?.devices ?? [], gridM),
-      );
-    rebuild();
-    const iv = setInterval(rebuild, 2500);
-    return () => clearInterval(iv);
-  }, [showGrid, gridM, gridMetric, ready]);
 
   // Dispatched work points overlay: poll the current points (15s) when shown. The selected point's
   // truck lines + rings are re-drawn every frame by the render loop (glued to smoothed positions).
@@ -664,6 +611,7 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
     const map = mapRef.current;
     const v = showRoadGraph ? "visible" : "none";
     if (map?.getLayer("roadgraph-line")) map.setLayoutProperty("roadgraph-line", "visibility", v);
+    if (map?.getLayer("roadgraph-arrow")) map.setLayoutProperty("roadgraph-arrow", "visibility", v);
     if (map?.getLayer("roadgraph-wp")) map.setLayoutProperty("roadgraph-wp", "visibility", v);
     if (map?.getLayer("roadgraph-node")) map.setLayoutProperty("roadgraph-node", "visibility", v);
     if (map?.getLayer("ll-seg")) map.setLayoutProperty("ll-seg", "visibility", v);
@@ -774,6 +722,8 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
       // on top → reads as a connected node+edge graph, high-contrast on satellite.
       map.addLayer({ id: "roadgraph-wp", type: "circle", source: "roadgraph", filter: ["==", ["get", "kind"], "workpoint"], layout: { visibility: "none" }, paint: { "circle-radius": ["interpolate", ["linear"], ["zoom"], 13, 0.4, 17, 1], "circle-color": "#67e8f9", "circle-opacity": 0.12 } });
       map.addLayer({ id: "roadgraph-line", type: "line", source: "roadgraph", filter: ["==", ["get", "kind"], "road"], layout: { visibility: "none", "line-cap": "round", "line-join": "round" }, paint: { "line-color": "#22d3ee", "line-opacity": 0.95, "line-width": ["interpolate", ["linear"], ["zoom"], 13, 1.5, 17, 4] } });
+      // per-edge direction arrowheads (flow direction; one-way = bright amber, two-way = orange)
+      map.addLayer({ id: "roadgraph-arrow", type: "line", source: "roadgraph", filter: ["==", ["get", "kind"], "arrow"], layout: { visibility: "none", "line-cap": "round", "line-join": "round" }, paint: { "line-color": ["case", ["get", "oneway"], "#fbbf24", "#fb923c"], "line-opacity": 0.95, "line-width": ["interpolate", ["linear"], ["zoom"], 13, 1, 17, 2.6] } });
       map.addLayer({ id: "roadgraph-node", type: "circle", source: "roadgraph", filter: ["==", ["get", "kind"], "node"], layout: { visibility: "none" }, paint: { "circle-radius": ["interpolate", ["linear"], ["zoom"], 13, 2.5, 17, 6], "circle-color": "#ffffff", "circle-stroke-color": "#0e7490", "circle-stroke-width": 1.6, "circle-opacity": 1 } });
       map.addSource("wharf", { type: "geojson", data: EMPTY_FC });
       map.addLayer({
@@ -832,9 +782,6 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
       });
 
       // metric grid: filled cells colored by a live metric (avg speed / density), client-side.
-      map.addSource("mgrid", { type: "geojson", data: EMPTY_FC });
-      map.addLayer({ id: "mgrid-fill", type: "fill", source: "mgrid", layout: { visibility: "none" }, paint: { "fill-color": SPEED_COLOR, "fill-opacity": 0.45 } });
-      map.addLayer({ id: "mgrid-line", type: "line", source: "mgrid", layout: { visibility: "none" }, paint: { "line-color": "#334155", "line-opacity": 0.35, "line-width": 0.5 } });
 
       map.addSource("vehicles", { type: "geojson", data: { type: "FeatureCollection", features: [] } });
       addEquipIcons(map); // equipment shapes × state colors
@@ -889,14 +836,6 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
           + `<div class="lmp-r">${k ? "평균속도" : "avg speed"}: ${p.speed != null ? p.speed + " km/h" : "—"}</div>`
           + `<div class="lmp-r">${k ? "통과 수" : "passes"}: ${p.passes}</div>`);
       });
-      map.on("click", "mgrid-fill", (e) => {
-        const f = e.features?.[0]; if (!f) return; const k = koRef.current;
-        const p = f.properties as { count: number; speed: number };
-        showPopup(e.lngLat,
-          `<div class="lmp-t">${k ? "격자 셀" : "grid cell"} (${gridMRef.current}m)</div>`
-          + `<div class="lmp-r">${k ? "트럭" : "trucks"}: ${p.count}${k ? "대" : ""}</div>`
-          + `<div class="lmp-r">${k ? "평균속도" : "avg speed"}: ${p.speed} km/h</div>`);
-      });
       // click a dispatched work point → draw lines to its dispatched trucks + TOS-vs-ours compare
       map.on("click", "workpts-pt", (e) => {
         const f = e.features?.[0]; if (!f) return; const k = koRef.current;
@@ -921,7 +860,7 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
           + `<div class="lmp-r" style="display:flex;gap:11px;font-weight:600"><span style="color:#22d3ee">TOS ${tosN}${k ? "대" : ""}</span><span style="color:#a78bfa">🤖 ${k ? "우리" : "ours"} ${ourN}${k ? "대" : ""}</span><span style="color:#22c55e">${k ? "공통" : "both"} ${common}</span></div>`
           + `<div class="lmp-r" style="color:#64748b;font-size:10px">${k ? `배차 결정 ${p.n}건 · 동일 트럭 ${p.agree_n}건` : `${p.n} decisions · ${p.agree_n} same`}${avgTxt ? ` · ${avgTxt}` : ""}</div>`);
       });
-      for (const id of ["lt-pt", "ll-seg", "mgrid-fill", "workpts-pt"]) {
+      for (const id of ["lt-pt", "ll-seg", "workpts-pt"]) {
         map.on("mouseenter", id, () => { map.getCanvas().style.cursor = "pointer"; });
         map.on("mouseleave", id, () => { map.getCanvas().style.cursor = ""; });
       }
@@ -1292,22 +1231,6 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
             <section className="llp-sec">
               <header>{ko ? "영역" : "Areas"}</header>
               <Row on={toggles.areas} color="#7eb6ff" label={ko ? "도로/블록 영역" : "Road/Block"} onChange={(v) => set("areas", v)} />
-              <Row on={showGrid} color={gridMetric === "speed" ? "#22c55e" : "#22d3ee"} label={ko ? `메트릭 격자 (${gridM}m)` : `Metric grid (${gridM}m)`} onChange={setShowGrid} />
-              {showGrid && (
-                <div className="llp-gridctl" style={{ padding: "2px 0 6px 18px", display: "flex", flexDirection: "column", gap: 5 }}>
-                  <div style={{ display: "flex", gap: 4 }}>
-                    <button className={`mdl${gridMetric === "speed" ? " on" : ""}`} onClick={() => setGridMetric("speed")}>{ko ? "평균속도" : "Avg speed"}</button>
-                    <button className={`mdl${gridMetric === "count" ? " on" : ""}`} onClick={() => setGridMetric("count")}>{ko ? "차량 수" : "Density"}</button>
-                  </div>
-                  <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11, color: "var(--text-dim)" }}>
-                    <input type="range" min={GRID_MIN} max={GRID_MAX} step={25} value={gridM} onChange={(e) => setGridM(Number(e.target.value))} style={{ flex: 1 }} />
-                    <span className="mono" style={{ minWidth: 34, textAlign: "right" }}>{gridM}m</span>
-                  </label>
-                  <div style={{ fontSize: 10, color: "var(--text-mute)" }}>
-                    {gridMetric === "speed" ? (ko ? "느림 🔴 → 빠름 🟢 (정체 구간)" : "slow 🔴 → fast 🟢") : (ko ? "적음 🔵 → 많음 🔴 (혼잡 구간)" : "few 🔵 → many 🔴")}
-                  </div>
-                </div>
-              )}
             </section>
             <section className="llp-sec">
               <header>{ko ? "학습 (GPS)" : "Learned (GPS)"}</header>
