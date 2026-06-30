@@ -481,7 +481,7 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
   const [showWharf, setShowWharf] = useState(false); // learned wharf/quay positions overlay
   const [showRoadGraph, setShowRoadGraph] = useState(false); // GPS-inferred road network (replaces imported links)
   const roadGraphLoaded = useRef(false);
-  const [roadGraphStats, setRoadGraphStats] = useState<{ nodes: number; edges: number; km: number; workpoints: number; generated_at: string } | null>(null);
+  const [roadGraphStats, setRoadGraphStats] = useState<{ nodes: number; edges: number; km: number; workpoints: number; generated_at: string; congested_edges?: number } | null>(null);
   const [showWeatherFx, setShowWeatherFx] = useState(true); // game-like weather effect overlay (default on; toggle via the weather chip)
   const [panelOpen, setPanelOpen] = useState(true);
   const [counts, setCounts] = useState({ total: 0, moving: 0, idle: 0, off: 0 });
@@ -721,7 +721,8 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
       // work-points = faint background texture (anchors); edges = bright cyan; junction NODES = white dots
       // on top → reads as a connected node+edge graph, high-contrast on satellite.
       map.addLayer({ id: "roadgraph-wp", type: "circle", source: "roadgraph", filter: ["==", ["get", "kind"], "workpoint"], layout: { visibility: "none" }, paint: { "circle-radius": ["interpolate", ["linear"], ["zoom"], 13, 0.4, 17, 1], "circle-color": "#67e8f9", "circle-opacity": 0.12 } });
-      map.addLayer({ id: "roadgraph-line", type: "line", source: "roadgraph", filter: ["==", ["get", "kind"], "road"], layout: { visibility: "none", "line-cap": "round", "line-join": "round" }, paint: { "line-color": "#22d3ee", "line-opacity": 0.95, "line-width": ["interpolate", ["linear"], ["zoom"], 13, 1.5, 17, 4] } });
+      // edges colored by this-hour median speed = congestion view (slow red → fast green); no data → cyan
+      map.addLayer({ id: "roadgraph-line", type: "line", source: "roadgraph", filter: ["==", ["get", "kind"], "road"], layout: { visibility: "none", "line-cap": "round", "line-join": "round" }, paint: { "line-color": ["case", ["has", "speed"], ["interpolate", ["linear"], ["get", "speed"], 0, "#ef4444", 8, "#f59e0b", 18, "#22c55e"], "#22d3ee"], "line-opacity": 0.95, "line-width": ["interpolate", ["linear"], ["zoom"], 13, 1.5, 17, 4] } });
       // per-edge direction arrowheads (flow direction; one-way = bright amber, two-way = orange)
       map.addLayer({ id: "roadgraph-arrow", type: "line", source: "roadgraph", filter: ["==", ["get", "kind"], "arrow"], layout: { visibility: "none", "line-cap": "round", "line-join": "round" }, paint: { "line-color": ["case", ["get", "oneway"], "#fbbf24", "#fb923c"], "line-opacity": 0.95, "line-width": ["interpolate", ["linear"], ["zoom"], 13, 1, 17, 2.6] } });
       map.addLayer({ id: "roadgraph-node", type: "circle", source: "roadgraph", filter: ["==", ["get", "kind"], "node"], layout: { visibility: "none" }, paint: { "circle-radius": ["interpolate", ["linear"], ["zoom"], 13, 2.5, 17, 6], "circle-color": "#ffffff", "circle-stroke-color": "#0e7490", "circle-stroke-width": 1.6, "circle-opacity": 1 } });
@@ -1242,9 +1243,10 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
                   {ko
                     ? `밀도: 노드 ${roadGraphStats.nodes} · 엣지 ${roadGraphStats.edges} · ${roadGraphStats.km}km · 작업지점 ${roadGraphStats.workpoints.toLocaleString()} · 갱신 ${roadGraphStats.generated_at}`
                     : `density: ${roadGraphStats.nodes} nodes · ${roadGraphStats.edges} edges · ${roadGraphStats.km}km · ${roadGraphStats.workpoints.toLocaleString()} work-pts · ${roadGraphStats.generated_at}`}
+                  <div style={{ marginTop: 2 }}>{ko ? `혼잡(엣지색): 느림 🔴 → 빠름 🟢 · 측정 ${roadGraphStats.congested_edges ?? 0}엣지` : `congestion (edge color): slow 🔴 → fast 🟢 · ${roadGraphStats.congested_edges ?? 0} edges`}</div>
                 </div>
               )}
-              <div className="llp-hint">{ko ? "작업점: 채움=신뢰도(🟢높음·🟠보통·🔴낮음)·테두리=블록(청록)/크레인(주황) · 안벽: ARRIVED GPS로 학습한 선석 위치 · 도로망: GPS 궤적 추론(보라 선) + 방향 화살표(초록=일방·회색=양방)" : "work-points: fill=confidence (🟢🟠🔴), ring=block/crane · wharf: berth positions from ARRIVED GPS · roads: inferred centerlines (purple) + direction arrows (green=one-way, grey=two-way)"}</div>
+              <div className="llp-hint">{ko ? "작업점: 채움=신뢰도(🟢높음·🟠보통·🔴낮음)·테두리=블록(청록)/크레인(주황) · 안벽: ARRIVED GPS로 학습한 선석 위치 · 도로망: 엣지색=혼잡(느림🔴→빠름🟢) + 방향 화살표(앰버=일방·주황=양방) + 흰점=교차로" : "work-points: fill=confidence (🟢🟠🔴), ring=block/crane · wharf: from ARRIVED GPS · roads: edge color=congestion (slow🔴→fast🟢) + direction arrows (amber=one-way) + white=junctions"}</div>
             </section>
             <section className="llp-sec">
               <header>{ko ? "배차 (DISPATCH)" : "Dispatch"}</header>
