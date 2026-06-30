@@ -10,7 +10,7 @@ CREATE TABLE IF NOT EXISTS free_in_sample (
   jobtype            text,
   qc                 text,
   container          text,
-  secs_carrying      int,                  -- time since it picked up the current container (laden elapsed)
+  secs_in_cycle      int,                  -- elapsed since the cycle opened (stable per-cycle anchor)
   nearest_rtg_m      double precision,     -- distance to nearest RTG (proxy for "near drop")
   pred_free_in_s     int,                  -- our CURRENT prediction (crude constant) at this moment
   soon_idle          boolean,              -- did we call it soon-idle now

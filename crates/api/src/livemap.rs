@@ -1470,9 +1470,10 @@ pub fn spawn_free_in_logger(lm: Arc<LiveMap>, pool: PgPool) {
                     let container = p.container1.clone().filter(|s| !s.is_empty())
                         .or_else(|| p.latched_container.clone())
                         .or_else(|| aj.and_then(|a| a.contno.clone()));
-                    let secs_carrying = if p.carry_since_ms > 0 { Some(((now - p.carry_since_ms) / 1000) as i32) } else { None };
+                    // cycle elapsed from OPEN (stable per-cycle anchor; carry_since_ms resets mid-journey)
+                    let secs_in_cycle = if p.v2.opened_ms > 0 { Some(((now - p.v2.opened_ms) / 1000) as i32) } else { None };
                     let qc = aj.and_then(|a| a.qc.clone()).or_else(|| p.latched_topos.clone().filter(|t| is_crane_code(t)));
-                    out.push((id.clone(), cl.state.to_string(), jt, qc, container, secs_carrying, cl.nearest_rtg_m, pred as i32, cl.state == "soon_idle"));
+                    out.push((id.clone(), cl.state.to_string(), jt, qc, container, secs_in_cycle, cl.nearest_rtg_m, pred as i32, cl.state == "soon_idle"));
                 }
                 out
             };
@@ -1487,7 +1488,7 @@ pub fn spawn_free_in_logger(lm: Arc<LiveMap>, pool: PgPool) {
                 let preds: Vec<i32> = rows.iter().map(|r| r.7).collect();
                 let soons: Vec<bool> = rows.iter().map(|r| r.8).collect();
                 let _ = sqlx::query(
-                    "INSERT INTO free_in_sample (ts, ytno, state, jobtype, qc, container, secs_carrying, nearest_rtg_m, pred_free_in_s, soon_idle)
+                    "INSERT INTO free_in_sample (ts, ytno, state, jobtype, qc, container, secs_in_cycle, nearest_rtg_m, pred_free_in_s, soon_idle)
                      SELECT $1::timestamptz, u.ytno, u.state, u.jt, u.qc, u.cont, u.carry, u.rtgm, u.pred, u.soon
                        FROM unnest($2::text[], $3::text[], $4::text[], $5::text[], $6::text[], $7::int[], $8::float8[], $9::int[], $10::bool[])
                          AS u(ytno, state, jt, qc, cont, carry, rtgm, pred, soon)
