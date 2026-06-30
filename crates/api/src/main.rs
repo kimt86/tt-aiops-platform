@@ -115,6 +115,7 @@ async fn main() -> anyhow::Result<()> {
     livemap::spawn_travel_aggregator(pool.clone()); // 5min harvest TT travel-time labels from cycles
     livemap::spawn_density_sampler(livemap.clone(), pool.clone()); // 60s per-cell TT density (4 grid sizes)
     livemap::spawn_soon_idle_logger(livemap.clone(), pool.clone()); // 30s soon_idle 예측 적재(그림자 정확도)
+    livemap::spawn_free_in_logger(livemap.clone(), pool.clone()); // 60s free_in 학습+검증셋(스냅샷+실제잔여 backfill)
     livemap::spawn_qc_wait_logger(livemap.clone(), pool.clone()); // 30s QC starvation 적재(K_QC_TT_WAIT_GPS, topos vs GPS 비교)
     livemap::spawn_qc_wait_kpi(pool.clone()); // 5min: qc_wait_sample → kpi_daily/shift (K_QC_TT_WAIT_GPS 영속)
     workpool::spawn_dispatch_pred_logger(pool.clone()); // 2min: 배차 1단계 예측 검증 로그(dispatch_pred_sample)

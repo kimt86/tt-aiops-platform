@@ -1434,6 +1434,87 @@ pub fn spawn_soon_idle_logger(lm: Arc<LiveMap>, pool: PgPool) {
     });
 }
 
+/// free_in training + verification (mig 0072). Every 60s snapshot each BUSY truck (a state where free_in
+/// applies) with its features + our current prediction + soon-idle flag → free_in_sample. Every ~10 min,
+/// BACKFILL the actual free moment (the truck's NEXT drop from tt_cycle_log) → actual_remaining_s, which is
+/// both the training LABEL and the verification ("predicted soon-idle → actually freed N s later").
+pub fn spawn_free_in_logger(lm: Arc<LiveMap>, pool: PgPool) {
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(Duration::from_secs(60));
+        let mut n = 0u64;
+        loop {
+            ticker.tick().await;
+            let now = Utc::now().timestamp_millis();
+            let ts = Utc::now();
+            let rows: Vec<(String, String, Option<String>, Option<String>, Option<String>, Option<i32>, Option<f64>, i32, bool)> = {
+                let devices = lm.devices.read().await;
+                let plc = lm.plc.read().await;
+                let centroids = lm.centroids.read().await;
+                let assigned = lm.assigned_pool.read().await;
+                let rtgs: Vec<(f64, f64)> = devices.values()
+                    .filter(|p| p.cls == "RTG" && (now - p.last_seen_ms) / 1000 <= STALE_AFTER_S)
+                    .map(|p| (p.lat, p.lon)).collect();
+                let cranes: HashMap<String, (f64, f64)> = devices.iter()
+                    .filter(|(_, p)| matches!(p.cls.as_str(), "C" | "M" | "Z") && (now - p.last_seen_ms) / 1000 <= STALE_AFTER_S)
+                    .map(|(id, p)| (id.clone(), (p.lat, p.lon))).collect();
+                let mut out = Vec::new();
+                for (id, p) in devices.iter() {
+                    if p.cls != "TT" || (now - p.last_seen_ms) / 1000 > STALE_AFTER_S {
+                        continue;
+                    }
+                    let aj = assigned.get(id);
+                    let cl = classify_tt(p, aj, &rtgs, &plc, &cranes, &centroids, now);
+                    let jt = p.jobtype.clone().or_else(|| p.latched_jobtype.clone());
+                    let (pred, _) = free_in(cl.state, jt.as_deref());
+                    let Some(pred) = pred else { continue }; // only states where free_in applies
+                    let container = p.container1.clone().filter(|s| !s.is_empty())
+                        .or_else(|| p.latched_container.clone())
+                        .or_else(|| aj.and_then(|a| a.contno.clone()));
+                    let secs_carrying = if p.carry_since_ms > 0 { Some(((now - p.carry_since_ms) / 1000) as i32) } else { None };
+                    let qc = aj.and_then(|a| a.qc.clone()).or_else(|| p.latched_topos.clone().filter(|t| is_crane_code(t)));
+                    out.push((id.clone(), cl.state.to_string(), jt, qc, container, secs_carrying, cl.nearest_rtg_m, pred as i32, cl.state == "soon_idle"));
+                }
+                out
+            };
+            if !rows.is_empty() {
+                let ytnos: Vec<String> = rows.iter().map(|r| r.0.clone()).collect();
+                let states: Vec<String> = rows.iter().map(|r| r.1.clone()).collect();
+                let jts: Vec<Option<String>> = rows.iter().map(|r| r.2.clone()).collect();
+                let qcs: Vec<Option<String>> = rows.iter().map(|r| r.3.clone()).collect();
+                let conts: Vec<Option<String>> = rows.iter().map(|r| r.4.clone()).collect();
+                let carry: Vec<Option<i32>> = rows.iter().map(|r| r.5).collect();
+                let rtgm: Vec<Option<f64>> = rows.iter().map(|r| r.6).collect();
+                let preds: Vec<i32> = rows.iter().map(|r| r.7).collect();
+                let soons: Vec<bool> = rows.iter().map(|r| r.8).collect();
+                let _ = sqlx::query(
+                    "INSERT INTO free_in_sample (ts, ytno, state, jobtype, qc, container, secs_carrying, nearest_rtg_m, pred_free_in_s, soon_idle)
+                     SELECT $1::timestamptz, u.ytno, u.state, u.jt, u.qc, u.cont, u.carry, u.rtgm, u.pred, u.soon
+                       FROM unnest($2::text[], $3::text[], $4::text[], $5::text[], $6::text[], $7::int[], $8::float8[], $9::int[], $10::bool[])
+                         AS u(ytno, state, jt, qc, cont, carry, rtgm, pred, soon)
+                     ON CONFLICT (ytno, ts) DO NOTHING",
+                )
+                .bind(ts).bind(&ytnos).bind(&states).bind(&jts).bind(&qcs).bind(&conts).bind(&carry).bind(&rtgm).bind(&preds).bind(&soons)
+                .execute(&pool).await;
+            }
+            n += 1;
+            if n % 10 == 0 {
+                // backfill: actual free = the truck's NEXT drop after the snapshot (its current carry's drop)
+                let _ = sqlx::query(
+                    "UPDATE free_in_sample s
+                        SET actual_free_at = nd.d, actual_remaining_s = extract(epoch FROM nd.d - s.ts)::int
+                       FROM (SELECT fs.ytno, fs.ts,
+                                    (SELECT min(c.dropped_at) FROM tt_cycle_log c
+                                      WHERE c.ytno = fs.ytno AND c.dropped_at > fs.ts AND c.dropped_at < fs.ts + interval '2 hours') d
+                               FROM free_in_sample fs
+                              WHERE fs.actual_free_at IS NULL AND fs.ts < now() - interval '2 minutes') nd
+                      WHERE s.ytno = nd.ytno AND s.ts = nd.ts AND nd.d IS NOT NULL",
+                ).execute(&pool).await;
+                let _ = sqlx::query("DELETE FROM free_in_sample WHERE ts < now() - interval '30 days'").execute(&pool).await;
+            }
+        }
+    });
+}
+
 /// Load persisted learned topos centroids (block work-point coords) back into memory on
 /// startup so accumulation survives restarts. var resets to 0 (spread re-accumulates).
 pub async fn load_centroids(lm: &Arc<LiveMap>, pool: &PgPool) {
