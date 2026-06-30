@@ -169,6 +169,8 @@ export interface TravelAccuracy {
 }
 export interface TravelData {
   samples: number; od_pairs: number; confident_pairs: number; median_speed_kmh: number | null;
+  // empty-leg decomposition (learn_leg_decomp): real drive speed vs effective + stopped fraction
+  drive_kmh: number | null; effective_kmh: number | null; pct_stopped: number | null; decomp_legs: number;
   accuracy: TravelAccuracy; od: TravelOd[]; metric_series: TravelMetricPoint[];
 }
 

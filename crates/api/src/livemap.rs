@@ -2267,6 +2267,58 @@ pub fn spawn_travel_aggregator(pool: PgPool) {
     });
 }
 
+/// Empty-leg time DECOMPOSITION (mig 0075): every 5min, split each newly-settled empty leg into MOVING
+/// vs STOPPED via 30s GPS motion segmentation, and locate the stopped time relative to the pickup —
+/// so "why is effective speed ~7 km/h" is answered with data (real drive ~23 km/h diluted by ~⅓ stop,
+/// mostly final-approach positioning) instead of interpretation. leg ends at TOS ARRIVED; gps_arrived_at
+/// is the first GPS fix within 50m of the pickup, so (arrived − gps_arrived) is the post-physical wait.
+pub fn spawn_leg_decomp(pool: PgPool) {
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(Duration::from_secs(300));
+        loop {
+            ticker.tick().await;
+            let _ = sqlx::query(
+                "INSERT INTO learn_leg_decomp (ytno, leg_start, arrived_at, dest_topos, grid_dist_m, total_s, drive_s, stop_s, stop_near_dest_s, gps_arrived_at)
+                 WITH cyc AS (
+                   SELECT ytno, empty_travel_start_at ets, empty_arrived_at eta, legs->0->>'target' AS dest_topos,
+                          (legs->0->>'lat')::float8 dlat, (legs->0->>'lon')::float8 dlon
+                     FROM tt_cycle_v2
+                    WHERE dropped_at > now()-interval '30 minutes'
+                      AND empty_travel_start_at IS NOT NULL AND empty_arrived_at IS NOT NULL
+                      AND empty_arrived_at > empty_travel_start_at AND empty_arrived_at < now()-interval '3 minutes'
+                      AND (legs->0->>'lat') IS NOT NULL),
+                 fx AS (
+                   SELECT c.ytno,c.ets,c.eta,c.dest_topos,c.dlat,c.dlon,p.ts,p.lat,p.lon,
+                          lag(p.ts) OVER w pts, lag(p.lat) OVER w plat, lag(p.lon) OVER w plon
+                     FROM cyc c JOIN truck_pos_hist p ON p.ytno=c.ytno AND p.ts BETWEEN c.ets AND c.eta
+                    WINDOW w AS (PARTITION BY c.ytno,c.ets ORDER BY p.ts)),
+                 seg AS (
+                   SELECT ytno,ets,eta,dest_topos,dlat,dlon,ts, extract(epoch FROM ts-pts) dt,
+                     CASE WHEN pts IS NULL THEN NULL ELSE 2*6371000*asin(sqrt(power(sin(radians(lat-plat)/2),2)+cos(radians(plat))*cos(radians(lat))*power(sin(radians(lon-plon)/2),2))) END disp_m,
+                     2*6371000*asin(sqrt(power(sin(radians(lat-dlat)/2),2)+cos(radians(dlat))*cos(radians(lat))*power(sin(radians(lon-dlon)/2),2))) dist_dest_m,
+                     first_value(lat) OVER (PARTITION BY ytno,ets ORDER BY ts) olat,
+                     first_value(lon) OVER (PARTITION BY ytno,ets ORDER BY ts) olon
+                   FROM fx)
+                 SELECT ytno, ets, max(eta), max(dest_topos),
+                   round(grid_manhattan_m(max(olat),max(olon),max(dlat),max(dlon)))::int,
+                   extract(epoch FROM max(eta)-ets)::int,
+                   coalesce(sum(dt) FILTER (WHERE disp_m>=8 AND dt BETWEEN 20 AND 60),0)::int,
+                   coalesce(sum(dt) FILTER (WHERE disp_m<8 AND dt BETWEEN 20 AND 60),0)::int,
+                   coalesce(sum(dt) FILTER (WHERE disp_m<8 AND dist_dest_m<=60 AND dt BETWEEN 20 AND 60),0)::int,
+                   min(ts) FILTER (WHERE dist_dest_m<=50)
+                 FROM seg GROUP BY ytno, ets
+                 HAVING count(*) FILTER (WHERE dt BETWEEN 20 AND 60) >= 2
+                 ON CONFLICT (ytno,leg_start) DO NOTHING",
+            )
+            .execute(&pool)
+            .await;
+            let _ = sqlx::query("DELETE FROM learn_leg_decomp WHERE captured_at < now() - interval '30 days'")
+                .execute(&pool)
+                .await;
+        }
+    });
+}
+
 /// Every ~30s, refresh the authoritative per-truck assignment cache from the work pool
 /// (`live_assigned_tt` = any active job, all types; enriched with the latest `live_workpool`
 /// row per truck for DS/LD job metadata). A truck present here is "assigned" even when its

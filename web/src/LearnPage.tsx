@@ -236,10 +236,11 @@ function ModelsTab({ lang }: { lang: Lang }) {
         </div>
         <div className="ls-chips">
           <Chip label={k ? "신뢰 OD쌍 (n≥10)" : "confident O→D"} value={tv ? fmtN(tv.confident_pairs) : "—"} accent="#34d399" />
-          <Chip label={k ? "OD쌍" : "O→D pairs"} value={tv ? fmtN(tv.od_pairs) : "—"} />
-          <Chip label={k ? "중앙 속도" : "median speed"} value={tv ? `${kmh(tv.median_speed_kmh)} km/h` : "—"} />
+          <Chip label={k ? "주행 속도 (정차 제외)" : "drive speed (stop-excl)"} value={tv?.drive_kmh != null ? `${kmh(tv.drive_kmh)} km/h` : "—"} accent="#60a5fa" />
+          <Chip label={k ? "실효 속도 (정차 포함)" : "effective (incl. stops)"} value={tv?.effective_kmh != null ? `${kmh(tv.effective_kmh)} km/h` : "—"} />
+          <Chip label={k ? "정지 시간 비율" : "% time stopped"} value={tv?.pct_stopped != null ? `${tv.pct_stopped.toFixed(0)}%` : "—"} accent="#f59e0b" />
         </div>
-        <div className="ls-note">{k ? "표본·신뢰 OD쌍이 늘며 커버리지는 개선됨. 단 같은 OD의 시간 변동(±50%)은 야드 확률성에 의한 본질적 천장 — 점예측보다 분포로 사용." : "Coverage grows with samples; within-OD variance (±50%) is a structural ceiling — use as a distribution."}</div>
+        <div className="ls-note">{k ? `실측 분해(${tv ? fmtN(tv.decomp_legs) : "—"}개 leg): 트럭은 실제로 ~${tv?.drive_kmh != null ? kmh(tv.drive_kmh) : "23"}km/h로 달리지만, leg 시간의 ~⅓이 정지(대부분 마지막 진입·자리잡기)라 실효 속도는 ${tv?.effective_kmh != null ? kmh(tv.effective_kmh) : "~14"}km/h. 큰 크레인 대기는 ARRIVED 이후라 이동시간에 안 들어감. 같은 OD의 변동(±50%)은 야드 확률성 — 점예측보다 분포로 사용.` : `Decomposition (${tv ? fmtN(tv.decomp_legs) : "—"} legs): trucks actually drive ~${tv?.drive_kmh != null ? kmh(tv.drive_kmh) : "23"} km/h, but ~⅓ of leg time is stopped (mostly final-approach positioning), so effective speed is ~${tv?.effective_kmh != null ? kmh(tv.effective_kmh) : "14"} km/h. The crane queue is after ARRIVED (not in travel time). Within-OD variance (±50%) — use as a distribution.`}</div>
         <details className="ls-detail">
           <summary>{k ? "상세 — 구간별 이동시간 (표본 많은 순)" : "detail — travel time by O→D"}</summary>
           <div className="learn-od-cols" style={{ marginTop: 8 }}>
@@ -476,8 +477,13 @@ const DATA_CATALOG: Category[] = [
       { key: "learn_travel_sample",
         name: ["이동시간 표본 (OD)", "travel-time samples (OD)"],
         source: ["사이클에서 수확 (5분)", "harvested from cycles (5min)"],
-        usage: ["TT 이동시간 모델", "TT travel-time model"],
-        desc: ["출발존→도착존 한 leg의 실제 소요시간·거리·피처(밀도·날씨·시간대). 이동시간 예측의 학습 표본.", "Per O→D leg: actual seconds, distance, features (density/weather/hour). Training rows for travel prediction."] },
+        usage: ["TT 이동시간 모델·비용행렬", "TT travel-time model"],
+        desc: ["출발존→도착존 한 leg의 실제(정체 포함) 소요시간·거리·피처. 이동시간 예측·비용행렬의 학습 표본.", "Per O→D leg: actual seconds, distance, features. Training rows for travel prediction + cost matrix."] },
+      { key: "learn_leg_decomp",
+        name: ["공차 leg 시간 분해", "empty-leg time decomposition"],
+        source: ["사이클 + GPS 모션분할 (5분)", "cycle + GPS motion-seg (5min)"],
+        usage: ["주행 vs 정지 진단", "drive-vs-stop diagnostic"],
+        desc: ["공차 leg를 주행/정지/도착지근처정지로 분해 + GPS 물리도착. 실제 주행 ~23km/h vs 실효 ~14km/h의 출처(정지가 어디서 생기나).", "Splits each empty leg into drive/stop/near-dest + GPS physical arrival. Source of real ~23 vs effective ~14 km/h."] },
     ],
   },
   {

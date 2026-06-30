@@ -192,6 +192,12 @@ pub struct TravelResp {
     confident_pairs: i64,           // zone pairs with n ≥ 10 (the usable model)
     confident_pairs_fullcode: i64,  // raw-code pairs n ≥ 10 (before-zoning, for comparison)
     median_speed_kmh: Option<f64>,  // distance ÷ speed fallback for sparse pairs
+    // empty-leg decomposition (learn_leg_decomp): the REAL drive speed (stop-excluded) vs effective —
+    // the old "median speed" was straight-line ÷ stop-inclusive time, misleadingly slow (~7 km/h).
+    drive_kmh: Option<f64>,         // grid dist ÷ moving time = real cruise (~23 km/h)
+    effective_kmh: Option<f64>,     // grid dist ÷ total realized time (incl. ~⅓ stop)
+    pct_stopped: Option<f64>,       // % of empty-leg time the truck is stopped
+    decomp_legs: i64,
     weather_wet_median_s: Option<f64>, // median empty/laden leg in precip > 0.1mm …
     weather_dry_median_s: Option<f64>, // … vs dry — quick weather-feature signal
     accuracy: TravelAccuracy,       // latest predicted-vs-actual test
@@ -240,6 +246,21 @@ pub async fn travel(State(pool): State<PgPool>) -> Result<Json<TravelResp>, AppE
         .fetch_one(&pool)
         .await?;
 
+    // empty-leg decomposition: real drive speed (stop-excluded) vs effective, + stopped fraction.
+    let (drive_kmh, effective_kmh, pct_stopped, decomp_legs): (Option<f64>, Option<f64>, Option<f64>, i64) =
+        sqlx::query_as(
+            "SELECT (percentile_cont(0.5) WITHIN GROUP (ORDER BY (grid_dist_m/1000.0)/nullif(drive_s/3600.0,0))
+                       FILTER (WHERE drive_s > 10 AND grid_dist_m > 50))::float8,
+                    (percentile_cont(0.5) WITHIN GROUP (ORDER BY (grid_dist_m/1000.0)/nullif(total_s/3600.0,0))
+                       FILTER (WHERE total_s > 10 AND grid_dist_m > 50))::float8,
+                    (100.0 * sum(stop_s) / nullif(sum(drive_s + stop_s), 0))::float8,
+                    count(*)
+               FROM learn_leg_decomp WHERE captured_at > now() - interval '7 days'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap_or((None, None, None, 0));
+
     // weather signal: median travel in wet vs dry hours (joined by hour bucket of dropped_at).
     let (weather_wet_median_s, weather_dry_median_s): (Option<f64>, Option<f64>) = sqlx::query_as(
         "SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY travel_s) FILTER (WHERE w.precip_mm > 0.1),
@@ -277,7 +298,8 @@ pub async fn travel(State(pool): State<PgPool>) -> Result<Json<TravelResp>, AppE
 
     Ok(Json(TravelResp {
         samples, od_pairs, confident_pairs, confident_pairs_fullcode,
-        median_speed_kmh, weather_wet_median_s, weather_dry_median_s, accuracy, od, metric_series,
+        median_speed_kmh, drive_kmh, effective_kmh, pct_stopped, decomp_legs,
+        weather_wet_median_s, weather_dry_median_s, accuracy, od, metric_series,
     }))
 }
 
@@ -634,6 +656,9 @@ const DATA_STREAMS: &[DataStream] = &[
     DataStream { key: "learn_travel_sample", table: "learn_travel_sample", ts: "captured_at",
         sample_sql: "SELECT captured_at, ytno, origin_zone, dest_zone, travel_s, round(dist_m::numeric,0) AS dist_m, shift \
                      FROM learn_travel_sample ORDER BY captured_at DESC LIMIT 50" },
+    DataStream { key: "learn_leg_decomp", table: "learn_leg_decomp", ts: "captured_at",
+        sample_sql: "SELECT captured_at, ytno, dest_topos, grid_dist_m, total_s, drive_s, stop_s, \
+                     stop_near_dest_s, gps_arrived_at, arrived_at FROM learn_leg_decomp ORDER BY captured_at DESC LIMIT 50" },
     DataStream { key: "tt_soon_idle_pred", table: "tt_soon_idle_pred", ts: "predicted_at",
         sample_sql: "SELECT predicted_at, ytno, jobtype, qc, source, gps_would_fire, \
                      round(nearest_rtg_m::numeric,0) AS nearest_rtg_m, reason \
