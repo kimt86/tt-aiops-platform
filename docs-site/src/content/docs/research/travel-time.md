@@ -15,10 +15,10 @@ sidebar:
 
 1. **① 완료 시점:** `free_in`(곧 빔 ~N분) — 도착 8분·운반 17분·임박 2분, `tt_cycle_v2`로 측정·검증([[/kc/research/soon-idle-tos/|곧유휴 연구]]). 표시 전용(그림자).
 2. **② 완료 지점:** 작업점 코드(`topos1`/사이클 `legs.target`) + 학습 중심좌표 → lat/lon. 라이브.
-3. **③ OD 이동시간 — 현재:** 키를 **작업점 풀코드 → 225m 존 격자**로. 배차 비용에 실제로 쓰는 값은 **순수 주행(pure-drive) 추정**(움직인 구간만) `learn_travel_zone225_drive` matview + 거리÷속도 폴백. 실측(정지 포함) 이력은 참조용으로만 유지.
+3. **③ OD 이동시간 — 현재:** 키를 **작업점 풀코드 → 225m 존 격자**로. 배차 비용에 실제로 쓰는 값은 **순수주행 = 주행 구간 시간**(출발→작업지점 도달; 경로 정체 포함·핸드오버 대기 제외) `learn_travel_zone225_drive` matview + 거리÷속도 폴백. 실측(핸드오버 포함) 이력은 참조용으로만 유지.
 
-:::caution[비용 소스 변천 — 이번 세션에 3번 뒤집힘]
-③ 이동시간 비용의 **소스가 순수(pure) → 실측(realized) → 순수주행(pure-drive)** 로 세 번 바뀌었고, **현재 = 순수주행**입니다. `learn_travel_zone225`(실측·정지 포함)는 지금도 갱신되지만 **비용에는 안 쓰이고 참조용**입니다. 이번 세션에 **삭제된 파이프라인**(문서에 살아있다고 적혀 있으면 낡은 것): `learn_travel_zone225_pure`, `learn_travel_drive_sample`, `learn_travel_topos_pure`, `learn_travel_topos_sample`, `learn_eval`, `spawn_learn_eval`, `GET /api/learn/eval`.
+:::caution[비용 소스 변천 — 정의까지 4번 정리됨]
+③ 이동시간 비용 소스가 **순수(pure) → 실측(realized) → 순수주행(움직임만) → 순수주행(구간시간)** 으로 바뀌었고, **현재 = 주행 구간 시간(`total_s`)**입니다. 세 번째 "움직인 순간만(`drive_s`)"은 경로 정체까지 벗겨 근거리-원거리 차이를 뭉개 **틀렸고**(2026-07-01·mig 0079 정정), 실측(realized)은 반대로 핸드오버까지 포함해 과대 — 구간시간이 가운데. `learn_travel_zone225`(실측)는 지금도 갱신되지만 **비용에는 안 쓰이고 참조용**입니다. **삭제된 파이프라인**(문서에 살아있다고 적혀 있으면 낡은 것): `learn_travel_zone225_pure`, `learn_travel_drive_sample`, `learn_travel_topos_pure/sample`, `learn_eval`, `learn_crane_approach`(mig 0079 DROP).
 :::
 
 ## 왜 존인가 — v0의 두 문제 [DB]
@@ -32,30 +32,28 @@ v0는 OD 키가 작업점 풀코드(`06T-3233`, `C21`)였습니다.
 
 ## 현재 비용 소스 — 225m 존 격자 [코드]
 
-- **격자:** 출발·도착을 **225m OD 격자**(`oz`/`dz`)로 버킷. matview `learn_travel_zone225_drive`가 존쌍별 **순수 주행시간**(움직인 구간만·정지 제외)의 p50/p90를 산출.
-- **L3 폴백:** 존쌍 표본이 없으면 `quay_manhattan_m ÷ PURE_DRIVE_SPEED_MS`(= 6.33 m/s ≈ 22.8 km/h)로 추정.
+- **격자:** 출발·도착을 **225m OD 격자**(`oz`/`dz`)로 버킷. matview `learn_travel_zone225_drive`가 존쌍별 **순수주행 = 구간시간**(출발→도달; 경로 정체 포함·핸드오버 제외)의 p50/p90를 산출. 소스 = `learn_travel_sample`의 **빈 트럭 트립**(출발 = 트럭 직전 드롭, 사이클 체이닝·GPS 불필요) → 사이클 이력 3주치라 커버리지 넓음(신뢰 존쌍 ~431, mig 0080).
+- **L3 폴백:** 존쌍 표본이 없으면 `quay_manhattan_m ÷ SEG_SPEED_MS`(= 3.30 m/s ≈ 13 km/h·구간속도)로 추정.
 - **하이브리드:** 그룹(중앙값 학습)은 존, 미세 위치는 topos 좌표로 계산 → 밀도와 미세위치 둘 다.
 
 ## 실측 empty-leg 분해 — `learn_leg_decomp` [DB·이번 세션]
 
-공차 레그를 30초 GPS 모션 세그먼트로 잘라 **주행(drive_s) + 정지(stop_s) + 접근(approach)** 으로 분해했습니다(마이그 `0075`/`0076`/`0078`). 각 행에 `oz`/`dz`(225m 격자)·출발/도착 좌표·`dest_topos`도 저장.
+공차 레그를 30초 GPS 모션 세그먼트로 잘라 **구간시간(`total_s`, 라벨)** 과 그 안의 **움직임(drive_s)/정지(stop_s)** 분해를 함께 냈습니다(마이그 `0075`/`0076`/`0078`). 각 행에 `oz`/`dz`(225m 격자)·출발/도착 좌표·`dest_topos`도 저장.
 
 | 성분 | 비중 | 의미 |
 |---|---|---|
-| 주행 `drive_s` | 레그의 ~53% | **실제 주행속도 ≈ 22.8 km/h** |
-| 정지 `stop_s` | ~47% | 대부분 목적지 최종접근·큐 |
-| 접근 `approach` | 중앙값 ~67s | `arrived − gps_arrived` |
+| **구간시간 `total_s`** | 100% | 출발→도달(이동시간 라벨); 구간속도 ≈ 13 km/h |
+| 움직임 `drive_s` | 레그의 ~53% | 진단용 — 움직인 순간만 보면 ~22.8 km/h |
+| 정지 `stop_s` | ~47% | 진단용 — 경로 정체 + 목적지 최종접근 |
 
 **핵심 발견:**
-- **(a)** `ARRIVED`가 곧 물리 도착(중앙값 격차 −4s)입니다 → 큰 **크레인 큐는 도착 이후**에 있지 이동시간 안에 있지 않습니다. 이동 중의 정지는 목적지 최종접근·위치잡기입니다.
-- **(b)** 한때 표시하던 "중앙값 6.9 km/h"는 직선거리 ÷ 정지포함시간 ÷ 짧은레그 가중이라 **오해를 준 수치**였고, 진짜 주행은 ≈ 22.8 km/h입니다.
-- **(c)** `drive_s`는 큐 노이즈가 지배합니다 — **동일 OD 내 변동계수 0.758(±76%)**. 이 바닥 밑을 이기는 거리 모델은 없습니다.
+- **(a)** `ARRIVED`가 곧 물리 도착(중앙값 격차 −4s)입니다 → 큰 **크레인 큐는 도착 이후**에 있지 이동시간 안에 있지 않습니다. 경로상 정지는 신호·정체·최종접근으로 *아직 주행 중*이라 라벨(구간시간)에 포함됩니다.
+- **(b)** 한때 표시하던 "중앙값 6.9 km/h"는 직선거리 ÷ 정지포함시간 ÷ 짧은레그 가중이라 **오해를 준 수치**였습니다.
+- **(c)** 같은 OD여도 주행시간이 크게 흩어집니다 — 움직인 성분(`drive_s`)조차 **동일 OD 내 변동계수 0.758(±76%)**. 이 바닥 밑을 이기는 거리 모델은 없습니다.
 
-## 큐·접근 → 1단계로 분리 — `learn_crane_approach` [DB·이번 세션]
+## 크레인 진입 대기 → 폐기 (2026-07-01·mig 0079)
 
-픽업 지점별 핸드오버/접근 대기(`dest_topos`: 양하 픽업 = 안벽 크레인, 선적 픽업 = 블록)를 `arrived − gps_arrived`로 잰 matview입니다. **중앙값 67s**, 크레인별 22~194s(~9배)로 갈리고 앞에 차가 줄서면 ~2.5배. 이는 **목적지의 성질**(트럭별 아님)이라 2단계 트럭별 비용에서 **떼어내 1단계 신호**로 둡니다.
-
-> **상태:** matview로 **빌드됐으나 아직 1단계 데드라인/리드에 배선 안 됨.** 양하=안벽은 깨끗이 매핑되나, 선적=블록 픽업 topos 스레딩이 남음.
+한때 크레인 앞 진입 대기(`arrived − gps_arrived`)를 매트뷰로 만들어 1단계 신호로 쓰려 했으나 **폐기**했습니다. 일관된 방법(구간창 안 50m 첫 도착)으로 다시 재니 **중앙값 ≈0**(양하 −1s·적하 −3s)이었고, 예전 "중앙 67초"는 GPS 탐색을 도착 시각까지만 잘라 *도착 전에 근처에 찍힌 트럭 절반*만 센 **선택편향**이었습니다(나머지 절반은 도착 시점/이후에 50m 진입). 게다가 크레인 도착 좌표가 학습된 부두 중심점이라 측정 자체가 부정확. 진짜 크레인 큐는 이동시간이 아니라 도착 이후(크레인 스케줄 = work_eta 영역)라 **1단계 마감에 넣지 않습니다.**
 
 ## 도로망 라우팅 — 빌드·검증됐으나 미배선(음성 게이트)
 
@@ -72,5 +70,5 @@ v0는 OD 키가 작업점 풀코드(`06T-3233`, `C21`)였습니다.
 
 ---
 
-**근거:** [DB] `learn_travel_zone225_drive`(순수주행 비용) `learn_leg_decomp`(주행/정지 분해) `learn_crane_approach`(접근 대기) `road_node`/`road_edge`·`road_route_eval`(도로망) `tt_cycle_v2` · [외부] Open-Meteo · [코드] `crates/api/src/livemap.rs` `roadgraph.rs` `learn.rs` `scripts/reinfer_roadgraph.sh` · 마이그 `0075`~`0078`.
+**근거:** [DB] `learn_travel_sample`(빈트립=비용원) `learn_travel_zone225_drive`(순수주행 비용) `learn_leg_decomp`(주행/정지 분해·진단) `road_node`/`road_edge`·`road_route_eval`(도로망) `tt_cycle_v2` · [외부] Open-Meteo · [코드] `crates/api/src/livemap.rs` `roadgraph.rs` `learn.rs` `scripts/reinfer_roadgraph.sh` · 마이그 `0075`~`0080`.
 **관련:** [곧 유휴 감지](/kc/research/soon-idle-tos/) · [RTG 작업 사이클](/kc/research/rtg-work-cycle/) · [TT 이동시간 예측 모델](/kc/research/travel-time-model/)

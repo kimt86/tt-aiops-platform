@@ -2317,9 +2317,8 @@ pub fn spawn_leg_decomp(pool: PgPool) {
             let _ = sqlx::query("DELETE FROM learn_leg_decomp WHERE captured_at < now() - interval '30 days'")
                 .execute(&pool)
                 .await;
-            // refresh the Stage-2 pure-drive OD cost layer + the Stage-1 per-crane approach signal.
+            // refresh the Stage-2 OD cost layer (순수주행 = drive-segment time = total_s, not moving-only).
             let _ = sqlx::query("REFRESH MATERIALIZED VIEW CONCURRENTLY learn_travel_zone225_drive").execute(&pool).await;
-            let _ = sqlx::query("REFRESH MATERIALIZED VIEW CONCURRENTLY learn_crane_approach").execute(&pool).await;
         }
     });
 }
@@ -3380,9 +3379,12 @@ const GRID_COS: f64 = 0.86777; // cos(29.8°)
 const GRID_SIN: f64 = 0.49697; // sin(29.8°)
 // ~22.8 km/h moving-only speed, measured in learn_leg_decomp (grid-Manhattan distance ÷ drive_s).
 // L3 fallback for the PURE-DRIVE cost (learn_travel_zone225_drive) when an OD pair isn't learned yet.
-// The Stage-2 cost is pure DRIVE time only; the dest-side approach/handover (which varies ~9× by crane)
-// is split out to a Stage-1 per-crane signal (learn_crane_approach), not buried in per-truck travel.
-const PURE_DRIVE_SPEED_MS: f64 = 6.33;
+// The Stage-2 cost is 순수주행 = the drive-SEGMENT time (empty_travel_start → work-point arrival):
+// en-route stops are still driving and stay IN the cost; only the post-arrival handover wait is excluded
+// (it lives in the next dwell segment). The crane approach term was dropped — measured consistently its
+// median is ~0 (crane coord = learned WHARF centroid; the old 72s was a select-biased early-arriver subset).
+// SEG_SPEED_MS = grid-Manhattan ÷ segment time (781m/237s ≈ 3.3 m/s = 13 km/h); the L3 distance fallback.
+const SEG_SPEED_MS: f64 = 3.30;
 fn quay_manhattan_m(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
     const M: f64 = 111_320.0;
     let dn = (lat2 - lat1) * M;
@@ -3599,7 +3601,7 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
             let cost = |vlat: f64, vlon: f64, wlat: f64, wlon: f64| -> (i64, i64, &'static str) {
                 match od.get(&(grid225(vlat, vlon), grid225(wlat, wlon))) {
                     Some(&(p50, p90)) => (p50, p90, "L2"),
-                    None => { let p50 = quay_manhattan_m(vlat, vlon, wlat, wlon) / PURE_DRIVE_SPEED_MS; (p50 as i64, (p50 * 1.5) as i64, "L3") }
+                    None => { let p50 = quay_manhattan_m(vlat, vlon, wlat, wlon) / SEG_SPEED_MS; (p50 as i64, (p50 * 1.5) as i64, "L3") }
                 }
             };
             // STAGE 1 owns urgency + per-crane demand caps; STAGE 2 (the matching below) is then PURE
@@ -3790,7 +3792,7 @@ pub fn spawn_dispatch_compare(lm: Arc<LiveMap>, pool: PgPool) {
             let cost = |vlat: f64, vlon: f64, wlat: f64, wlon: f64| -> i64 {
                 match od.get(&(grid225(vlat, vlon), grid225(wlat, wlon))) {
                     Some(&p50) => p50,
-                    None => (quay_manhattan_m(vlat, vlon, wlat, wlon) / PURE_DRIVE_SPEED_MS) as i64,
+                    None => (quay_manhattan_m(vlat, vlon, wlat, wlon) / SEG_SPEED_MS) as i64,
                 }
             };
             // truck pool snapshots (last 6 min), keyed by snapshot time → reconstruct T1 state
@@ -4025,7 +4027,7 @@ pub fn spawn_fair_compare(lm: Arc<LiveMap>, pool: PgPool) {
             let cost = |vlat: f64, vlon: f64, wlat: f64, wlon: f64| -> i64 {
                 match od.get(&(grid225(vlat, vlon), grid225(wlat, wlon))) {
                     Some(&p50) => p50,
-                    None => (quay_manhattan_m(vlat, vlon, wlat, wlon) / PURE_DRIVE_SPEED_MS) as i64,
+                    None => (quay_manhattan_m(vlat, vlon, wlat, wlon) / SEG_SPEED_MS) as i64,
                 }
             };
             // truck positions over the window → per-truck position nearest its dispatch instant

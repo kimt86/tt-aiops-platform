@@ -91,14 +91,14 @@ KPI와 사이클 검증에 쓰이는 핵심 개념입니다. 산출식 전체는
 **4단계 사이클** — `4-phase decomposition`
 : **공차이동**(배정→픽업 도착) → **받기**(픽업 도착→출발) → **부하이동**(출발→드롭측 도착) → **주기**(도착→drop). 공차이동 시작은 배정 시각(assigned_at)을 프록시로 쓰며, ARRIVED 의존이라 관측 못 한 단계는 추정 없이 NULL로 둡니다([FAQ](#faq-phases)).
 
-**공차 레그 분해 · drive_s** — `leg decomposition`
-: 각 공차 레그를 30초 GPS 이동 세그먼트로 나눠 **주행(drive_s·움직인 시간·레그의 ~53%)** + **정지(stop_s·~47%·대부분 목적지 최종 접근/대기)** + **접근(arrived−gps_arrived·중앙값 ~67초)**으로 쪼갠 것. `learn_leg_decomp`에 적재. **실주행 속도는 ≈ 22.8km/h**이며, 한때 표시하던 "중앙값 6.9km/h"는 직선÷정지포함시간÷짧은레그 가중이 겹친 착시였습니다. drive_s는 같은 OD에서도 변동계수 0.758(±76%)로 대기 노이즈가 지배해, 어떤 거리 모델도 이 정확도 바닥을 넘지 못합니다.
+**공차 레그 분해** — `leg decomposition`
+: 각 공차 레그를 30초 GPS 이동 세그먼트로 나눠 **구간시간(`total_s`·출발→도달, 이동시간 라벨)** 과 그 안의 **움직임(drive_s·레그의 ~53%)/정지(stop_s·~47%·진단용)** 을 함께 잰 것. `learn_leg_decomp`에 적재. 주행 구간 속도는 ≈ 13km/h(움직인 순간만 보면 ~22.8km/h)이며, 한때 표시하던 "중앙값 6.9km/h"는 직선÷정지포함시간÷짧은레그 가중이 겹친 착시였습니다. 같은 OD에서도 변동계수 0.758(±76%)로 대기 노이즈가 지배해, 어떤 거리 모델도 이 정확도 바닥을 넘지 못합니다.
 
-**크레인 접근 대기** — `learn_crane_approach`
-: 픽업 지점별 핸드오버/접근 대기 = arrived − gps_arrived (dest_topos: DS 픽업=안벽 크레인·LD 픽업=블록). 중앙값 67초, 크레인별 22–194초(~9배), 앞 트럭이 줄 서면 ~2.5배. **트럭별이 아니라 목적지 속성**이라, 2단계 트럭별 이동비용에서 빼내 1단계(데드라인) 신호로 다룹니다(현재 매트뷰만 구축·1단계 미연결). ARRIVED가 실제 도착과 거의 같으므로(중앙값 −4초) **큰 크레인 대기는 이동시간 안이 아니라 도착 이후**에 있습니다.
+**크레인 접근 대기 (폐기)** — `learn_crane_approach — dropped 2026-07-01`
+: 크레인 앞 진입 대기를 매트뷰로 만들어 1단계 신호로 쓰려 했으나 **폐기**함. 일관된 방법으로 다시 재니 중앙값 ≈0(양하 −1초·적하 −3초)이었고, 예전의 "중앙 67초"는 GPS 탐색을 도착 시각까지만 잘라 *도착 전에 근처에 찍힌 트럭*만 센 **선택편향**이었습니다. 게다가 크레인 도착 좌표가 학습된 부두 중심점이라 측정 자체가 부정확. 진짜 크레인 큐는 이동시간이 아니라 도착 이후(크레인 스케줄) 영역이라 1단계 마감에 넣지 않습니다.
 
-**2단계 이동비용 · 순수주행** — `pure-drive travel cost`
-: 배차 2단계(최소비용 매칭)의 트럭→작업 이동비용 = free_in + 이동시간. 이동시간은 **현재 순수주행 격자 조회가 잠정**: 매트뷰 `learn_travel_zone225_drive`(225m OD 격자·주행만 p50/p90), L3 폴백 = quay_manhattan_m ÷ 6.33 m/s(22.8km/h). 실현시간 `learn_travel_zone225`는 계속 갱신하나 비용엔 미사용(참조용). OD 이동시간 학습 모델이 이 조회를 대체하는 것이 목표입니다.
+**2단계 이동비용 · 순수주행** — `travel cost`
+: 배차 2단계(최소비용 매칭)의 트럭→작업 이동비용 = free_in + 이동시간. 이동시간은 **순수주행 = 주행 구간 시간**(출발→작업지점 도달; 경로 정체 포함·핸드오버 대기 제외)으로, 매트뷰 `learn_travel_zone225_drive`(225m OD 격자·`total_s` p50/p90) 조회가 잠정, L3 폴백 = quay_manhattan_m ÷ 3.30 m/s(13km/h·구간속도). 실현시간(핸드오버 포함) `learn_travel_zone225`는 계속 갱신하나 비용엔 미사용(참조용). OD 이동시간 학습 모델이 이 조회를 대체하는 것이 목표입니다.
 
 **이동필터** — `150 m / 30 s`
 : "진짜 인도" 검증 규칙 — [container1](#container1)이 비-빈 값에서 바뀌는 엣지 + **보유 ≥ 30초** + **운반 ≥ 150m**일 때만 인도로 인정합니다. 미달 엣지는 TOS 재배정 artifact로 기각합니다([FAQ](#faq-cycle-verify)).
@@ -141,13 +141,13 @@ KPI와 사이클 검증에 쓰이는 핵심 개념입니다. 산출식 전체는
 : 정확 [ETW](#etw) 공급 경로 — Azure의 FastAPI 게이트웨이가 TOS RPC `/RPC/yard/etw`를 폴링하고, SSH 터널 wp-etw-bridge(`127.0.0.1:18080`)로 받아 `tos_etw_cntr` 테이블에 upsert합니다(TTL 30분).
 
 **learn_leg_decomp** — `empty-leg decomposition`
-: 공차 레그별 1행 — [drive_s/stop_s/접근](#leg-decomp) + oz/dz(225m 격자)·출발/도착 좌표·dest_topos. ①(이동시간) 학습의 라벨 원천(mig 0075/0076/0078).
+: 공차 레그별 1행 — [total_s(구간시간, 라벨)·drive_s/stop_s(진단)](#leg-decomp) + oz/dz(225m 격자)·출발/도착 좌표·dest_topos. ①(이동시간) 학습의 라벨 원천(mig 0075/0076/0078/0079).
 
-**learn_travel_zone225_drive** — `pure-drive OD travel cost`
-: 225m OD 격자별 주행만(drive_s) p50/p90 매트뷰. [2단계 이동비용](#pure-drive-cost)의 **현재 소스**. 실현시간판 `learn_travel_zone225`는 참조용으로만 갱신됩니다.
+**learn_travel_zone225_drive** — `OD travel cost (segment time)`
+: 225m OD 격자별 **구간시간**(`total_s`) p50/p90 매트뷰. [2단계 이동비용](#pure-drive-cost)의 **현재 소스**(mig 0079부터 움직임만 `drive_s`→구간시간 `total_s`로 정정). 실현시간판 `learn_travel_zone225`는 참조용으로만 갱신됩니다.
 
-**learn_crane_approach** — `pickup approach/queue wait`
-: 픽업 지점(dest_topos)별 [접근·핸드오버 대기](#crane-approach) 매트뷰. 1단계 신호 후보(현재 미연결).
+**learn_crane_approach (폐기)** — `dropped 2026-07-01`
+: 픽업 지점별 접근 대기 매트뷰였으나 [폐기](#crane-approach)됨(측정 중앙값 ≈0·선택편향, mig 0079 DROP). 1단계에 쓰지 않음.
 
 **road_node / road_edge** — `inferred road graph`
 : GPS 궤적에서 매시 추론한 방향 도로망(~264노드/353방향엣지·mig 0077). Rust 방향 Dijkstra 라우터 `crates/api/src/roadgraph.rs`가 사용. **게이트에서 맨해튼보다 나쁘고 스냅 커버리지 30%라 핫패스 비용엔 미채택**, 향후 이동시간 모델의 경로거리 피처 공급용으로 보존합니다.

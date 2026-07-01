@@ -667,7 +667,7 @@ pub fn spawn_dispatch_pred_logger(pool: PgPool) {
                         continue;
                     }
                     let Some(&(eta, p, rem)) = bay.get(&key) else { continue };
-                    let lead: i64 = if m.jobtype.as_deref() == Some("LD") { 1200 } else { 300 };
+                    let lead: i64 = if m.jobtype.as_deref() == Some("LD") { LEAD_LD_S } else { LEAD_DS_S };
                     let work_eta = eta + chrono::Duration::seconds(((i as f64 / rem as f64) * p as f64) as i64);
                     let deadline = work_eta - chrono::Duration::seconds(lead);
                     let assigned = m.ytno.as_deref().map(|s| !s.trim().is_empty()).unwrap_or(false);
@@ -718,11 +718,20 @@ pub(crate) struct Stage2Work {
     pub(crate) src_block: Option<String>,  // LD: pickup block; DS: None (pickup = the QC)
     pub(crate) n: i32,                      // containers in this bucket still needing a truck
     pub(crate) work_eta_ts: Option<DateTime<Utc>>, // when the QC reaches this work (deadline base)
-    pub(crate) lead_s: i64,                 // dispatch lead (DS 300 / LD 1200)
+    pub(crate) lead_s: i64,                 // dispatch lead (p75 journey: DS 450 / LD 1180; see LEAD_*_S)
 }
 
 /// Build the Stage-2 work-demand list from the same engine the dispatch page uses (build_workpool):
 /// each unassigned candidate + its queue's work-ETA. Same-module access to the private WorkpoolOut.
+// Dispatch lead = the journey a truck must complete before work_eta, by job type. Grounded in the p75
+// of the MEASURED journey (tt_cycle_v2, 5-day, 2026-07-01), p75 = "the deadline should cover 3/4 of
+// journeys": DS = 공차이동 to the pickup crane (p50 248 / p75 450); LD = 공차이동+받기+부하이동 to the
+// delivery crane (p50 791 / p75 1182). NB the LD journey must be measured DIRECTLY (empty_travel_start →
+// laden_arrived) — summing per-stage medians understates it. No crane-approach term (its measured median
+// is ~0; see mig 0079). Old fixed values were DS 300 (~p60, a bit tight) / LD 1200 (~p75, already sound).
+const LEAD_DS_S: i64 = 450;
+const LEAD_LD_S: i64 = 1180;
+
 pub(crate) async fn stage2_work_candidates(pool: PgPool) -> Result<Vec<Stage2Work>, AppError> {
     let wp = build_workpool(pool).await?;
     let mut eta: HashMap<(String, String, String), DateTime<Utc>> = HashMap::new();
@@ -737,7 +746,7 @@ pub(crate) async fn stage2_work_candidates(pool: PgPool) -> Result<Vec<Stage2Wor
     for c in &wp.candidates {
         let Some(qc) = c.qc.clone().filter(|s| !s.is_empty()) else { continue };
         let jt = c.jobtype.clone().unwrap_or_default();
-        let lead = if jt == "LD" { 1200 } else { 300 };
+        let lead = if jt == "LD" { LEAD_LD_S } else { LEAD_DS_S };
         let work_eta = eta.get(&(qc.clone(), c.vessel.clone(), c.queuename.clone())).copied();
         out.push(Stage2Work {
             qc,
