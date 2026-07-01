@@ -9,7 +9,7 @@ sidebar:
 > **독자**: 시뮬레이터 구현자(다른 Claude Code/사람).
 > **전제**: **레이아웃 + 라우터는 이미 준비됨.** 빠진 건 **에뮬레이터의 장비 모듈 + 시뮬레이션 시나리오**다.
 > **범위(지금)**: **해측(quayside)만** — QC(안벽크레인) ↔ 야드 블록을 TT(내부 트럭)가 나르는 양하(DS)·적하(LD). **게이트(외부트럭·반출입)는 나중.**
-> 모든 수치/공식/출처는 라이브 코드·DB로 검증됨(2026-06-29, 시간축 MYT=UTC+8).
+> 모든 수치/공식/출처는 라이브 코드·DB로 검증됨(2026-07-01, 시간축 MYT=UTC+8).
 
 ---
 
@@ -144,8 +144,9 @@ on TruckArrive(드롭):
 on free: IDLE → emit TruckFree(다음 결정틱 후보)
 ```
 - 이동시간=라우터. 끝점: 현위치 / QC **동적** 작업지점(§3.2) / 블록(YC).
-- **차량 주행속도 = GPS 실측 23.8 km/h**(움직이는 30초 구간 중앙, p90 41). ⚠ 점대점 "유효속도"(직선 7.5 km/h)는 **정지가 35% 섞여** 너무 느림 — 그대로 쓰면 안 됨. **순수 trip 추출 가능**: ① 모션분할(움직임≥8m/30s만) ② 이미 추적 중인 `empty_trip_m`(실경로길이)÷속도.
-  - **라우터에 넣는 법**: 라우터에 **주행속도 ~24 km/h**(실경로 기준)를 쓰고, **정지 35%(큐·대기·신호)는 에뮬레이터(QC/YC 핸드오버·큐·STALL)에서 별도 모델** — 차량 속도에 넣으면 **이중계상**. 검증: 라우터(주행)+에뮬레이터(정지) 합 = 실측 leg시간·C1(TT 사이클 740s).
+- **차량 주행속도 = GPS 실측 22.8 km/h**(움직이는 30초 구간 중앙, p90 41). ⚠ 점대점 "유효속도"(직선 ~6.9 km/h)는 **정지가 약 47% 섞이고 짧은 leg에 가중**돼 너무 느림 — 그대로 쓰면 안 됨. **순수 주행 추출 가능**: ① 모션분할(움직임≥8m/30s만) ② 이미 추적 중인 `empty_trip_m`(실경로길이)÷속도.
+  - **leg 분해(`learn_leg_decomp`, 마이그0075/0076/0078)**: 빈차 leg을 30초 GPS 모션분할로 **주행(drive_s, leg의 ~53%·실주행 ≈22.8km/h) + 정지(stop_s, ~47%·대부분 도착지 최종접근/큐) + 접근(approach, 도착−GPS도착 중앙 ~67s)** 으로 쪼갠다. **핵심: `ARRIVED`가 물리 도착과 사실상 일치(중앙 −4s)** → 크레인 큰 **큐는 도착 *이후*이지 이동시간 안이 아니다**(이동 중 정지는 도착지 최종접근·자리잡기). drive_s는 큐 잡음 지배적(동일 OD 변동계수 0.758=±76%) → **어떤 거리모델도 이 바닥을 못 이긴다.**
+  - **라우터에 넣는 법**: 라우터에 **주행속도 ~23 km/h**(실경로 기준)를 쓰고, **정지(큐·대기·신호)는 에뮬레이터(QC/YC 핸드오버·큐·STALL)에서 별도 모델** — 차량 속도에 넣으면 **이중계상**. 검증: 라우터(주행)+에뮬레이터(정지) 합 = 실측 leg시간·C1(TT 사이클 740s).
   - 적재/공차 분리는 `tt_cycle_v2`로(1차 단일 속도). 가속도는 30초 GPS로 추정 불가·불필요. 함대 수 `live_assigned_tt`, 적재량 1(트윈 2).
 - **확률 모드**: 이동·핸드오버를 로그정규 샘플링(`mu=ln(p50), sigma=(ln(p90)−ln(p50))/1.2816`). 실측 트럭 leg p90/p50≈2.4(꼬리 두꺼움) → 결정론은 대기 과소평가.
 
@@ -192,10 +193,12 @@ LD는 대칭: 트럭이 **블록 먼저**(YC 적재) → **QC**(적재), QC STAL
 | **QC 무브**(컨테이너 1개) | DS **90s**(주88·야93) · LD **121s**(주117·야125) | `learn_qc_move_time`, 58크레인 |
 | **YC 서비스**(분포 샘플) | DS p10/p50/p90 **10/51/140s** · LD **10/76/164s** · 재취급RH 9/69/154 · GO 10/122/227 | `rtg_move_log` 24h |
 | **해치커버**(베이당 1회) | 양하 **~428s** · 적하 **~496s** | research-log |
-| **TT 주행속도** | **23.8 km/h**(GPS 실측: 움직이는 30초 구간 중앙, p90 41) — ⚠ 점대점 중앙 7.5는 정지 섞인 값 | `truck_pos_hist` state=empty_travel |
-| **TT 정지(오버헤드)** | empty_travel 시간의 **35%가 정지**(큐·대기·신호) — 주행과 분리 추출 가능(아래) | `truck_pos_hist` 모션분할 |
+| **TT 주행속도** | **22.8 km/h**(GPS 실측: 움직이는 30초 구간 중앙, p90 41) — ⚠ 점대점 중앙 ~6.9는 정지 섞이고 짧은 leg 가중된 값 | `truck_pos_hist` state=empty_travel |
+| **TT 정지(오버헤드)** | 빈차 leg 시간의 **~47%가 정지**(대부분 도착지 최종접근·큐) — 주행과 분리 추출됨(`learn_leg_decomp`) | `truck_pos_hist` 모션분할 |
 
-> **★ 순수 trip 추출(정지 오버헤드 제외) — 구현 완료(배차에 적용됨).** **(A) 모션 분할**(채택): `truck_pos_hist`(state=empty_travel)의 30초 변위로 움직임(≥8m)/정지를 나눠 **주행시간만** 집계 → **`learn_travel_zone225_pure`**(마이그0065, 정지 35% 제외). **배차 cost가 이미 이 순수 OD 사용**(livemap.rs 3개 cost, L3 폴백 속도 `PURE_DRIVE_SPEED_MS=6.61`=23.8km/h). 효과: 순수 OD ≈ 번들의 19~50%(같은셀 228s 오버헤드 제거), L3 도착 722→376s, 공정비교 절감 ~29%(순수 기준 유지). **(B) `empty_trip_m`**(실경로, livemap.rs:78) = 대안. **시뮬도 라우터 속도/정책 비용추정에 이 순수 OD 차용** 가능. 커버리지: 순수샘플을 **영속 30일 테이블 `learn_travel_drive_sample`**(마이그0066, 틱마다 settled leg 누적)에 쌓아 뷰가 집계 — 현재 ~375쌍(2일 백필)에서 30일에 걸쳐 번들(~2500쌍)로 성장 중; 미커버 쌍은 기하 폴백(quay_manhattan÷24km/h). (TT leg 시간 `tt_cycle_v2`: 공차 191s·적재 441s — 정지 포함.)
+> **★ 순수 주행 추출(정지 오버헤드 제외) — 구현 완료(배차에 적용됨).** **모션 분할**(채택): `truck_pos_hist`(state=empty_travel)의 30초 변위로 움직임(≥8m)/정지를 나눠 **주행시간만** 집계 → 매트뷰 **`learn_travel_zone225_drive`**(225m OD 격자, 움직임 구간만의 p50/p90). **배차 cost가 이미 이 순수-주행 OD 사용**(livemap.rs, L3 폴백 = `quay_manhattan_m ÷ PURE_DRIVE_SPEED_MS`, `PURE_DRIVE_SPEED_MS=6.33 m/s=22.8km/h`). Stage-2 cost = **빈차 도착시간 = `free_in`(곧빔 잔여) + TRAVEL**. **시뮬도 라우터 속도/정책 비용추정에 이 순수-주행 OD 차용** 가능. 미커버 쌍은 기하 폴백(quay_manhattan÷22.8km/h). (TT leg 시간 `tt_cycle_v2`: 공차 191s·적재 441s — 정지 포함.)
+>
+> ⚠ 이 travel-cost 소스는 여러 번 바뀌었다: 순수-OD(`zone225_pure`) → 실현(`zone225`) → **순수-주행(`zone225_drive`, 현재 채택)**. `learn_travel_zone225`(실현)은 여전히 갱신되지만 **cost엔 미사용**(참고용). **삭제됨(호출 시 STALE)**: `learn_travel_zone225_pure`, `learn_travel_drive_sample`, `learn_eval`.
 
 - **베이 이동(갠트리)**: 깨끗한 분해 신호 없음 → 1차는 분포 안에 흡수. 향후 **레이아웃 거리 + TT와 동일 라우터 속도**로 별도 추정.
 - **보정은 자동**: 이 값이 곧 실측이라, TOS-baseline 시뮬은 정의상 §7 C2/C5/C8을 재현(효율계수 불필요 — 명판이 아니라 관측이므로). 시뮬은 분포를 **로그정규로 샘플**(`mu=ln(p50), sigma=(ln(p90)−ln(p50))/1.2816`).
@@ -289,7 +292,9 @@ pub fn run_stage2(s: &Snapshot) -> Vec<(String /*ytno*/, WorkRef)>;
 ```
 공유코드는 `crates/core`로 → 라이브·시뮬 같은 경로. 함정: 1단계 후 `works[order[wpos]]` 복원, `free_in`은 DS만 grounded, `starving`·`prev_assign` 입력 필수.
 
-**정책 비용추정 OD(`env.policy_od`)**: `"router"`(1차, 추정=실제로 배차결정 품질만 격리) | `"learned"`(**`learn_travel_zone225_pure`** grid225 p50/p90 — 라이브 배차가 쓰는 순수주행 OD와 동일, 미커버는 quay_manhattan÷6.61; 추정오차 채널, 끝점 latlon 필요).
+**정책 비용추정 OD(`env.policy_od`)**: `"router"`(1차, 추정=실제로 배차결정 품질만 격리) | `"learned"`(**`learn_travel_zone225_drive`** grid225 p50/p90 — 라이브 배차가 쓰는 순수-주행 OD와 동일, 미커버는 quay_manhattan÷6.33; 추정오차 채널, 끝점 latlon 필요).
+
+> **도로망 라우팅 주의**: 추론된 도로 그래프(`road_node`/`road_edge`, 마이그0077·Rust 방향 Dijkstra `roadgraph.rs`)는 **구축·검증됐으나 cost에 미연결**. 게이트 결과(585 leg): 도로경로 상관 **0.490 < 맨해튼 0.565**(도로가 더 나쁨) + leg의 **30%만 스냅**(작업지점이 도로망에서 중앙 62m 벗어남 — 도로가 블록/안벽 안까지 안 들어옴). → **cost는 순수-주행 격자 유지**(interim). 도로 그래프는 향후 OD 모델의 *경로거리 피처*로만 쓸 예정. 시뮬 `"router"`도 이 한계를 반영해 맨해튼/격자 기반이 현실적.
 
 **TOS = 보정 baseline**(알고리즘 역공학 금지): 알려진 행동(*유휴 트럭만 배차*, 픽업 최단) 휴리스틱 → 같은 에뮬레이터에서 실측 KPI(§7) 재현하면 유효 baseline.
 
@@ -337,10 +342,10 @@ queuename = <bay><D|H>-<D|L>   // 02H-D = 베이02·홀드·양하 (parse_q, wor
 # QC 베이 walk 가산(workpool.rs:354-427)
 BAY_CHANGE_S=180  HATCH_DS_S=340  HATCH_LD_S=390  DS_MOVE_S=90  LD_MOVE_S=110
 proc = qty*(1−twin/2)*move_s + (베이바뀜?180 : 적하H→D?390 : 양하D→H?340 : 0)
-# OD(policy_od="learned"일 때만; livemap.rs:3212,3237-3456) — 배차는 순수주행 OD 사용
+# OD(policy_od="learned"일 때만) — 배차는 순수-주행 OD 사용
 grid225(lat,lon)='G'||round(lat/0.00202)||'_'||round(lon/0.00202)   # ~225m
-L2: learn_travel_zone225_pure[(oz,dz)](n>=10) ; L3: 안벽축 맨해튼 / PURE_DRIVE_SPEED_MS 6.61(23.8km/h), p90=p50*1.5
-# (번들 learn_travel_zone225 / 2.278=8.2km/h 는 정지/큐 포함이라 배차서 폐기, §3.6)
+L2: learn_travel_zone225_drive[(oz,dz)](n>=10) ; L3: 안벽축 맨해튼 / PURE_DRIVE_SPEED_MS 6.33(22.8km/h), p90=p50*1.5
+# (실현 learn_travel_zone225 는 정지/큐 포함이라 cost서 미사용·참고용; learn_travel_zone225_pure 삭제됨, §3.6)
 # 배차(livemap.rs:3217-3239)
 SWITCH_PENALTY_S=180  COMMIT_WINDOW_MS=600_000  COMMIT_LOCK_S=1200  NEED_HORIZON_S=900
 ```

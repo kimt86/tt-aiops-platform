@@ -272,9 +272,9 @@ WHERE (JOB_HIST_DATE||SUBSTR(JOB_HIST_TIME,1,6)) > {{last_watermark}}
 
 ### 5. 검증·라벨 전략
 
-- 라이브 판정엔 GPS/PLC 근접, **학습 라벨엔 `ACTV_DT`+RTG 근접 구간** 병행. 관측 못 한 단계는 **NULL**.
+- **정답(ground truth)은 GPS 우선:** 트럭이 실제로 빈 순간 = **그 트럭 자신의 다음 GPS 사이클 종료(`tt_cycle_v2.dropped_at`)** **[코드: learn.rs `IDLE_JOINS`/`IDLE_EXPR`]**. 실측 검증으로 실제 자유시점과 **~0.5분 이내**로 일치하고 TOS 라벨보다 **더 많은 트립을 덮음**. TOS 라벨(`tos_handover_label`)은 **GPS에 공백이 있을 때만 폴백**으로 씀 — LD는 `dis_ts`(YT_DIS_DT) 우선(LD의 `comp_ts`='박스 선적'은 트럭-자유보다 ~8분 늦음), DS는 `comp_ts`. 라이브 판정엔 GPS/PLC 근접을 씀. 관측 못 한 단계는 **NULL**.
+- **recall은 TOS 권위 완료 기준 유지:** DS가 필요로 하는 컨테이너 키를 TOS 라벨이 갖고 있어서(GPS를 (ytno,시각)만으로 매칭하면 DS recall이 부풀려짐).
 - 이동필터(`carry_trip_m ≥ 150m`)로 가짜 배정 제거.
-- DS 라벨 시각 −19초(중앙값)로 물리 완료 정렬.
 - **그림자 승격 게이트(v2):** `tt_cycle_v2`(41,420행)에 병렬 기록 후 게이트 통과 시에만 메인 교체. G1: DS 픽업도착 ≥60%(v1 29%), LD 드롭도착 ≥70%(v1 42%) → v2 레그모델이 DS 32→66%, LD 43→77%로 충족 **[문서/DB]**.
 
 ## 리스크·열린 질문
@@ -294,10 +294,10 @@ WHERE (JOB_HIST_DATE||SUBSTR(JOB_HIST_TIME,1,6)) > {{last_watermark}}
 1. **✅ 구현 완료(2026-06-14):** 90초 `workpool.sql`에 `JOB_ODR_ACTV_DT` 추가 → `live_workpool.actv_ts`/`actv_raw`에 적재(Oracle 추가쿼리 0, mig `0029`). **검증: DS 활성 103건 전부(100%) `actv_ts`+`ytno`+`armgc` 보유** — DS 곧유휴(RTG 핸드오버 시작+대상트럭) 라이브 수집 가동.
 2. **✅ 구현 완료(2026-06-14):** `classify_tt()` DS 분기에 **TOS 보정 훅** — 배정 캐시(`AssignedJob.rtg_active`)로 활성주문 `actv_ts`를 받아, GPS RTG 미근접(>30m)이어도 TOS ACTV(=QC 양하 완료)면 `soon_idle`(이후 `approaching` 티어로 분리)로 보정(웹소켓 GPS ∪ TOS). 사유에 GPS 거리 병기로 감사 가능. **검증: soon_idle 28 중 18이 TOS 보정(GPS 56~118m) — DS 곧유휴 GPS단독 4 → 22로 ~5.5배.** `actv_ts`는 `/api/workpool`·대시보드 TT카드(`적재 N분` 배지)에도 노출.
 3. **✅ 라벨 수집 구현(2026-06-14):** `extractor handover` 서브커맨드 + `wp-handover.timer`(60초)가 `JOB_ORDER_HISTORY` 완료(`JOBSTATUS='C'`)를 `etl_watermark`(`IDX_JOBHIST_DATETIME` 워터마크) **증분 폴링** → `tos_handover_label`(mig `0030`)에 적재. `comp_ts`=실제 유휴 시각(정답), `actv_ts`/`dis_ts` 동반. **검증: 증분 동작(첫 폴 211 → 이후 폴 ~수십), 빈 `etl_watermark` 가동.** 권위 호라이즌(DS, n≈99): **ACTV→실제유휴 중앙 ~10.2분 · 블록대기(DIS→ACTV) ~12.3분** — 라이브 검열 추정(≈6분)을 정답 데이터가 교정.
-4. **✅ 정확도 하니스 구현(2026-06-14):** 백그라운드 샘플러 `spawn_soon_idle_logger`(30초)가 `classify_tt`를 읽기 호출해 트립당 soon_idle **첫 진입**을 `tt_soon_idle_pred`(mig `0031`)에 적재 — `source`(gps_rtg/tos_actv/qc_plc/both)와 **`gps_would_fire`**(GPS단독이면 잡혔을지=반사실) 동반. `learn.rs` `/api/learn/soon-idle`이 예측↔`comp_ts`를 **DS=(ytno,container)·LD=시간창(nearest-Δt)**로 매칭해 precision·recall·리드타임을 **GPS단독 vs TOS보정**으로 분리 산출(`spawn_learn_persist`가 개선곡선 스냅샷). 대시보드 학습센터 **④ 섹션** 노출. **검증(라이브 적재 직후):** 예측 60건 중 **DS 38의 34가 tos_only**(GPS단독이면 89% 놓침), matched 누적 시작. **남은 일(자연 누적):** 하루치 쌓인 뒤 §승격 게이트(G1 recall≥0.85·G2 타이밍·G3 ΔRecall_TOS≥0.10) 측정 → DS 우선 라이브 승격, LD 타이밍 꼬리 재캘리브레이션.
+4. **✅ 정확도 하니스 구현(2026-06-14):** 백그라운드 샘플러 `spawn_soon_idle_logger`(30초)가 `classify_tt`를 읽기 호출해 트립당 soon_idle **첫 진입**을 `tt_soon_idle_pred`(mig `0031`)에 적재 — `source`(gps_rtg/tos_actv/qc_plc/both)와 **`gps_would_fire`**(GPS단독이면 잡혔을지=반사실) 동반. `learn.rs` `/api/learn/soon-idle`이 예측↔**정답(GPS 우선 `tt_cycle_v2.dropped_at`, 공백 시 TOS 라벨 폴백)**을 매칭해 precision·리드타임을 산출하고, recall은 TOS 권위 완료(DS=(ytno,container)·LD=시간창) 기준으로 **GPS단독 vs TOS보정**으로 분리 산출(`spawn_learn_persist`가 개선곡선 스냅샷). 대시보드 학습센터 **④ 섹션** 노출. **검증(라이브 적재 직후):** 예측 60건 중 **DS 38의 34가 tos_only**(GPS단독이면 89% 놓침), matched 누적 시작. **남은 일(자연 누적):** 하루치 쌓인 뒤 §승격 게이트(G1 recall≥0.85·G2 타이밍·G3 ΔRecall_TOS≥0.10) 측정 → DS 우선 라이브 승격, LD 타이밍 꼬리 재캘리브레이션.
 
 ---
 
 **관련 문서:** [예측 모형 연구 §7b](/kc/research/tt-prediction/) · [피드 의미론 실측](/kc/research/feed-semantics/) · [TOS DB 레퍼런스](/kc/architecture/tos-db-reference/) · [배차 풀(라이브)](/kc/architecture/dispatch-pools/) · [사이클 v2 그림자 실험](/kc/experiments/cycle-v2-shadow/)
 
-**근거(절대경로):** 분류 `crates/api/src/livemap.rs`(`classify_tt` 694-770) · QC 추출 `crates/extractor/sql/{c07,c10,f2,e1c}*.sql` · RTG 추출 `crates/extractor/sql/{c08,e5}*.sql` · 라이브 `crates/extractor/sql/workpool.sql`(`COMPDATE IS NULL`)·`crates/extractor/src/{runner,params}.rs` · 스케줄 `deploy/systemd/wp-workpool.timer` · DB `tt_cycle_log`·`tt_cycle_v2`·`raw_k_crane_q_daily`·`live_workpool`·`etl_run_log`·`etl_watermark`.
+**근거(절대경로):** 분류 `crates/api/src/livemap.rs`(`classify_tt` 694-770) · 정확도·GPS우선 정답 `crates/api/src/learn.rs`(`soon_idle`·`IDLE_JOINS`/`IDLE_EXPR`: `tt_cycle_v2.dropped_at` 우선, `tos_handover_label` 폴백) · QC 추출 `crates/extractor/sql/{c07,c10,f2,e1c}*.sql` · RTG 추출 `crates/extractor/sql/{c08,e5}*.sql` · 라이브 `crates/extractor/sql/workpool.sql`(`COMPDATE IS NULL`)·`crates/extractor/src/{runner,params}.rs` · 스케줄 `deploy/systemd/wp-workpool.timer` · DB `tt_cycle_log`·`tt_cycle_v2`·`raw_k_crane_q_daily`·`live_workpool`·`etl_run_log`·`etl_watermark`.

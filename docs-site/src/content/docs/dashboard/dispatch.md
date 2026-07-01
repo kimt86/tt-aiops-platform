@@ -55,7 +55,7 @@ flowchart LR
 > RTG는 PLC가 없어 직접 못 봅니다 → **GPS 거리**로 추정. 블록 위치는 ARRIVED한 트럭들의 GPS로 **학습한 중심좌표**를 써서, 크레인이 GPS를 안 쏠 때도 거리 계산이 됩니다.
 
 :::note[wait_qc는 왜 없나 — DS/LD 비대칭]
-**DS**는 RTG에 PLC가 없어 "도착했지만 크레인이 아직"을 `wait_rtg`/`approaching`으로 따로 둡니다. 반면 **LD**는 트럭이 QC에 ARRIVED하면 곧바로 `soon_idle`로 가고 **별도 wait_qc가 없습니다** — QC는 항상 PLC가 있어 관여 여부가 관측되기 때문(PLC 신선도는 reason 라벨로만 표시). 단, 측정상 LD 트럭은 도착 후에도 QC 큐에서 **~3.4분** 더 대기하므로([러닝센터 ④](/kc/dashboard/learning/)), 그 대기를 굳이 분리하고 싶다면 'LD ARRIVED + QC PLC 미신선'을 조건으로 `wait_qc`를 추가할 수 있습니다(현재는 그 대기가 `soon_idle`에 포함).
+**DS**는 RTG에 PLC가 없어 "도착했지만 크레인이 아직"을 `wait_rtg`/`approaching`으로 따로 둡니다. 반면 **LD**는 트럭이 QC에 ARRIVED하면 곧바로 `soon_idle`로 가고 **별도 wait_qc가 없습니다** — QC는 항상 PLC가 있어 관여 여부가 관측되기 때문(PLC 신선도는 reason 라벨로만 표시). 단, 측정상 LD 트럭은 도착 후에도 QC 큐에서 **~3.2분** 더 대기하므로([러닝센터 ④](/kc/dashboard/learning/)), 그 대기를 굳이 분리하고 싶다면 'LD ARRIVED + QC PLC 미신선'을 조건으로 `wait_qc`를 추가할 수 있습니다(현재는 그 대기가 `soon_idle`에 포함).
 :::
 
 ## 2. websocket 필드 → 화면 값 (lineage)
@@ -83,7 +83,7 @@ soon_idle/도착 트럭 옆에 **"곧 빔 ~N분"** 같은 추정이 붙을 수 �
 | 임박(곧유휴) | ~2분 | ~6분 |
 
 :::note[표시 전용입니다]
-이 값(`free_in`)은 **보여주기만** 하고 아직 실제 배차 결정에는 쓰지 않습니다(그림자). 검증된 "몇 분 후 유휴" 정밀 측정은 [러닝 센터 ④·⑤](/kc/dashboard/learning/)에서 다룹니다. (러닝 센터 측정 기준으로 실제로는 LD ~3.4분·DS ~5분 뒤 빔 — free_in 상수는 보정 예정.)
+이 값(`free_in`)은 **보여주기만** 하고 아직 실제 배차 결정에는 쓰지 않습니다(그림자). 검증된 "몇 분 후 유휴" 정밀 측정은 [러닝 센터 ④·⑤](/kc/dashboard/learning/)에서 다룹니다. (러닝 센터 측정 기준으로 실제로는 LD ~3.2분·DS ~5분 뒤 빔 — free_in 상수는 보정 예정.)
 :::
 
 ## 4. 작업 풀 융합 — "계획(TOS) + 실측(GPS)"
