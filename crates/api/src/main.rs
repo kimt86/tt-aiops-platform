@@ -9,6 +9,7 @@ mod learn;
 mod live;
 mod livemap;
 mod models;
+mod roadgraph;
 mod periods;
 mod routes;
 mod workpool;
@@ -115,6 +116,7 @@ async fn main() -> anyhow::Result<()> {
     livemap::spawn_learn_persist(livemap.clone(), pool.clone()); // 5min persist learned topos coords + lanes + quality
     livemap::spawn_travel_aggregator(pool.clone()); // 5min harvest TT travel-time labels from cycles
     livemap::spawn_leg_decomp(pool.clone()); // 5min: empty-leg drive/stop decomposition (learn_leg_decomp)
+    roadgraph::spawn_roadgraph_eval(pool.clone()); // 10min: road-graph route vs drive_s vs manhattan (road_route_eval)
     livemap::spawn_density_sampler(livemap.clone(), pool.clone()); // 60s per-cell TT density (4 grid sizes)
     livemap::spawn_soon_idle_logger(livemap.clone(), pool.clone()); // 30s soon_idle 예측 적재(그림자 정확도)
     livemap::spawn_free_in_logger(livemap.clone(), pool.clone()); // 60s free_in 학습+검증셋(스냅샷+실제잔여 backfill)

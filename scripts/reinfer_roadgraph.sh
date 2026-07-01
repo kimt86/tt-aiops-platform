@@ -66,9 +66,10 @@ edge_speed={k:round(float(np.median(v)),1) for k,v in spd.items() if len(v)>=3}
 lc=[r for r in csv.reader(open('/tmp/lane_cells.tsv'),delimiter='\t') if len(r)>=5]
 lla=np.array([float(r[0]) for r in lc]); llo=np.array([float(r[1]) for r in lc])
 lhd=np.array([float(r[2]) for r in lc]); ldir=np.array([float(r[3]) for r in lc])
+lmspd=np.array([float(r[4]) for r in lc])   # learned lane mean speed (stable; edge weight for routing)
 ltree=cKDTree(np.column_stack([llo*mlon(float(lla.mean())), lla*MLAT]))
 
-feats=[]
+feats=[]; edge_rows=[]   # directed routable edges → road_edge (Rust Dijkstra router)
 for k,e in enumerate(g['edges']):
     geom=[(la,lo) for la,lo in e['geom']]
     if len(geom)<2: continue
@@ -76,7 +77,12 @@ for k,e in enumerate(g['edges']):
     _,i=ltree.query([mid[1]*mlon(mid[0]), mid[0]*MLAT])
     hd=lhd[i]; oneway=bool(ldir[i]>0.6)
     eb=bearing(geom[0], geom[-1])
-    if adiff(eb,hd)>90: geom=geom[::-1]; eb=(eb+180)%360
+    flipped=adiff(eb,hd)>90
+    if flipped: geom=geom[::-1]; eb=(eb+180)%360
+    # routable directed edge in FLOW direction (flip swaps u/v); weight = learned lane mean speed
+    fr,to=(e['v'],e['u']) if flipped else (e['u'],e['v'])
+    espd=round(float(lmspd[i]),1) if lmspd[i]>0 else ''
+    edge_rows.append((fr,to,round(e['len_m'],1),espd,'t' if oneway else 'f'))
     props={"kind":"road","oneway":oneway,"len_m":e['len_m']}
     if k in edge_speed: props["speed"]=edge_speed[k]      # this-hour median km/h → colored by congestion
     feats.append({"type":"Feature","properties":props,
@@ -107,7 +113,14 @@ with open('/tmp/congestion_edge.tsv','w') as f:
         if len(v)<3: continue
         geom=g['edges'][k]['geom']; m=geom[len(geom)//2]
         f.write(f"{m[0]:.6f}\t{m[1]:.6f}\t{edge_speed[k]:.1f}\t{len(v)}\t{g['edges'][k]['len_m']:.1f}\n")
-print(f"PUBLISHED nodes {fc['stats']['nodes']} edges {fc['stats']['edges']} {km}km wp {nwp} | speed-colored edges {len(edge_speed)}")
+# routable directed graph for the Rust dispatch router (mig 0077)
+with open('/tmp/road_node.tsv','w') as f:
+    for nid,(la,lo) in g['nodes'].items():
+        f.write(f"{int(nid)}\t{la:.7f}\t{lo:.7f}\n")
+with open('/tmp/road_edge.tsv','w') as f:
+    for fr,to,lm,sp,ow in edge_rows:
+        f.write(f"{fr}\t{to}\t{lm}\t{sp}\t{ow}\n")
+print(f"PUBLISHED nodes {fc['stats']['nodes']} edges {fc['stats']['edges']} {km}km wp {nwp} | speed-colored edges {len(edge_speed)} | routable edges {len(edge_rows)}")
 PY
 
 # 4) load congestion (hour stamped by SQL so it's tz-correct)
@@ -118,4 +131,14 @@ INSERT INTO congestion_edge(hour,mlat,mlon,med_speed_kmh,n,len_m)
   SELECT date_trunc('hour',now())-interval '1 hour', mlat,mlon,med,n,len FROM ce_stage
   ON CONFLICT (hour,mlat,mlon) DO NOTHING;
 DELETE FROM congestion_edge WHERE hour < now() - interval '180 days';
+SQL
+
+# 5) publish the routable directed road graph (mig 0077) for the Rust dispatch router — atomic swap
+psql $P -v ON_ERROR_STOP=1 <<'SQL'
+BEGIN;
+TRUNCATE road_node;
+\copy road_node FROM '/tmp/road_node.tsv'
+TRUNCATE road_edge;
+\copy road_edge(from_id,to_id,len_m,speed_kmh,oneway) FROM '/tmp/road_edge.tsv' WITH (NULL '')
+COMMIT;
 SQL

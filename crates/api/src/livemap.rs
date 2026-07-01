@@ -2278,7 +2278,7 @@ pub fn spawn_leg_decomp(pool: PgPool) {
         loop {
             ticker.tick().await;
             let _ = sqlx::query(
-                "INSERT INTO learn_leg_decomp (ytno, leg_start, arrived_at, dest_topos, grid_dist_m, total_s, drive_s, stop_s, stop_near_dest_s, gps_arrived_at, oz, dz)
+                "INSERT INTO learn_leg_decomp (ytno, leg_start, arrived_at, dest_topos, grid_dist_m, total_s, drive_s, stop_s, stop_near_dest_s, gps_arrived_at, oz, dz, origin_lat, origin_lon, dest_lat, dest_lon)
                  WITH cyc AS (
                    SELECT ytno, empty_travel_start_at ets, empty_arrived_at eta, legs->0->>'target' AS dest_topos,
                           (legs->0->>'lat')::float8 dlat, (legs->0->>'lon')::float8 dlon
@@ -2306,7 +2306,8 @@ pub fn spawn_leg_decomp(pool: PgPool) {
                    coalesce(sum(dt) FILTER (WHERE disp_m<8 AND dt BETWEEN 20 AND 60),0)::int,
                    coalesce(sum(dt) FILTER (WHERE disp_m<8 AND dist_dest_m<=60 AND dt BETWEEN 20 AND 60),0)::int,
                    min(ts) FILTER (WHERE dist_dest_m<=50),
-                   travel_grid225(max(olat), max(olon)), travel_grid225(max(dlat), max(dlon))
+                   travel_grid225(max(olat), max(olon)), travel_grid225(max(dlat), max(dlon)),
+                   max(olat), max(olon), max(dlat), max(dlon)
                  FROM seg GROUP BY ytno, ets
                  HAVING count(*) FILTER (WHERE dt BETWEEN 20 AND 60) >= 2
                  ON CONFLICT (ytno,leg_start) DO NOTHING",
