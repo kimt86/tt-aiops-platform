@@ -9,16 +9,23 @@
 //! (for a cost estimate) and metres (the clean topology-aware distance = the model's route feature).
 
 use std::cmp::Ordering;
-use std::collections::BinaryHeap;
+use std::collections::{BinaryHeap, HashMap};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 
+use crate::livemap::quay_manhattan_m;
+
 /// pure-drive speed (km/h) for edges missing a learned speed — the measured leg-level moving speed.
 const FALLBACK_KMH: f64 = 22.8;
 /// reject a snap if the nearest node is farther than this (truck/work not on the road network).
 const SNAP_MAX_M: f64 = 60.0;
+/// wider snap for a route SOURCE (= a truck's raw GPS): idle trucks park in staging pockets off the
+/// inferred lanes (the graph is built from MOVING gps only), but they re-enter a lane to drive — so
+/// route from the nearest lane node; the short off-road stub is absorbed by the cost calibration.
+const SNAP_SRC_MAX_M: f64 = 150.0;
 
 pub struct RoadGraph {
     nodes: Vec<(f64, f64)>,             // node id (index) → (lat, lon); (0,0) marks an id gap
@@ -32,13 +39,27 @@ pub struct Route {
 
 impl RoadGraph {
     /// Load from the DB (rebuilt hourly by the cron). Returns None if the graph is empty/unavailable
-    /// so callers can fall back to the geometric estimate.
+    /// so callers can fall back to the geometric estimate. Both tables are read from ONE repeatable-
+    /// read snapshot: the cron swaps them atomically (TRUNCATE+COPY in one tx) and node ids are
+    /// renumbered every build, so two autocommit reads straddling the swap would silently pair old
+    /// node coordinates with new edge topology (chimera graph → wrong routes, poisoned eval rows).
     pub async fn load(pool: &PgPool) -> Option<RoadGraph> {
+        let mut tx = pool.begin().await.ok()?;
+        sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+            .execute(&mut *tx)
+            .await
+            .ok()?;
         let nodes_raw: Vec<(i32, f64, f64)> =
             sqlx::query_as("SELECT id, lat, lon FROM road_node ORDER BY id")
-                .fetch_all(pool)
+                .fetch_all(&mut *tx)
                 .await
                 .ok()?;
+        let edges: Vec<(i32, i32, f64, Option<f64>, bool)> =
+            sqlx::query_as("SELECT from_id, to_id, len_m, speed_kmh, oneway FROM road_edge")
+                .fetch_all(&mut *tx)
+                .await
+                .ok()?;
+        let _ = tx.commit().await;
         if nodes_raw.is_empty() {
             return None;
         }
@@ -49,11 +70,6 @@ impl RoadGraph {
                 nodes[*id as usize] = (*la, *lo);
             }
         }
-        let edges: Vec<(i32, i32, f64, Option<f64>, bool)> =
-            sqlx::query_as("SELECT from_id, to_id, len_m, speed_kmh, oneway FROM road_edge")
-                .fetch_all(pool)
-                .await
-                .ok()?;
         let mut adj: Vec<Vec<(u32, f64, f64)>> = vec![Vec::new(); maxid + 1];
         for (u, v, len_m, spd, oneway) in edges {
             if u < 0 || v < 0 || u as usize > maxid || v as usize > maxid {
@@ -79,10 +95,15 @@ impl RoadGraph {
 
     /// nearest node within SNAP_MAX_M, or None.
     fn snap(&self, lat: f64, lon: f64) -> Option<u32> {
+        self.snap_r(lat, lon, SNAP_MAX_M)
+    }
+
+    /// nearest node within `max_m`, or None.
+    fn snap_r(&self, lat: f64, lon: f64, max_m: f64) -> Option<u32> {
         let mlat = 111_320.0;
         let mlon = 111_320.0 * lat.to_radians().cos();
         let mut best: Option<u32> = None;
-        let mut bestd = SNAP_MAX_M * SNAP_MAX_M;
+        let mut bestd = max_m * max_m;
         for (i, (nla, nlo)) in self.nodes.iter().enumerate() {
             if *nla == 0.0 {
                 continue; // id gap
@@ -96,6 +117,37 @@ impl RoadGraph {
             }
         }
         best
+    }
+
+    /// Public snap: nearest node within SNAP_MAX_M (work points are ON the graph via connectors, so
+    /// they snap at ~0 m; a truck's raw GPS snaps to the densified lane nodes).
+    pub fn snap_node(&self, lat: f64, lon: f64) -> Option<u32> {
+        self.snap(lat, lon)
+    }
+
+    /// Single-source Dijkstra by TIME from a coordinate, over the whole graph. One call serves every
+    /// target the matcher will ask about for this truck (targets × O(1) lookups instead of targets ×
+    /// Dijkstra). Source = raw truck GPS → wider SNAP_SRC_MAX_M. None if it doesn't snap.
+    pub fn field_from(&self, lat: f64, lon: f64) -> Option<RouteField> {
+        let s = self.snap_r(lat, lon, SNAP_SRC_MAX_M)?;
+        let n = self.nodes.len();
+        let mut best_t = vec![f64::INFINITY; n];
+        best_t[s as usize] = 0.0;
+        let mut heap = BinaryHeap::new();
+        heap.push(HeapItem { t: 0.0, node: s });
+        while let Some(HeapItem { t: ct, node }) = heap.pop() {
+            if ct > best_t[node as usize] {
+                continue;
+            }
+            for &(to, et, _em) in &self.adj[node as usize] {
+                let nt = ct + et;
+                if nt < best_t[to as usize] {
+                    best_t[to as usize] = nt;
+                    heap.push(HeapItem { t: nt, node: to });
+                }
+            }
+        }
+        Some(RouteField { time_s: best_t })
     }
 
     /// Route by minimum TIME. Returns time_s + the distance along the chosen path. None if either
@@ -132,6 +184,167 @@ impl RoadGraph {
     }
 }
 
+/// Per-source shortest-time field (seconds to every node) from `field_from`.
+pub struct RouteField {
+    time_s: Vec<f64>,
+}
+impl RouteField {
+    /// seconds to the node, or None if unreachable on the directed graph.
+    pub fn time_to(&self, node: u32) -> Option<f64> {
+        let t = *self.time_s.get(node as usize)?;
+        t.is_finite().then_some(t)
+    }
+}
+
+/// Cold-start multipliers if road_route_eval is too thin to fit curves: raw route time is a PHYSICS
+/// estimate (edge len ÷ lane moving speed) so it under-counts the realized 순수주행 구간시간.
+const CAL50_DEFAULT: f64 = 1.6;
+const CAL90_DEFAULT: f64 = 3.7;
+
+/// A monotone estimator→ACTUAL cost curve fitted from `road_route_eval`: knots at each bin's mean
+/// estimator value, knot values = the bin's realized p50/p90 seconds (DIRECT levels, not ratios).
+/// Review found two defects in the earlier ratio×t form: (a) t×ratio(t) went NON-MONOTONE where the
+/// ratio falls steeply with scale (a nearer truck could cost MORE than a farther one, inverting both
+/// the objective and the p90 deadline filter), and (b) short routes lost their realized ~75-90s
+/// floor (a 15s raw route was costed ~21s, over-favouring trivially-near picks and inflating the
+/// fair-compare savings). Direct levels + a cumulative-max clamp fix both by construction: held
+/// flat below the first knot (the floor), linear between knots, last-slope extrapolation above.
+struct CostCurve {
+    knots: Vec<(f64, f64, f64)>, // (estimator value, actual p50_s, actual p90_s), all monotone ↑
+}
+
+impl CostCurve {
+    fn fit(mut rows: Vec<(f64, f64, f64, i64)>, min_n: i64) -> Option<CostCurve> {
+        rows.retain(|r| r.3 >= min_n && r.0.is_finite() && r.1 > 0.0);
+        rows.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(Ordering::Equal));
+        let mut knots: Vec<(f64, f64, f64)> = Vec::with_capacity(rows.len());
+        let (mut m50, mut m90) = (0.0_f64, 0.0_f64);
+        for (x, p50, p90, _n) in rows {
+            m50 = m50.max(p50);
+            m90 = m90.max(p90).max(m50);
+            knots.push((x, m50, m90));
+        }
+        (knots.len() >= 2).then_some(CostCurve { knots })
+    }
+
+    fn eval(&self, x: f64) -> (f64, f64) {
+        let k = &self.knots;
+        if x <= k[0].0 {
+            return (k[0].1, k[0].2); // short-range floor
+        }
+        for w in k.windows(2) {
+            let (a, b) = (w[0], w[1]);
+            if x <= b.0 {
+                let f = (x - a.0) / (b.0 - a.0);
+                return (a.1 + f * (b.1 - a.1), a.2 + f * (b.2 - a.2));
+            }
+        }
+        let (a, b) = (k[k.len() - 2], k[k.len() - 1]);
+        let span = (b.0 - a.0).max(1.0);
+        let extra = x - b.0;
+        (b.1 + (b.1 - a.1) / span * extra, b.2 + (b.2 - a.2) / span * extra)
+    }
+}
+
+/// The dispatch OD cost: road-network ROUTE TIME mapped through a learned route→actual curve.
+/// Replaces the 225m grid lookup (dropped, mig 0082) — the router answers every pair (work points
+/// are graph nodes via connectors), and the graph has headroom the Manhattan formula lacks (lane
+/// speeds, one-ways, congestion) plus it generalizes to non-grid terminals. A SECOND curve maps
+/// Manhattan→actual for the L3 fallback so unroutable pairs sit on the SAME realized scale as
+/// routed ones (review: raw manh÷speed ran +57s hot vs routed costs and its p90 was incomparable).
+/// Per-tick object: caches one Dijkstra field per truck and one snap per coordinate (Mutex so
+/// matcher futures holding &RouteCost across awaits stay Send).
+pub struct RouteCost {
+    rg: Option<RoadGraph>,
+    route_curve: Option<CostCurve>, // raw route seconds → realized (p50, p90) seconds
+    manh_curve: Option<CostCurve>,  // grid-Manhattan metres → realized (p50, p90) seconds
+    fields: Mutex<HashMap<(i64, i64), Option<Arc<RouteField>>>>,
+    snaps: Mutex<HashMap<(i64, i64), Option<u32>>>,
+}
+
+impl RouteCost {
+    /// Load the graph + fit both cost curves from the eval table. Never fails — with no graph every
+    /// route lookup returns None and callers use `manh_p50_p90` / the geometric fallback.
+    pub async fn load(pool: &PgPool) -> RouteCost {
+        let rg = RoadGraph::load(pool).await;
+        // route→actual: routed rows, binned by raw route time (dense at the short end — that's
+        // where the floor and most matching decisions live).
+        let route_rows: Vec<(Option<f64>, Option<f64>, Option<f64>, i64)> = sqlx::query_as(
+            "SELECT avg(route_time_s)::float8,
+                    percentile_cont(0.5) WITHIN GROUP (ORDER BY actual_s)::float8,
+                    percentile_cont(0.9) WITHIN GROUP (ORDER BY actual_s)::float8,
+                    count(*)
+               FROM road_route_eval
+              WHERE snapped AND route_time_s >= 5 AND actual_s BETWEEN 10 AND 3600
+                AND ts > now() - interval '14 days'
+              GROUP BY width_bucket(route_time_s::float8, ARRAY[30.0,60.0,120.0,240.0,480.0])",
+        )
+        .fetch_all(pool)
+        .await
+        .unwrap_or_default();
+        // Manhattan→actual: ALL rows (unroutable pairs included — that's the L3 population).
+        let manh_rows: Vec<(Option<f64>, Option<f64>, Option<f64>, i64)> = sqlx::query_as(
+            "SELECT avg(manh_m)::float8,
+                    percentile_cont(0.5) WITHIN GROUP (ORDER BY actual_s)::float8,
+                    percentile_cont(0.9) WITHIN GROUP (ORDER BY actual_s)::float8,
+                    count(*)
+               FROM road_route_eval
+              WHERE manh_m > 0 AND actual_s BETWEEN 10 AND 3600
+                AND ts > now() - interval '14 days'
+              GROUP BY width_bucket(manh_m::float8, ARRAY[200.0,400.0,800.0,1600.0,3200.0])",
+        )
+        .fetch_all(pool)
+        .await
+        .unwrap_or_default();
+        let clean = |rows: Vec<(Option<f64>, Option<f64>, Option<f64>, i64)>| {
+            rows.into_iter()
+                .filter_map(|(x, p50, p90, n)| Some((x?, p50?, p90?, n)))
+                .collect::<Vec<_>>()
+        };
+        RouteCost {
+            rg,
+            route_curve: CostCurve::fit(clean(route_rows), 150),
+            manh_curve: CostCurve::fit(clean(manh_rows), 150),
+            fields: Mutex::default(),
+            snaps: Mutex::default(),
+        }
+    }
+
+    /// Realized (p50_s, p90_s) for a Manhattan distance, on the SAME learned scale as the routed
+    /// cost — the L3 fallback for unroutable pairs. None until the eval table has enough rows.
+    pub fn manh_p50_p90(&self, manh_m: f64) -> Option<(f64, f64)> {
+        Some(self.manh_curve.as_ref()?.eval(manh_m))
+    }
+
+    fn key(lat: f64, lon: f64) -> (i64, i64) {
+        ((lat * 1e7) as i64, (lon * 1e7) as i64)
+    }
+
+    /// Calibrated (p50_s, p90_s) for truck→work, or None (no graph / unsnappable / unreachable) —
+    /// caller falls back to Manhattan ÷ segment speed.
+    pub fn p50_p90(&self, vlat: f64, vlon: f64, wlat: f64, wlon: f64) -> Option<(f64, f64)> {
+        let rg = self.rg.as_ref()?;
+        let field = self
+            .fields
+            .lock()
+            .unwrap()
+            .entry(Self::key(vlat, vlon))
+            .or_insert_with(|| rg.field_from(vlat, vlon).map(Arc::new))
+            .clone()?;
+        let node = (*self
+            .snaps
+            .lock()
+            .unwrap()
+            .entry(Self::key(wlat, wlon))
+            .or_insert_with(|| rg.snap_node(wlat, wlon)))?;
+        let t = field.time_to(node)?;
+        match &self.route_curve {
+            Some(c) => Some(c.eval(t)),
+            None => Some((t * CAL50_DEFAULT, t * CAL90_DEFAULT)), // cold start
+        }
+    }
+}
+
 // min-heap by time (BinaryHeap is a max-heap → reverse the compare)
 struct HeapItem {
     t: f64,
@@ -154,66 +367,84 @@ impl Ord for HeapItem {
     }
 }
 
-/// SHADOW validation (mig 0078): every 10min, route each recent settled leg (origin→dest) on the road
-/// graph and log route time/distance next to the drive_s label → `road_route_eval`. This is the GATE
-/// before wiring routing into the cost: does the topology-aware route predict drive_s better than the
-/// Manhattan baseline (computed from the same coords)? Snap-fail rate also lands here.
+/// Router eval + calibration source (mig 0078/0082): every 10min, route recent EMPTY TRIPS
+/// (learn_travel_sample leg_ord=0, label = 순수주행 구간시간) on the graph and log route time/distance
+/// + rotated-grid Manhattan next to the label → `road_route_eval`. Two consumers: (1) the standing
+/// GATE metric — does route predict the label better than Manhattan as the graph improves; (2) the
+/// COST CALIBRATION — RouteCost::load derives its actual÷route p50/p90 ratios from these rows.
+/// Self-backfills (batch-drains the 21-day sample window keyed by (ytno, dropped_at)).
 pub fn spawn_roadgraph_eval(pool: PgPool) {
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(Duration::from_secs(600));
         loop {
             ticker.tick().await;
             let Some(rg) = RoadGraph::load(&pool).await else { continue };
-            let legs: Vec<(String, DateTime<Utc>, i32, f64, f64, f64, f64)> = sqlx::query_as(
-                "SELECT ytno, leg_start, drive_s, origin_lat, origin_lon, dest_lat, dest_lon
-                   FROM learn_leg_decomp d
-                  WHERE origin_lat IS NOT NULL AND dest_lat IS NOT NULL AND drive_s > 10
-                    AND captured_at > now() - interval '20 minutes'
-                    AND NOT EXISTS (SELECT 1 FROM road_route_eval e WHERE e.ytno = d.ytno AND e.leg_start = d.leg_start)
-                  LIMIT 4000",
-            )
-            .fetch_all(&pool)
-            .await
-            .unwrap_or_default();
-            if legs.is_empty() {
-                continue;
-            }
-            let mut yt = Vec::new();
-            let mut ls = Vec::new();
-            let mut ds = Vec::new();
-            let mut rt: Vec<Option<i32>> = Vec::new();
-            let mut rd: Vec<Option<i32>> = Vec::new();
-            let mut sn = Vec::new();
-            for (ytno, leg_start, drive_s, ola, olo, dla, dlo) in legs {
-                let r = rg.route(ola, olo, dla, dlo);
-                yt.push(ytno);
-                ls.push(leg_start);
-                ds.push(drive_s);
-                match r {
-                    Some(rr) => {
-                        rt.push(Some(rr.time_s as i32));
-                        rd.push(Some(rr.dist_m as i32));
-                        sn.push(true);
-                    }
-                    None => {
-                        rt.push(None);
-                        rd.push(None);
-                        sn.push(false);
+            for _ in 0..12 {
+                let legs: Vec<(String, DateTime<Utc>, i32, f64, f64, f64, f64)> = sqlx::query_as(
+                    "SELECT s.ytno, s.dropped_at, s.travel_s,
+                            s.origin_lat, s.origin_lon, s.dest_lat, s.dest_lon
+                       FROM learn_travel_sample s
+                      WHERE s.leg_ord = 0 AND s.travel_s BETWEEN 10 AND 3600
+                        AND s.origin_lat IS NOT NULL AND s.dest_lat IS NOT NULL
+                        AND s.trip_ts > now() - interval '21 days'
+                        AND NOT EXISTS (SELECT 1 FROM road_route_eval e
+                                         WHERE e.ytno = s.ytno AND e.leg_start = s.dropped_at)
+                      LIMIT 2000",
+                )
+                .fetch_all(&pool)
+                .await
+                .unwrap_or_default();
+                if legs.is_empty() {
+                    break;
+                }
+                let n = legs.len();
+                let mut yt = Vec::new();
+                let mut ls = Vec::new();
+                let mut act = Vec::new();
+                let mut rt: Vec<Option<i32>> = Vec::new();
+                let mut rd: Vec<Option<i32>> = Vec::new();
+                let mut sn = Vec::new();
+                let mut mh = Vec::new();
+                for (ytno, dropped_at, travel_s, ola, olo, dla, dlo) in legs {
+                    let r = rg.route(ola, olo, dla, dlo);
+                    yt.push(ytno);
+                    ls.push(dropped_at);
+                    act.push(travel_s);
+                    mh.push(quay_manhattan_m(ola, olo, dla, dlo) as i32);
+                    match r {
+                        Some(rr) => {
+                            rt.push(Some(rr.time_s as i32));
+                            rd.push(Some(rr.dist_m as i32));
+                            sn.push(true);
+                        }
+                        None => {
+                            rt.push(None);
+                            rd.push(None);
+                            sn.push(false);
+                        }
                     }
                 }
+                let _ = sqlx::query(
+                    "INSERT INTO road_route_eval (ytno, leg_start, actual_s, route_time_s, route_dist_m, snapped, manh_m)
+                     SELECT * FROM UNNEST($1::text[], $2::timestamptz[], $3::int[], $4::int[], $5::int[], $6::bool[], $7::int[])",
+                )
+                .bind(&yt)
+                .bind(&ls)
+                .bind(&act)
+                .bind(&rt)
+                .bind(&rd)
+                .bind(&sn)
+                .bind(&mh)
+                .execute(&pool)
+                .await;
+                if n < 2000 {
+                    break;
+                }
+                tokio::task::yield_now().await;
             }
-            let _ = sqlx::query(
-                "INSERT INTO road_route_eval (ytno, leg_start, drive_s, route_time_s, route_dist_m, snapped)
-                 SELECT * FROM UNNEST($1::text[], $2::timestamptz[], $3::int[], $4::int[], $5::int[], $6::bool[])",
-            )
-            .bind(&yt)
-            .bind(&ls)
-            .bind(&ds)
-            .bind(&rt)
-            .bind(&rd)
-            .bind(&sn)
-            .execute(&pool)
-            .await;
+            let _ = sqlx::query("DELETE FROM road_route_eval WHERE ts < now() - interval '60 days'")
+                .execute(&pool)
+                .await;
         }
     });
 }

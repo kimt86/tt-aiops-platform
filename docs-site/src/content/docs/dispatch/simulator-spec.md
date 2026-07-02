@@ -194,11 +194,11 @@ LD는 대칭: 트럭이 **블록 먼저**(YC 적재) → **QC**(적재), QC STAL
 | **YC 서비스**(분포 샘플) | DS p10/p50/p90 **10/51/140s** · LD **10/76/164s** · 재취급RH 9/69/154 · GO 10/122/227 | `rtg_move_log` 24h |
 | **해치커버**(베이당 1회) | 양하 **~428s** · 적하 **~496s** | research-log |
 | **TT 주행속도** | **22.8 km/h**(GPS 실측: 움직이는 30초 구간 중앙, p90 41) — ⚠ 점대점 중앙 ~6.9는 정지 섞이고 짧은 leg 가중된 값 | `truck_pos_hist` state=empty_travel |
-| **TT 정지(오버헤드)** | 빈차 leg 시간의 **~47%가 정지**(대부분 도착지 최종접근·큐) — 주행과 분리 추출됨(`learn_leg_decomp`) | `truck_pos_hist` 모션분할 |
+| **TT 정지(오버헤드)** | 빈차 leg 시간의 **~47%가 정지**(대부분 도착지 최종접근·큐) — 과거 `learn_leg_decomp`로 규명(retire됨 mig 0081). 비용 라벨은 구간시간(정지 포함) | `truck_pos_hist` 모션분할 |
 
-> **★ 순수주행(구간시간) OD — 구현 완료(배차에 적용됨).** 순수주행 = **주행 구간 시간**(출발→작업지점 도달; 경로 정체 포함·핸드오버 대기 제외) → 매트뷰 **`learn_travel_zone225_drive`**(225m OD 격자, 구간시간 p50/p90). **배차 cost가 이 순수주행 OD 사용**(livemap.rs, L3 폴백 = `quay_manhattan_m ÷ SEG_SPEED_MS`, `SEG_SPEED_MS=3.30 m/s=13km/h·구간속도`). Stage-2 cost = **빈차 도착시간 = `free_in`(곧빔 잔여) + TRAVEL**. **시뮬도 라우터 속도/정책 비용추정에 이 OD 차용** 가능. 미커버 쌍은 기하 폴백(quay_manhattan÷13km/h). (TT leg 시간 `tt_cycle_v2`: 공차 191s·적재 441s — 도착 후 대기 포함.)
+> **★ 순수주행(구간시간) OD — 도로망 경로시간→실제 곡선으로 가동(2026-07-02).** 순수주행 = **주행 구간 시간**(출발→작업지점 도달; 경로 정체 포함·핸드오버 대기 제외) → **배차 cost = 추론 도로망 최단시간 경로를 실측 곡선으로 변환**(`roadgraph.rs RouteCost/CostCurve`: `road_route_eval`에서 경로시간 6구간별 **실제 p50/p90 초**를 매듭으로 직접 학습 — 단조 잠금·짧은 경로 바닥 ~89s 유지·매듭 보간. *처음의 "비율 p50/p90 × 경로시간, 4구간+중점보간"은 당일 리뷰 탈락: 비단조 역전·바닥 소실*). L3 폴백(라우팅 불능 ~3%) = 같은 표의 맨해튼→실제 곡선(R과 같은 실측 눈금; `quay_manhattan_m ÷ 3.30 m/s`는 콜드스타트만). Stage-2 cost = **빈차 도착시간 = `free_in`(곧빔 잔여) + TRAVEL**. **시뮬도 정책 비용추정에 같은 라우터 차용** 가능. (TT leg 시간 `tt_cycle_v2`: 공차 191s·적재 441s — 도착 후 대기 포함.)
 >
-> ⚠ 이 travel-cost 소스·정의는 여러 번 바뀌었다: 순수-OD(`zone225_pure`) → 실현(`zone225`) → 움직인순간만(`zone225_drive`) → **구간시간(`zone225_drive`, 현재)**. 세 번째 "움직인 순간만(`drive_s`)"은 경로 정체까지 벗겨 근거리-원거리 spread를 뭉개 **틀렸고**(2026-07-01·mig 0079 정정), 구간시간으로 교정했다. `learn_travel_zone225`(실현·핸드오버 포함)은 여전히 갱신되지만 **cost엔 미사용**(참고용). **삭제됨(호출 시 STALE)**: `learn_travel_zone225_pure`, `learn_travel_drive_sample`, `learn_eval`, `learn_crane_approach`.
+> ⚠ 이 travel-cost 소스·정의는 여러 번 바뀌었다: 순수-OD(`zone225_pure`) → 실현(`zone225`) → 움직인순간만(`zone225_drive`) → 구간시간(`zone225_drive`) → **도로망 경로시간→실제 곡선(현재·2026-07-02)**. "움직인 순간만"은 경로 정체까지 벗겨 틀렸고(2026-07-01 정정), 격자 룩업은 도로망 라우팅으로 대체(mig 0082). `learn_travel_zone225`(실현·핸드오버 포함)은 여전히 갱신되지만 **cost엔 미사용**(참고용). **삭제됨(호출 시 STALE)**: `learn_travel_zone225_pure`, `learn_travel_drive_sample`, `learn_eval`, `learn_crane_approach`, `learn_leg_decomp`, `learn_travel_zone225_drive`.
 
 - **베이 이동(갠트리)**: 깨끗한 분해 신호 없음 → 1차는 분포 안에 흡수. 향후 **레이아웃 거리 + TT와 동일 라우터 속도**로 별도 추정.
 - **보정은 자동**: 이 값이 곧 실측이라, TOS-baseline 시뮬은 정의상 §7 C2/C5/C8을 재현(효율계수 불필요 — 명판이 아니라 관측이므로). 시뮬은 분포를 **로그정규로 샘플**(`mu=ln(p50), sigma=(ln(p90)−ln(p50))/1.2816`).
@@ -292,9 +292,9 @@ pub fn run_stage2(s: &Snapshot) -> Vec<(String /*ytno*/, WorkRef)>;
 ```
 공유코드는 `crates/core`로 → 라이브·시뮬 같은 경로. 함정: 1단계 후 `works[order[wpos]]` 복원, `free_in`은 DS만 grounded, `starving`·`prev_assign` 입력 필수.
 
-**정책 비용추정 OD(`env.policy_od`)**: `"router"`(1차, 추정=실제로 배차결정 품질만 격리) | `"learned"`(**`learn_travel_zone225_drive`** grid225 p50/p90 — 라이브 배차가 쓰는 순수주행(구간시간) OD와 동일, 미커버는 quay_manhattan÷3.30; 추정오차 채널, 끝점 latlon 필요).
+**정책 비용추정 OD(`env.policy_od`)**: `"router"`(1차, 추정=실제로 배차결정 품질만 격리) | `"learned"`(**도로망 경로시간→실제 곡선** — 라이브 배차의 `RouteCost`와 동일, 라우팅 불능은 맨해튼→실제 곡선(콜드스타트만 quay_manhattan÷3.30); 추정오차 채널, 끝점 latlon 필요).
 
-> **도로망 라우팅 주의**: 추론된 도로 그래프(`road_node`/`road_edge`, 마이그0077·Rust 방향 Dijkstra `roadgraph.rs`)는 **구축·검증됐으나 cost에 미연결**. 게이트 결과(585 leg): 도로경로 상관 **0.490 < 맨해튼 0.565**(도로가 더 나쁨) + leg의 **30%만 스냅**(작업지점이 도로망에서 중앙 62m 벗어남 — 도로가 블록/안벽 안까지 안 들어옴). → **cost는 순수-주행 격자 유지**(interim). 도로 그래프는 향후 OD 모델의 *경로거리 피처*로만 쓸 예정. 시뮬 `"router"`도 이 한계를 반영해 맨해튼/격자 기반이 현실적.
+> **도로망 라우팅(2026-07-02 갱신)**: 추론 도로 그래프(`road_node`/`road_edge`·Rust 방향 Dijkstra `roadgraph.rs`)가 **재구축 후 배차 cost에 연결됨** — 작업지점 5,888곳 커넥터(스냅 100%)·방향은 도로 단위 다수결·지오메트리 기점 정렬(경로 성공률 96.7%)·`road_route_eval`에서 배운 실측 곡선으로 변환. 첫 판(264노드·스냅 30%)의 탈락은 재구축으로 뒤집힘. 시뮬 `"router"`도 같은 그래프를 쓰면 라이브 배차와 정합.
 
 **TOS = 보정 baseline**(알고리즘 역공학 금지): 알려진 행동(*유휴 트럭만 배차*, 픽업 최단) 휴리스틱 → 같은 에뮬레이터에서 실측 KPI(§7) 재현하면 유효 baseline.
 
@@ -343,8 +343,8 @@ queuename = <bay><D|H>-<D|L>   // 02H-D = 베이02·홀드·양하 (parse_q, wor
 BAY_CHANGE_S=180  HATCH_DS_S=340  HATCH_LD_S=390  DS_MOVE_S=90  LD_MOVE_S=110
 proc = qty*(1−twin/2)*move_s + (베이바뀜?180 : 적하H→D?390 : 양하D→H?340 : 0)
 # OD(policy_od="learned"일 때만) — 배차는 순수-주행 OD 사용
-grid225(lat,lon)='G'||round(lat/0.00202)||'_'||round(lon/0.00202)   # ~225m
-L2: learn_travel_zone225_drive[(oz,dz)](n>=10, 구간시간) ; L3: 안벽축 맨해튼 / SEG_SPEED_MS 3.30(13km/h·구간속도), p90=p50*1.5
+R: 도로망 경로시간 → 실제 곡선(RouteCost/CostCurve·구간시간 기준, 6구간 실제 p50/p90 매듭·단조·바닥~89s)
+L3: 맨해튼 → 실제 곡선(같은 표·같은 눈금); 콜드스타트만 맨해튼/3.30 m/s, p90=p50*1.5
 # (실현 learn_travel_zone225 는 정지/큐 포함이라 cost서 미사용·참고용; learn_travel_zone225_pure 삭제됨, §3.6)
 # 배차(livemap.rs:3217-3239)
 SWITCH_PENALTY_S=180  COMMIT_WINDOW_MS=600_000  COMMIT_LOCK_S=1200  NEED_HORIZON_S=900

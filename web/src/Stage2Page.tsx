@@ -180,7 +180,7 @@ export default function Stage2Page({ lang }: { lang: Lang }) {
         <Chip label={k ? "thrash (재배정율)" : "thrash"} value={pct(s?.switched_pct)} accent={(s?.switched_pct ?? 0) < 10 ? "#34d399" : "#f59e0b"} />
         <Chip label={k ? "마감 충족" : "feasible"} value={pct(s?.feasible_pct)} />
         <Chip label={k ? "중앙 도착" : "median arrival"} value={s?.median_arrival_s != null ? `${(s.median_arrival_s / 60).toFixed(1)}${k ? "분" : "m"}` : "—"} />
-        <Chip label={k ? "OD 정확층(L2)" : "OD L2"} value={pct(s?.l2_pct)} accent="#60a5fa" />
+        <Chip label={k ? "도로망 라우팅(R)" : "routed (R)"} value={pct(s?.routed_pct)} accent="#60a5fa" />
         <Chip label={k ? "30분 매칭" : "30m matches"} value={s ? s.matches_30m.toLocaleString() : "—"} />
       </div>
 
@@ -236,7 +236,7 @@ export default function Stage2Page({ lang }: { lang: Lang }) {
               <td className="mono">{m.src_block ?? "—"}</td>
               <td className="mono">{mmss(m.arrival_s)}</td>
               <td className="mono" style={{ color: (m.deadline_slack_s ?? 0) < 0 ? "#ef4444" : "#34d399" }}>{signMin(m.deadline_slack_s)}</td>
-              <td style={{ color: m.cost_tier === "L2" ? "#60a5fa" : "var(--text-mute)" }}>{m.cost_tier}</td>
+              <td style={{ color: m.cost_tier === "R" ? "#60a5fa" : "var(--text-mute)" }}>{m.cost_tier}</td>
               <td>{m.switched ? "↔" : ""}</td>
             </tr>
           ))}

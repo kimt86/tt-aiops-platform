@@ -2234,8 +2234,8 @@ pub fn spawn_travel_aggregator(pool: PgPool) {
             let _ = sqlx::query("DELETE FROM learn_travel_sample WHERE captured_at < now() - interval '30 days'")
                 .execute(&pool)
                 .await;
-            // refresh the Stage-2 OD cost layer (225m-grid summary, mig 0051) from the new samples.
-            // CONCURRENTLY keeps it readable during refresh (needs the unique index on (oz,dz)).
+            // refresh the realized zone summary (참조용 — the dispatch cost is the road-network route
+            // time, roadgraph::RouteCost; the 순수주행 격자 matview was dropped in mig 0082).
             let _ = sqlx::query("REFRESH MATERIALIZED VIEW CONCURRENTLY learn_travel_zone225")
                 .execute(&pool)
                 .await;
@@ -2267,61 +2267,9 @@ pub fn spawn_travel_aggregator(pool: PgPool) {
     });
 }
 
-/// Empty-leg time DECOMPOSITION (mig 0075): every 5min, split each newly-settled empty leg into MOVING
-/// vs STOPPED via 30s GPS motion segmentation, and locate the stopped time relative to the pickup —
-/// so "why is effective speed ~7 km/h" is answered with data (real drive ~23 km/h diluted by ~⅓ stop,
-/// mostly final-approach positioning) instead of interpretation. leg ends at TOS ARRIVED; gps_arrived_at
-/// is the first GPS fix within 50m of the pickup, so (arrived − gps_arrived) is the post-physical wait.
-pub fn spawn_leg_decomp(pool: PgPool) {
-    tokio::spawn(async move {
-        let mut ticker = tokio::time::interval(Duration::from_secs(300));
-        loop {
-            ticker.tick().await;
-            let _ = sqlx::query(
-                "INSERT INTO learn_leg_decomp (ytno, leg_start, arrived_at, dest_topos, grid_dist_m, total_s, drive_s, stop_s, stop_near_dest_s, gps_arrived_at, oz, dz, origin_lat, origin_lon, dest_lat, dest_lon)
-                 WITH cyc AS (
-                   SELECT ytno, empty_travel_start_at ets, empty_arrived_at eta, legs->0->>'target' AS dest_topos,
-                          (legs->0->>'lat')::float8 dlat, (legs->0->>'lon')::float8 dlon
-                     FROM tt_cycle_v2
-                    WHERE dropped_at > now()-interval '30 minutes'
-                      AND empty_travel_start_at IS NOT NULL AND empty_arrived_at IS NOT NULL
-                      AND empty_arrived_at > empty_travel_start_at AND empty_arrived_at < now()-interval '3 minutes'
-                      AND (legs->0->>'lat') IS NOT NULL),
-                 fx AS (
-                   SELECT c.ytno,c.ets,c.eta,c.dest_topos,c.dlat,c.dlon,p.ts,p.lat,p.lon,
-                          lag(p.ts) OVER w pts, lag(p.lat) OVER w plat, lag(p.lon) OVER w plon
-                     FROM cyc c JOIN truck_pos_hist p ON p.ytno=c.ytno AND p.ts BETWEEN c.ets AND c.eta
-                    WINDOW w AS (PARTITION BY c.ytno,c.ets ORDER BY p.ts)),
-                 seg AS (
-                   SELECT ytno,ets,eta,dest_topos,dlat,dlon,ts, extract(epoch FROM ts-pts) dt,
-                     CASE WHEN pts IS NULL THEN NULL ELSE 2*6371000*asin(sqrt(power(sin(radians(lat-plat)/2),2)+cos(radians(plat))*cos(radians(lat))*power(sin(radians(lon-plon)/2),2))) END disp_m,
-                     2*6371000*asin(sqrt(power(sin(radians(lat-dlat)/2),2)+cos(radians(dlat))*cos(radians(lat))*power(sin(radians(lon-dlon)/2),2))) dist_dest_m,
-                     first_value(lat) OVER (PARTITION BY ytno,ets ORDER BY ts) olat,
-                     first_value(lon) OVER (PARTITION BY ytno,ets ORDER BY ts) olon
-                   FROM fx)
-                 SELECT ytno, ets, max(eta), max(dest_topos),
-                   round(grid_manhattan_m(max(olat),max(olon),max(dlat),max(dlon)))::int,
-                   extract(epoch FROM max(eta)-ets)::int,
-                   coalesce(sum(dt) FILTER (WHERE disp_m>=8 AND dt BETWEEN 20 AND 60),0)::int,
-                   coalesce(sum(dt) FILTER (WHERE disp_m<8 AND dt BETWEEN 20 AND 60),0)::int,
-                   coalesce(sum(dt) FILTER (WHERE disp_m<8 AND dist_dest_m<=60 AND dt BETWEEN 20 AND 60),0)::int,
-                   min(ts) FILTER (WHERE dist_dest_m<=50),
-                   travel_grid225(max(olat), max(olon)), travel_grid225(max(dlat), max(dlon)),
-                   max(olat), max(olon), max(dlat), max(dlon)
-                 FROM seg GROUP BY ytno, ets
-                 HAVING count(*) FILTER (WHERE dt BETWEEN 20 AND 60) >= 2
-                 ON CONFLICT (ytno,leg_start) DO NOTHING",
-            )
-            .execute(&pool)
-            .await;
-            let _ = sqlx::query("DELETE FROM learn_leg_decomp WHERE captured_at < now() - interval '30 days'")
-                .execute(&pool)
-                .await;
-            // refresh the Stage-2 OD cost layer (순수주행 = drive-segment time = total_s, not moving-only).
-            let _ = sqlx::query("REFRESH MATERIALIZED VIEW CONCURRENTLY learn_travel_zone225_drive").execute(&pool).await;
-        }
-    });
-}
+// [spawn_leg_decomp retired — mig 0081] The empty-leg drive/stop GPS decomposition (learn_leg_decomp)
+// was removed. The Stage-2 cost = 순수주행 구간시간 now comes from learn_travel_sample empty trips
+// (mig 0080), and its matview refresh moved into spawn_travel_aggregator above.
 
 /// Every ~30s, refresh the authoritative per-truck assignment cache from the work pool
 /// (`live_assigned_tt` = any active job, all types; enriched with the latest `live_workpool`
@@ -3348,11 +3296,6 @@ fn clean_driver(s: &str) -> String {
 }
 
 // ── Stage-2 SHADOW optimal-matching recommender ──────────────────────────────────────────────
-/// ~225m spatial grid cell of a coordinate (mirrors the SQL travel_grid225, mig 0051) — lets a
-/// truck's live GPS look up the OD cost summary in memory.
-fn grid225(lat: f64, lon: f64) -> String {
-    format!("G{}_{}", (lat / 0.00202).round() as i64, (lon / 0.00202).round() as i64)
-}
 // anti-thrash: a vehicle keeps its previous-tick work bucket unless another is >= this many
 // arrival-seconds cheaper. Damps reassignment from small OD/GPS noise.
 const SWITCH_PENALTY_S: i64 = 180;
@@ -3377,15 +3320,14 @@ const NEED_HORIZON_S: i64 = 900;
 // estimate, because trucks drive the grid, not diagonally. Speed calibrated to actual trips.
 const GRID_COS: f64 = 0.86777; // cos(29.8°)
 const GRID_SIN: f64 = 0.49697; // sin(29.8°)
-// ~22.8 km/h moving-only speed, measured in learn_leg_decomp (grid-Manhattan distance ÷ drive_s).
-// L3 fallback for the PURE-DRIVE cost (learn_travel_zone225_drive) when an OD pair isn't learned yet.
-// The Stage-2 cost is 순수주행 = the drive-SEGMENT time (empty_travel_start → work-point arrival):
-// en-route stops are still driving and stay IN the cost; only the post-arrival handover wait is excluded
-// (it lives in the next dwell segment). The crane approach term was dropped — measured consistently its
-// median is ~0 (crane coord = learned WHARF centroid; the old 72s was a select-biased early-arriver subset).
-// SEG_SPEED_MS = grid-Manhattan ÷ segment time (781m/237s ≈ 3.3 m/s = 13 km/h); the L3 distance fallback.
+// L3 fallback when the road-network router can't answer (no graph / endpoint doesn't snap / no
+// directed path). The cost is 순수주행 = the drive-SEGMENT time (empty_travel_start → work-point
+// arrival): en-route stops are still driving and stay IN the cost; only the post-arrival handover
+// wait is excluded (it lives in the next dwell segment). The crane approach term was dropped —
+// measured consistently its median is ~0 (the old 72s was a select-biased early-arriver subset).
+// SEG_SPEED_MS = grid-Manhattan ÷ segment time (781m/237s ≈ 3.3 m/s = 13 km/h).
 const SEG_SPEED_MS: f64 = 3.30;
-fn quay_manhattan_m(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
+pub(crate) fn quay_manhattan_m(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
     const M: f64 = 111_320.0;
     let dn = (lat2 - lat1) * M;
     let de = (lon2 - lon1) * M * ((lat1 + lat2) / 2.0).to_radians().cos();
@@ -3590,18 +3532,25 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
             if works.is_empty() {
                 continue;
             }
-            // OD cost summary (225m grid, n>=10) loaded once → in-memory lookup. REALIZED empty-travel
-            // (learn_travel_zone225): wall-clock leg time, so it carries route congestion empirically —
-            // the pure/moving-only view under-penalised far-through-congestion trucks and mis-ranked picks.
-            let od: HashMap<(String, String), (i64, i64)> = sqlx::query_as::<_, (String, String, i32, i32)>(
-                "SELECT oz, dz, p50_s, p90_s FROM learn_travel_zone225_drive WHERE n >= 10",
-            )
-            .fetch_all(&pool).await.unwrap_or_default()
-            .into_iter().map(|(oz, dz, p50, p90)| ((oz, dz), (p50 as i64, p90 as i64))).collect();
+            // OD cost = road-network ROUTE TIME (directed Dijkstra over the inferred graph: lane
+            // speeds + work-point connectors) × the actual÷route calibration learned from realized
+            // empty trips (road_route_eval) — see roadgraph::RouteCost. Replaces the 225m grid lookup
+            // (mig 0082): the router answers every pair, and the graph has headroom Manhattan lacks
+            // (lane speeds, one-ways, congestion) + generalizes to non-grid terminals. tier R = routed,
+            // L3 = Manhattan fallback (unroutable pair).
+            let rc = crate::roadgraph::RouteCost::load(&pool).await;
             let cost = |vlat: f64, vlon: f64, wlat: f64, wlon: f64| -> (i64, i64, &'static str) {
-                match od.get(&(grid225(vlat, vlon), grid225(wlat, wlon))) {
-                    Some(&(p50, p90)) => (p50, p90, "L2"),
-                    None => { let p50 = quay_manhattan_m(vlat, vlon, wlat, wlon) / SEG_SPEED_MS; (p50 as i64, (p50 * 1.5) as i64, "L3") }
+                match rc.p50_p90(vlat, vlon, wlat, wlon) {
+                    Some((p50, p90)) => (p50 as i64, p90 as i64, "R"),
+                    None => {
+                        // unroutable pair → Manhattan, mapped through the SAME learned realized
+                        // scale as routed costs (raw manh÷speed ran systematically hot vs R).
+                        let m = quay_manhattan_m(vlat, vlon, wlat, wlon);
+                        match rc.manh_p50_p90(m) {
+                            Some((p50, p90)) => (p50 as i64, p90 as i64, "L3"),
+                            None => { let p50 = m / SEG_SPEED_MS; (p50 as i64, (p50 * 1.5) as i64, "L3") }
+                        }
+                    }
                 }
             };
             // STAGE 1 owns urgency + per-crane demand caps; STAGE 2 (the matching below) is then PURE
@@ -3784,15 +3733,18 @@ pub fn spawn_dispatch_compare(lm: Arc<LiveMap>, pool: PgPool) {
             if !lm.connected.load(Ordering::Relaxed) {
                 continue;
             }
-            let od: HashMap<(String, String), i64> = sqlx::query_as::<_, (String, String, i32)>(
-                "SELECT oz, dz, p50_s FROM learn_travel_zone225_drive WHERE n >= 10",
-            )
-            .fetch_all(&pool).await.unwrap_or_default()
-            .into_iter().map(|(oz, dz, p50)| ((oz, dz), p50 as i64)).collect();
+            // same OD cost as the Stage-2 matcher: calibrated road-network route time, Manhattan fallback.
+            let rc = crate::roadgraph::RouteCost::load(&pool).await;
             let cost = |vlat: f64, vlon: f64, wlat: f64, wlon: f64| -> i64 {
-                match od.get(&(grid225(vlat, vlon), grid225(wlat, wlon))) {
-                    Some(&p50) => p50,
-                    None => (quay_manhattan_m(vlat, vlon, wlat, wlon) / SEG_SPEED_MS) as i64,
+                match rc.p50_p90(vlat, vlon, wlat, wlon) {
+                    Some((p50, _)) => p50 as i64,
+                    None => {
+                        let m = quay_manhattan_m(vlat, vlon, wlat, wlon);
+                        match rc.manh_p50_p90(m) {
+                            Some((p50, _)) => p50 as i64,
+                            None => (m / SEG_SPEED_MS) as i64,
+                        }
+                    }
                 }
             };
             // truck pool snapshots (last 6 min), keyed by snapshot time → reconstruct T1 state
@@ -4019,15 +3971,18 @@ pub fn spawn_fair_compare(lm: Arc<LiveMap>, pool: PgPool) {
                 continue;
             }
             let now = Utc::now().timestamp_millis();
-            let od: HashMap<(String, String), i64> = sqlx::query_as::<_, (String, String, i32)>(
-                "SELECT oz, dz, p50_s FROM learn_travel_zone225_drive WHERE n >= 10",
-            )
-            .fetch_all(&pool).await.unwrap_or_default()
-            .into_iter().map(|(oz, dz, p50)| ((oz, dz), p50 as i64)).collect();
+            // same OD cost as the Stage-2 matcher: calibrated road-network route time, Manhattan fallback.
+            let rc = crate::roadgraph::RouteCost::load(&pool).await;
             let cost = |vlat: f64, vlon: f64, wlat: f64, wlon: f64| -> i64 {
-                match od.get(&(grid225(vlat, vlon), grid225(wlat, wlon))) {
-                    Some(&p50) => p50,
-                    None => (quay_manhattan_m(vlat, vlon, wlat, wlon) / SEG_SPEED_MS) as i64,
+                match rc.p50_p90(vlat, vlon, wlat, wlon) {
+                    Some((p50, _)) => p50 as i64,
+                    None => {
+                        let m = quay_manhattan_m(vlat, vlon, wlat, wlon);
+                        match rc.manh_p50_p90(m) {
+                            Some((p50, _)) => p50 as i64,
+                            None => (m / SEG_SPEED_MS) as i64,
+                        }
+                    }
                 }
             };
             // truck positions over the window → per-truck position nearest its dispatch instant

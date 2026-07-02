@@ -115,8 +115,8 @@ async fn main() -> anyhow::Result<()> {
     livemap::spawn_cycle_flusher(livemap.clone(), pool.clone()); // 30s persist completed TT cycles
     livemap::spawn_learn_persist(livemap.clone(), pool.clone()); // 5min persist learned topos coords + lanes + quality
     livemap::spawn_travel_aggregator(pool.clone()); // 5min harvest TT travel-time labels from cycles
-    livemap::spawn_leg_decomp(pool.clone()); // 5min: empty-leg drive/stop decomposition (learn_leg_decomp)
-    roadgraph::spawn_roadgraph_eval(pool.clone()); // 10min: road-graph route vs drive_s vs manhattan (road_route_eval)
+    // [retired mig 0081] spawn_leg_decomp (empty-leg drive/stop decomp) removed; cost now from learn_travel_sample empty trips (mig 0080).
+    roadgraph::spawn_roadgraph_eval(pool.clone()); // 10min: route empty trips vs 순수주행 label → road_route_eval (gate metric + RouteCost calibration)
     livemap::spawn_density_sampler(livemap.clone(), pool.clone()); // 60s per-cell TT density (4 grid sizes)
     livemap::spawn_soon_idle_logger(livemap.clone(), pool.clone()); // 30s soon_idle 예측 적재(그림자 정확도)
     livemap::spawn_free_in_logger(livemap.clone(), pool.clone()); // 60s free_in 학습+검증셋(스냅샷+실제잔여 backfill)

@@ -133,7 +133,7 @@ export default function HealthPage({ lang }: { lang: Lang }) {
               {[
                 [t("중앙(p50)", "p50"), d?.arr_p50_s != null ? `${(d.arr_p50_s / 60).toFixed(1)}분` : "—", ""],
                 ["p90", d?.arr_p90_s != null ? `${(d.arr_p90_s / 60).toFixed(1)}분` : "—", ""],
-                [t("OD 실측층", "OD L2"), `${pct(d?.l2_pct)}%`, "good"],
+                [t("도로망 라우팅(R)", "routed (R)"), `${pct(d?.routed_pct)}%`, "good"],
               ].map(([key, v, c], i) => (
                 <div key={i}><div className="hp-pct-k">{key}</div><div className={`hp-pct-v mono ${c}`}>{v}</div></div>
               ))}
@@ -173,7 +173,7 @@ export default function HealthPage({ lang }: { lang: Lang }) {
                   <td>{x.jobtype === "DS" ? t("양하", "DS") : x.jobtype === "LD" ? t("적하", "LD") : x.jobtype}</td>
                   <td className="mono">{mmss(x.arrival_s)}</td>
                   <td className="mono" style={{ color: (x.deadline_slack_s ?? 0) < 0 ? "#ef4444" : "#34d399" }}>{x.deadline_slack_s != null ? `${x.deadline_slack_s >= 0 ? "+" : ""}${(x.deadline_slack_s / 60).toFixed(1)}` : "—"}</td>
-                  <td style={{ color: x.cost_tier === "L2" ? "#60a5fa" : "var(--text-mute)" }}>{x.cost_tier}</td>
+                  <td style={{ color: x.cost_tier === "R" ? "#60a5fa" : "var(--text-mute)" }}>{x.cost_tier}</td>
                   <td>{x.switched ? "↔" : ""}</td>
                   <td>{x.feasible ? <span className="ok">{t("제때 ✓", "in time ✓")}</span> : <span className="fb">{t("늦음", "late")}</span>}</td>
                 </tr>

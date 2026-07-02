@@ -169,8 +169,6 @@ export interface TravelAccuracy {
 }
 export interface TravelData {
   samples: number; od_pairs: number; confident_pairs: number; median_speed_kmh: number | null;
-  // empty-leg decomposition (learn_leg_decomp): real drive speed vs effective + stopped fraction
-  drive_kmh: number | null; effective_kmh: number | null; pct_stopped: number | null; decomp_legs: number;
   accuracy: TravelAccuracy; od: TravelOd[]; metric_series: TravelMetricPoint[];
 }
 
@@ -218,7 +216,7 @@ export interface Stage2Match {
 export interface Stage2Shadow {
   summary: {
     matches_30m: number; switched_pct: number | null; feasible_pct: number | null;
-    l2_pct: number | null; median_arrival_s: number | null; vehicles: number; works: number;
+    routed_pct: number | null; median_arrival_s: number | null; vehicles: number; works: number;
   };
   latest_ts: string | null;
   latest: Stage2Match[];
@@ -227,7 +225,7 @@ export interface Stage2Shadow {
 }
 export interface HealthDispatch {
   up: boolean; last_tick_age_s: number | null; ticks_1h: number; matches_latest: number;
-  thrash_pct: number | null; feasible_pct: number | null; savings_pct: number | null; l2_pct: number | null;
+  thrash_pct: number | null; feasible_pct: number | null; savings_pct: number | null; routed_pct: number | null;
   arr_p50_s: number | null; arr_p90_s: number | null;
   arrival_hist: { label: string; n: number }[];
   trend: { hour: string; thrash_pct: number | null; matches: number }[];
