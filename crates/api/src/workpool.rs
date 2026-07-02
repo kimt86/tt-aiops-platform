@@ -729,8 +729,8 @@ pub fn spawn_dispatch_pred_logger(pool: PgPool) {
                         if assigned { (Some(Utc::now()), Some(tick as i64), m.upd_ts) } else { (None, None, None) };
                     let _ = sqlx::query(
                         "INSERT INTO dispatch_pred_sample
-                           (qc, vessel, contno, queuename, jobtype, pred_work_eta_ts, dispatch_deadline_ts, assigned, slack_s, lead_s, became_assigned_at, became_assigned_tick, tos_upd_dt)
-                         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)",
+                           (qc, vessel, contno, queuename, jobtype, pred_work_eta_ts, dispatch_deadline_ts, assigned, slack_s, lead_s, became_assigned_at, became_assigned_tick, tos_upd_dt, etw_qc_ts)
+                         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)",
                     )
                     .bind(&qc.qc)
                     .bind(&m.vessel)
@@ -745,6 +745,9 @@ pub fn spawn_dispatch_pred_logger(pool: PgPool) {
                     .bind(ba_at)
                     .bind(ba_tick)
                     .bind(ba_upd)
+                    // accurate ETW (TOS RPC) snapshot at prediction time → enables the ETW-vs-pred
+                    // horizon comparison once accumulated (mig 0084). NULL when the vessel/QC has none.
+                    .bind(m.etw_accurate)
                     .execute(&pool)
                     .await;
                     logged += 1;
