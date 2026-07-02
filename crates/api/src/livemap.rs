@@ -3539,14 +3539,14 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
             // (lane speeds, one-ways, congestion) + generalizes to non-grid terminals. tier R = routed,
             // L3 = Manhattan fallback (unroutable pair).
             let rc = crate::roadgraph::RouteCost::load(&pool).await;
-            let cost = |vlat: f64, vlon: f64, wlat: f64, wlon: f64| -> (i64, i64, &'static str) {
-                match rc.p50_p90(vlat, vlon, wlat, wlon) {
+            let cost = |vlat: f64, vlon: f64, wlat: f64, wlon: f64, is_ld: bool| -> (i64, i64, &'static str) {
+                match rc.p50_p90(vlat, vlon, wlat, wlon, is_ld) {
                     Some((p50, p90)) => (p50 as i64, p90 as i64, "R"),
                     None => {
                         // unroutable pair → Manhattan, mapped through the SAME learned realized
                         // scale as routed costs (raw manh÷speed ran systematically hot vs R).
                         let m = quay_manhattan_m(vlat, vlon, wlat, wlon);
-                        match rc.manh_p50_p90(m) {
+                        match rc.manh_p50_p90(m, is_ld) {
                             Some((p50, p90)) => (p50 as i64, p90 as i64, "L3"),
                             None => { let p50 = m / SEG_SPEED_MS; (p50 as i64, (p50 * 1.5) as i64, "L3") }
                         }
@@ -3623,7 +3623,7 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                 // long empty drives to the quay (worse) and starve load work. So we minimise empty travel.
                 let mut row = Vec::with_capacity(vehicles.len());
                 for (vi, v) in vehicles.iter().enumerate() {
-                    let (p50, p90, tier) = cost(v.1, v.2, wlat, wlon);
+                    let (p50, p90, tier) = cost(v.1, v.2, wlat, wlon, w.jobtype == "LD");
                     let arr = v.3 + p50; // empty travel to the pickup
                     let prevk = prev.get(&v.0);
                     let switched = prevk.map(|pk| pk != &this_key).unwrap_or(false);
@@ -3735,12 +3735,12 @@ pub fn spawn_dispatch_compare(lm: Arc<LiveMap>, pool: PgPool) {
             }
             // same OD cost as the Stage-2 matcher: calibrated road-network route time, Manhattan fallback.
             let rc = crate::roadgraph::RouteCost::load(&pool).await;
-            let cost = |vlat: f64, vlon: f64, wlat: f64, wlon: f64| -> i64 {
-                match rc.p50_p90(vlat, vlon, wlat, wlon) {
+            let cost = |vlat: f64, vlon: f64, wlat: f64, wlon: f64, is_ld: bool| -> i64 {
+                match rc.p50_p90(vlat, vlon, wlat, wlon, is_ld) {
                     Some((p50, _)) => p50 as i64,
                     None => {
                         let m = quay_manhattan_m(vlat, vlon, wlat, wlon);
-                        match rc.manh_p50_p90(m) {
+                        match rc.manh_p50_p90(m, is_ld) {
                             Some((p50, _)) => p50 as i64,
                             None => (m / SEG_SPEED_MS) as i64,
                         }
@@ -3820,7 +3820,7 @@ pub fn spawn_dispatch_compare(lm: Arc<LiveMap>, pool: PgPool) {
                     if !matches!(st, "idle" | "soon_idle" | "approaching" | "wait_rtg") {
                         continue;
                     }
-                    let a = cost(la, lo, dlat, dlon);
+                    let a = cost(la, lo, dlat, dlon, jobtype == "LD");
                     if best.as_ref().map(|b| a < b.1).unwrap_or(true) {
                         best = Some((yt.clone(), a));
                     }
@@ -3828,7 +3828,7 @@ pub fn spawn_dispatch_compare(lm: Arc<LiveMap>, pool: PgPool) {
                 let Some((our_ytno, our_arrival)) = best else { continue };
                 // TOS truck's arrival (for the gap) — None if its GPS is currently stale (no position)
                 let tos_pos = tos_at_t1.or_else(|| latest_pos.get(&tos_ytno).map(|(la, lo, _)| (*la, *lo)));
-                let tos_arrival: Option<i64> = tos_pos.map(|(tl, to)| cost(tl, to, dlat, dlon));
+                let tos_arrival: Option<i64> = tos_pos.map(|(tl, to)| cost(tl, to, dlat, dlon, jobtype == "LD"));
                 let agree = our_ytno == tos_ytno;
                 let delta: Option<i64> = tos_arrival.map(|t| t - our_arrival); // + = ours sooner
                 let reason = if !precise { "now" }
@@ -3973,12 +3973,12 @@ pub fn spawn_fair_compare(lm: Arc<LiveMap>, pool: PgPool) {
             let now = Utc::now().timestamp_millis();
             // same OD cost as the Stage-2 matcher: calibrated road-network route time, Manhattan fallback.
             let rc = crate::roadgraph::RouteCost::load(&pool).await;
-            let cost = |vlat: f64, vlon: f64, wlat: f64, wlon: f64| -> i64 {
-                match rc.p50_p90(vlat, vlon, wlat, wlon) {
+            let cost = |vlat: f64, vlon: f64, wlat: f64, wlon: f64, is_ld: bool| -> i64 {
+                match rc.p50_p90(vlat, vlon, wlat, wlon, is_ld) {
                     Some((p50, _)) => p50 as i64,
                     None => {
                         let m = quay_manhattan_m(vlat, vlon, wlat, wlon);
-                        match rc.manh_p50_p90(m) {
+                        match rc.manh_p50_p90(m, is_ld) {
                             Some((p50, _)) => p50 as i64,
                             None => (m / SEG_SPEED_MS) as i64,
                         }
@@ -4056,7 +4056,7 @@ pub fn spawn_fair_compare(lm: Arc<LiveMap>, pool: PgPool) {
                     continue;
                 }
                 n += m as i32;
-                let tos_each: Vec<i64> = batch.iter().map(|(tp, wc, _, _)| cost(tp.0, tp.1, wc.0, wc.1)).collect();
+                let tos_each: Vec<i64> = batch.iter().map(|(tp, wc, jt, _)| cost(tp.0, tp.1, wc.0, wc.1, jt == "LD")).collect();
                 for &c in &tos_each {
                     tos_total += c;
                 }
@@ -4071,7 +4071,7 @@ pub fn spawn_fair_compare(lm: Arc<LiveMap>, pool: PgPool) {
                     }
                     for i in 0..m {
                         for j in 0..m {
-                            let c = cost(batch[i].0 .0, batch[i].0 .1, batch[j].1 .0, batch[j].1 .1);
+                            let c = cost(batch[i].0 .0, batch[i].0 .1, batch[j].1 .0, batch[j].1 .1, batch[j].2 == "LD");
                             g.add(1 + i, 1 + m + j, 1, c);
                         }
                     }
@@ -4089,7 +4089,7 @@ pub fn spawn_fair_compare(lm: Arc<LiveMap>, pool: PgPool) {
                     }
                 }
                 for i in 0..m {
-                    let our_s = cost(batch[i].0 .0, batch[i].0 .1, batch[sigma[i]].1 .0, batch[sigma[i]].1 .1);
+                    let our_s = cost(batch[i].0 .0, batch[i].0 .1, batch[sigma[i]].1 .0, batch[sigma[i]].1 .1, batch[sigma[i]].2 == "LD");
                     our_total += our_s;
                     if sigma[i] == i {
                         same += 1;

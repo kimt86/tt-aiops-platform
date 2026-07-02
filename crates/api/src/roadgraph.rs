@@ -256,10 +256,49 @@ impl CostCurve {
 /// matcher futures holding &RouteCost across awaits stay Send).
 pub struct RouteCost {
     rg: Option<RoadGraph>,
-    route_curve: Option<CostCurve>, // raw route seconds → realized (p50, p90) seconds
-    manh_curve: Option<CostCurve>,  // grid-Manhattan metres → realized (p50, p90) seconds
+    route: JobCurves, // route-time → realized, per job type (DS crane-pickup vs LD block-pickup differ)
+    manh: JobCurves,  // Manhattan → realized (L3 fallback), per job type
     fields: Mutex<HashMap<(i64, i64), Option<Arc<RouteField>>>>,
     snaps: Mutex<HashMap<(i64, i64), Option<u32>>>,
+}
+
+/// One cost curve per job type + a combined fallback. The cycle audit measured DS empty trips
+/// (pickup = crane) running p50 ~1.5× / p90 ~2× longer than LD (pickup = block) at the SAME route
+/// time, and DS is ~73% of samples — so a single pooled curve over-costs LD and under-costs DS
+/// (worst at p90, which gates the deadline filter). Split by job type; `all` covers cold start,
+/// other job types, or a per-type bin too thin to fit.
+#[derive(Default)]
+struct JobCurves {
+    ds: Option<CostCurve>,
+    ld: Option<CostCurve>,
+    all: Option<CostCurve>,
+}
+impl JobCurves {
+    fn pick(&self, is_ld: bool) -> Option<&CostCurve> {
+        (if is_ld { self.ld.as_ref() } else { self.ds.as_ref() }).or(self.all.as_ref())
+    }
+}
+
+/// Fit one estimator→actual curve from road_route_eval, optionally restricted to a job type.
+/// `xcol`/`base_where`/`bins` are code constants (never user input) so the format! is injection-safe.
+async fn fit_cost_curve(
+    pool: &PgPool, xcol: &str, base_where: &str, bins: &str, jt: Option<&str>,
+) -> Option<CostCurve> {
+    let jt_clause = jt.map(|j| format!(" AND jobtype = '{j}'")).unwrap_or_default();
+    let sql = format!(
+        "SELECT avg({xcol})::float8,
+                percentile_cont(0.5) WITHIN GROUP (ORDER BY actual_s)::float8,
+                percentile_cont(0.9) WITHIN GROUP (ORDER BY actual_s)::float8,
+                count(*)
+           FROM road_route_eval
+          WHERE {base_where} AND actual_s BETWEEN 10 AND 3600 AND ts > now() - interval '14 days'{jt_clause}
+          GROUP BY width_bucket({xcol}::float8, ARRAY[{bins}])"
+    );
+    let rows: Vec<(Option<f64>, Option<f64>, Option<f64>, i64)> =
+        sqlx::query_as(&sql).fetch_all(pool).await.unwrap_or_default();
+    let clean: Vec<(f64, f64, f64, i64)> =
+        rows.into_iter().filter_map(|(x, p50, p90, n)| Some((x?, p50?, p90?, n))).collect();
+    CostCurve::fit(clean, if jt.is_some() { 100 } else { 150 })
 }
 
 impl RouteCost {
@@ -267,62 +306,40 @@ impl RouteCost {
     /// route lookup returns None and callers use `manh_p50_p90` / the geometric fallback.
     pub async fn load(pool: &PgPool) -> RouteCost {
         let rg = RoadGraph::load(pool).await;
-        // route→actual: routed rows, binned by raw route time (dense at the short end — that's
-        // where the floor and most matching decisions live).
-        let route_rows: Vec<(Option<f64>, Option<f64>, Option<f64>, i64)> = sqlx::query_as(
-            "SELECT avg(route_time_s)::float8,
-                    percentile_cont(0.5) WITHIN GROUP (ORDER BY actual_s)::float8,
-                    percentile_cont(0.9) WITHIN GROUP (ORDER BY actual_s)::float8,
-                    count(*)
-               FROM road_route_eval
-              WHERE snapped AND route_time_s >= 5 AND actual_s BETWEEN 10 AND 3600
-                AND ts > now() - interval '14 days'
-              GROUP BY width_bucket(route_time_s::float8, ARRAY[30.0,60.0,120.0,240.0,480.0])",
-        )
-        .fetch_all(pool)
-        .await
-        .unwrap_or_default();
-        // Manhattan→actual: ALL rows (unroutable pairs included — that's the L3 population).
-        let manh_rows: Vec<(Option<f64>, Option<f64>, Option<f64>, i64)> = sqlx::query_as(
-            "SELECT avg(manh_m)::float8,
-                    percentile_cont(0.5) WITHIN GROUP (ORDER BY actual_s)::float8,
-                    percentile_cont(0.9) WITHIN GROUP (ORDER BY actual_s)::float8,
-                    count(*)
-               FROM road_route_eval
-              WHERE manh_m > 0 AND actual_s BETWEEN 10 AND 3600
-                AND ts > now() - interval '14 days'
-              GROUP BY width_bucket(manh_m::float8, ARRAY[200.0,400.0,800.0,1600.0,3200.0])",
-        )
-        .fetch_all(pool)
-        .await
-        .unwrap_or_default();
-        let clean = |rows: Vec<(Option<f64>, Option<f64>, Option<f64>, i64)>| {
-            rows.into_iter()
-                .filter_map(|(x, p50, p90, n)| Some((x?, p50?, p90?, n)))
-                .collect::<Vec<_>>()
+        // route→actual (routed rows, binned by raw route time — dense at the short end) and
+        // Manhattan→actual (all rows, the L3 population), each fitted SEPARATELY for DS / LD, with a
+        // combined `all` fallback. bin edges are code constants.
+        const RT_W: &str = "snapped AND route_time_s >= 5";
+        const RT_B: &str = "30.0,60.0,120.0,240.0,480.0";
+        const MH_W: &str = "manh_m > 0";
+        const MH_B: &str = "200.0,400.0,800.0,1600.0,3200.0";
+        let route = JobCurves {
+            ds: fit_cost_curve(pool, "route_time_s", RT_W, RT_B, Some("DS")).await,
+            ld: fit_cost_curve(pool, "route_time_s", RT_W, RT_B, Some("LD")).await,
+            all: fit_cost_curve(pool, "route_time_s", RT_W, RT_B, None).await,
         };
-        RouteCost {
-            rg,
-            route_curve: CostCurve::fit(clean(route_rows), 150),
-            manh_curve: CostCurve::fit(clean(manh_rows), 150),
-            fields: Mutex::default(),
-            snaps: Mutex::default(),
-        }
+        let manh = JobCurves {
+            ds: fit_cost_curve(pool, "manh_m", MH_W, MH_B, Some("DS")).await,
+            ld: fit_cost_curve(pool, "manh_m", MH_W, MH_B, Some("LD")).await,
+            all: fit_cost_curve(pool, "manh_m", MH_W, MH_B, None).await,
+        };
+        RouteCost { rg, route, manh, fields: Mutex::default(), snaps: Mutex::default() }
     }
 
     /// Realized (p50_s, p90_s) for a Manhattan distance, on the SAME learned scale as the routed
     /// cost — the L3 fallback for unroutable pairs. None until the eval table has enough rows.
-    pub fn manh_p50_p90(&self, manh_m: f64) -> Option<(f64, f64)> {
-        Some(self.manh_curve.as_ref()?.eval(manh_m))
+    pub fn manh_p50_p90(&self, manh_m: f64, is_ld: bool) -> Option<(f64, f64)> {
+        Some(self.manh.pick(is_ld)?.eval(manh_m))
     }
 
     fn key(lat: f64, lon: f64) -> (i64, i64) {
         ((lat * 1e7) as i64, (lon * 1e7) as i64)
     }
 
-    /// Calibrated (p50_s, p90_s) for truck→work, or None (no graph / unsnappable / unreachable) —
-    /// caller falls back to Manhattan ÷ segment speed.
-    pub fn p50_p90(&self, vlat: f64, vlon: f64, wlat: f64, wlon: f64) -> Option<(f64, f64)> {
+    /// Calibrated (p50_s, p90_s) for truck→work of the given job type, or None (no graph /
+    /// unsnappable / unreachable) — caller falls back to Manhattan ÷ segment speed. `is_ld` picks
+    /// the LD vs DS realized curve (crane vs block pickup differ ~1.5–2×).
+    pub fn p50_p90(&self, vlat: f64, vlon: f64, wlat: f64, wlon: f64, is_ld: bool) -> Option<(f64, f64)> {
         let rg = self.rg.as_ref()?;
         let field = self
             .fields
@@ -338,7 +355,7 @@ impl RouteCost {
             .entry(Self::key(wlat, wlon))
             .or_insert_with(|| rg.snap_node(wlat, wlon)))?;
         let t = field.time_to(node)?;
-        match &self.route_curve {
+        match self.route.pick(is_ld) {
             Some(c) => Some(c.eval(t)),
             None => Some((t * CAL50_DEFAULT, t * CAL90_DEFAULT)), // cold start
         }
@@ -380,10 +397,11 @@ pub fn spawn_roadgraph_eval(pool: PgPool) {
             ticker.tick().await;
             let Some(rg) = RoadGraph::load(&pool).await else { continue };
             for _ in 0..12 {
-                let legs: Vec<(String, DateTime<Utc>, i32, f64, f64, f64, f64)> = sqlx::query_as(
+                let legs: Vec<(String, DateTime<Utc>, i32, f64, f64, f64, f64, Option<String>)> = sqlx::query_as(
                     "SELECT s.ytno, s.dropped_at, s.travel_s,
-                            s.origin_lat, s.origin_lon, s.dest_lat, s.dest_lon
+                            s.origin_lat, s.origin_lon, s.dest_lat, s.dest_lon, c.jobtype
                        FROM learn_travel_sample s
+                       JOIN tt_cycle_v2 c ON c.ytno = s.ytno AND c.dropped_at = s.dropped_at
                       WHERE s.leg_ord = 0 AND s.travel_s BETWEEN 10 AND 3600
                         AND s.origin_lat IS NOT NULL AND s.dest_lat IS NOT NULL
                         AND s.trip_ts > now() - interval '21 days'
@@ -405,12 +423,14 @@ pub fn spawn_roadgraph_eval(pool: PgPool) {
                 let mut rd: Vec<Option<i32>> = Vec::new();
                 let mut sn = Vec::new();
                 let mut mh = Vec::new();
-                for (ytno, dropped_at, travel_s, ola, olo, dla, dlo) in legs {
+                let mut jt: Vec<Option<String>> = Vec::new();
+                for (ytno, dropped_at, travel_s, ola, olo, dla, dlo, jobtype) in legs {
                     let r = rg.route(ola, olo, dla, dlo);
                     yt.push(ytno);
                     ls.push(dropped_at);
                     act.push(travel_s);
                     mh.push(quay_manhattan_m(ola, olo, dla, dlo) as i32);
+                    jt.push(jobtype);
                     match r {
                         Some(rr) => {
                             rt.push(Some(rr.time_s as i32));
@@ -425,8 +445,8 @@ pub fn spawn_roadgraph_eval(pool: PgPool) {
                     }
                 }
                 let _ = sqlx::query(
-                    "INSERT INTO road_route_eval (ytno, leg_start, actual_s, route_time_s, route_dist_m, snapped, manh_m)
-                     SELECT * FROM UNNEST($1::text[], $2::timestamptz[], $3::int[], $4::int[], $5::int[], $6::bool[], $7::int[])",
+                    "INSERT INTO road_route_eval (ytno, leg_start, actual_s, route_time_s, route_dist_m, snapped, manh_m, jobtype)
+                     SELECT * FROM UNNEST($1::text[], $2::timestamptz[], $3::int[], $4::int[], $5::int[], $6::bool[], $7::int[], $8::text[])",
                 )
                 .bind(&yt)
                 .bind(&ls)
@@ -435,6 +455,7 @@ pub fn spawn_roadgraph_eval(pool: PgPool) {
                 .bind(&rd)
                 .bind(&sn)
                 .bind(&mh)
+                .bind(&jt)
                 .execute(&pool)
                 .await;
                 if n < 2000 {
