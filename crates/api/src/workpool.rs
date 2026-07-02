@@ -346,6 +346,26 @@ pub(crate) async fn build_workpool(pool: PgPool) -> Result<WorkpoolOut, AppError
                 }
             }
         }
+        // learned work-ETA residual: median(actual − predicted) per (crane, jobtype) from the shadow
+        // validation, DISPATCH-BAND horizon only (5–45 min; far predictions are re-plan-polluted).
+        // mig 0083, refreshed ~20 min by the pred logger. Self-recalibrating: predictions embed this
+        // term, so the residual converges toward 0 (integral controller, damped by the 7-day window).
+        // Measured need: LD near-horizon ran +21 min optimistic with NO static correction, and the DS
+        // static +600s was tuned on top of the ghost-transition bug fixed alongside this.
+        let bias_rows: Vec<(String, String, i32, Option<i32>)> =
+            sqlx::query_as("SELECT qc, jobtype, n, med_err_s FROM learn_work_eta_bias")
+                .fetch_all(&pool).await.unwrap_or_default();
+        let mut eta_bias: std::collections::HashMap<(String, char), i64> = std::collections::HashMap::new();
+        for (bqc, jt, n, med) in bias_rows {
+            let min_n = if bqc.is_empty() { 100 } else { 30 }; // '' = global-jobtype fallback row
+            if n < min_n {
+                continue;
+            }
+            if let Some(med) = med {
+                let j = if jt == "LD" { 'L' } else { 'D' };
+                eta_bias.insert((bqc, j), (med as i64).clamp(-900, 1800));
+            }
+        }
         let now = Utc::now();
         // work-ETA is a FIXED future instant (when the QC reaches a bay); anchor it to the data
         // snapshot (as_of), NOT now — else every poll re-anchors to a later "now" and the countdown
@@ -362,7 +382,21 @@ pub(crate) async fn build_workpool(pool: PgPool) -> Result<WorkpoolOut, AppError
         // (dispatch-relevant) range — confirmed by shadow validation (resolved_at − pred). Shift DS
         // work-ETA by this. The departure-based deadline_ts and slack_s use `total` and are
         // UNAFFECTED. Far-out predictions remain limited by queue-order reliability (seq), not this.
+        // NB tuned while the ghost-transition bug inflated ETAs — the learned residual layer
+        // (eta_bias, mig 0083) absorbs the recalibration automatically; keep this as a static prior.
         const DS_WORK_ETA_BIAS_S: i64 = 600;
+        // Scheduled crane stops: the terminal pauses at the MYT 00/08/16 shift/meal boundaries —
+        // measured on the shadow validation as prediction-error spikes of +436..+608s exactly at
+        // those three hours (the move-time cadence deliberately excludes gaps>300s, so work-ETA
+        // otherwise assumes a crane that never rests). Charge one stall per boundary the work waits
+        // through. MYT 00/08/16 = UTC 16/00/08 = epoch multiples of 8h, so a division counts them.
+        const SHIFT_BREAK_S: i64 = 500;
+        fn shift_breaks_between(a: DateTime<Utc>, b: DateTime<Utc>) -> i64 {
+            if b <= a {
+                return 0;
+            }
+            b.timestamp().div_euclid(28_800) - a.timestamp().div_euclid(28_800)
+        }
         // "10D-D" → (bay "10", deck/hold 'D', job 'D')
         fn parse_q(qn: &str) -> Option<(String, char, char)> {
             let dash = qn.find('-')?;
@@ -400,14 +434,25 @@ pub(crate) async fn build_workpool(pool: PgPool) -> Result<WorkpoolOut, AppError
                         .get(&(qc_id.clone(), job))
                         .copied()
                         .unwrap_or(if job == 'L' { LD_MOVE_S } else { DS_MOVE_S });
-                    let mut p = (qc.queues[i].remaining.max(0) as f64) * move_factor * move_s;
-                    if let (Some((pb, pdh, _)), Some((cb, cdh, _))) = (&prev, &cur) {
-                        if pb != cb {
-                            p += BAY_CHANGE_S;
-                        } else if job == 'L' && *pdh == 'H' && *cdh == 'D' {
-                            p += HATCH_LD_S;
-                        } else if job != 'L' && *pdh == 'D' && *cdh == 'H' {
-                            p += HATCH_DS_S;
+                    let remaining = qc.queues[i].remaining.max(0);
+                    let mut p = (remaining as f64) * move_factor * move_s;
+                    // Transition overhead (gantry/hatch) only for queues the crane still has to WORK.
+                    // A completed queue (remaining=0) is behind the crane: charging it a transition
+                    // added a GHOST ~180s per finished bay that inflated every later bay's work-ETA
+                    // (~21 min on an 8-bay-done vessel; measured: DS med error −579s on 4+-done
+                    // vessels vs −189s on 0–3) — the crane looked busier than it is, so Stage-1
+                    // under-ranked its urgency. `prev` still advances through completed queues so the
+                    // first remaining queue is charged the one REAL transition from the crane's
+                    // current bay.
+                    if remaining > 0 {
+                        if let (Some((pb, pdh, _)), Some((cb, cdh, _))) = (&prev, &cur) {
+                            if pb != cb {
+                                p += BAY_CHANGE_S;
+                            } else if job == 'L' && *pdh == 'H' && *cdh == 'D' {
+                                p += HATCH_LD_S;
+                            } else if job != 'L' && *pdh == 'D' && *cdh == 'H' {
+                                p += HATCH_DS_S;
+                            }
                         }
                     }
                     procs.push(p);
@@ -422,7 +467,15 @@ pub(crate) async fn build_workpool(pool: PgPool) -> Result<WorkpoolOut, AppError
                     let before = (total - cum_after - procs[k]).max(0.0);
                     let job = parse_q(&qc.queues[qi].queuename).map(|c| c.2).unwrap_or('D');
                     let bias = if job == 'L' { 0 } else { DS_WORK_ETA_BIAS_S };
-                    qc.queues[qi].work_eta_ts = Some(eta_anchor + chrono::Duration::seconds(before as i64 + bias));
+                    // + learned residual (per-crane, else global-jobtype, else 0) + shift-break stalls
+                    let learned = eta_bias
+                        .get(&(qc_id.clone(), job))
+                        .or_else(|| eta_bias.get(&(String::new(), job)))
+                        .copied()
+                        .unwrap_or(0);
+                    let raw = eta_anchor + chrono::Duration::seconds(before as i64 + bias + learned);
+                    let brk = shift_breaks_between(eta_anchor, raw) * SHIFT_BREAK_S;
+                    qc.queues[qi].work_eta_ts = Some(raw + chrono::Duration::seconds(brk));
                     qc.queues[qi].proc_s = Some(procs[k] as i64);
                     cum_after += procs[k];
                 }
@@ -702,6 +755,12 @@ pub fn spawn_dispatch_pred_logger(pool: PgPool) {
                     .execute(&pool)
                     .await;
             }
+            // learned work-ETA residual layer (mig 0083): refit ~20 min from freshly resolved rows.
+            if tick % 10 == 0 {
+                let _ = sqlx::query("REFRESH MATERIALIZED VIEW CONCURRENTLY learn_work_eta_bias")
+                    .execute(&pool)
+                    .await;
+            }
         }
     });
 }
@@ -718,7 +777,6 @@ pub(crate) struct Stage2Work {
     pub(crate) src_block: Option<String>,  // LD: pickup block; DS: None (pickup = the QC)
     pub(crate) n: i32,                      // containers in this bucket still needing a truck
     pub(crate) work_eta_ts: Option<DateTime<Utc>>, // when the QC reaches this work (deadline base)
-    pub(crate) lead_s: i64,                 // dispatch lead (p75 journey: DS 450 / LD 1180; see LEAD_*_S)
 }
 
 /// Build the Stage-2 work-demand list from the same engine the dispatch page uses (build_workpool):
@@ -746,7 +804,6 @@ pub(crate) async fn stage2_work_candidates(pool: PgPool) -> Result<Vec<Stage2Wor
     for c in &wp.candidates {
         let Some(qc) = c.qc.clone().filter(|s| !s.is_empty()) else { continue };
         let jt = c.jobtype.clone().unwrap_or_default();
-        let lead = if jt == "LD" { LEAD_LD_S } else { LEAD_DS_S };
         let work_eta = eta.get(&(qc.clone(), c.vessel.clone(), c.queuename.clone())).copied();
         out.push(Stage2Work {
             qc,
@@ -756,7 +813,6 @@ pub(crate) async fn stage2_work_candidates(pool: PgPool) -> Result<Vec<Stage2Wor
             src_block: c.src_block.clone(),
             n: c.n,
             work_eta_ts: work_eta,
-            lead_s: lead,
         });
     }
     Ok(out)
@@ -768,7 +824,7 @@ struct S2Summary {
     matches_30m: i64,
     switched_pct: Option<f64>,
     feasible_pct: Option<f64>,
-    l2_pct: Option<f64>,
+    routed_pct: Option<f64>,
     median_arrival_s: Option<f64>,
     vehicles: i64,
     works: i64,
@@ -825,7 +881,7 @@ pub async fn stage2_shadow(State(pool): State<PgPool>) -> Result<Json<Stage2Shad
         "SELECT count(*) AS matches_30m,
                 (100.0*count(*) FILTER (WHERE switched)/nullif(count(*),0))::float8 AS switched_pct,
                 (100.0*count(*) FILTER (WHERE feasible)/nullif(count(*),0))::float8 AS feasible_pct,
-                (100.0*count(*) FILTER (WHERE cost_tier='L2')/nullif(count(*),0))::float8 AS l2_pct,
+                (100.0*count(*) FILTER (WHERE cost_tier='R')/nullif(count(*),0))::float8 AS routed_pct,
                 (percentile_cont(0.5) WITHIN GROUP (ORDER BY arrival_s))::float8 AS median_arrival_s,
                 count(DISTINCT ytno) AS vehicles,
                 count(DISTINCT (qc, queuename, vessel)) AS works
@@ -935,7 +991,7 @@ pub struct HealthDispatchOut {
     thrash_pct: Option<f64>,
     feasible_pct: Option<f64>,
     savings_pct: Option<f64>,
-    l2_pct: Option<f64>,
+    routed_pct: Option<f64>,
     arr_p50_s: Option<f64>,
     arr_p90_s: Option<f64>,
     arrival_hist: Vec<HistBucket>,
@@ -957,12 +1013,12 @@ pub async fn health_dispatch(State(pool): State<PgPool>) -> Result<Json<HealthDi
     .await?;
     let up = last_tick_age_s.map(|a| a < 120).unwrap_or(false);
 
-    let (thrash_pct, feasible_pct, l2_pct, arr_p50_s, arr_p90_s): (
+    let (thrash_pct, feasible_pct, routed_pct, arr_p50_s, arr_p90_s): (
         Option<f64>, Option<f64>, Option<f64>, Option<f64>, Option<f64>,
     ) = sqlx::query_as(
         "SELECT (100.0*count(*) FILTER (WHERE switched)/nullif(count(*),0))::float8,
                 (100.0*count(*) FILTER (WHERE feasible)/nullif(count(*),0))::float8,
-                (100.0*count(*) FILTER (WHERE cost_tier='L2')/nullif(count(*),0))::float8,
+                (100.0*count(*) FILTER (WHERE cost_tier='R')/nullif(count(*),0))::float8,
                 (percentile_cont(0.5) WITHIN GROUP (ORDER BY arrival_s))::float8,
                 (percentile_cont(0.9) WITHIN GROUP (ORDER BY arrival_s))::float8
            FROM stage2_match_shadow WHERE ts > now() - interval '30 minutes'",
@@ -1015,7 +1071,7 @@ pub async fn health_dispatch(State(pool): State<PgPool>) -> Result<Json<HealthDi
 
     Ok(Json(HealthDispatchOut {
         up, last_tick_age_s, ticks_1h, matches_latest,
-        thrash_pct, feasible_pct, savings_pct, l2_pct, arr_p50_s, arr_p90_s,
+        thrash_pct, feasible_pct, savings_pct, routed_pct, arr_p50_s, arr_p90_s,
         arrival_hist, trend, decisions,
     }))
 }

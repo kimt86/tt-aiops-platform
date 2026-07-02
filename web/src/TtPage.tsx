@@ -469,10 +469,10 @@ function QcCol({ q, lang, ttState, working, mph, maxN, showDl, ourRecs, ourPicks
               // when the QC works THIS container = bay start + its share of the bay's processing
               const idx = moveIdx.get(mkey(m)) ?? 0;
               const workEtaMs = new Date(e.eta).getTime() + (idx / e.rem) * e.proc * 1000;
-              const lead = (m.jobtype === "LD" ? 20 : 5) * 60; // truck travel+handover
+              const lead = m.jobtype === "LD" ? 1180 : 450; // truck journey p75 (= backend LEAD_*_S)
               const dispatchSec = Math.round((workEtaMs - Date.now()) / 1000) - lead;
               const cls = dispatchSec < 120 ? "bad" : dispatchSec < 1800 ? "warn" : "ok";
-              return <span className={`jetw ${cls}`} title={k ? "이 컨테이너 배차 마감까지 남은 시간 = 작업 예정시각 − 트럭 리드타임(양하5/적하20분). 빨강=지금 배차" : "time until this container's dispatch deadline = work-ETA − truck lead; red = dispatch now"}>🏁 {clockDur(dispatchSec, k)}</span>;
+              return <span className={`jetw ${cls}`} title={k ? "이 컨테이너 배차 마감까지 남은 시간 = 작업 예정시각 − 트럭 리드타임(실측 여정 p75: 양하 7.5분/적하 20분). 빨강=지금 배차" : "time until this container's dispatch deadline = work-ETA − truck lead (measured journey p75: DS 7.5m / LD 20m); red = dispatch now"}>🏁 {clockDur(dispatchSec, k)}</span>;
             })()}
             {role === "past" && m.actv_ts && <span className="jetw rtg-actv" title={k ? "TOS ACTV — QC 양하 완료(트럭 적재). 검증 ACTV==QC move 완료 0초(n=3464)." : "TOS ACTV — QC discharged onto the truck (verified, n=3464)."}>{k ? "양하완료" : "discharged"}</span>}
           </div>
