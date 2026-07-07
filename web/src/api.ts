@@ -120,12 +120,12 @@ export interface CycleSummary {
   bucket_min: number; buckets: CycleBucket[]; trucks_list: CycleTruckAgg[];
 }
 export interface CycleRow {
-  dropped_at: string; pickup_at: string | null; pickup_arrived_at: string | null; pickup_left_at: string | null; assigned_at: string | null; arrived_at: string | null;
+  dropped_at: string;
   jobtype: string | null; vessel: string | null; voyage: string | null; container: string | null; qc: string | null;
   cycle_s: number | null; laden_leg_s: number | null; laden_leg_m: number | null;
   empty_leg_s: number | null; empty_leg_m: number | null; container_to_container: boolean;
-  // v2 shadow 6-event model (null where unobserved / no v2 row)
-  v2_opened_at: string | null; v2_empty_travel_start_at: string | null; v2_empty_arrived_at: string | null;
+  // Current 5-event model (null where unobserved / no v2 row): ①배차 → ②픽업도착 → ③픽업떠남 → ④부하도착 → ⑤드롭
+  v2_opened_at: string | null; v2_empty_arrived_at: string | null;
   v2_pickup_left_at: string | null; v2_laden_arrived_at: string | null;
 }
 export interface CycleDetail { ytno: string; hours: number; cycles: CycleRow[]; }

@@ -77,6 +77,12 @@ enum Command {
         #[arg(long, default_value = "oracle-prod")]
         target: String,
     },
+    /// Quay-crane (C/M/Z) move stream from MCH_OPERATION → qc_move_log (DS pickup + LD drop
+    /// handovers; TRK_ID always present). Incremental via etl_watermark. Run ~every 5min.
+    QcMoves {
+        #[arg(long, default_value = "oracle-prod")]
+        target: String,
+    },
     /// Hourly terminal weather (Open-Meteo, no Oracle) → weather_hourly. A travel-time
     /// feature (rain/wind/visibility). Run ~hourly.
     Weather {},
@@ -185,6 +191,10 @@ async fn main() -> Result<()> {
         Command::RtgMoves { target } => {
             let pool = db::pool().await?;
             wp_extractor::rtg_moves::tick_rtg_moves(&pool, &target).await?;
+        }
+        Command::QcMoves { target } => {
+            let pool = db::pool().await?;
+            wp_extractor::qc_moves::tick_qc_moves(&pool, &target).await?;
         }
         Command::Weather {} => {
             let pool = db::pool().await?;

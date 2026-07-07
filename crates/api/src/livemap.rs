@@ -384,6 +384,141 @@ impl Ring {
     }
 }
 
+// ── QC handover work-point: quay work-line + per-crane recency centroid ────────────────
+// A QC's GPS is spreader-mounted → it swings ship↔truck ~26m every crane cycle, and its
+// all-time centroid also smears the crane's whole gantry travel (~185m). Trucks don't swing
+// and their ARRIVED positions lie on ONE quay line (±11m, measured 2026-07). So: learn that
+// line, keep a recency-decayed centroid of recent handovers per crane, and project it onto the
+// line → the current handover point (~11-15m) that tracks the gantry with the swing removed.
+const CRANE_WP_TAU_S: f64 = 900.0; // ~15-min recency half-life for the per-crane centroid
+const REF_LAT: f64 = 2.926; // terminal-local metre origin (keeps the PCA well-conditioned)
+const REF_LON: f64 = 101.29;
+fn to_local(lat: f64, lon: f64) -> (f64, f64) {
+    let mlon = 111_320.0 * REF_LAT.to_radians().cos();
+    ((lon - REF_LON) * mlon, (lat - REF_LAT) * 111_320.0)
+}
+fn from_local(x: f64, y: f64) -> (f64, f64) {
+    let mlon = 111_320.0 * REF_LAT.to_radians().cos();
+    (REF_LAT + y / 111_320.0, REF_LON + x / mlon) // (lat, lon)
+}
+
+/// Total-least-squares (PCA) line fit, accumulated from crane truck-ARRIVED positions (local m).
+#[derive(Clone, Copy, Default)]
+struct QuayLine {
+    n: f64,
+    sx: f64,
+    sy: f64,
+    sxx: f64,
+    syy: f64,
+    sxy: f64,
+}
+impl QuayLine {
+    fn push(&mut self, x: f64, y: f64) {
+        self.n += 1.0;
+        self.sx += x;
+        self.sy += y;
+        self.sxx += x * x;
+        self.syy += y * y;
+        self.sxy += x * y;
+    }
+    /// (point_x, point_y, unit_dir_x, unit_dir_y) of the fitted line; None until it's confident.
+    fn fit(&self) -> Option<(f64, f64, f64, f64)> {
+        if self.n < 50.0 {
+            return None;
+        }
+        let n = self.n;
+        let (mx, my) = (self.sx / n, self.sy / n);
+        let cxx = self.sxx / n - mx * mx;
+        let cyy = self.syy / n - my * my;
+        let cxy = self.sxy / n - mx * my;
+        let tr = cxx + cyy;
+        let disc = (tr * tr / 4.0 - (cxx * cyy - cxy * cxy)).max(0.0).sqrt();
+        let l1 = tr / 2.0 + disc; // major eigenvalue = variance along the line
+        if l1 < 400.0 {
+            return None; // <~20 m along-span → not yet a line
+        }
+        let (mut dx, mut dy) = if cxy.abs() > 1e-9 {
+            (l1 - cyy, cxy)
+        } else if cxx >= cyy {
+            (1.0, 0.0)
+        } else {
+            (0.0, 1.0)
+        };
+        let norm = (dx * dx + dy * dy).sqrt();
+        if norm < 1e-9 {
+            return None;
+        }
+        dx /= norm;
+        dy /= norm;
+        Some((mx, my, dx, dy))
+    }
+    /// Project a local point onto the fitted line (identity until the line is confident).
+    fn project(&self, x: f64, y: f64) -> (f64, f64) {
+        match self.fit() {
+            Some((mx, my, dx, dy)) => {
+                let t = (x - mx) * dx + (y - my) * dy;
+                (mx + t * dx, my + t * dy)
+            }
+            None => (x, y),
+        }
+    }
+}
+
+/// Per-crane time-decayed centroid of recent truck-ARRIVED (handover) positions, in local m.
+#[derive(Clone, Copy, Default)]
+struct CraneWp {
+    last_ms: i64,
+    wx: f64,
+    wy: f64,
+    w: f64,
+    obs: u64,
+}
+impl CraneWp {
+    fn push(&mut self, x: f64, y: f64, now_ms: i64) {
+        if self.w > 0.0 && self.last_ms > 0 {
+            let dt = ((now_ms - self.last_ms).max(0) as f64) / 1000.0;
+            let decay = (-dt / CRANE_WP_TAU_S).exp();
+            self.wx *= decay;
+            self.wy *= decay;
+            self.w *= decay;
+        }
+        self.wx += x;
+        self.wy += y;
+        self.w += 1.0;
+        self.last_ms = now_ms;
+        self.obs += 1;
+    }
+    fn centroid(&self) -> Option<(f64, f64)> {
+        (self.w > 0.3).then(|| (self.wx / self.w, self.wy / self.w))
+    }
+}
+
+/// Resolve each crane to its handover WORK-POINT for dispatch: the recency centroid projected
+/// onto the quay line (swing-free, gantry-tracking); else the live GPS projected onto the line
+/// (strips the spreader swing) for cranes with no recent handover. classify_tt still falls back
+/// to the plain `centroids` when a crane has neither.
+fn resolve_crane_wp(
+    line: &QuayLine,
+    cwp: &HashMap<String, CraneWp>,
+    live: &HashMap<String, (f64, f64)>,
+) -> HashMap<String, (f64, f64)> {
+    let mut out: HashMap<String, (f64, f64)> = HashMap::with_capacity(cwp.len() + live.len());
+    for (id, w) in cwp {
+        if let Some((cx, cy)) = w.centroid() {
+            let (px, py) = line.project(cx, cy);
+            out.insert(id.clone(), from_local(px, py));
+        }
+    }
+    for (id, &(la, lo)) in live {
+        out.entry(id.clone()).or_insert_with(|| {
+            let (x, y) = to_local(la, lo);
+            let (px, py) = line.project(x, y);
+            from_local(px, py)
+        });
+    }
+    out
+}
+
 /// Shared ingest state.
 pub struct LiveMap {
     devices: RwLock<HashMap<String, Pos>>,
@@ -426,6 +561,11 @@ pub struct LiveMap {
     // few 30s ticks, written by spawn_qc_wait_logger and read by the positions endpoint. Replaces
     // the jumpy per-request topos1 count. (count, avg_wait_s).
     qc_wait_live: RwLock<Option<(usize, Option<i64>)>>,
+    // QC handover model: one quay work-line (from all crane truck-ARRIVED positions) + a
+    // per-crane recency centroid. Work-point = recency centroid projected onto the line
+    // (swing-free, gantry-tracking). Blocks/RTG stay on `centroids` above.
+    quay_line: RwLock<QuayLine>,
+    crane_wp: RwLock<HashMap<String, CraneWp>>,
 }
 
 /// Cap on the in-memory completed-cycle buffer. If the flusher stalls we drop the oldest
@@ -449,6 +589,8 @@ impl LiveMap {
             cycle_v2: Mutex::new(VecDeque::new()),
             soon_idle_open: Mutex::new(HashSet::new()),
             qc_wait_live: RwLock::new(None),
+            quay_line: RwLock::new(QuayLine::default()),
+            crane_wp: RwLock::new(HashMap::new()),
             connected: AtomicBool::new(false),
             messages: AtomicU64::new(0),
             reconnects: AtomicU64::new(0),
@@ -593,7 +735,20 @@ pub struct PositionsOut {
     devices: Vec<DeviceOut>,
 }
 
-const RTG_BAY_M: f64 = 30.0; // RTG within this of a TT ≈ same bay (engaged)
+// RTG within this of a TT ≈ engaged. Measured at ground-truth DS-drop handovers (rtg_move_log ⨝
+// rtg_pos_hist ⨝ truck_pos_hist): RTG↔truck separation is ~40m median (crane antenna offset from
+// the truck lane, NOT GPS jitter — pure jitter is ~2m). 30m caught only 32%; 50m catches 63%.
+// The offset is ~isotropic (along 28 / cross 21), so an anisotropic box does NOT beat a wider circle.
+const RTG_BAY_M: f64 = 50.0;
+// loaded TT stopped within this of its drop-target (topos1) centroid ≈ arrived (websocket geofence,
+// replaces TOS rtg_active). Tuned by measured recall/precision vs crane ground truth (comparable load):
+//   70m  → recall DS59/LD61, precision 96%   ← chosen (Pareto point)
+//   85m  → recall DS61/LD59, precision 90%   ← DOMINATED (≈70m recall, worse precision) → dropped
+//   100m → recall DS73/LD68, precision 87%   ← recall-max, but −9pp precision (early/false arrivals)
+// The 70→85m band adds false arrivals without real catches; the meaningful recall gain is only at
+// 100m, at a precision cost. 70m is the safe default (recall still +10pp over the 50% baseline).
+// Gated on the truck's OWN topos1. Bump to 100m if max recall is worth the precision hit.
+const GEOFENCE_DROP_M: f64 = 70.0;
 const IDLE_SPEED_KMH: f64 = 3.0;
 // A TT within this of its ASSIGNED quay crane's GPS ≈ arrived at the crane. Used ONLY to
 // populate the SHADOW crane-arrival columns (observational); the live phase logic is untouched.
@@ -721,7 +876,7 @@ struct Classed {
 ///  - wait_rtg: loaded + ARRIVED at block but no RTG near yet (arrived ≠ soon-idle)
 fn classify_tt(
     p: &Pos,
-    aj: Option<&AssignedJob>,
+    _aj: Option<&AssignedJob>, // TOS work-pool — no longer used (real-time path is websocket-only)
     rtgs: &[(f64, f64)],
     plc: &HashMap<String, Plc>,
     cranes: &HashMap<String, (f64, f64)>,
@@ -729,7 +884,12 @@ fn classify_tt(
     now: i64,
 ) -> Classed {
     let st = |state, reason: Option<String>| Classed { state, reason, ..Default::default() };
-    let assigned = aj.is_some(); // in live_assigned_tt (any active job)
+    // WEBSOCKET-ONLY (no TOS work-pool in the real-time decision path — TOS is offline/learning
+    // only): a pending mission = a live or latched container/target. latched_* persist across feed
+    // gaps that clear the raw fields, so an intermittent feed doesn't drop the assignment.
+    let assigned = p.container1.as_deref().is_some_and(|s| !s.is_empty())
+        || p.latched_container.as_deref().is_some_and(|s| !s.is_empty())
+        || p.latched_topos.as_deref().is_some_and(|s| !s.is_empty());
     let loaded = p.container1.as_deref().is_some_and(|s| !s.is_empty());
     if !loaded {
         if p.speed < IDLE_SPEED_KMH {
@@ -762,54 +922,55 @@ fn classify_tt(
         };
         return Classed { state: "empty_travel", reason: Some(reason), dest_remaining_m: rem_r, swappable: Some(swappable), ..Default::default() };
     }
-    if p.arrival.as_deref() != Some("ARRIVED") {
-        return st("delivering", Some("적재 이동 중".into()));
-    }
+    // ── loaded: which side UNLOADS this job (= frees the TT)? LD at the quay crane; DS/MO/MI at a
+    // block. A loaded TT whose current target (topos1) is the OTHER side just picked up → delivering.
     let topos = p.topos1.as_deref().unwrap_or("");
     let is_crane = is_crane_code(topos);
-    // Which side UNLOADS this job (= frees the TT)? LD unloads at the quay crane; DS/MO/MI at a
-    // block. A loaded TT ARRIVED at the *other* side just picked up → still delivering.
     let drop_at_crane = match p.jobtype.as_deref().unwrap_or("") {
         "LD" => true,
         "DS" | "MO" | "MI" => false,
         _ => is_crane,
     };
-    if drop_at_crane {
-        if !is_crane {
-            return st("delivering", Some("적재 이동 (안벽行)".into()));
-        }
-        let plc_ok = plc.get(topos).is_some_and(|c| (now - c.last_seen_ms) / 1000 <= STALE_AFTER_S);
-        let reason = if plc_ok { format!("안벽 {topos} 핸드오버 · PLC 확인") } else { format!("안벽 {topos} 핸드오버") };
-        return st("soon_idle", Some(reason));
+    if drop_at_crane && !is_crane {
+        return st("delivering", Some("적재 이동 (안벽行)".into()));
     }
-    if is_crane {
+    if !drop_at_crane && is_crane {
         return st("delivering", Some("적재 이동 (블록行)".into()));
     }
-    // block handover — RTG engaged via GPS (≈ same bay) OR TOS says the order's RTG is active.
-    // GPS misses DS RTGs (no PLC, nearest fix is often >30m), so the authoritative TOS ACTV
-    // signal (JOB_ODR_ACTV_DT) fills that gap. Kept as a distinct reason so the upgrade is
-    // auditable. See research/soon-idle-tos (연구 2차).
-    let tos_active = aj.is_some_and(|a| a.rtg_active);
+    // WEBSOCKET-ONLY arrival at the drop: the ARRIVED flag OR a geofence (stopped within
+    // GEOFENCE_DROP_M of the drop target). The geofence rescues arrivals the ARRIVED flag misses —
+    // this is what replaces the TOS `rtg_active` signal (now offline/learning-only). GPS misses DS
+    // RTGs (no PLC), so being physically stopped at the drop block is the real-time arrival signal.
+    let drop_pos = if is_crane {
+        cranes.get(topos).copied().or_else(|| centroids.get(topos).map(|c| (c.lat, c.lon)))
+    } else {
+        centroids.get(topos).or_else(|| centroids.get(block_prefix(topos))).map(|c| (c.lat, c.lon))
+    };
+    let drop_dist = drop_pos.map(|dp| dist_m((p.lat, p.lon), dp));
+    let arrived_flag = p.arrival.as_deref() == Some("ARRIVED");
+    let geofence_arrived = p.speed < IDLE_SPEED_KMH && drop_dist.is_some_and(|d| d <= GEOFENCE_DROP_M);
+    if !arrived_flag && !geofence_arrived {
+        return st("delivering", Some("적재 이동 중".into()));
+    }
+    let geo_tag = if !arrived_flag { " · 지오펜스" } else { "" };
+    if drop_at_crane {
+        // LD drop at the quay crane
+        let plc_ok = plc.get(topos).is_some_and(|c| (now - c.last_seen_ms) / 1000 <= STALE_AFTER_S);
+        let src = if plc_ok { " · PLC 확인" } else { geo_tag };
+        return st("soon_idle", Some(format!("안벽 {topos} 핸드오버{src}")));
+    }
+    // DS/MO/MI drop at a block: RTG GPS ≤30m = engaged (soon_idle); else arrived-and-waiting
+    // (wait_rtg). Both are dispatch candidates with the same free-in.
     let nearest = rtgs.iter().map(|r| dist_m((p.lat, p.lon), *r)).fold(f64::INFINITY, f64::min);
     let d = nearest.is_finite().then(|| (nearest * 10.0).round() / 10.0);
-    match (d, tos_active) {
-        (Some(d), _) if d <= RTG_BAY_M => {
-            Classed { state: "soon_idle", reason: Some(format!("블록 RTG 근접 {d:.0}m")), nearest_rtg_m: Some(d), ..Default::default() }
+    match d {
+        Some(dm) if dm <= RTG_BAY_M => {
+            Classed { state: "soon_idle", reason: Some(format!("블록 RTG 근접 {dm:.0}m")), nearest_rtg_m: Some(dm), ..Default::default() }
         }
-        (_, true) => {
-            // ACTV set = the QC already discharged this box onto the truck (verified: ACTV_DT ==
-            // QC move complete, 0s). The truck is at/near the block waiting for the RTG (not yet
-            // GPS-engaged) — "approaching", ~12 min median from QC-handover to free.
-            let reason = match d {
-                Some(d) => format!("QC 양하 완료 · RTG 대기 (GPS {d:.0}m)"),
-                None => "QC 양하 완료 · RTG 대기 (GPS 미관측)".into(),
-            };
-            Classed { state: "approaching", reason: Some(reason), nearest_rtg_m: d, ..Default::default() }
+        _ => {
+            let where_txt = drop_dist.map(|x| format!("{x:.0}m")).unwrap_or_else(|| "미학습".into());
+            Classed { state: "wait_rtg", reason: Some(format!("블록 도착{geo_tag} · RTG 대기 ({where_txt})")), nearest_rtg_m: d, ..Default::default() }
         }
-        (Some(d), false) => {
-            Classed { state: "wait_rtg", reason: Some(format!("도착 · RTG 대기 (최근접 {d:.0}m)")), nearest_rtg_m: Some(d), ..Default::default() }
-        }
-        (None, false) => st("wait_rtg", Some("도착 · RTG 미관측".into())),
     }
 }
 
@@ -861,6 +1022,13 @@ pub async fn positions(State(lm): State<Arc<LiveMap>>, State(pool): State<PgPool
         .filter(|(_, p)| matches!(p.cls.as_str(), "C" | "M" | "Z") && (now - p.last_seen_ms) / 1000 <= STALE_AFTER_S)
         .map(|(id, p)| (id.clone(), (p.lat, p.lon)))
         .collect();
+    // dispatch uses the swing-free QC WORK-POINT (recency centroid / live GPS, projected onto the
+    // quay line), not the raw spreader GPS. classify_tt falls back to `centroids` for the rest.
+    let cranes = {
+        let line = *lm.quay_line.read().await;
+        let g = lm.crane_wp.read().await;
+        resolve_crane_wp(&line, &g, &cranes)
+    };
     let mut devices: Vec<DeviceOut> = map
         .iter()
         .filter_map(|(id, p)| {
@@ -1343,6 +1511,11 @@ pub fn spawn_soon_idle_logger(lm: Arc<LiveMap>, pool: PgPool) {
                     .filter(|(_, p)| matches!(p.cls.as_str(), "C" | "M" | "Z") && (now - p.last_seen_ms) / 1000 <= STALE_AFTER_S)
                     .map(|(id, p)| (id.clone(), (p.lat, p.lon)))
                     .collect();
+                let cranes = {
+                    let line = *lm.quay_line.read().await;
+                    let g = lm.crane_wp.read().await;
+                    resolve_crane_wp(&line, &g, &cranes)
+                };
                 let mut cur: HashMap<String, String> = HashMap::new();
                 let mut soon: Vec<PredRow> = Vec::new();
                 for (id, p) in devices.iter() {
@@ -1457,6 +1630,11 @@ pub fn spawn_free_in_logger(lm: Arc<LiveMap>, pool: PgPool) {
                 let cranes: HashMap<String, (f64, f64)> = devices.iter()
                     .filter(|(_, p)| matches!(p.cls.as_str(), "C" | "M" | "Z") && (now - p.last_seen_ms) / 1000 <= STALE_AFTER_S)
                     .map(|(id, p)| (id.clone(), (p.lat, p.lon))).collect();
+                let cranes = {
+                    let line = *lm.quay_line.read().await;
+                    let g = lm.crane_wp.read().await;
+                    resolve_crane_wp(&line, &g, &cranes)
+                };
                 let mut out = Vec::new();
                 for (id, p) in devices.iter() {
                     if p.cls != "TT" || (now - p.last_seen_ms) / 1000 > STALE_AFTER_S {
@@ -1580,10 +1758,27 @@ pub fn spawn_learn_persist(lm: Arc<LiveMap>, pool: PgPool) {
                 let c = lm.centroids.read().await;
                 c.iter().map(|(k, v)| (k.clone(), *v)).collect()
             };
+            let line = *lm.quay_line.read().await;
+            let cwp: HashMap<String, CraneWp> = lm.crane_wp.read().await.clone();
             for (topos, c) in &snap {
                 if c.obs == 0 {
                     continue;
                 }
+                // QC: replace the swing-smeared all-time centroid with the recency handover
+                // centroid projected onto the learned quay line (falls back to the plain
+                // centroid when there's no recent handover / the line isn't fitted yet).
+                let (plat, plon, pspread) = if is_crane_code(topos) {
+                    match cwp.get(topos).and_then(|w| w.centroid()) {
+                        Some((cx, cy)) => {
+                            let (px, py) = line.project(cx, cy);
+                            let (la, lo) = from_local(px, py);
+                            (la, lo, 15.0_f64)
+                        }
+                        None => (c.lat, c.lon, c.spread_m()),
+                    }
+                } else {
+                    (c.lat, c.lon, c.spread_m())
+                };
                 if let Err(e) = sqlx::query(
                     "INSERT INTO learn_topos_point (topos, is_crane, lat, lon, n, obs, spread_m, updated_at)
                        VALUES ($1,$2,$3,$4,$5,$6,$7, now())
@@ -1592,11 +1787,11 @@ pub fn spawn_learn_persist(lm: Arc<LiveMap>, pool: PgPool) {
                 )
                 .bind(topos)
                 .bind(is_crane_code(topos))
-                .bind(c.lat)
-                .bind(c.lon)
+                .bind(plat)
+                .bind(plon)
                 .bind(c.n as i32)
                 .bind(c.obs as i64)
-                .bind(c.spread_m())
+                .bind(pspread)
                 .execute(&pool)
                 .await
                 {
@@ -2745,10 +2940,19 @@ async fn ingest_text(lm: &Arc<LiveMap>, text: &str) {
         if let Some(t) = pos.topos1.as_deref() {
             if !t.is_empty() {
                 let (full, pre) = (t.to_string(), block_prefix(t).to_string());
-                let mut c = lm.centroids.write().await;
-                c.entry(full).or_default().push(lat, lon);
-                if pre != t {
-                    c.entry(pre).or_default().push(lat, lon);
+                {
+                    let mut c = lm.centroids.write().await;
+                    c.entry(full).or_default().push(lat, lon);
+                    if pre != t {
+                        c.entry(pre).or_default().push(lat, lon);
+                    }
+                }
+                // QC handover: also feed the quay work-line + per-crane recency centroid — a
+                // swing-free handover point (block/RTG keep the plain centroid above).
+                if is_crane_code(t) {
+                    let (x, y) = to_local(lat, lon);
+                    lm.quay_line.write().await.push(x, y);
+                    lm.crane_wp.write().await.entry(t.to_string()).or_default().push(x, y, now);
                 }
             }
         }
@@ -3491,6 +3695,11 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                 let cranes: HashMap<String, (f64, f64)> = map.iter()
                     .filter(|(_, p)| matches!(p.cls.as_str(), "C" | "M" | "Z") && (now - p.last_seen_ms) / 1000 <= STALE_AFTER_S)
                     .map(|(id, p)| (id.clone(), (p.lat, p.lon))).collect();
+                let cranes = {
+                    let line = *lm.quay_line.read().await;
+                    let g = lm.crane_wp.read().await;
+                    resolve_crane_wp(&line, &g, &cranes)
+                };
                 let mut v = Vec::new();
                 for (id, p) in map.iter() {
                     if p.cls != "TT" || (now - p.last_seen_ms) / 1000 > STALE_AFTER_S {
@@ -3873,6 +4082,11 @@ pub fn spawn_pos_hist(lm: Arc<LiveMap>, pool: PgPool) {
                 let cranes: HashMap<String, (f64, f64)> = map.iter()
                     .filter(|(_, p)| matches!(p.cls.as_str(), "C" | "M" | "Z") && (now - p.last_seen_ms) / 1000 <= STALE_AFTER_S)
                     .map(|(id, p)| (id.clone(), (p.lat, p.lon))).collect();
+                let cranes = {
+                    let line = *lm.quay_line.read().await;
+                    let g = lm.crane_wp.read().await;
+                    resolve_crane_wp(&line, &g, &cranes)
+                };
                 map.iter()
                     .filter(|(_, p)| p.cls == "TT" && (now - p.last_seen_ms) / 1000 <= STALE_AFTER_S)
                     .map(|(id, p)| {
@@ -3899,6 +4113,110 @@ pub fn spawn_pos_hist(lm: Arc<LiveMap>, pool: PgPool) {
             n += 1;
             if n % 120 == 0 {
                 let _ = sqlx::query("DELETE FROM truck_pos_hist WHERE ts < now() - interval '2 days'").execute(&pool).await;
+            }
+        }
+    });
+}
+
+/// RTG/ES yard-crane GPS history → `rtg_pos_hist` (mig 0086). RTGs have NO PLC (unlike QC), so GPS
+/// proximity is the only live "RTG engaged with this TT" signal — yet it fires for just ~16% of DS
+/// drop handovers. RTG GPS was never persisted before. Stores each FRESH fix (dedup by last_seen),
+/// INCLUDING stationary jitter — that scatter is exactly what the handover-detection study needs.
+/// Matched offline against `rtg_move_log` (st_ts/comp_ts) ground truth. 3-day prune.
+pub fn spawn_rtg_pos_hist(lm: Arc<LiveMap>, pool: PgPool) {
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(Duration::from_secs(3));
+        let mut last_seen: HashMap<String, i64> = HashMap::new();
+        let mut n = 0u64;
+        loop {
+            ticker.tick().await;
+            if !lm.connected.load(Ordering::Relaxed) {
+                continue;
+            }
+            let now = Utc::now().timestamp_millis();
+            let ts = Utc::now();
+            // one row per NEW fix (last_seen advanced) — keeps stationary jitter, skips stale repeats
+            let fixes: Vec<(String, i64, f64, f64)> = {
+                let map = lm.devices.read().await;
+                map.iter()
+                    .filter(|(_, p)| matches!(p.cls.as_str(), "RTG" | "ES") && (now - p.last_seen_ms) / 1000 <= STALE_AFTER_S)
+                    .filter_map(|(id, p)| {
+                        let fresh = last_seen.get(id).is_none_or(|&ls| p.last_seen_ms > ls);
+                        fresh.then(|| (id.clone(), p.last_seen_ms, p.lat, p.lon))
+                    })
+                    .collect()
+            };
+            for f in &fixes {
+                last_seen.insert(f.0.clone(), f.1);
+            }
+            if fixes.is_empty() {
+                continue;
+            }
+            let machnos: Vec<String> = fixes.iter().map(|r| r.0.clone()).collect();
+            let lats: Vec<f64> = fixes.iter().map(|r| r.2).collect();
+            let lons: Vec<f64> = fixes.iter().map(|r| r.3).collect();
+            let _ = sqlx::query(
+                "INSERT INTO rtg_pos_hist (ts, machno, lat, lon)
+                 SELECT $1::timestamptz, u.machno, u.lat, u.lon
+                   FROM unnest($2::text[], $3::float8[], $4::float8[]) AS u(machno, lat, lon)
+                 ON CONFLICT (machno, ts) DO NOTHING",
+            )
+            .bind(ts).bind(&machnos).bind(&lats).bind(&lons)
+            .execute(&pool).await;
+            n += 1;
+            if n % 200 == 0 {
+                let _ = sqlx::query("DELETE FROM rtg_pos_hist WHERE ts < now() - interval '3 days'").execute(&pool).await;
+            }
+        }
+    });
+}
+
+/// Phase-2 correction (mig 0088): pin the PICKUP completion (③ 픽업 떠남 = 상차 완료) from the TOS
+/// crane ground truth. A crane's comp_ts is truck-relevant ONLY for LOAD-onto-truck ops = the two
+/// PICKUPS: DS pickup = QC discharge (qc_move_log, jobtype DS); LD pickup = RTG load (rtg_move_log,
+/// jobtype LD). (Drops are UNLOAD-from-truck → comp_ts lands the box on ship/block AFTER the truck
+/// was freed, so NOT correctable here — truck-free stays GPS.) Keeps the GPS estimate (pickup_left_at)
+/// and adds the truth alongside (pickup_done_at). Matched by (truck, container) via
+/// tt_cycle_log.container ⨝ crane_log.contno. Every 5min over recently-dropped, still-uncorrected
+/// cycles (crane data lands within ~7min). All format! args are code constants (no injection).
+pub fn spawn_cycle_pickup_correct(pool: PgPool) {
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(Duration::from_secs(300));
+        // (cycle jobtype, crane log table, crane-move jobtype, source tag)
+        let jobs: [(&str, &str, &str, &str); 2] =
+            [("DS", "qc_move_log", "DS", "qc"), ("LD", "rtg_move_log", "LD", "rtg")];
+        loop {
+            ticker.tick().await;
+            for (cyc_jt, log_tbl, log_jt, src) in jobs {
+                let sql = format!(
+                    "WITH matched AS (
+                       SELECT c.ytno, c.dropped_at,
+                         -- pickup completion must sit in the pickup window: after pickup ARRIVAL
+                         -- and before LADEN arrival. Guards the ~11% (DS) QC matches whose comp
+                         -- lands past the laden drive (QC comp can lag / mismatch). Confirmed:
+                         -- ST_DT = job-queue start (not physical); comp = physical completion.
+                         (SELECT q.comp_ts FROM {log_tbl} q
+                            WHERE q.trk_id = c.ytno AND q.contno = v1.container AND q.jobtype = '{log_jt}'
+                              AND q.comp_ts BETWEEN COALESCE(c.empty_arrived_at, c.opened_at - interval '15 min')
+                                                AND COALESCE(c.laden_arrived_at, c.dropped_at)
+                            ORDER BY abs(extract(epoch FROM q.comp_ts - c.opened_at)) LIMIT 1) AS done_ts
+                       FROM tt_cycle_v2 c
+                       JOIN tt_cycle_log v1 ON v1.ytno = c.ytno AND v1.dropped_at = c.dropped_at
+                      WHERE c.jobtype = '{cyc_jt}' AND c.pickup_done_at IS NULL AND c.opened_at IS NOT NULL
+                        AND c.dropped_at > now() - interval '2 hours' AND v1.container IS NOT NULL
+                     )
+                     UPDATE tt_cycle_v2 c
+                        SET pickup_done_at = m.done_ts, pickup_done_src = '{src}'
+                       FROM matched m
+                      WHERE c.ytno = m.ytno AND c.dropped_at = m.dropped_at AND m.done_ts IS NOT NULL"
+                );
+                match sqlx::query(&sql).execute(&pool).await {
+                    Ok(r) if r.rows_affected() > 0 => {
+                        tracing::info!(jobtype = cyc_jt, source = src, corrected = r.rows_affected(), "cycle pickup corrected")
+                    }
+                    Ok(_) => {}
+                    Err(e) => tracing::warn!(jobtype = cyc_jt, error = %e, "cycle pickup correct failed"),
+                }
             }
         }
     });

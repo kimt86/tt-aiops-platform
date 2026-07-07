@@ -6,6 +6,7 @@ pub mod db;
 pub mod handover;
 pub mod kpis;
 pub mod params;
+pub mod qc_moves;
 pub mod rtg_moves;
 pub mod runner;
 pub mod shift;

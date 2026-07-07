@@ -1,10 +1,9 @@
-//! Yard-crane (RTG/ES) move stream from MCH_OPERATION → rtg_move_log. The dashboard's KPI
-//! extractor filters MCH_OPERATION to QC (^C), so the RTG side was never landed — yet RTG moves
-//! ARE logged in detail (ST_DT start + COMPDATE||COMPTIME complete) for the full work mix
-//! (DS/LD/RH/AH/GI/GO/MI/MO). DS handovers are only ~20% of an RTG's moves; the rest (reshuffles,
-//! gate, repositioning) is what our DS truck waits behind. This stream gives the RTG's real
-//! backlog as a wait-prediction feature. Incremental via etl_watermark (stream='rtg_move').
-//! See research/rtg-work-cycle.
+//! Quay-crane (QC: C/M/Z) move stream from MCH_OPERATION → qc_move_log. Parallel to `rtg_moves`
+//! (RTG/ES yard side). QC↔truck handovers are the other two of the four cycle handovers: DS pickup
+//! (QC discharges ship → truck) and LD drop (truck → QC loads onto ship). Every QC move carries a
+//! truck (TRK_ID 100%), so comp_ts is the physical handover completion — the Phase-2 ground truth
+//! that backfills/corrects the websocket-estimated cycle timestamps. Incremental via etl_watermark
+//! (stream='qc_move'). See architecture/cycle-decomposition (§5) and rtg_moves.
 
 use anyhow::{Context, Result};
 use chrono::NaiveDate;
@@ -16,7 +15,7 @@ use crate::kpis::common::run_logged;
 use crate::runner::Toolbox;
 use crate::workpool::parse_etw; // shared MYT "YYYYMMDDHH24MISS[mmm]" → UTC parser
 
-const STREAM: &str = "rtg_move";
+const STREAM: &str = "qc_move";
 const FETCH_CAP: u32 = 5000;
 
 #[derive(Debug, Deserialize)]
@@ -32,12 +31,12 @@ struct MoveRow {
     status: Option<String>,  // MCH_OPER_STATUS: F=Full / M=empty(MT)
 }
 
-/// One incremental poll: upsert yard-crane moves completed since the watermark, advance it.
-pub async fn tick_rtg_moves(pool: &PgPool, target: &str) -> Result<()> {
+/// One incremental poll: upsert quay-crane moves completed since the watermark, advance it.
+pub async fn tick_qc_moves(pool: &PgPool, target: &str) -> Result<()> {
     let today = wp_core::shift::terminal_now();
     let day = today.format("%Y%m%d").to_string();
     let run_date = today.date_naive();
-    run_logged(pool, "RTG_MOVE", run_date, |_| async move {
+    run_logged(pool, "QC_MOVE", run_date, |_| async move {
         // watermark = last move comp seen (text "YYYYMMDDHHMMSS"). First run: start of today so
         // we self-backfill today (FETCH_CAP per poll, ORDER BY comp ASC → catches up over polls).
         let wm: Option<String> = sqlx::query_scalar(
@@ -48,8 +47,9 @@ pub async fn tick_rtg_moves(pool: &PgPool, target: &str) -> Result<()> {
         .await?;
         let wm = wm.unwrap_or_else(|| format!("{day}000000"));
 
-        // COMPDATE='today' uses IDX_MCH_OPERATION_COMPDATE; comp>wm + REGEXP(RTG|ES) post-filter.
-        // Same scan profile as the 5-min MPH extractor. Excludes QC (already in MPH) and trucks.
+        // COMPDATE='today' uses IDX_MCH_OPERATION_COMPDATE; comp>wm + REGEXP(C|M|Z) post-filter.
+        // Quay cranes only (yard RTG/ES land in rtg_move_log; trucks/RS excluded). Every QC move
+        // has a truck → each row is a real DS-pickup or LD-drop handover.
         let sql = format!(
             "SELECT MCH_OPER_MACHNO AS machno, SUBSTR(MCH_OPER_CONTNO,1,11) AS contno,
                     MCH_OPER_SEQNO AS seqno, MCH_OPER_JOBTYPE AS jobtype, TRK_ID AS trk_id,
@@ -58,13 +58,13 @@ pub async fn tick_rtg_moves(pool: &PgPool, target: &str) -> Result<()> {
                FROM TOSADM.MCH_OPERATION
               WHERE MCH_OPER_COMPDATE = '{day}'
                 AND MCH_OPER_COMPDATE||MCH_OPER_COMPTIME > '{wm}'
-                AND REGEXP_LIKE(MCH_OPER_MACHNO, '^(RTG|ES)')
+                AND REGEXP_LIKE(MCH_OPER_MACHNO, '^(C|M|Z)[0-9]')
                 AND LENGTH(MCH_OPER_COMPTIME) >= 6
               ORDER BY MCH_OPER_COMPDATE||MCH_OPER_COMPTIME
               FETCH FIRST {FETCH_CAP} ROWS ONLY"
         );
         let raw = Toolbox::from_env(target)?.run_sql(&sql).await?;
-        let rows: Vec<MoveRow> = parse_rows(&raw).context("parsing rtg move rows")?;
+        let rows: Vec<MoveRow> = parse_rows(&raw).context("parsing qc move rows")?;
 
         let mut tx = pool.begin().await?;
         let mut max_comp: Option<String> = None;
@@ -80,7 +80,7 @@ pub async fn tick_rtg_moves(pool: &PgPool, target: &str) -> Result<()> {
             let dur_s = st_ts.map(|st| (comp_ts - st).num_seconds()).filter(|&d| (0..=3600).contains(&d));
             let bdate = NaiveDate::parse_from_str(comp_dt.get(..8).unwrap_or(""), "%Y%m%d").unwrap_or(run_date);
             let res = sqlx::query(
-                "INSERT INTO rtg_move_log
+                "INSERT INTO qc_move_log
                    (machno, contno, seqno, jobtype, trk_id, st_ts, comp_ts, dur_s, business_date, status)
                  VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
                  ON CONFLICT (machno, contno, seqno) DO NOTHING",
@@ -97,7 +97,7 @@ pub async fn tick_rtg_moves(pool: &PgPool, target: &str) -> Result<()> {
             .bind(r.status.as_deref().map(str::trim).filter(|s| !s.is_empty()))
             .execute(&mut *tx)
             .await
-            .context("insert rtg_move_log")?;
+            .context("insert qc_move_log")?;
             inserted += res.rows_affected();
             if max_comp.as_deref().is_none_or(|m| comp_dt > m) {
                 max_comp = Some(comp_dt.to_string());
@@ -118,7 +118,7 @@ pub async fn tick_rtg_moves(pool: &PgPool, target: &str) -> Result<()> {
             .await?;
         }
         tx.commit().await?;
-        tracing::info!(fetched = rows.len(), inserted, "rtg moves");
+        tracing::info!(fetched = rows.len(), inserted, "qc moves");
         Ok(rows.len() as u64)
     })
     .await

@@ -145,11 +145,6 @@ pub struct DetailQ {
 #[derive(Serialize, sqlx::FromRow)]
 struct CycleRow {
     dropped_at: DateTime<Utc>,
-    pickup_at: Option<DateTime<Utc>>,
-    pickup_arrived_at: Option<DateTime<Utc>>,
-    pickup_left_at: Option<DateTime<Utc>>,
-    assigned_at: Option<DateTime<Utc>>,
-    arrived_at: Option<DateTime<Utc>>,
     jobtype: Option<String>,
     vessel: Option<String>,
     voyage: Option<String>,
@@ -161,10 +156,11 @@ struct CycleRow {
     empty_leg_s: Option<i32>,
     empty_leg_m: Option<f64>,
     container_to_container: bool,
-    // v2 shadow 6-event model (tt_cycle_v2, same ytno+dropped_at). NULL where v2 has no row
-    // or that event was unobserved. dropped_at is shared with v1 above.
+    // Current 5-event model (tt_cycle_v2, same ytno+dropped_at). NULL where v2 has no row or the
+    // event was unobserved. dropped_at (⑤) is shared with v1's validated drop above. The retired
+    // v1 4-phase timestamps and the v2 "빈차 출발" event are no longer served.
+    //   ①배차 opened · ②픽업도착 empty_arrived · ③픽업떠남 pickup_left · ④부하도착 laden_arrived · ⑤드롭 dropped
     v2_opened_at: Option<DateTime<Utc>>,
-    v2_empty_travel_start_at: Option<DateTime<Utc>>,
     v2_empty_arrived_at: Option<DateTime<Utc>>,
     v2_pickup_left_at: Option<DateTime<Utc>>,
     v2_laden_arrived_at: Option<DateTime<Utc>>,
@@ -184,15 +180,13 @@ pub async fn detail(
     let hours = clamp_hours(q.hours);
     let limit = q.limit.unwrap_or(200).clamp(1, 1000);
     let cycles: Vec<CycleRow> = sqlx::query_as(
-        "SELECT v1.dropped_at, v1.pickup_at, v1.pickup_arrived_at, v1.pickup_left_at,
-                v1.assigned_at, v1.arrived_at, v1.jobtype, v1.vessel, v1.voyage, v1.container, v1.qc,
+        "SELECT v1.dropped_at, v1.jobtype, v1.vessel, v1.voyage, v1.container, v1.qc,
                 v1.cycle_s, v1.laden_leg_s, v1.laden_leg_m, v1.empty_leg_s, v1.empty_leg_m,
                 v1.container_to_container,
-                v2.opened_at            AS v2_opened_at,
-                v2.empty_travel_start_at AS v2_empty_travel_start_at,
-                v2.empty_arrived_at     AS v2_empty_arrived_at,
-                v2.pickup_left_at       AS v2_pickup_left_at,
-                v2.laden_arrived_at     AS v2_laden_arrived_at
+                v2.opened_at        AS v2_opened_at,
+                v2.empty_arrived_at AS v2_empty_arrived_at,
+                v2.pickup_left_at   AS v2_pickup_left_at,
+                v2.laden_arrived_at AS v2_laden_arrived_at
            FROM tt_cycle_log v1
            LEFT JOIN tt_cycle_v2 v2 ON v2.ytno = v1.ytno AND v2.dropped_at = v1.dropped_at
           WHERE v1.ytno = $1 AND v1.dropped_at > now() - ($2::int * interval '1 hour')

@@ -126,6 +126,8 @@ async fn main() -> anyhow::Result<()> {
     livemap::spawn_stage2_shadow(livemap.clone(), pool.clone()); // 60s: Stage-2 매칭 그림자(stage2_match_shadow)
     livemap::spawn_pos_hist(livemap.clone(), pool.clone()); // 30s: 트럭 위치·상태 이력(truck_pos_hist)
     livemap::spawn_pos_hist_hifreq(livemap.clone(), pool.clone()); // 3s: 도로망 추론용 고빈도 GPS(truck_pos_hifreq)
+    livemap::spawn_rtg_pos_hist(livemap.clone(), pool.clone()); // 3s: RTG/ES GPS 이력(rtg_pos_hist) — 핸드오버 포착 연구용
+    livemap::spawn_cycle_pickup_correct(pool.clone()); // 5m: 픽업완료(③) TOS 크레인 정답지 보정(pickup_done_at, mig0088)
     livemap::spawn_dispatch_compare(livemap.clone(), pool.clone()); // 60s: TOS vs 우리 배차 비교(dispatch_compare_shadow)
     livemap::spawn_fair_compare(livemap.clone(), pool.clone()); // 5min: 공정 1:1 최적매칭 vs TOS(fair_compare_shadow)
     let state = AppState { pool, livemap };
