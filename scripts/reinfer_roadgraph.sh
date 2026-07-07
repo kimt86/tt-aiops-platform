@@ -27,9 +27,40 @@ psql $P -tAF$'\t' -c "
 
 # 3) congestion map-match (→ per-edge speed) THEN geojson (directed edges colored by speed) + congestion TSV
 $PY - <<'PY'
-import json, math, datetime, csv, os
+import json, math, datetime, csv, os, re, colorsys
 import numpy as np
 from scipy.spatial import cKDTree
+
+# graph-color the blocks like a map: spatially-adjacent blocks (bays within ADJ_M) must differ,
+# using as FEW colors as possible (Welsh-Powell greedy: order by degree desc, take smallest free color).
+# few colors → each reused far apart → neighbours pop; exact block still on hover.
+BLOCK_PALETTE = ['#ef4444','#3b82f6','#22c55e','#eab308','#a855f7','#f97316','#14b8a6','#ec4899','#84cc16','#06b6d4','#f43f5e','#0ea5e9']
+def block_coloring(block_pts, ADJ_M=38.0):
+    prefs = list(block_pts); idx = {p: i for i, p in enumerate(prefs)}
+    ml = mlon(2.926)                                   # terminal-local metres (small area → fixed ref lat)
+    pts = []; owner = []
+    for i, p in enumerate(prefs):
+        for (la, lo) in block_pts[p]:
+            pts.append((lo * ml, la * MLAT)); owner.append(i)
+    adj = {i: set() for i in range(len(prefs))}
+    if pts:
+        tree = cKDTree(np.array(pts)); owner = np.array(owner)
+        for a, b in tree.query_pairs(r=ADJ_M):
+            oa, ob = int(owner[a]), int(owner[b])
+            if oa != ob: adj[oa].add(ob); adj[ob].add(oa)
+    col = {}
+    for i in sorted(range(len(prefs)), key=lambda i: -len(adj[i])):   # Welsh-Powell order
+        used = {col[j] for j in adj[i] if j in col}
+        c = 0
+        while c in used: c += 1
+        col[i] = c
+    ncol = (max(col.values()) + 1) if col else 0
+    def hexof(c):
+        if c < len(BLOCK_PALETTE): return BLOCK_PALETTE[c]
+        r, g, b = colorsys.hls_to_rgb(((c * 137) % 360) / 360.0, 0.6, 0.66)
+        return '#%02x%02x%02x' % (int(r * 255), int(g * 255), int(b * 255))
+    avgdeg = (sum(len(v) for v in adj.values()) / len(prefs)) if prefs else 0
+    return {p: hexof(col[idx[p]]) for p in prefs}, ncol, avgdeg
 SCRATCH = os.environ.get('ROADSCRATCH', '/tmp')
 CONNECTOR_KMH = 10.0   # work-point approach-stub speed (bidirectional connectors)
 g = json.load(open(f'{SCRATCH}/road_graph.json'))
@@ -118,17 +149,34 @@ for k,e,geom,eb in sub:
     if k in edge_speed: props["speed"]=edge_speed[k]      # this-hour median km/h → colored by congestion
     feats.append({"type":"Feature","properties":props,
                   "geometry":{"type":"LineString","coordinates":[[lo,la] for la,lo in geom]}})
-    m=geom[len(geom)//2]; head=off(m[0],m[1],eb,7)
-    bl=off(head[1],head[0],eb+148,6); br=off(head[1],head[0],eb-148,6)
-    feats.append({"type":"Feature","properties":{"kind":"arrow","oneway":oneway},
-                  "geometry":{"type":"LineString","coordinates":[bl, head, br]}})
-for la,lo in g['nodes'].values():
-    feats.append({"type":"Feature","properties":{"kind":"node"},"geometry":{"type":"Point","coordinates":[lo,la]}})
+# junction nodes = skeleton-graph vertices; carry id + road-degree (1=dead-end · 2=mid-road · 3+=intersection) for hover
+deg={}
+for e in g['edges']:
+    if e.get('connector'): continue
+    for nd in (e['u'],e['v']): deg[int(nd)]=deg.get(int(nd),0)+1
+for nid,(la,lo) in g['nodes'].items():
+    feats.append({"type":"Feature","properties":{"kind":"node","id":int(nid),"deg":deg.get(int(nid),0)},
+                  "geometry":{"type":"Point","coordinates":[lo,la]}})
+# work-points, tagged by node type (block/crane/wharf/other) for per-type filtering on the live map
+def ntype_of(t):
+    if t.startswith('WHARF'): return 'wharf'
+    if re.match(r'^[CMZ][0-9]', t): return 'crane'
+    if '-' in t: return 'block'
+    return 'other'
 nwp=0
+rows=[]; block_pts={}
 for r in csv.reader(open(f'{SCRATCH}/workpoints.tsv'),delimiter='\t'):
     if len(r)<3: continue
-    feats.append({"type":"Feature","properties":{"kind":"workpoint","topos":r[2]},
-                  "geometry":{"type":"Point","coordinates":[float(r[1]),float(r[0])]}}); nwp+=1
+    la,lo,tp = float(r[0]),float(r[1]),r[2]
+    nt = ntype_of(tp)
+    rows.append((la,lo,tp,nt))
+    if nt=='block': block_pts.setdefault(tp.split('-')[0],[]).append((la,lo))
+bcolor, nbcol, bavgdeg = block_coloring(block_pts)   # map-coloring: adjacent blocks differ, few colors
+for la,lo,tp,nt in rows:
+    props={"kind":"workpoint","topos":tp,"ntype":nt}
+    if nt=='block': props["bcolor"]=bcolor[tp.split('-')[0]]
+    feats.append({"type":"Feature","properties":props,
+                  "geometry":{"type":"Point","coordinates":[lo,la]}}); nwp+=1
 km=round(sum(e['len_m'] for e in g['edges'])/1000.0,1)
 fc={"type":"FeatureCollection",
     "stats":{"nodes":len(g['nodes']),"edges":len(g['edges']),"km":km,"workpoints":nwp,
@@ -151,7 +199,7 @@ with open(f'{SCRATCH}/road_node.tsv','w') as f:
 with open(f'{SCRATCH}/road_edge.tsv','w') as f:
     for fr,to,lm,sp,ow in edge_rows:
         f.write(f"{fr}\t{to}\t{lm}\t{sp}\t{ow}\n")
-print(f"PUBLISHED nodes {fc['stats']['nodes']} edges {fc['stats']['edges']} {km}km wp {nwp} | speed-colored edges {len(edge_speed)} | routable edges {len(edge_rows)}")
+print(f"PUBLISHED nodes {fc['stats']['nodes']} edges {fc['stats']['edges']} {km}km wp {nwp} | blocks {len(block_pts)} → {nbcol} colors (adj~{bavgdeg:.1f}) | speed-colored edges {len(edge_speed)} | routable edges {len(edge_rows)}")
 PY
 
 # 4) load congestion (hour stamped by SQL so it's tz-correct)

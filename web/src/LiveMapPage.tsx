@@ -7,7 +7,7 @@ import maplibregl from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { type Lang } from "./i18n";
-import { api, type WorkPoint, type WharfPoint } from "./api";
+import { api, type WorkPoint } from "./api";
 import { LiveVehicleDetail, type SelVeh } from "./LiveVehicleDetail";
 
 const ESRI = "https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}";
@@ -185,53 +185,8 @@ const DEFAULT_TOGGLES: Toggles = {
 const LAYER_TOTAL = 12; // toggle count shown in the panel header
 const EMPTY_FC: GeoJSON.FeatureCollection = { type: "FeatureCollection", features: [] };
 
-// Learned-wharf zones as rectangles ALIGNED to the local quay direction: for each point, estimate
-// the quay bearing from its 2 nearest wharf neighbours (axial mean), then box it — long axis along
-// the quay (length ≈ neighbour spacing), short axis = its learned depth (spread).
-function wharfZonesFC(pts: WharfPoint[]): GeoJSON.FeatureCollection {
-  const M = 111320;
-  const distM = (a: WharfPoint, b: WharfPoint) => {
-    const dn = (a.lat - b.lat) * M;
-    const de = (a.lon - b.lon) * M * Math.cos(((a.lat + b.lat) / 2) * Math.PI / 180);
-    return Math.hypot(dn, de);
-  };
-  const bearingTo = (p: WharfPoint, q: WharfPoint) => {
-    const de = (q.lon - p.lon) * M * Math.cos(((p.lat + q.lat) / 2) * Math.PI / 180);
-    return Math.atan2(de, (q.lat - p.lat) * M); // from north, clockwise
-  };
-  // global quay direction = axial mean of every point's nearest-neighbour bearing (robust fallback)
-  let gr = 0, gi = 0;
-  for (const p of pts) {
-    const nn = pts.filter((q) => q !== p).map((q) => ({ q, d: distM(p, q) })).sort((a, b) => a.d - b.d)[0];
-    if (nn) { const th = bearingTo(p, nn.q); gr += Math.cos(2 * th); gi += Math.sin(2 * th); }
-  }
-  const global = pts.length > 1 ? Math.atan2(gi, gr) / 2 : 0;
-  const feats: GeoJSON.Feature[] = pts.map((p) => {
-    const near = pts.filter((q) => q !== p).map((q) => ({ q, d: distM(p, q) })).sort((a, b) => a.d - b.d).slice(0, 3);
-    // axial mean of bearings to the nearest neighbours (a line has no head/tail → double-angle mean)
-    let zr = 0, zi = 0;
-    for (const { q } of near) {
-      const th = bearingTo(p, q);
-      zr += Math.cos(2 * th);
-      zi += Math.sin(2 * th);
-    }
-    let theta = near.length ? Math.atan2(zi, zr) / 2 : global;
-    // reject a local estimate that deviates > 25° (line-angle) from the quay → use the global direction
-    const diff = Math.abs((((theta - global) + Math.PI / 2) % Math.PI + Math.PI) % Math.PI - Math.PI / 2);
-    if (diff > (25 * Math.PI) / 180) theta = global;
-    const L = Math.max(30, Math.min(90, near.length ? near[0].d : 50)); // along quay
-    const W = Math.max(18, Math.min(45, (p.spread_m ?? 30) * 0.9)); // depth
-    const u = [Math.sin(theta), Math.cos(theta)]; // along (east, north)
-    const v = [Math.cos(theta), -Math.sin(theta)]; // perpendicular
-    const ring = [[1, 1], [1, -1], [-1, -1], [-1, 1], [1, 1]].map(([su, sv]) => {
-      const e = su * (L / 2) * u[0] + sv * (W / 2) * v[0];
-      const n = su * (L / 2) * u[1] + sv * (W / 2) * v[1];
-      return [p.lon + e / (M * Math.cos((p.lat * Math.PI) / 180)), p.lat + n / M];
-    });
-    return { type: "Feature", properties: { topos: p.topos }, geometry: { type: "Polygon", coordinates: [ring] } };
-  });
-  return { type: "FeatureCollection", features: feats };
-}
+// (wharf overlay removed — work-points/cranes/wharf are now shown via the road-network node-type
+//  filter; the road graph already incorporates all of them as connectors.)
 
 // Dispatched work points: one marker per currently-dispatched work point (last hour). Clicking it
 // shows TOS's dispatched truck beside ours (from the timing-skew-free comparison). Replaces the old
@@ -478,10 +433,10 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
   const workPtsRef = useRef<WorkPoint[]>([]);
   const selectedWpRef = useRef<WorkPoint | null>(null); // the clicked work point (for re-anchoring its truck lines)
   const dispPosRef = useRef<Map<string, [number, number]>>(new Map()); // each device's currently DISPLAYED (smoothed) position
-  const [showWharf, setShowWharf] = useState(false); // learned wharf/quay positions overlay
-  const [showRoadGraph, setShowRoadGraph] = useState(false); // GPS-inferred road network (replaces imported links)
+  const [showLinks, setShowLinks] = useState(false); // road edges + direction arrows
+  const [showNodes, setShowNodes] = useState(false); // node points (master for the kind chips)
+  const [nodeKinds, setNodeKinds] = useState({ junction: false, block: true, crane: true, wharf: true });
   const roadGraphLoaded = useRef(false);
-  const [roadGraphStats, setRoadGraphStats] = useState<{ nodes: number; edges: number; km: number; workpoints: number; generated_at: string; congested_edges?: number } | null>(null);
   const [showWeatherFx, setShowWeatherFx] = useState(true); // game-like weather effect overlay (default on; toggle via the weather chip)
   const [panelOpen, setPanelOpen] = useState(true);
   const [counts, setCounts] = useState({ total: 0, moving: 0, idle: 0, off: 0 });
@@ -566,56 +521,28 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
     }
   }, [showWorkPts, ready]);
 
-  // wharf overlay: learned quay-segment positions (changes slowly → poll 60s when shown)
-  useEffect(() => {
-    if (!ready || !showWharf) return;
-    let alive = true;
-    const load = () =>
-      api.livemapWharf().then((pts) => {
-        if (!alive) return;
-        const feats: GeoJSON.Feature[] = pts.map((p) => ({
-          type: "Feature",
-          geometry: { type: "Point", coordinates: [p.lon, p.lat] },
-          properties: { topos: p.topos, n: p.n, spread: p.spread_m != null ? Math.round(p.spread_m) : null },
-        }));
-        // zone = rectangle aligned to the local quay direction (from neighbouring wharf points)
-        const src = mapRef.current?.getSource("wharf") as maplibregl.GeoJSONSource | undefined;
-        src?.setData({ type: "FeatureCollection", features: feats });
-        (mapRef.current?.getSource("wharf-zone") as maplibregl.GeoJSONSource | undefined)?.setData(wharfZonesFC(pts));
-      }).catch(() => {});
-    load();
-    const iv = setInterval(load, 60000);
-    return () => { alive = false; clearInterval(iv); };
-  }, [showWharf, ready]);
-
-  // wharf overlay visibility
-  useEffect(() => {
-    const map = mapRef.current;
-    if (!map) return;
-    for (const id of ["wharf-zone-fill", "wharf-zone-line", "wharf-pt", "wharf-label"]) {
-      if (map.getLayer(id)) map.setLayoutProperty(id, "visibility", showWharf ? "visible" : "none");
-    }
-  }, [showWharf, ready]);
 
   // GPS-inferred road graph: centerlines (static GeoJSON) + direction arrows (learned lane field) —
   // loaded once when first shown — a clean node+edge graph (no floating lane arrows).
   useEffect(() => {
-    if (!ready || !showRoadGraph || roadGraphLoaded.current) return;
+    if (!ready || (!showLinks && !showNodes) || roadGraphLoaded.current) return;
     roadGraphLoaded.current = true;
     fetch("/livemap-roadgraph.geojson", { cache: "no-store" }).then((r) => r.json()).then((fc) => {
       (mapRef.current?.getSource("roadgraph") as maplibregl.GeoJSONSource | undefined)?.setData(fc);
-      if (fc.stats) setRoadGraphStats(fc.stats);
     }).catch(() => { roadGraphLoaded.current = false; });
-  }, [showRoadGraph, ready]);
+  }, [showLinks, showNodes, ready]);
   useEffect(() => {
     const map = mapRef.current;
-    const v = showRoadGraph ? "visible" : "none";
-    if (map?.getLayer("roadgraph-line")) map.setLayoutProperty("roadgraph-line", "visibility", v);
-    if (map?.getLayer("roadgraph-arrow")) map.setLayoutProperty("roadgraph-arrow", "visibility", v);
-    if (map?.getLayer("roadgraph-wp")) map.setLayoutProperty("roadgraph-wp", "visibility", v);
-    if (map?.getLayer("roadgraph-node")) map.setLayoutProperty("roadgraph-node", "visibility", v);
-    if (map?.getLayer("ll-seg")) map.setLayoutProperty("ll-seg", "visibility", v);
-  }, [showRoadGraph, ready]);
+    if (!map) return;
+    const setV = (id: string, vis: boolean) => { if (map.getLayer(id)) map.setLayoutProperty(id, "visibility", vis ? "visible" : "none"); };
+    setV("roadgraph-line", showLinks);
+    setV("roadgraph-connector", showLinks);
+    setV("roadgraph-arrow", showLinks);
+    setV("roadgraph-node", showNodes && nodeKinds.junction);
+    setV("roadgraph-wp-block", showNodes && nodeKinds.block);
+    setV("roadgraph-wp-crane", showNodes && nodeKinds.crane);
+    setV("roadgraph-wp-wharf", showNodes && nodeKinds.wharf);
+  }, [showLinks, showNodes, nodeKinds, ready]);
 
   // init map once
   useEffect(() => {
@@ -709,45 +636,30 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
         paint: { "text-color": "#e2e8f0", "text-halo-color": "#0a0f1d", "text-halo-width": 1.2 },
       });
 
-      // ── learned wharf/quay positions (from cur_loc=WHARF_*) — empty until polled ──
-      // zone (filled area sized by the learned spread) renders first, point+label on top.
-      map.addSource("wharf-zone", { type: "geojson", data: EMPTY_FC });
-      map.addLayer({ id: "wharf-zone-fill", type: "fill", source: "wharf-zone", layout: { visibility: "none" }, paint: { "fill-color": "#38bdf8", "fill-opacity": 0.13 } });
-      map.addLayer({ id: "wharf-zone-line", type: "line", source: "wharf-zone", layout: { visibility: "none" }, paint: { "line-color": "#38bdf8", "line-opacity": 0.55, "line-width": 1 } });
       // GPS-inferred road network (static GeoJSON from scripts/build_road_graph.py) — replaces imported links
       map.addSource("roadgraph", { type: "geojson", data: EMPTY_FC });
-      // work-points first (subtle anchor cloud), then edges, then junction NODES on top (the graph reads
-      // as nodes+edges, not just roads).
-      // work-points = faint background texture (anchors); edges = bright cyan; junction NODES = white dots
-      // on top → reads as a connected node+edge graph, high-contrast on satellite.
-      map.addLayer({ id: "roadgraph-wp", type: "circle", source: "roadgraph", filter: ["==", ["get", "kind"], "workpoint"], layout: { visibility: "none" }, paint: { "circle-radius": ["interpolate", ["linear"], ["zoom"], 13, 0.4, 17, 1], "circle-color": "#67e8f9", "circle-opacity": 0.12 } });
-      // edges colored by this-hour median speed = congestion view (slow red → fast green); no data → cyan
-      map.addLayer({ id: "roadgraph-line", type: "line", source: "roadgraph", filter: ["==", ["get", "kind"], "road"], layout: { visibility: "none", "line-cap": "round", "line-join": "round" }, paint: { "line-color": ["case", ["has", "speed"], ["interpolate", ["linear"], ["get", "speed"], 0, "#ef4444", 8, "#f59e0b", 18, "#22c55e"], "#22d3ee"], "line-opacity": 0.95, "line-width": ["interpolate", ["linear"], ["zoom"], 13, 1.5, 17, 4] } });
-      // per-edge direction arrowheads (flow direction; one-way = bright amber, two-way = orange)
-      map.addLayer({ id: "roadgraph-arrow", type: "line", source: "roadgraph", filter: ["==", ["get", "kind"], "arrow"], layout: { visibility: "none", "line-cap": "round", "line-join": "round" }, paint: { "line-color": ["case", ["get", "oneway"], "#fbbf24", "#fb923c"], "line-opacity": 0.95, "line-width": ["interpolate", ["linear"], ["zoom"], 13, 1, 17, 2.6] } });
-      map.addLayer({ id: "roadgraph-node", type: "circle", source: "roadgraph", filter: ["==", ["get", "kind"], "node"], layout: { visibility: "none" }, paint: { "circle-radius": ["interpolate", ["linear"], ["zoom"], 13, 2.5, 17, 6], "circle-color": "#ffffff", "circle-stroke-color": "#0e7490", "circle-stroke-width": 1.6, "circle-opacity": 1 } });
-      map.addSource("wharf", { type: "geojson", data: EMPTY_FC });
-      map.addLayer({
-        id: "wharf-pt",
-        type: "circle",
-        source: "wharf",
-        layout: { visibility: "none" },
-        paint: {
-          "circle-radius": ["interpolate", ["linear"], ["zoom"], 13, 3, 17, 7],
-          "circle-color": "#38bdf8",
-          "circle-opacity": 0.85,
-          "circle-stroke-width": 1.2,
-          "circle-stroke-color": "#0ea5e9",
-        },
-      });
-      map.addLayer({
-        id: "wharf-label",
-        type: "symbol",
-        source: "wharf",
-        minzoom: 14,
-        layout: { visibility: "none", "text-field": ["get", "topos"], "text-size": 9, "text-offset": [0, 1.1], "text-anchor": "top" },
-        paint: { "text-color": "#bae6fd", "text-halo-color": "#0a0f1d", "text-halo-width": 1.2 },
-      });
+      // direction chevron (glyph-free icon, drawn once) — auto-placed along road lines in flow order
+      if (!map.hasImage("rg-chevron")) {
+        const s = 24, cv = document.createElement("canvas"); cv.width = s; cv.height = s;
+        const cx = cv.getContext("2d")!;
+        cx.lineCap = "round"; cx.lineJoin = "round";
+        const path = () => { cx.beginPath(); cx.moveTo(7, 5); cx.lineTo(16, 12); cx.lineTo(7, 19); cx.stroke(); };
+        cx.strokeStyle = "rgba(8,12,24,0.5)"; cx.lineWidth = 6; path();       // dark halo for contrast
+        cx.strokeStyle = "rgba(255,255,255,0.95)"; cx.lineWidth = 3; path();  // thin white chevron
+        map.addImage("rg-chevron", cx.getImageData(0, 0, s, s), { pixelRatio: 2 });
+      }
+      // work-point approach stubs (bidirectional connectors) — faint dashed gray, no direction, secondary
+      map.addLayer({ id: "roadgraph-connector", type: "line", source: "roadgraph", filter: ["all", ["==", ["get", "kind"], "road"], ["==", ["get", "connector"], true]], layout: { visibility: "none", "line-cap": "round" }, paint: { "line-color": "#b8c2d4", "line-opacity": 0.55, "line-width": ["interpolate", ["linear"], ["zoom"], 13, 0.5, 17, 1.3], "line-dasharray": [2, 2] } });
+      // thin real roads colored by this-hour median speed (slow red → fast green); no this-hour data → cyan
+      map.addLayer({ id: "roadgraph-line", type: "line", source: "roadgraph", filter: ["all", ["==", ["get", "kind"], "road"], ["!=", ["get", "connector"], true]], layout: { visibility: "none", "line-cap": "round", "line-join": "round" }, paint: { "line-color": ["case", ["has", "speed"], ["interpolate", ["linear"], ["get", "speed"], 0, "#ef4444", 8, "#f59e0b", 18, "#22c55e"], "#22d3ee"], "line-opacity": 0.9, "line-width": ["interpolate", ["linear"], ["zoom"], 13, 0.6, 17, 2] } });
+      // direction = clean chevrons auto-spaced along each road line (flow order), decluttered by collision
+      map.addLayer({ id: "roadgraph-arrow", type: "symbol", source: "roadgraph", filter: ["all", ["==", ["get", "kind"], "road"], ["!=", ["get", "connector"], true]], layout: { visibility: "none", "symbol-placement": "line", "symbol-spacing": 90, "icon-image": "rg-chevron", "icon-size": ["interpolate", ["linear"], ["zoom"], 13, 0.5, 17, 0.95], "icon-rotation-alignment": "map", "icon-allow-overlap": false, "icon-keep-upright": false }, paint: { "icon-opacity": 0.85 } });
+      map.addLayer({ id: "roadgraph-node", type: "circle", source: "roadgraph", filter: ["all", ["==", ["get", "kind"], "node"], [">=", ["get", "deg"], 1]], layout: { visibility: "none" }, paint: { "circle-radius": ["interpolate", ["linear"], ["zoom"], 13, 1.6, 17, 3.6], "circle-color": "#ffffff", "circle-stroke-color": "#0e7490", "circle-stroke-width": 0.6, "circle-opacity": 0.95 } });
+      // work-point NODES on TOP of the network (else edges/junctions occlude them), split by type for
+      // per-type filtering: block (teal) · crane (amber) · wharf (sky). Crane/wharf larger (few, salient).
+      map.addLayer({ id: "roadgraph-wp-block", type: "circle", source: "roadgraph", filter: ["all", ["==", ["get", "kind"], "workpoint"], ["==", ["get", "ntype"], "block"]], layout: { visibility: "none" }, paint: { "circle-radius": ["interpolate", ["linear"], ["zoom"], 13, 2, 17, 4.5], "circle-color": ["coalesce", ["get", "bcolor"], "#5eead4"], "circle-opacity": 0.9, "circle-stroke-width": 0.8, "circle-stroke-color": "#0a0f1d" } });
+      map.addLayer({ id: "roadgraph-wp-crane", type: "circle", source: "roadgraph", filter: ["all", ["==", ["get", "kind"], "workpoint"], ["==", ["get", "ntype"], "crane"]], layout: { visibility: "none" }, paint: { "circle-radius": ["interpolate", ["linear"], ["zoom"], 13, 3.5, 17, 8], "circle-color": "#f59e0b", "circle-opacity": 0.95, "circle-stroke-width": 1.4, "circle-stroke-color": "#7c2d12" } });
+      map.addLayer({ id: "roadgraph-wp-wharf", type: "circle", source: "roadgraph", filter: ["all", ["==", ["get", "kind"], "workpoint"], ["==", ["get", "ntype"], "wharf"]], layout: { visibility: "none" }, paint: { "circle-radius": ["interpolate", ["linear"], ["zoom"], 13, 3.5, 17, 8], "circle-color": "#38bdf8", "circle-opacity": 0.95, "circle-stroke-width": 1.4, "circle-stroke-color": "#0c4a6e" } });
 
       // ── vehicles (top) ──
       // ── learned-layout (work-points · driving lanes) + dispatch demand overlays ──
@@ -865,6 +777,41 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
         map.on("mouseenter", id, () => { map.getCanvas().style.cursor = "pointer"; });
         map.on("mouseleave", id, () => { map.getCanvas().style.cursor = ""; });
       }
+
+      // hover tooltips for the road network (nodes + links) — follows the cursor
+      const hpop = new maplibregl.Popup({ closeButton: false, closeOnClick: false, maxWidth: "240px", className: "lm-popup", offset: 10 });
+      const RG_LAYERS = ["roadgraph-wp-crane", "roadgraph-wp-wharf", "roadgraph-wp-block", "roadgraph-node", "roadgraph-line", "roadgraph-connector"];
+      const rgRank = (p: Record<string, unknown> | null) => {
+        if (!p) return 0;
+        if (p.kind === "workpoint") return 4;
+        if (p.kind === "node") return 3;
+        return p.connector ? 1 : 2;
+      };
+      const rgHtml = (p: Record<string, unknown>) => {
+        const k = koRef.current;
+        if (p.kind === "workpoint") {
+          const topos = String(p.topos);
+          if (p.ntype === "crane") return `<div class="lmp-t">QC ${topos}</div><div class="lmp-r">${k ? "안벽 크레인 노드" : "quay crane node"}</div>`;
+          if (p.ntype === "wharf") return `<div class="lmp-t">${topos}</div><div class="lmp-r">${k ? "안벽(선석) 노드" : "wharf node"}</div>`;
+          if (p.ntype === "block") return `<div class="lmp-t">${topos}</div><div class="lmp-r">${k ? "블록" : "block"} <b>${topos.split("-")[0]}</b> · ${k ? "야드 작업점(RTG)" : "yard work-point (RTG)"}</div>`;
+          return `<div class="lmp-t">${topos}</div>`;
+        }
+        if (p.kind === "node") {
+          const d = Number(p.deg);
+          const t = d <= 1 ? (k ? "막다른 길" : "dead-end") : d === 2 ? (k ? "중간 지점" : "mid-road") : (k ? "교차로" : "intersection");
+          return `<div class="lmp-t">${k ? "노드" : "node"} #${p.id}</div><div class="lmp-r">${k ? "도로 연결" : "roads"}: <b>${d}</b> (${t})</div>`;
+        }
+        if (p.connector) return `<div class="lmp-t">${k ? "커넥터" : "connector"}</div><div class="lmp-r">${k ? "작업지점 접근 · 양방향" : "work-point approach · two-way"}</div>`;
+        return `<div class="lmp-t">${k ? "도로" : "road"} · ${p.len_m}m</div><div class="lmp-r">${p.speed != null ? p.speed + " km/h" : (k ? "이번시간 미측정" : "no data this hour")} · ${k ? "일방" : "one-way"}</div>`;
+      };
+      map.on("mousemove", (e) => {
+        const layers = RG_LAYERS.filter((id) => map.getLayer(id));
+        const fs = layers.length ? map.queryRenderedFeatures(e.point, { layers }) : [];
+        if (!fs.length) { hpop.remove(); return; }
+        const best = fs.reduce((a, b) => (rgRank(b.properties) > rgRank(a.properties) ? b : a));
+        map.getCanvas().style.cursor = "pointer";
+        hpop.setLngLat(e.lngLat).setHTML(rgHtml(best.properties as Record<string, unknown>)).addTo(map);
+      });
       setReady(true);
     });
     return () => { ro.disconnect(); map.remove(); mapRef.current = null; };
@@ -1234,19 +1181,17 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
               <Row on={toggles.areas} color="#7eb6ff" label={ko ? "도로/블록 영역" : "Road/Block"} onChange={(v) => set("areas", v)} />
             </section>
             <section className="llp-sec">
-              <header>{ko ? "학습 (GPS)" : "Learned (GPS)"}</header>
-              <Row on={toggles.learnTopos} color="#5eead4" label={ko ? "작업지점 좌표 (학습)" : "Work-points (learned)"} onChange={(v) => set("learnTopos", v)} />
-              <Row on={showWharf} color="#38bdf8" label={ko ? "안벽 위치 (WHARF)" : "Wharf positions"} onChange={setShowWharf} />
-              <Row on={showRoadGraph} color="#a78bfa" label={ko ? "추론 도로망 (GPS, 방향)" : "Inferred roads (GPS, directed)"} onChange={setShowRoadGraph} />
-              {showRoadGraph && roadGraphStats && (
-                <div className="llp-hint" style={{ paddingLeft: 18 }}>
-                  {ko
-                    ? `밀도: 노드 ${roadGraphStats.nodes} · 엣지 ${roadGraphStats.edges} · ${roadGraphStats.km}km · 작업지점 ${roadGraphStats.workpoints.toLocaleString()} · 갱신 ${roadGraphStats.generated_at}`
-                    : `density: ${roadGraphStats.nodes} nodes · ${roadGraphStats.edges} edges · ${roadGraphStats.km}km · ${roadGraphStats.workpoints.toLocaleString()} work-pts · ${roadGraphStats.generated_at}`}
-                  <div style={{ marginTop: 2 }}>{ko ? `혼잡(엣지색): 느림 🔴 → 빠름 🟢 · 측정 ${roadGraphStats.congested_edges ?? 0}엣지` : `congestion (edge color): slow 🔴 → fast 🟢 · ${roadGraphStats.congested_edges ?? 0} edges`}</div>
+              <header>{ko ? "도로망" : "Road network"}</header>
+              <Row on={showLinks} color="#22d3ee" label={ko ? "링크" : "Links"} onChange={setShowLinks} />
+              <Row on={showNodes} color="#a78bfa" label={ko ? "노드" : "Nodes"} onChange={setShowNodes} />
+              {showNodes && (
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 6, padding: "4px 0 6px 14px" }}>
+                  <Chip on={nodeKinds.block} color="#5eead4" label={ko ? "블록" : "Block"} onClick={() => setNodeKinds((s) => ({ ...s, block: !s.block }))} />
+                  <Chip on={nodeKinds.crane} color="#f59e0b" label="QC" onClick={() => setNodeKinds((s) => ({ ...s, crane: !s.crane }))} />
+                  <Chip on={nodeKinds.wharf} color="#38bdf8" label={ko ? "안벽" : "Wharf"} onClick={() => setNodeKinds((s) => ({ ...s, wharf: !s.wharf }))} />
+                  <Chip on={nodeKinds.junction} color="#ffffff" label={ko ? "교차로" : "Junction"} onClick={() => setNodeKinds((s) => ({ ...s, junction: !s.junction }))} />
                 </div>
               )}
-              <div className="llp-hint">{ko ? "작업점: 채움=신뢰도(🟢높음·🟠보통·🔴낮음)·테두리=블록(청록)/크레인(주황) · 안벽: ARRIVED GPS로 학습한 선석 위치 · 도로망: 엣지색=혼잡(느림🔴→빠름🟢) + 방향 화살표(앰버=일방·주황=양방) + 흰점=교차로" : "work-points: fill=confidence (🟢🟠🔴), ring=block/crane · wharf: from ARRIVED GPS · roads: edge color=congestion (slow🔴→fast🟢) + direction arrows (amber=one-way) + white=junctions"}</div>
             </section>
             <section className="llp-sec">
               <header>{ko ? "배차 (DISPATCH)" : "Dispatch"}</header>
@@ -1297,5 +1242,23 @@ function Row({ on, color, label, onChange }: { on: boolean; color: string; label
       <span className="llp-sw" style={{ background: color }} />
       <span className="llp-label">{label}</span>
     </label>
+  );
+}
+
+function Chip({ on, color, label, onClick }: { on: boolean; color: string; label: string; onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      style={{
+        display: "inline-flex", alignItems: "center", gap: 5,
+        padding: "3px 9px", borderRadius: 999, cursor: "pointer",
+        border: `1px solid ${on ? color : "#334155"}`,
+        background: on ? `${color}22` : "transparent",
+        color: on ? "#e2e8f0" : "#64748b", fontSize: 11, lineHeight: 1.4,
+      }}
+    >
+      {label}
+    </button>
   );
 }
