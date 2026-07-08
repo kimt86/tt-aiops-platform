@@ -15,7 +15,7 @@ psql $P -tAF$'\t' -c "
   SELECT ytno, extract(epoch FROM ts), lat, lon FROM truck_pos_hist WHERE state IN ('empty_travel','delivering')
   UNION ALL SELECT ytno, extract(epoch FROM ts), lat, lon FROM truck_pos_hifreq ORDER BY 1,2" > "$SCRATCH/gps_moving.tsv"
 # work-points must be dumped BEFORE build (build attaches connectors to them)
-psql $P -tAF$'\t' -c "SELECT lat,lon,topos FROM learn_topos_point WHERE n>=30" > "$SCRATCH/workpoints.tsv"
+psql $P -tAF$'\t' -c "SELECT lat,lon,topos,obs,round(spread_m)::int FROM learn_topos_point WHERE n>=30" > "$SCRATCH/workpoints.tsv"
 $PY scripts/infer_road_network.py >/dev/null
 $PY scripts/build_road_graph.py   >/dev/null
 
@@ -168,13 +168,26 @@ rows=[]; block_pts={}
 for r in csv.reader(open(f'{SCRATCH}/workpoints.tsv'),delimiter='\t'):
     if len(r)<3: continue
     la,lo,tp = float(r[0]),float(r[1]),r[2]
+    obs = int(r[3]) if len(r)>3 and r[3] else 0   # accumulated samples (uncapped)
+    sp  = int(r[4]) if len(r)>4 and r[4] else 0   # spread_m = positional precision (big = unreliable)
     nt = ntype_of(tp)
-    rows.append((la,lo,tp,nt))
+    rows.append((la,lo,tp,nt,obs,sp))
     if nt=='block': block_pts.setdefault(tp.split('-')[0],[]).append((la,lo))
+# drop block bays >250m from their block's median center = stale-topos1 mislabels that plot 1-3km
+# away and spawn garbage connectors (the live outlier-gate prevents new ones; this cleans existing).
+BAY_OUTLIER_M = 250.0
+block_ctr = {p:(float(np.median([a for a,b in v])), float(np.median([b for a,b in v]))) for p,v in block_pts.items() if len(v)>=3}
+def far_from_block(pref, la, lo):
+    c = block_ctr.get(pref)
+    return bool(c) and math.hypot((la-c[0])*MLAT, (lo-c[1])*mlon(c[0])) > BAY_OUTLIER_M
+block_pts = {p:[(la,lo) for la,lo in v if not far_from_block(p,la,lo)] for p,v in block_pts.items()}
+block_pts = {p:v for p,v in block_pts.items() if v}
 bcolor, nbcol, bavgdeg = block_coloring(block_pts)   # map-coloring: adjacent blocks differ, few colors
-for la,lo,tp,nt in rows:
-    props={"kind":"workpoint","topos":tp,"ntype":nt}
-    if nt=='block': props["bcolor"]=bcolor[tp.split('-')[0]]
+ndrop=0
+for la,lo,tp,nt,obs,sp in rows:
+    if nt=='block' and far_from_block(tp.split('-')[0], la, lo): ndrop+=1; continue
+    props={"kind":"workpoint","topos":tp,"ntype":nt,"obs":obs,"spread":sp}
+    if nt=='block': props["bcolor"]=bcolor.get(tp.split('-')[0], '#5eead4')
     feats.append({"type":"Feature","properties":props,
                   "geometry":{"type":"Point","coordinates":[lo,la]}}); nwp+=1
 km=round(sum(e['len_m'] for e in g['edges'])/1000.0,1)
@@ -199,7 +212,7 @@ with open(f'{SCRATCH}/road_node.tsv','w') as f:
 with open(f'{SCRATCH}/road_edge.tsv','w') as f:
     for fr,to,lm,sp,ow in edge_rows:
         f.write(f"{fr}\t{to}\t{lm}\t{sp}\t{ow}\n")
-print(f"PUBLISHED nodes {fc['stats']['nodes']} edges {fc['stats']['edges']} {km}km wp {nwp} | blocks {len(block_pts)} → {nbcol} colors (adj~{bavgdeg:.1f}) | speed-colored edges {len(edge_speed)} | routable edges {len(edge_rows)}")
+print(f"PUBLISHED nodes {fc['stats']['nodes']} edges {fc['stats']['edges']} {km}km wp {nwp} (bay-outliers dropped {ndrop}) | blocks {len(block_pts)} → {nbcol} colors (adj~{bavgdeg:.1f}) | speed-colored edges {len(edge_speed)} | routable edges {len(edge_rows)}")
 PY
 
 # 4) load congestion (hour stamped by SQL so it's tz-correct)

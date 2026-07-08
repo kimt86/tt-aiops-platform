@@ -791,10 +791,14 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
         const k = koRef.current;
         if (p.kind === "workpoint") {
           const topos = String(p.topos);
-          if (p.ntype === "crane") return `<div class="lmp-t">QC ${topos}</div><div class="lmp-r">${k ? "안벽 크레인 노드" : "quay crane node"}</div>`;
-          if (p.ntype === "wharf") return `<div class="lmp-t">${topos}</div><div class="lmp-r">${k ? "안벽(선석) 노드" : "wharf node"}</div>`;
-          if (p.ntype === "block") return `<div class="lmp-t">${topos}</div><div class="lmp-r">${k ? "블록" : "block"} <b>${topos.split("-")[0]}</b> · ${k ? "야드 작업점(RTG)" : "yard work-point (RTG)"}</div>`;
-          return `<div class="lmp-t">${topos}</div>`;
+          const obs = Number(p.obs) || 0;
+          const sp = Number(p.spread) || 0;
+          const warn = sp >= 150; // high spread = scattered/mislabeled samples → unreliable position
+          const meta = `<div class="lmp-r">${k ? "표본" : "samples"} ${obs.toLocaleString()} · ${k ? "정확도" : "precision"} <b style="color:${warn ? "#f87171" : "#4ade80"}">±${sp}m</b>${warn ? (k ? " ⚠ 흩어짐" : " ⚠ scattered") : ""}</div>`;
+          if (p.ntype === "crane") return `<div class="lmp-t">QC ${topos}</div><div class="lmp-r">${k ? "안벽 크레인 노드" : "quay crane node"}</div>${meta}`;
+          if (p.ntype === "wharf") return `<div class="lmp-t">${topos}</div><div class="lmp-r">${k ? "안벽(선석) 노드" : "wharf node"}</div>${meta}`;
+          if (p.ntype === "block") return `<div class="lmp-t">${topos}</div><div class="lmp-r">${k ? "블록" : "block"} <b>${topos.split("-")[0]}</b> · ${k ? "야드 작업점(RTG)" : "yard work-point (RTG)"}</div>${meta}`;
+          return `<div class="lmp-t">${topos}</div>${meta}`;
         }
         if (p.kind === "node") {
           const d = Number(p.deg);

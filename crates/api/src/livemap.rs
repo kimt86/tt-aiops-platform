@@ -274,6 +274,8 @@ pub struct Centroid {
     var_lat: f64, // EWMA variance (matches the capped mean) → spread/precision
     var_lon: f64,
 }
+const CENTROID_GATE_M: f64 = 300.0; // reject a block work-point sample >this from the running centroid
+const CENTROID_GATE_MIN_N: u32 = 10; // ...but only once the centroid has settled
 impl Centroid {
     fn push(&mut self, lat: f64, lon: f64) {
         self.obs += 1;
@@ -285,6 +287,15 @@ impl Centroid {
         self.lon += d_lon * k;
         self.var_lat = (1.0 - k) * (self.var_lat + k * d_lat * d_lat);
         self.var_lon = (1.0 - k) * (self.var_lon + k * d_lon * d_lon);
+    }
+    /// Like `push`, but drops a sample lying more than `gate_m` from the established centroid — a
+    /// cross-block mislabel (stale topos1) that would otherwise drag the mean and blow up spread.
+    /// Only gates once the centroid has settled (≥ CENTROID_GATE_MIN_N samples).
+    fn push_gated(&mut self, lat: f64, lon: f64, gate_m: f64) {
+        if self.n >= CENTROID_GATE_MIN_N && dist_m((self.lat, self.lon), (lat, lon)) > gate_m {
+            return;
+        }
+        self.push(lat, lon);
     }
     /// spatial spread (m) ≈ √(var_lat + var_lon), the model's precision at this point.
     fn spread_m(&self) -> f64 {
@@ -2939,20 +2950,22 @@ async fn ingest_text(lm: &Arc<LiveMap>, text: &str) {
     if pos.cls == "TT" && pos.arrival.as_deref() == Some("ARRIVED") {
         if let Some(t) = pos.topos1.as_deref() {
             if !t.is_empty() {
-                let (full, pre) = (t.to_string(), block_prefix(t).to_string());
-                {
-                    let mut c = lm.centroids.write().await;
-                    c.entry(full).or_default().push(lat, lon);
-                    if pre != t {
-                        c.entry(pre).or_default().push(lat, lon);
-                    }
-                }
-                // QC handover: also feed the quay work-line + per-crane recency centroid — a
-                // swing-free handover point (block/RTG keep the plain centroid above).
                 if is_crane_code(t) {
+                    // QC: ungated fallback centroid (a crane legitimately travels the quay) + the
+                    // quay work-line + per-crane recency work-point (swing-free handover point).
+                    lm.centroids.write().await.entry(t.to_string()).or_default().push(lat, lon);
                     let (x, y) = to_local(lat, lon);
                     lm.quay_line.write().await.push(x, y);
                     lm.crane_wp.write().await.entry(t.to_string()).or_default().push(x, y, now);
+                } else {
+                    // block/bay: OUTLIER-GATED push — a stale-topos1 sample landing in another
+                    // block is dropped so it can't drag the mean / blow up the spread.
+                    let (full, pre) = (t.to_string(), block_prefix(t).to_string());
+                    let mut c = lm.centroids.write().await;
+                    c.entry(full).or_default().push_gated(lat, lon, CENTROID_GATE_M);
+                    if pre != t {
+                        c.entry(pre).or_default().push_gated(lat, lon, CENTROID_GATE_M);
+                    }
                 }
             }
         }
@@ -2961,7 +2974,7 @@ async fn ingest_text(lm: &Arc<LiveMap>, text: &str) {
         // Surfaced via /api/livemap/wharf + the live-map overlay (persisted in learn_topos_point).
         if let Some(cl) = pos.cur_loc.as_deref() {
             if cl.starts_with("WHARF") && !cl.is_empty() {
-                lm.centroids.write().await.entry(cl.to_string()).or_default().push(lat, lon);
+                lm.centroids.write().await.entry(cl.to_string()).or_default().push_gated(lat, lon, CENTROID_GATE_M);
             }
         }
     }
