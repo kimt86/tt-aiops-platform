@@ -37,6 +37,13 @@ pub struct Route {
     pub dist_m: f64,
 }
 
+/// A routed path's geometry (node coordinates) + total distance — for map-matching a truck's live
+/// GPS onto its expected route (stabilises noisy/gappy GPS for cycle decomposition).
+pub struct RoutePath {
+    pub pts: Vec<(f64, f64)>, // (lat, lon) polyline, source → destination
+    pub dist_m: f64,
+}
+
 impl RoadGraph {
     /// Load from the DB (rebuilt hourly by the cron). Returns None if the graph is empty/unavailable
     /// so callers can fall back to the geometric estimate. Both tables are read from ONE repeatable-
@@ -176,6 +183,54 @@ impl RoadGraph {
                 if nt < best_t[to as usize] {
                     best_t[to as usize] = nt;
                     path_m[to as usize] = path_m[node as usize] + em;
+                    heap.push(HeapItem { t: nt, node: to });
+                }
+            }
+        }
+        None
+    }
+
+    /// Like `route`, but also returns the path GEOMETRY (node coordinates) for map-matching. Source
+    /// = raw truck GPS (wider snap); destination = a work-point (already on the graph via connectors).
+    pub fn route_path(&self, alat: f64, alon: f64, blat: f64, blon: f64) -> Option<RoutePath> {
+        let s = self.snap_r(alat, alon, SNAP_SRC_MAX_M)?;
+        let t = self.snap(blat, blon)?;
+        if s == t {
+            return Some(RoutePath { pts: vec![self.nodes[s as usize]], dist_m: 0.0 });
+        }
+        let n = self.nodes.len();
+        let mut best_t = vec![f64::INFINITY; n];
+        let mut path_m = vec![0.0f64; n];
+        let mut prev = vec![u32::MAX; n];
+        best_t[s as usize] = 0.0;
+        let mut heap = BinaryHeap::new();
+        heap.push(HeapItem { t: 0.0, node: s });
+        while let Some(HeapItem { t: ct, node }) = heap.pop() {
+            if node == t {
+                let mut pts = Vec::new();
+                let mut cur = t;
+                loop {
+                    pts.push(self.nodes[cur as usize]);
+                    if cur == s {
+                        break;
+                    }
+                    cur = prev[cur as usize];
+                    if cur == u32::MAX {
+                        return None;
+                    }
+                }
+                pts.reverse();
+                return Some(RoutePath { pts, dist_m: path_m[t as usize] });
+            }
+            if ct > best_t[node as usize] {
+                continue;
+            }
+            for &(to, et, em) in &self.adj[node as usize] {
+                let nt = ct + et;
+                if nt < best_t[to as usize] {
+                    best_t[to as usize] = nt;
+                    path_m[to as usize] = path_m[node as usize] + em;
+                    prev[to as usize] = node;
                     heap.push(HeapItem { t: nt, node: to });
                 }
             }

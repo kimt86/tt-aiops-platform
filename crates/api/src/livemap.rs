@@ -568,6 +568,8 @@ pub struct LiveMap {
     // logger records each trip's FIRST soon_idle entry once; released when the truck stops
     // carrying that container. Powers the soon-idle accuracy shadow (tt_soon_idle_pred).
     soon_idle_open: Mutex<HashSet<(String, String)>>,
+    // dedup for the near-miss (wait_rtg) log — one row per carry-trip's first wait_rtg entry (⑤ gate).
+    nearmiss_open: Mutex<HashSet<(String, String)>>,
     // SMOOTHED live QC starvation (GPS-distance, pending-work gated) — rolling mean over the last
     // few 30s ticks, written by spawn_qc_wait_logger and read by the positions endpoint. Replaces
     // the jumpy per-request topos1 count. (count, avg_wait_s).
@@ -577,6 +579,9 @@ pub struct LiveMap {
     // (swing-free, gantry-tracking). Blocks/RTG stay on `centroids` above.
     quay_line: RwLock<QuayLine>,
     crane_wp: RwLock<HashMap<String, CraneWp>>,
+    // ⑤⑥ time-to-free self-cal (mig 0086): (state, jobtype, dist_bin) → learned median seconds-to-free,
+    // per cycle stage, replacing the free_in constants. Loaded by spawn_selfcal_refresh (~15min).
+    free_in_bias: RwLock<HashMap<(String, String, i16), i64>>,
 }
 
 /// Cap on the in-memory completed-cycle buffer. If the flusher stalls we drop the oldest
@@ -599,9 +604,11 @@ impl LiveMap {
             cycle_log: Mutex::new(VecDeque::new()),
             cycle_v2: Mutex::new(VecDeque::new()),
             soon_idle_open: Mutex::new(HashSet::new()),
+            nearmiss_open: Mutex::new(HashSet::new()),
             qc_wait_live: RwLock::new(None),
             quay_line: RwLock::new(QuayLine::default()),
             crane_wp: RwLock::new(HashMap::new()),
+            free_in_bias: RwLock::new(HashMap::new()),
             connected: AtomicBool::new(false),
             messages: AtomicU64::new(0),
             reconnects: AtomicU64::new(0),
@@ -751,6 +758,21 @@ pub struct PositionsOut {
 // the truck lane, NOT GPS jitter — pure jitter is ~2m). 30m caught only 32%; 50m catches 63%.
 // The offset is ~isotropic (along 28 / cross 21), so an anisotropic box does NOT beat a wider circle.
 const RTG_BAY_M: f64 = 50.0;
+// ⑤ soon-idle gate self-cal (mig 0084): DS block soon_idle RTG-distance cutoff, learned to hold
+// precision ≥0.82. Default = RTG_BAY_M×1000 (mm); spawn_selfcal_refresh updates it from
+// learn_soon_idle_gate every ~15min. classify_tt reads it via soon_idle_gate_m().
+static SOON_IDLE_GATE_MM: AtomicU64 = AtomicU64::new(50_000);
+fn soon_idle_gate_m() -> f64 { SOON_IDLE_GATE_MM.load(Ordering::Relaxed) as f64 / 1000.0 }
+// RTG-distance bin (matches learn_free_in_bias / ds_eta): -1 none, 0 ≤30m, 1 ≤80m, 2 ≤150m, 3 >150m.
+fn dist_bin_of(nearest_rtg_m: Option<f64>) -> i16 {
+    match nearest_rtg_m {
+        None => -1,
+        Some(m) if m <= 30.0 => 0,
+        Some(m) if m <= 80.0 => 1,
+        Some(m) if m <= 150.0 => 2,
+        Some(_) => 3,
+    }
+}
 // loaded TT stopped within this of its drop-target (topos1) centroid ≈ arrived (websocket geofence,
 // replaces TOS rtg_active). Tuned by measured recall/precision vs crane ground truth (comparable load):
 //   70m  → recall DS59/LD61, precision 96%   ← chosen (Pareto point)
@@ -975,7 +997,7 @@ fn classify_tt(
     let nearest = rtgs.iter().map(|r| dist_m((p.lat, p.lon), *r)).fold(f64::INFINITY, f64::min);
     let d = nearest.is_finite().then(|| (nearest * 10.0).round() / 10.0);
     match d {
-        Some(dm) if dm <= RTG_BAY_M => {
+        Some(dm) if dm <= soon_idle_gate_m() => {
             Classed { state: "soon_idle", reason: Some(format!("블록 RTG 근접 {dm:.0}m")), nearest_rtg_m: Some(dm), ..Default::default() }
         }
         _ => {
@@ -1495,6 +1517,17 @@ struct PredRow {
     reason: String,
 }
 
+/// One near-miss (first `wait_rtg` entry per trip) to persist into `tt_soon_idle_nearmiss`: a truck
+/// arrived-and-loaded at a block but the nearest RTG was BEYOND the soon_idle gate. Joined to actual
+/// idle later, it gives P(idle-soon | distance>gate) — the data that lets ⑤'s gate LOOSEN, not just
+/// tighten. Without it the gate is blind above the current cutoff (mig 0085).
+struct NearMissRow {
+    ytno: String,
+    container: String,
+    jobtype: Option<String>,
+    nearest_rtg_m: Option<f64>,
+}
+
 /// SHADOW: every 30s, evaluate each TT's dispatch state (read-only `classify_tt`) and log the
 /// FIRST soon_idle entry per carry-trip into `tt_soon_idle_pred`, tagged with the firing signal
 /// (gps_rtg/tos_actv/qc_plc/both) and a counterfactual `gps_would_fire` flag. The hot path is
@@ -1507,7 +1540,7 @@ pub fn spawn_soon_idle_logger(lm: Arc<LiveMap>, pool: PgPool) {
             ticker.tick().await;
             let now = Utc::now().timestamp_millis();
             // collect prediction rows + current carry map under read locks, then release
-            let (cur_container, soon): (HashMap<String, String>, Vec<PredRow>) = {
+            let (cur_container, soon, nearmiss): (HashMap<String, String>, Vec<PredRow>, Vec<NearMissRow>) = {
                 let devices = lm.devices.read().await;
                 let plc = lm.plc.read().await;
                 let centroids = lm.centroids.read().await;
@@ -1529,6 +1562,7 @@ pub fn spawn_soon_idle_logger(lm: Arc<LiveMap>, pool: PgPool) {
                 };
                 let mut cur: HashMap<String, String> = HashMap::new();
                 let mut soon: Vec<PredRow> = Vec::new();
+                let mut nearmiss: Vec<NearMissRow> = Vec::new();
                 for (id, p) in devices.iter() {
                     if p.cls != "TT" || (now - p.last_seen_ms) / 1000 > STALE_AFTER_S {
                         continue;
@@ -1546,10 +1580,21 @@ pub fn spawn_soon_idle_logger(lm: Arc<LiveMap>, pool: PgPool) {
                         cur.insert(id.clone(), c.clone());
                     }
                     let cl = classify_tt(p, aj, &rtgs, &plc, &cranes, &centroids, now);
-                    if cl.state != "soon_idle" {
+                    // soon_idle → prediction log; wait_rtg → near-miss log (arrived at block but RTG
+                    // beyond the gate — the counterfactual that lets ⑤'s gate loosen safely).
+                    if cl.state != "soon_idle" && cl.state != "wait_rtg" {
                         continue;
                     }
-                    let Some(container) = container else { continue }; // soon_idle ⇒ loaded ⇒ present
+                    let Some(container) = container else { continue }; // loaded ⇒ present
+                    if cl.state == "wait_rtg" {
+                        nearmiss.push(NearMissRow {
+                            ytno: id.clone(),
+                            container,
+                            jobtype: p.jobtype.clone().or_else(|| p.latched_jobtype.clone()),
+                            nearest_rtg_m: cl.nearest_rtg_m,
+                        });
+                        continue;
+                    }
                     let reason = cl.reason.clone().unwrap_or_default();
                     // source ↔ classify_tt branch; gps_would_fire = would GPS/PLC alone have fired
                     let (source, gps_would_fire) = if reason.starts_with("블록 RTG 근접") {
@@ -1573,7 +1618,7 @@ pub fn spawn_soon_idle_logger(lm: Arc<LiveMap>, pool: PgPool) {
                         reason,
                     });
                 }
-                (cur, soon)
+                (cur, soon, nearmiss)
             };
 
             // release ended trips (truck no longer carrying that container) + pick new first-entries
@@ -1584,10 +1629,34 @@ pub fn spawn_soon_idle_logger(lm: Arc<LiveMap>, pool: PgPool) {
                     .filter(|r| open.insert((r.ytno.clone(), r.container.clone())))
                     .collect()
             };
-            if to_insert.is_empty() {
+            // near-misses: first wait_rtg entry per trip (⑤ gate loosen data)
+            let nm_insert: Vec<NearMissRow> = {
+                let mut open = lm.nearmiss_open.lock().await;
+                open.retain(|(yt, c0)| cur_container.get(yt).map(|c| c == c0).unwrap_or(false));
+                nearmiss.into_iter()
+                    .filter(|r| open.insert((r.ytno.clone(), r.container.clone())))
+                    .collect()
+            };
+            if to_insert.is_empty() && nm_insert.is_empty() {
                 continue;
             }
             let (bd, sh) = wp_core::shift::current(wp_core::shift::terminal_now().naive_local());
+            for r in &nm_insert {
+                let _ = sqlx::query(
+                    "INSERT INTO tt_soon_idle_nearmiss
+                       (ytno, container, jobtype, observed_at, nearest_rtg_m, business_date, shift)
+                     VALUES ($1,$2,$3,now(),$4,$5,$6)
+                     ON CONFLICT (ytno, container, observed_at) DO NOTHING",
+                )
+                .bind(&r.ytno)
+                .bind(&r.container)
+                .bind(&r.jobtype)
+                .bind(r.nearest_rtg_m)
+                .bind(bd)
+                .bind(sh.label())
+                .execute(&pool)
+                .await;
+            }
             for r in &to_insert {
                 if let Err(e) = sqlx::query(
                     "INSERT INTO tt_soon_idle_pred
@@ -1755,6 +1824,231 @@ pub async fn load_lanes(lm: &Arc<LiveMap>, pool: &PgPool) {
         );
     }
     tracing::info!(count = l.len(), "loaded learned lane cells");
+}
+
+// ── live map-matching SHADOW ───────────────────────────────────────────────────────────
+// GPS is noisy (7% of samples jump >100m) and gappy (14% >30s apart), so cycle decomposition
+// misses arrivals (DS pickup ~29% missed). A truck's OD is known, so we route its expected path
+// and project the GPS onto it: even when GPS jumps/drops, the furthest-along on-route point tells
+// us how close to the destination it got. This task runs it as a SHADOW — per leg it logs the
+// route-progress vs the current geofence/ARRIVED signal so we can measure the gain. No live change.
+const MM_GATE_M: f64 = 80.0; // a GPS sample farther than this from the route is off-route → ignored
+
+#[derive(Default)]
+struct MapMatch {
+    dest: String,
+    dest_xy: (f64, f64),
+    rxy: Vec<(f64, f64)>, // route polyline in local metres
+    arc: Vec<f64>,        // cumulative arc-length
+    total_m: f64,
+    routed: bool,
+    progress_m: f64,
+    started_ms: i64,
+    last_upd_ms: i64,
+    last_gps_ms: i64,
+    max_gap_s: f64,
+    min_dest_m: f64,
+    max_jump_m: f64,
+    last_xy: Option<(f64, f64)>,
+    saw_arrived: bool,
+    is_crane: bool,
+}
+impl MapMatch {
+    fn set_route(&mut self, rp: crate::roadgraph::RoutePath) {
+        let mut acc = 0.0;
+        for (i, &(la, lo)) in rp.pts.iter().enumerate() {
+            let p = to_local(la, lo);
+            if i > 0 {
+                let (px, py) = self.rxy[i - 1];
+                acc += (p.0 - px).hypot(p.1 - py);
+            }
+            self.rxy.push(p);
+            self.arc.push(acc);
+        }
+        self.total_m = acc;
+        self.routed = self.total_m > 1.0 && self.rxy.len() >= 2;
+    }
+    fn project(&mut self, lat: f64, lon: f64) {
+        let g = to_local(lat, lon);
+        let dd = (g.0 - self.dest_xy.0).hypot(g.1 - self.dest_xy.1);
+        if dd < self.min_dest_m {
+            self.min_dest_m = dd;
+        }
+        if !self.routed {
+            return;
+        }
+        let mut best = (f64::INFINITY, 0.0);
+        for i in 0..self.rxy.len() - 1 {
+            let (p0, p1) = (self.rxy[i], self.rxy[i + 1]);
+            let (dx, dy) = (p1.0 - p0.0, p1.1 - p0.1);
+            let l2 = dx * dx + dy * dy;
+            if l2 < 1e-6 {
+                continue;
+            }
+            let t = (((g.0 - p0.0) * dx + (g.1 - p0.1) * dy) / l2).clamp(0.0, 1.0);
+            let d = (g.0 - (p0.0 + t * dx)).hypot(g.1 - (p0.1 + t * dy));
+            if d < best.0 {
+                best = (d, self.arc[i] + t * (self.arc[i + 1] - self.arc[i]));
+            }
+        }
+        if best.0 <= MM_GATE_M {
+            self.progress_m = self.progress_m.max(best.1);
+        }
+    }
+}
+
+struct MmRow {
+    ytno: String,
+    dest: String,
+    is_crane: bool,
+    dur_s: i32,
+    route_m: f32,
+    prog_frac: f32,
+    min_dest_m: f32,
+    saw_arrived: bool,
+    max_gap_s: f32,
+    max_jump_m: f32,
+}
+fn mm_finalize(ytno: &str, mm: &MapMatch) -> Option<MmRow> {
+    if !mm.routed || mm.started_ms == 0 || mm.total_m <= 0.0 {
+        return None;
+    }
+    let dur = ((mm.last_upd_ms - mm.started_ms) / 1000) as i32;
+    if dur < 20 {
+        return None; // too short to be a meaningful leg
+    }
+    Some(MmRow {
+        ytno: ytno.to_string(),
+        dest: mm.dest.clone(),
+        is_crane: mm.is_crane,
+        dur_s: dur,
+        route_m: mm.total_m as f32,
+        prog_frac: (mm.progress_m / mm.total_m).clamp(0.0, 1.0) as f32,
+        min_dest_m: if mm.min_dest_m.is_finite() { mm.min_dest_m as f32 } else { -1.0 },
+        saw_arrived: mm.saw_arrived,
+        max_gap_s: mm.max_gap_s as f32,
+        max_jump_m: mm.max_jump_m as f32,
+    })
+}
+
+/// SHADOW map-matcher: every 5s, project each TT's GPS onto its expected road route (cached per leg)
+/// and, at each leg transition, log route-progress vs the current arrival signal → `mm_arrival_shadow`.
+pub fn spawn_mapmatch_shadow(lm: Arc<LiveMap>, pool: PgPool) {
+    tokio::spawn(async move {
+        let mut graph = crate::roadgraph::RoadGraph::load(&pool).await;
+        let mut age_s: i64 = 0;
+        let mut state: HashMap<String, MapMatch> = HashMap::new();
+        let mut ticker = tokio::time::interval(Duration::from_secs(5));
+        loop {
+            ticker.tick().await;
+            age_s += 5;
+            if graph.is_none() || age_s >= 3600 {
+                if let Some(gg) = crate::roadgraph::RoadGraph::load(&pool).await {
+                    graph = Some(gg);
+                }
+                age_s = 0;
+            }
+            let Some(g) = graph.as_ref() else { continue };
+            let now = Utc::now().timestamp_millis();
+            let (tts, cents): (
+                Vec<(String, f64, f64, Option<String>, bool, i64)>,
+                HashMap<String, (f64, f64)>,
+            ) = {
+                let d = lm.devices.read().await;
+                let c = lm.centroids.read().await;
+                let tts = d
+                    .iter()
+                    .filter(|(_, p)| p.cls == "TT" && (now - p.last_seen_ms) / 1000 <= 600)
+                    .map(|(id, p)| {
+                        (id.clone(), p.lat, p.lon, p.topos1.clone(), p.arrival.as_deref() == Some("ARRIVED"), p.last_seen_ms)
+                    })
+                    .collect();
+                let cents = c.iter().map(|(k, v)| (k.clone(), (v.lat, v.lon))).collect();
+                (tts, cents)
+            };
+            let mut rows: Vec<MmRow> = Vec::new();
+            let mut present: HashSet<String> = HashSet::new();
+            for (id, lat, lon, topos1, arrived, last_seen) in tts {
+                present.insert(id.clone());
+                let dest_t = topos1.filter(|t| !t.is_empty() && t != "0");
+                let entry = state.entry(id.clone()).or_default();
+                let mut active = false;
+                match dest_t.as_deref() {
+                    Some(dt) if dt == entry.dest && entry.started_ms != 0 => {
+                        active = true;
+                    }
+                    Some(dt) => {
+                        if let Some(r) = mm_finalize(&id, entry) {
+                            rows.push(r);
+                        }
+                        let dest_pos = cents.get(dt).or_else(|| cents.get(block_prefix(dt))).copied();
+                        *entry = MapMatch {
+                            dest: dt.to_string(),
+                            is_crane: is_crane_code(dt),
+                            started_ms: now,
+                            last_upd_ms: now,
+                            min_dest_m: f64::INFINITY,
+                            ..Default::default()
+                        };
+                        if let Some((dla, dlo)) = dest_pos {
+                            entry.dest_xy = to_local(dla, dlo);
+                            if let Some(rp) = g.route_path(lat, lon, dla, dlo) {
+                                entry.set_route(rp);
+                            }
+                        }
+                        active = true;
+                    }
+                    None => {
+                        if let Some(r) = mm_finalize(&id, entry) {
+                            rows.push(r);
+                        }
+                        *entry = MapMatch::default();
+                    }
+                }
+                if active && entry.routed {
+                    if entry.last_gps_ms > 0 && last_seen > entry.last_gps_ms {
+                        let gap = (last_seen - entry.last_gps_ms) as f64 / 1000.0;
+                        if gap > entry.max_gap_s {
+                            entry.max_gap_s = gap;
+                        }
+                    }
+                    if let Some((lx, ly)) = entry.last_xy {
+                        let (nx, ny) = to_local(lat, lon);
+                        let jmp = (nx - lx).hypot(ny - ly);
+                        if jmp > entry.max_jump_m {
+                            entry.max_jump_m = jmp;
+                        }
+                    }
+                    entry.project(lat, lon);
+                    if arrived {
+                        entry.saw_arrived = true;
+                    }
+                    entry.last_gps_ms = last_seen;
+                    entry.last_xy = Some(to_local(lat, lon));
+                    entry.last_upd_ms = now;
+                }
+            }
+            let gone: Vec<String> = state.keys().filter(|k| !present.contains(k.as_str())).cloned().collect();
+            for k in &gone {
+                if let Some(mm) = state.get(k) {
+                    if let Some(r) = mm_finalize(k, mm) {
+                        rows.push(r);
+                    }
+                }
+                state.remove(k);
+            }
+            for r in &rows {
+                let _ = sqlx::query(
+                    "INSERT INTO mm_arrival_shadow (ytno,dest_topos,is_crane,leg_dur_s,route_m,progress_frac,min_dest_m,saw_arrived,max_gap_s,max_jump_m)
+                     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
+                )
+                .bind(&r.ytno).bind(&r.dest).bind(r.is_crane).bind(r.dur_s)
+                .bind(r.route_m).bind(r.prog_frac).bind(r.min_dest_m).bind(r.saw_arrived)
+                .bind(r.max_gap_s).bind(r.max_jump_m)
+                .execute(&pool).await;
+            }
+        }
+    });
 }
 
 /// Every 5 min, persist in-memory learned topos centroids → `learn_topos_point` (the block
@@ -3671,6 +3965,38 @@ fn optimal_assign(
 /// QC's work-ETA + pickup coord (LD=block centroid, DS=QC GPS). Cost = time-to-free + OD travel
 /// (travel_cost_lookup layer, loaded once). Greedy: urgent work first gets its n cheapest feasible
 /// vehicles. Logs arrival, conservative deadline slack, feasibility, OD tier → stage2_match_shadow.
+/// ⑤⑥ self-cal refresh (mig 0084): every ~15min REFRESH the two learned MVs and load them into the
+/// live dispatch path — learn_free_in_bias → lm.free_in_bias, learn_soon_idle_gate → SOON_IDLE_GATE_MM.
+/// Mirrors learn_work_eta_bias (⑦): the correction is measured from realized idle outcomes and fed
+/// back, so both predictions self-recalibrate as conditions drift (7-day window in the MVs).
+pub fn spawn_selfcal_refresh(lm: Arc<LiveMap>, pool: PgPool) {
+    tokio::spawn(async move {
+        loop {
+            let _ = sqlx::query("REFRESH MATERIALIZED VIEW CONCURRENTLY learn_free_in_bias").execute(&pool).await;
+            let _ = sqlx::query("REFRESH MATERIALIZED VIEW CONCURRENTLY learn_soon_idle_gate").execute(&pool).await;
+            // ⑥ free-in residual: learned median seconds-to-idle for soon_idle, per (jobtype, dist_bin).
+            if let Ok(rows) = sqlx::query_as::<_, (String, String, i32, i32)>(
+                "SELECT state, jobtype, dist_bin, med_rem_s FROM learn_free_in_bias WHERE med_rem_s IS NOT NULL AND n >= 50",
+            ).fetch_all(&pool).await {
+                let map: HashMap<(String, String, i16), i64> = rows.into_iter()
+                    .map(|(st, jt, bin, med)| ((st, jt, bin as i16), (med as i64).clamp(30, 3600)))
+                    .collect();
+                if !map.is_empty() {
+                    *lm.free_in_bias.write().await = map;
+                }
+            }
+            // ⑤ soon-idle gate: learned DS RTG-distance cutoff holding precision ≥0.82.
+            if let Ok(Some((gate_m,))) = sqlx::query_as::<_, (f32,)>(
+                "SELECT gate_m FROM learn_soon_idle_gate WHERE jobtype = 'DS' AND n >= 200",
+            ).fetch_optional(&pool).await {
+                let mm = ((gate_m as f64) * 1000.0).round().clamp(30_000.0, 90_000.0) as u64;
+                SOON_IDLE_GATE_MM.store(mm, Ordering::Relaxed);
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(900)).await;
+        }
+    });
+}
+
 pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(Duration::from_secs(60));
@@ -3713,6 +4039,7 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                     let g = lm.crane_wp.read().await;
                     resolve_crane_wp(&line, &g, &cranes)
                 };
+                let fi_bias = lm.free_in_bias.read().await; // ⑥ learned soon_idle seconds-to-idle
                 let mut v = Vec::new();
                 for (id, p) in map.iter() {
                     if p.cls != "TT" || (now - p.last_seen_ms) / 1000 > STALE_AFTER_S {
@@ -3721,11 +4048,27 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                     let c = classify_tt(p, assigned_pool.get(id), &rtgs, &plc, &cranes, &centroids, now);
                     let base = match c.state {
                         "idle" => 0,
-                        s @ ("soon_idle" | "approaching" | "wait_rtg") => free_in(s, p.jobtype.as_deref()).0.unwrap_or(0),
+                        // ⑤⑥ time-to-free: learned per-stage median seconds (state × jobtype × RTG
+                        // bin, fallback state×jobtype, fallback the free_in constant). Replaces the
+                        // miscalibrated constants for every candidate stage (soon_idle 120→~300, etc).
+                        s @ ("soon_idle" | "approaching" | "wait_rtg") => {
+                            // jobtype must use the SAME latched fallback the MV/logger key on
+                            // (free_in_sample writer + near-miss logger), else a momentary None
+                            // jobtype misses the learned bucket and collapses to the 30s floor.
+                            let jt = p.jobtype.clone().or_else(|| p.latched_jobtype.clone()).unwrap_or_default();
+                            let bin = dist_bin_of(c.nearest_rtg_m);
+                            fi_bias
+                                .get(&(s.to_string(), jt.clone(), bin))
+                                .or_else(|| fi_bias.get(&(s.to_string(), jt.clone(), -99)))
+                                .copied()
+                                .unwrap_or_else(|| free_in(s, (!jt.is_empty()).then_some(jt.as_str())).0.unwrap_or(0))
+                                .clamp(30, 3600)
+                        }
                         _ => continue,
                     };
                     v.push((id.clone(), p.lat, p.lon, base, c.state));
                 }
+                drop(fi_bias);
                 v
             };
             if vehicles.is_empty() {

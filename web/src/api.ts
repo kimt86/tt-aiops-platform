@@ -207,6 +207,15 @@ export interface DispatchPredData {
   ld_eval: number; ld_med_err_min: number | null;
 }
 
+export interface LearnExtra {
+  mm_legs: number; mm_saw_pct: number | null; mm_missed: number; mm_recoverable: number; mm_avg_prog: number | null;
+  cyc_n: number; cyc_empty_miss_pct: number | null; cyc_laden_miss_pct: number | null; cyc_pickdone_pct: number | null;
+  qc_total: number; qc_projected: number;
+  s2_rows: number; s2_feasible_pct: number | null; s2_switched: number; s2_gap_pct: number | null;
+  si_gate_m: number | null; si_gate_prec: number | null; si_gate_n: number; si_gate_nearmiss_n: number;
+  fi_stages: { state: string; jobtype: string; n: number; med_rem_s: number }[];
+}
+
 export interface Stage2Match {
   ytno: string; qc: string | null; vessel: string | null; queuename: string | null;
   jobtype: string | null; src_block: string | null; veh_state: string | null;
@@ -307,6 +316,7 @@ export const api = {
   learnTravel: () => get<TravelData>("/api/learn/travel"),
   learnSoonIdle: () => get<SoonIdleData>("/api/learn/soon-idle"),
   learnDispatchPred: () => get<DispatchPredData>("/api/learn/dispatch-pred"),
+  learnExtra: () => get<LearnExtra>("/api/learn/extra"),
   learnDataCatalog: () => get<DataStat[]>("/api/learn/data-catalog"),
   learnDataSample: (key: string) => get<DataRow[]>(`/api/learn/data-sample?key=${encodeURIComponent(key)}`),
   stage2Shadow: () => get<Stage2Shadow>("/api/stage2/shadow"),

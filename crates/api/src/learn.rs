@@ -724,3 +724,105 @@ pub async fn data_sample(
     let txt: String = sqlx::query_scalar(&sql).fetch_one(&pool).await?;
     Ok((json_ct, txt).into_response())
 }
+
+// ─────────────────── extra: live stats for the newer models (map-match, cycle, stage-2, QC) ───────────────────
+#[derive(Serialize, sqlx::FromRow)]
+pub struct FreeInStage {
+    state: String,
+    jobtype: String,
+    n: i32,
+    med_rem_s: i32, // learned median seconds-to-free for a truck observed in this stage
+}
+
+#[derive(Serialize)]
+pub struct ExtraResp {
+    // live map-match arrival shadow (mm_arrival_shadow, block legs, 24h)
+    mm_legs: i64,
+    mm_saw_pct: Option<f64>,
+    mm_missed: i64,
+    mm_recoverable: i64, // missed by geofence/ARRIVED but route-progress reached the end
+    mm_avg_prog: Option<f64>,
+    // cycle decomposition capture (tt_cycle_v2, last 3d)
+    cyc_n: i64,
+    cyc_empty_miss_pct: Option<f64>,
+    cyc_laden_miss_pct: Option<f64>,
+    cyc_pickdone_pct: Option<f64>, // pickup_left backed by crane ground truth
+    // QC work-point (learn_topos_point cranes)
+    qc_total: i64,
+    qc_projected: i64, // cranes resolved to the swing-free quay-line work-point (spread≈15)
+    // stage-2 dispatch matching shadow (24h)
+    s2_rows: i64,
+    s2_feasible_pct: Option<f64>,
+    s2_switched: i64,
+    s2_gap_pct: Option<f64>, // greedy vs optimal cost gap
+    // ⑤ soon-idle gate self-cal (learn_soon_idle_gate) + ⑥ free-in residual (learn_free_in_bias)
+    si_gate_m: Option<f64>,       // learned DS RTG-distance cutoff (m); default 50
+    si_gate_prec: Option<i32>,    // precision (%) held at that gate
+    si_gate_n: i64,               // total observations the gate was learned from (fired ∪ near-miss)
+    si_gate_nearmiss_n: i64,      // near-miss (>gate) observations — enables loosening
+    fi_stages: Vec<FreeInStage>, // ⑤⑥ learned median seconds-to-free per cycle stage (rollup rows)
+}
+
+/// GET /api/learn/extra — one-shot live stats for the models that lack a dedicated endpoint.
+pub async fn extra(State(pool): State<PgPool>) -> Result<Json<ExtraResp>, AppError> {
+    let (mm_legs, mm_saw_pct, mm_missed, mm_recoverable, mm_avg_prog): (i64, Option<f64>, i64, i64, Option<f64>) =
+        sqlx::query_as(
+            "SELECT count(*),
+                    (100.0*avg(saw_arrived::int))::float8,
+                    count(*) FILTER (WHERE NOT saw_arrived AND (min_dest_m<0 OR min_dest_m>70)),
+                    count(*) FILTER (WHERE NOT saw_arrived AND (min_dest_m<0 OR min_dest_m>70) AND progress_frac>=0.9),
+                    avg(progress_frac)::float8
+               FROM mm_arrival_shadow
+              WHERE NOT is_crane AND leg_dur_s>=30 AND logged_at > now()-interval '24 hours'",
+        )
+        .fetch_one(&pool)
+        .await?;
+    let (cyc_n, cyc_empty_miss_pct, cyc_laden_miss_pct, cyc_pickdone_pct): (i64, Option<f64>, Option<f64>, Option<f64>) =
+        sqlx::query_as(
+            "SELECT count(*),
+                    (100.0*avg((empty_arrived_at IS NULL)::int))::float8,
+                    (100.0*avg((laden_arrived_at IS NULL)::int))::float8,
+                    (100.0*avg((pickup_done_at IS NOT NULL)::int))::float8
+               FROM tt_cycle_v2 WHERE dropped_at > now()-interval '3 days'",
+        )
+        .fetch_one(&pool)
+        .await?;
+    let (qc_total, qc_projected): (i64, i64) = sqlx::query_as(
+        "SELECT count(*), count(*) FILTER (WHERE spread_m <= 16) FROM learn_topos_point WHERE is_crane",
+    )
+    .fetch_one(&pool)
+    .await?;
+    let (s2_rows, s2_feasible_pct, s2_switched): (i64, Option<f64>, i64) = sqlx::query_as(
+        "SELECT count(*), (100.0*avg(feasible::int))::float8, count(*) FILTER (WHERE switched)
+           FROM stage2_match_shadow WHERE ts > now()-interval '24 hours'",
+    )
+    .fetch_one(&pool)
+    .await?;
+    let s2_gap_pct: Option<f64> = sqlx::query_scalar(
+        "SELECT avg(gap_pct)::float8 FROM stage2_solver_shadow WHERE ts > now()-interval '24 hours'",
+    )
+    .fetch_one(&pool)
+    .await?;
+    let gate: Option<(f32, i32, i32, i32)> = sqlx::query_as(
+        "SELECT gate_m, prec_pct, n, nearmiss_n FROM learn_soon_idle_gate WHERE jobtype = 'DS'",
+    )
+    .fetch_optional(&pool)
+    .await?;
+    let (si_gate_m, si_gate_prec, si_gate_n, si_gate_nearmiss_n) = gate
+        .map(|(g, p, n, nm)| (Some(g as f64), Some(p), n as i64, nm as i64))
+        .unwrap_or((None, None, 0, 0));
+    let fi_stages: Vec<FreeInStage> = sqlx::query_as(
+        "SELECT state, jobtype, n, med_rem_s FROM learn_free_in_bias
+          WHERE dist_bin = -99 AND med_rem_s IS NOT NULL
+          ORDER BY array_position(ARRAY['delivering','approaching','wait_rtg','soon_idle'], state), jobtype",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap_or_default();
+    Ok(Json(ExtraResp {
+        mm_legs, mm_saw_pct, mm_missed, mm_recoverable, mm_avg_prog,
+        cyc_n, cyc_empty_miss_pct, cyc_laden_miss_pct, cyc_pickdone_pct,
+        qc_total, qc_projected, s2_rows, s2_feasible_pct, s2_switched, s2_gap_pct,
+        si_gate_m, si_gate_prec, si_gate_n, si_gate_nearmiss_n, fi_stages,
+    }))
+}
