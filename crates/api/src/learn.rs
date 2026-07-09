@@ -182,6 +182,7 @@ struct TravelAccuracy {
     evaluated: i64,               // recent trips on a confident OD (n≥10), last 2 days
     mape_pct: Option<f64>,        // median |actual − pred| / actual
     median_abs_err_s: Option<f64>,
+    mae_s: Option<f64>,           // mean |actual − pred| in seconds (MAE; outlier-sensitive vs median)
     within_30pct: Option<f64>,    // % of trips predicted within ±30%
 }
 
@@ -268,12 +269,13 @@ pub async fn travel(State(pool): State<PgPool>) -> Result<Json<TravelResp>, AppE
          SELECT count(*) AS evaluated,
                 (percentile_cont(0.5) WITHIN GROUP (ORDER BY ape) * 100)::float8 AS mape_pct,
                 percentile_cont(0.5) WITHIN GROUP (ORDER BY abs_err) AS median_abs_err_s,
+                avg(abs_err)::float8 AS mae_s,
                 (avg(CASE WHEN ape <= 0.30 THEN 1.0 ELSE 0.0 END) * 100)::float8 AS within_30pct
            FROM e",
     )
     .fetch_one(&pool)
     .await
-    .unwrap_or(TravelAccuracy { evaluated: 0, mape_pct: None, median_abs_err_s: None, within_30pct: None });
+    .unwrap_or(TravelAccuracy { evaluated: 0, mape_pct: None, median_abs_err_s: None, mae_s: None, within_30pct: None });
 
     Ok(Json(TravelResp {
         samples, od_pairs, confident_pairs, confident_pairs_fullcode,
@@ -322,6 +324,7 @@ struct SiLead {
     // minutes-to-idle prediction test: predict the learned median (= lead_p50_s) for every truck of
     // this jobtype; how far off was the actual lead. mape = median |actual−pred|/actual.
     mape_pct: Option<f64>,
+    mae_s: Option<f64>,        // mean |actual − pred| in seconds (MAE)
     within_30pct: Option<f64>, // % of trucks whose actual idle landed within ±30% of the prediction
 }
 
@@ -353,6 +356,7 @@ struct DsEtaModel {
     evaluated: i64,
     feat_mape_pct: Option<f64>, // error of the feature-binned prediction
     flat_mape_pct: Option<f64>, // error of the flat jobtype-median baseline (for comparison)
+    feat_mae_s: Option<f64>,    // mean |actual − pred| in seconds for the feature model (MAE)
     within_30pct: Option<f64>,
 }
 
@@ -456,6 +460,7 @@ pub async fn soon_idle(State(pool): State<PgPool>) -> Result<Json<SoonIdleResp>,
                 percentile_cont(0.9) WITHIN GROUP (ORDER BY m.lead_s) FILTER (WHERE m.lead_s >= 0) AS lead_p90_s,
                 (percentile_cont(0.5) WITHIN GROUP (ORDER BY abs(m.lead_s - gm.med) / nullif(m.lead_s, 0))
                    FILTER (WHERE m.lead_s > 0) * 100)::float8 AS mape_pct,
+                (avg(abs(m.lead_s - gm.med)) FILTER (WHERE m.lead_s >= 0))::float8 AS mae_s,
                 (avg(((abs(m.lead_s - gm.med) / nullif(m.lead_s, 0)) <= 0.30)::int)
                    FILTER (WHERE m.lead_s > 0) * 100)::float8 AS within_30pct
            FROM m JOIN gm USING (jobtype) GROUP BY m.jobtype ORDER BY m.jobtype"
@@ -500,12 +505,13 @@ pub async fn soon_idle(State(pool): State<PgPool>) -> Result<Json<SoonIdleResp>,
          SELECT count(*) FILTER (WHERE m.lead_s > 0) AS evaluated,
                 (percentile_cont(0.5) WITHIN GROUP (ORDER BY abs(m.lead_s - cg.med) / nullif(m.lead_s, 0)) FILTER (WHERE m.lead_s > 0) * 100)::float8 AS feat_mape_pct,
                 (percentile_cont(0.5) WITHIN GROUP (ORDER BY abs(m.lead_s - f.med) / nullif(m.lead_s, 0)) FILTER (WHERE m.lead_s > 0) * 100)::float8 AS flat_mape_pct,
+                (avg(abs(m.lead_s - cg.med)) FILTER (WHERE m.lead_s >= 0))::float8 AS feat_mae_s,
                 (avg(((abs(m.lead_s - cg.med) / nullif(m.lead_s, 0)) <= 0.30)::int) FILTER (WHERE m.lead_s > 0) * 100)::float8 AS within_30pct
            FROM m JOIN cg USING (dist_bin, source) CROSS JOIN f"
     ))
     .fetch_one(&pool)
     .await
-    .unwrap_or(DsEtaModel { evaluated: 0, feat_mape_pct: None, flat_mape_pct: None, within_30pct: None });
+    .unwrap_or(DsEtaModel { evaluated: 0, feat_mape_pct: None, flat_mape_pct: None, feat_mae_s: None, within_30pct: None });
 
     let predictions: i64 = by_source.iter().map(|s| s.predictions).sum();
     let matched: i64 = by_source.iter().map(|s| s.matched).sum();

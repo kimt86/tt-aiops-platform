@@ -124,6 +124,7 @@ async fn main() -> anyhow::Result<()> {
     livemap::spawn_qc_wait_logger(livemap.clone(), pool.clone()); // 30s QC starvation 적재(K_QC_TT_WAIT_GPS, topos vs GPS 비교)
     livemap::spawn_qc_wait_kpi(pool.clone()); // 5min: qc_wait_sample → kpi_daily/shift (K_QC_TT_WAIT_GPS 영속)
     workpool::spawn_dispatch_pred_logger(pool.clone()); // 2min: 배차 1단계 예측 검증 로그(dispatch_pred_sample)
+    livemap::spawn_qc_handover_logger(livemap.clone(), pool.clone()); // 10s: LD 핸드오버 엣지 섀도(mig0087, 탐지 검증)
     livemap::spawn_selfcal_refresh(livemap.clone(), pool.clone()); // 15min: ⑤곧빔게이트·⑥유휴분 잔차 자가보정(mig0084)
     livemap::spawn_stage2_shadow(livemap.clone(), pool.clone()); // 60s: Stage-2 매칭 그림자(stage2_match_shadow)
     livemap::spawn_mapmatch_shadow(livemap.clone(), pool.clone()); // 5s: 도로망 맵매칭 그림자(mm_arrival_shadow, 도착 포착 개선 측정)

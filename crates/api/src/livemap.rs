@@ -3965,6 +3965,86 @@ fn optimal_assign(
 /// QC's work-ETA + pickup coord (LD=block centroid, DS=QC GPS). Cost = time-to-free + OD travel
 /// (travel_cost_lookup layer, loaded once). Greedy: urgent work first gets its n cheapest feasible
 /// vehicles. Logs arrival, conservative deadline slack, feasibility, OD tier → stage2_match_shadow.
+const QC_DOCK_M: f64 = 35.0; // a docked LD truck sits within this of the QC workpoint (queued trucks are farther)
+
+/// SHADOW (mig 0087): persist QC hook-load empty→laden rising edges (pickups) attributed to the docked
+/// LD truck, to validate "handover-start = truck free" on OUR data before wiring into classify_tt. For
+/// LD the pickup instant ≈ the truck-free instant, so edge→free residual should be near zero (vs the
+/// current arrival-based soon_idle: 248s median / 837s p90 = almost all pre-pickup wait). Attribution:
+/// the closest loaded LD truck within QC_DOCK_M of the crane workpoint; n_arrived flags queue ambiguity.
+/// Only edges from the last ~25s are logged so the docked truck is still the one that was picked. NOT
+/// wired into dispatch.
+pub fn spawn_qc_handover_logger(lm: Arc<LiveMap>, pool: PgPool) {
+    tokio::spawn(async move {
+        let mut last_edge: HashMap<String, i64> = HashMap::new();
+        let mut ticker = tokio::time::interval(Duration::from_secs(10));
+        struct Edge { crane: String, ts: i64, ytno: Option<String>, container: Option<String>, jobtype: Option<String>, dist: Option<f64>, n: i32, land: Option<bool> }
+        loop {
+            ticker.tick().await;
+            let now = Utc::now().timestamp_millis();
+            let edges: Vec<Edge> = {
+                let devices = lm.devices.read().await;
+                let plc = lm.plc.read().await;
+                let cranes_gps: HashMap<String, (f64, f64)> = devices.iter()
+                    .filter(|(_, p)| matches!(p.cls.as_str(), "C" | "M" | "Z") && (now - p.last_seen_ms) / 1000 <= STALE_AFTER_S)
+                    .map(|(id, p)| (id.clone(), (p.lat, p.lon))).collect();
+                let crane_wp = { let line = *lm.quay_line.read().await; let g = lm.crane_wp.read().await; resolve_crane_wp(&line, &g, &cranes_gps) };
+                let mut out: Vec<Edge> = Vec::new();
+                for (crane, e) in plc.iter() {
+                    let Some(&cpos) = crane_wp.get(crane) else { continue };
+                    let seen = *last_edge.get(crane).unwrap_or(&0);
+                    for &ts in e.moves.iter() {
+                        if ts <= seen || now - ts > 25_000 {
+                            continue;
+                        }
+                        // docked loaded LD trucks within QC_DOCK_M of the workpoint, closest first
+                        let mut cand: Vec<(f64, &String, &Pos)> = devices.iter()
+                            .filter(|(_, p)| p.cls == "TT" && (now - p.last_seen_ms) / 1000 <= STALE_AFTER_S)
+                            .filter(|(_, p)| {
+                                let jt = p.jobtype.as_deref().or(p.latched_jobtype.as_deref());
+                                let loaded = p.container1.as_deref().is_some_and(|s| !s.is_empty())
+                                    || p.latched_container.as_deref().is_some_and(|s| !s.is_empty());
+                                jt == Some("LD") && loaded
+                            })
+                            .map(|(id, p)| (dist_m((p.lat, p.lon), cpos), id, p))
+                            .filter(|(d, _, _)| *d <= QC_DOCK_M)
+                            .collect();
+                        cand.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+                        let n = cand.len() as i32;
+                        let (ytno, container, jobtype, dist) = match cand.first() {
+                            Some((d, id, p)) => (
+                                Some((*id).clone()),
+                                p.container1.clone().filter(|s| !s.is_empty()).or_else(|| p.latched_container.clone()),
+                                p.jobtype.clone().or_else(|| p.latched_jobtype.clone()),
+                                Some(*d),
+                            ),
+                            None => (None, None, None, None),
+                        };
+                        out.push(Edge { crane: crane.clone(), ts, ytno, container, jobtype, dist, n, land: e.land });
+                    }
+                }
+                out
+            };
+            if edges.is_empty() {
+                continue;
+            }
+            let (bd, sh) = wp_core::shift::current(wp_core::shift::terminal_now().naive_local());
+            for ed in &edges {
+                last_edge.insert(ed.crane.clone(), ed.ts.max(*last_edge.get(&ed.crane).unwrap_or(&0)));
+                let _ = sqlx::query(
+                    "INSERT INTO qc_handover_edge
+                       (crane, edge_ts, ytno, container, jobtype, truck_dist_m, n_arrived, land, business_date, shift)
+                     VALUES ($1, to_timestamp($2::float8/1000.0), $3,$4,$5,$6,$7,$8,$9,$10)
+                     ON CONFLICT (crane, edge_ts) DO NOTHING",
+                )
+                .bind(&ed.crane).bind(ed.ts).bind(&ed.ytno).bind(&ed.container).bind(&ed.jobtype)
+                .bind(ed.dist).bind(ed.n).bind(ed.land).bind(bd).bind(sh.label())
+                .execute(&pool).await;
+            }
+        }
+    });
+}
+
 /// ⑤⑥ self-cal refresh (mig 0084): every ~15min REFRESH the two learned MVs and load them into the
 /// live dispatch path — learn_free_in_bias → lm.free_in_bias, learn_soon_idle_gate → SOON_IDLE_GATE_MM.
 /// Mirrors learn_work_eta_bias (⑦): the correction is measured from realized idle outcomes and fed

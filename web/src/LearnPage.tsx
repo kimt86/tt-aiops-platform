@@ -327,6 +327,7 @@ function ModelsTab({ lang }: { lang: Lang }) {
               <Chip label="MAPE" value={acc.mape_pct != null ? `${acc.mape_pct.toFixed(0)}%` : "—"} accent="#f59e0b" />
               <Chip label={k ? "±30% 적중" : "within ±30%"} value={acc.within_30pct != null ? `${acc.within_30pct.toFixed(0)}%` : "—"} accent="#34d399" />
               <Chip label={k ? "중앙 절대오차" : "median abs err"} value={mmss(acc.median_abs_err_s)} />
+              <Chip label={k ? "MAE 평균오차" : "MAE mean err"} value={mmss(acc.mae_s)} accent="#38bdf8" />
               <Chip label={k ? "신뢰 OD쌍" : "confident O→D"} value={tv ? fmtN(tv.confident_pairs) : "—"} />
             </div>
           ) : <div className="cyc-empty">{k ? "trip 완료 대기 중" : "awaiting trips"}</div>}
@@ -441,8 +442,26 @@ function ModelsTab({ lang }: { lang: Lang }) {
           <div className="ls-beat">{k ? "① 탐지 — 놓치지 않고 잡았나 (재현율 추이 DS·LD)" : "① detection — did we catch them (recall)"}</div>
           <div className="learn-charts"><div className="cyc-tp"><div className="cyc-sec-h">DS <TrendBadge series={siRecallSeries} higherBetter lang={lang} /></div><div className="cyc-tp-box">{siRecallSeries.length > 1 ? <LineChart values={siRecallSeries} color="#fb923c" axes /> : <div className="cyc-empty">{k ? "수집 중" : "collecting"}</div>}</div></div><div className="cyc-tp"><div className="cyc-sec-h">LD <TrendBadge series={ldRecallSeries} higherBetter lang={lang} /></div><div className="cyc-tp-box">{ldRecallSeries.length > 1 ? <LineChart values={ldRecallSeries} color="#22d3ee" axes /> : <div className="cyc-empty">{k ? "수집 중" : "collecting"}</div>}</div></div></div>
           <div className="ls-leads"><LeadCard jt="DS" accent="#fb923c" lead={dsJob.lead} recall={dsJob.recall} recallGps={dsJob.recallGps} precision={dsJob.precision} lang={lang} /><LeadCard jt="LD" accent="#22d3ee" lead={ldJob.lead} recall={ldJob.recall} recallGps={ldJob.recallGps} precision={ldJob.precision} lang={lang} /></div>
-          <div className="ls-beat">{k ? "② 시각 — 사이클 단계별 유휴까지 남은시간 (상수 → 실측 자가보정)" : "② timing — seconds-to-free per stage (const → learned)"}</div>
-          <div style={{ marginTop: 4 }}>{(ex?.fi_stages ?? []).map((s) => {
+          <div className="ls-beat">{k ? "② 시각 정확도 — '몇 분 후 유휴' 예측이 실제와 얼마나 맞았나" : "② timing accuracy — was the minutes-to-idle prediction close"}</div>
+          <div className="ls-testchips" style={{ marginTop: 4, alignItems: "center" }}>
+            <span style={{ fontWeight: 700, color: "#fb923c", minWidth: 26 }}>DS</span>
+            <Chip label={k ? "±30% 적중" : "within ±30%"} value={dse?.within_30pct != null ? `${dse.within_30pct.toFixed(0)}%` : "—"} accent="#34d399" />
+            <Chip label={k ? "평균오차 MAE" : "MAE"} value={mmss(dse?.feat_mae_s)} accent="#38bdf8" />
+            <Chip label={k ? "오차율 MAPE" : "MAPE"} value={dse?.feat_mape_pct != null ? `${dse.feat_mape_pct.toFixed(0)}%` : "—"} accent="#fb923c" />
+            <span style={{ color: "var(--text-dim)", fontSize: 11 }}>n={dse ? fmtN(dse.evaluated) : "—"}</span>
+          </div>
+          <div className="ls-testchips" style={{ marginTop: 6, alignItems: "center" }}>
+            <span style={{ fontWeight: 700, color: "#22d3ee", minWidth: 26 }}>LD</span>
+            <Chip label={k ? "±30% 적중" : "within ±30%"} value={ldJob.lead?.within_30pct != null ? `${ldJob.lead.within_30pct.toFixed(0)}%` : "—"} accent="#34d399" />
+            <Chip label={k ? "평균오차 MAE" : "MAE"} value={mmss(ldJob.lead?.mae_s)} accent="#38bdf8" />
+            <Chip label={k ? "오차율 MAPE" : "MAPE"} value={ldJob.lead?.mape_pct != null ? `${ldJob.lead.mape_pct.toFixed(0)}%` : "—"} accent="#fb923c" />
+            <span style={{ color: "var(--text-dim)", fontSize: 11 }}>n={ldJob.lead ? fmtN(ldJob.lead.matched) : "—"}</span>
+          </div>
+          <div style={{ fontSize: 11, color: "var(--text-dim)", marginTop: 8, lineHeight: 1.55 }}>{k
+            ? `읽는 법: MAE=평균 몇 분 빗나갔나 · MAPE=평균 몇 % 빗나갔나 · ±30% 적중=예측이 실제의 ±30% 안에 든 비율. ⚠ 지금은 정밀하지 않습니다 — 10번 중 약 ${dse?.within_30pct != null ? Math.round(dse.within_30pct / 10) : "?"}번만 ±30% 안. 유휴까지 시간은 RTG 대기·큐 변동이 커서 콕 집기 어렵고, RTG 거리를 써도 평균과 거의 차이가 없습니다(${dse?.feat_mape_pct != null ? dse.feat_mape_pct.toFixed(0) : "?"}% vs 평균 ${dse?.flat_mape_pct != null ? dse.flat_mape_pct.toFixed(0) : "?"}%). 그래서 배차는 이 값을 한 점이 아니라 보수적 상한(p90)까지 함께 써서 마감을 안전하게 잡습니다.`
+            : `Read: MAE = avg minutes off · MAPE = avg % off · within ±30% = share inside ±30% of actual. ⚠ Not precise yet — only ~${dse?.within_30pct != null ? Math.round(dse.within_30pct / 10) : "?"}/10 within ±30%. Time-to-free varies a lot with RTG queueing, and the RTG-distance feature barely helps (${dse?.feat_mape_pct != null ? dse.feat_mape_pct.toFixed(0) : "?"}% vs flat ${dse?.flat_mape_pct != null ? dse.flat_mape_pct.toFixed(0) : "?"}%). Dispatch therefore uses the conservative p90 bound, not just the point, for deadline safety.`}</div>
+          <details className="ls-detail"><summary>{k ? "예측 근거 — 학습된 단계별 평균 시간" : "prediction basis — learned per-stage medians"}</summary>
+          <div style={{ marginTop: 6 }}>{(ex?.fi_stages ?? []).map((s) => {
             const cst = ({ delivering: 1030, approaching: 480, wait_rtg: 480, soon_idle: 120 } as Record<string, number>)[s.state] ?? 0;
             const lbl = ({ delivering: ["운반 중", "delivering"], approaching: ["접근 중", "approaching"], wait_rtg: ["RTG 대기", "wait RTG"], soon_idle: ["곧 빔", "soon idle"] } as Record<string, [string, string]>)[s.state] ?? [s.state, s.state];
             return (
@@ -456,7 +475,7 @@ function ModelsTab({ lang }: { lang: Lang }) {
               </div>
             );
           })}</div>
-          {dse ? <div className="ls-testchips" style={{ marginTop: 8 }}><Chip label={k ? "시각 정확도(DS MAPE)" : "timing DS MAPE"} value={dse.feat_mape_pct != null ? `${dse.feat_mape_pct.toFixed(0)}%` : "—"} accent="#fb923c" /><Chip label={k ? "±30% 적중" : "within ±30%"} value={dse.within_30pct != null ? `${dse.within_30pct.toFixed(0)}%` : "—"} accent="#34d399" /><Chip label={k ? "LD MAPE" : "LD MAPE"} value={ldJob.lead?.mape_pct != null ? `${ldJob.lead.mape_pct.toFixed(0)}%` : "—"} /></div> : null}
+          </details>
           <div className="ls-note" style={{ borderLeft: "2px solid #38bdf8", paddingLeft: 8, marginTop: 10 }}>🔵 {k
             ? `자가보정 1 (남은시간): 매 사이클 단계에서 실제 유휴까지 걸린 시간(free_in_sample 라벨)의 median으로 상수를 대체 — 전 단계·jobtype·RTG거리별, 7일창·15분 갱신. 상수는 양방향으로 어긋나 있었음(soon_idle 120→~300 과소 / delivering 1030→~570 과대).`
             : `Self-correction 1 (time): replaces each stage constant with the measured median time-to-free (per stage × jobtype × RTG bin, 7-day / 15-min). Constants were off both ways (soon_idle 120→~300, delivering 1030→~570).`}</div>

@@ -165,7 +165,7 @@ export interface TravelMetricPoint {
   captured_at: string; samples: number; od_pairs: number; confident_pairs: number; median_speed_kmh: number | null;
 }
 export interface TravelAccuracy {
-  evaluated: number; mape_pct: number | null; median_abs_err_s: number | null; within_30pct: number | null;
+  evaluated: number; mape_pct: number | null; median_abs_err_s: number | null; mae_s: number | null; within_30pct: number | null;
 }
 export interface TravelData {
   samples: number; od_pairs: number; confident_pairs: number; median_speed_kmh: number | null;
@@ -187,13 +187,13 @@ export interface SoonIdleMetricPoint {
 }
 export interface SoonIdleLead {
   jobtype: string; matched: number; lead_p10_s: number | null; lead_p50_s: number | null; lead_p90_s: number | null;
-  mape_pct: number | null; within_30pct: number | null;
+  mape_pct: number | null; mae_s: number | null; within_30pct: number | null;
 }
 export interface SoonIdleEtaCell {
   dist_bin: number; source: string; n: number; pred_s: number | null; p10_s: number | null; p90_s: number | null;
 }
 export interface SoonIdleEtaModel {
-  evaluated: number; feat_mape_pct: number | null; flat_mape_pct: number | null; within_30pct: number | null;
+  evaluated: number; feat_mape_pct: number | null; flat_mape_pct: number | null; feat_mae_s: number | null; within_30pct: number | null;
 }
 export interface SoonIdleData {
   predictions: number; matched: number; precision_pct: number | null;
