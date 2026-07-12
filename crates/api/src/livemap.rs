@@ -4045,6 +4045,78 @@ pub fn spawn_qc_handover_logger(lm: Arc<LiveMap>, pool: PgPool) {
     });
 }
 
+const TIGHT_WP_M: f64 = 30.0; // truck within this of its OWN drop work-point (slot/bay) + stopped = tight-arrived
+const AHEAD_R_M: f64 = 35.0;  // other stopped loaded same-jobtype trucks within this of the work-point = queue ahead
+
+/// SHADOW (mig 0088): the redesign test. Per trip, log the FIRST TIGHT arrival at the truck's own drop
+/// work-point (QC slot / RTG bay, ≤TIGHT_WP_M + stopped) plus the GPS ahead-count (stopped loaded
+/// same-jobtype trucks clustered at that work-point). The user's model: work-point arrival = handover
+/// start, and free ≈ crane_cycle × (1 + ahead) — bounded (QC 2 slots → ahead 0-1; RTG gantry-fixed →
+/// bay arrival = committed). Validates offline vs tt_cycle_v2.dropped_at before wiring into classify_tt.
+pub fn spawn_wp_arrival_logger(lm: Arc<LiveMap>, pool: PgPool) {
+    tokio::spawn(async move {
+        let mut open: HashSet<(String, String)> = HashSet::new(); // (ytno, container) already logged this trip
+        let mut ticker = tokio::time::interval(Duration::from_secs(5));
+        struct Arr { ytno: String, container: String, jobtype: String, wp_code: String, dist: f64, ahead: i32 }
+        loop {
+            ticker.tick().await;
+            let now = Utc::now().timestamp_millis();
+            let (cur_trip, arrivals): (HashSet<(String, String)>, Vec<Arr>) = {
+                let devices = lm.devices.read().await;
+                let centroids = lm.centroids.read().await;
+                let cranes_gps: HashMap<String, (f64, f64)> = devices.iter()
+                    .filter(|(_, p)| matches!(p.cls.as_str(), "C" | "M" | "Z") && (now - p.last_seen_ms) / 1000 <= STALE_AFTER_S)
+                    .map(|(id, p)| (id.clone(), (p.lat, p.lon))).collect();
+                let crane_wp = { let line = *lm.quay_line.read().await; let g = lm.crane_wp.read().await; resolve_crane_wp(&line, &g, &cranes_gps) };
+                // work-point position for a loaded truck's drop target (topos1)
+                let wp_of = |topos: &str, jt: &str| -> Option<(f64, f64)> {
+                    if jt == "LD" { crane_wp.get(topos).copied().or_else(|| centroids.get(topos).map(|c| (c.lat, c.lon))) }
+                    else { centroids.get(topos).or_else(|| centroids.get(block_prefix(topos))).map(|c| (c.lat, c.lon)) }
+                };
+                // loaded LD/DS trucks with a known work-point + their tight-arrival state (for ahead-count)
+                struct T { id: String, container: String, jt: String, code: String, wp: (f64, f64), dist: f64, tight: bool }
+                let mut trucks: Vec<T> = Vec::new();
+                let mut cur: HashSet<(String, String)> = HashSet::new();
+                for (id, p) in devices.iter() {
+                    if p.cls != "TT" || (now - p.last_seen_ms) / 1000 > STALE_AFTER_S { continue; }
+                    let jt = match p.jobtype.as_deref().or(p.latched_jobtype.as_deref()) { Some(j @ ("LD" | "DS")) => j.to_string(), _ => continue };
+                    let container = match p.container1.clone().filter(|s| !s.is_empty()).or_else(|| p.latched_container.clone()) { Some(c) => c, None => continue };
+                    let code = match p.topos1.clone().filter(|s| !s.is_empty()).or_else(|| p.latched_topos.clone()) { Some(t) => t, None => continue };
+                    // only the DROP work-point frees the truck (classify_tt drop-side): LD at the quay
+                    // crane, DS at a block bay. Skip the pickup-side arrival (LD's block, DS's crane).
+                    let is_cr = is_crane_code(&code);
+                    if !(if jt == "LD" { is_cr } else { !is_cr }) { continue; }
+                    let Some(wp) = wp_of(&code, &jt) else { continue };
+                    let dist = dist_m((p.lat, p.lon), wp);
+                    cur.insert((id.clone(), container.clone()));
+                    trucks.push(T { id: id.clone(), container, jt, code, wp, dist, tight: dist <= TIGHT_WP_M && p.speed < IDLE_SPEED_KMH });
+                }
+                // first tight arrival per trip; ahead-count = OTHER stopped loaded same-jt trucks near this wp
+                let mut out: Vec<Arr> = Vec::new();
+                for t in trucks.iter().filter(|t| t.tight) {
+                    if open.contains(&(t.id.clone(), t.container.clone())) { continue; }
+                    let ahead = trucks.iter().filter(|o| o.tight && o.id != t.id && o.jt == t.jt && dist_m(o.wp, t.wp) <= AHEAD_R_M).count() as i32;
+                    out.push(Arr { ytno: t.id.clone(), container: t.container.clone(), jobtype: t.jt.clone(), wp_code: t.code.clone(), dist: t.dist, ahead });
+                }
+                (cur, out)
+            };
+            // release ended trips so a truck's next trip can log again
+            open.retain(|k| cur_trip.contains(k));
+            if arrivals.is_empty() { continue; }
+            let (bd, sh) = wp_core::shift::current(wp_core::shift::terminal_now().naive_local());
+            for a in &arrivals {
+                open.insert((a.ytno.clone(), a.container.clone()));
+                let _ = sqlx::query(
+                    "INSERT INTO tt_wp_arrival (ytno, container, jobtype, wp_code, arrived_at, wp_dist_m, ahead_n, business_date, shift)
+                     VALUES ($1,$2,$3,$4, now(), $5,$6,$7,$8) ON CONFLICT (ytno, container, arrived_at) DO NOTHING",
+                )
+                .bind(&a.ytno).bind(&a.container).bind(&a.jobtype).bind(&a.wp_code).bind(a.dist).bind(a.ahead).bind(bd).bind(sh.label())
+                .execute(&pool).await;
+            }
+        }
+    });
+}
+
 /// ⑤⑥ self-cal refresh (mig 0084): every ~15min REFRESH the two learned MVs and load them into the
 /// live dispatch path — learn_free_in_bias → lm.free_in_bias, learn_soon_idle_gate → SOON_IDLE_GATE_MM.
 /// Mirrors learn_work_eta_bias (⑦): the correction is measured from realized idle outcomes and fed
