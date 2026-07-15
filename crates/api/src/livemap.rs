@@ -4164,6 +4164,12 @@ pub fn spawn_selfcal_refresh(lm: Arc<LiveMap>, pool: PgPool) {
     });
 }
 
+// ★ proactive pre-assignment: a soon-free truck goes SILENT while it waits (stopped = the GPS unit
+// reports on movement only). ~25% of trucks are stale right before they free. We MUST keep them as
+// soon-free candidates so a recommendation is always ready before TOS assigns them at the free moment.
+const SILENT_HOLD_S: i64 = 1200;     // hold a silent loaded truck up to 20min (covers 88% of waits) before assuming off-shift
+const HELD_NEAR_DROP_M: f64 = 120.0; // ...only if its last position is within this of its drop (= waiting there, last stage)
+
 pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(Duration::from_secs(60));
@@ -4210,7 +4216,27 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                 let st_free = lm.stationary_free.read().await; // 정차 앵커 (mig 0091)
                 let mut v = Vec::new();
                 for (id, p) in map.iter() {
-                    if p.cls != "TT" || (now - p.last_seen_ms) / 1000 > STALE_AFTER_S {
+                    if p.cls != "TT" { continue; }
+                    let age = (now - p.last_seen_ms) / 1000;
+                    if age > STALE_AFTER_S {
+                        // ★ hold a SILENT last-stage truck as a soon-free candidate (proactive coverage):
+                        // loaded + last position near its drop + silent = it stopped waiting to be served
+                        // (the unit only reports on movement). Key it on the DROP location (where it frees),
+                        // robust to the stale GPS. Without this we miss ~25% of about-to-free trucks.
+                        if age > SILENT_HOLD_S { continue; }
+                        let jt = match p.jobtype.as_deref().or(p.latched_jobtype.as_deref()) { Some(j @ ("LD" | "DS")) => j, _ => continue };
+                        let loaded = p.container1.as_deref().is_some_and(|s| !s.is_empty())
+                            || p.latched_container.as_deref().is_some_and(|s| !s.is_empty());
+                        if !loaded { continue; }
+                        let code = match p.topos1.as_deref().filter(|s| !s.is_empty()).or(p.latched_topos.as_deref()) { Some(c) => c, None => continue };
+                        let is_cr = is_crane_code(code);
+                        if jt == "LD" { if !is_cr { continue; } } else if is_cr { continue; } // drop-side only (LD=crane / DS=bay)
+                        let dpos = if is_cr { cranes.get(code).copied().or_else(|| centroids.get(code).map(|c| (c.lat, c.lon))) }
+                                   else { centroids.get(code).or_else(|| centroids.get(block_prefix(code))).map(|c| (c.lat, c.lon)) };
+                        let Some((dlat, dlon)) = dpos else { continue };
+                        if dist_m((p.lat, p.lon), (dlat, dlon)) > HELD_NEAR_DROP_M { continue; }
+                        let base = st_free.get(jt).map(|&(m, _)| m).unwrap_or(300).clamp(30, 3600);
+                        v.push((id.clone(), dlat, dlon, base, "soon_idle_held"));
                         continue;
                     }
                     let c = classify_tt(p, assigned_pool.get(id), &rtgs, &plc, &cranes, &centroids, now);
