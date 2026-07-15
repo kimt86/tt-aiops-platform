@@ -1,0 +1,10 @@
+[Unit]
+Description=wp-tt refresh tt_move_log every 5min (Postgres join; offset after rtg/qc move + handover extractors)
+
+[Timer]
+OnBootSec=6min
+OnUnitActiveSec=300s
+AccuracySec=20s
+
+[Install]
+WantedBy=timers.target

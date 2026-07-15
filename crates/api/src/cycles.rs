@@ -1,10 +1,14 @@
-//! TT work-cycle history API — reads the accumulated `tt_cycle_log` (written by the
-//! live-map cycle flusher). Two endpoints power the Cycle History page:
+//! TT work-cycle history API. Two endpoints power the Cycle History page:
 //!   * `GET /api/tt-cycles/summary?hours=` — fleet overview: KPI totals, a per-bucket
 //!     throughput series, and a per-truck aggregate leaderboard.
 //!   * `GET /api/tt-cycles/detail?ytno=&hours=&limit=` — one truck's recent cycles
 //!     (the timeline rows: phase timestamps, legs, job metadata).
-//! Pure Postgres reads; no Oracle/GPS. Each "cycle" = one validated container delivery.
+//! Pure Postgres reads; no Oracle/GPS. Each "cycle" = one delivered container.
+//!
+//! CYCLE TIME is sourced from `tt_move_log` (dispatch YT_DIS_DT → crane-free, both TOS-authoritative;
+//! validated ±5s vs tt_cycle_v2). The older GPS-mover `tt_cycle_log` undercounts by ~41% (starts its
+//! clock after dispatch + drops the longest ~42% of cycles), so it is NO longer the cycle-time source.
+//! Laden DISTANCE (laden_km) is still read from `tt_cycle_log` — tt_move_log carries no per-leg meters.
 
 use axum::extract::{Query, State};
 use axum::Json;
@@ -73,23 +77,32 @@ pub async fn summary(
         _ => 180,
     };
 
-    let (total_cycles, trucks, fleet_median_s, fleet_laden_km): (i64, i64, Option<f64>, Option<f64>) =
-        sqlx::query_as(
-            "SELECT count(*), count(DISTINCT ytno),
-                    percentile_cont(0.5) WITHIN GROUP (ORDER BY cycle_s),
-                    coalesce(sum(laden_leg_m), 0) / 1000.0
-               FROM tt_cycle_log
-              WHERE dropped_at > now() - ($1::int * interval '1 hour')",
-        )
-        .bind(hours)
-        .fetch_one(&pool)
-        .await?;
+    // cycle time + counts: tt_move_log (dispatch→free, authoritative). laden km: tt_cycle_log (only
+    // source with per-leg meters) — separate query so the two sources stay independent.
+    let (total_cycles, trucks, fleet_median_s): (i64, i64, Option<f64>) = sqlx::query_as(
+        "SELECT count(*), count(DISTINCT ytno),
+                percentile_cont(0.5) WITHIN GROUP (ORDER BY cycle_s)
+           FROM tt_move_log
+          WHERE free_ts > now() - ($1::int * interval '1 hour')",
+    )
+    .bind(hours)
+    .fetch_one(&pool)
+    .await?;
+
+    let (fleet_laden_km,): (Option<f64>,) = sqlx::query_as(
+        "SELECT coalesce(sum(laden_leg_m), 0) / 1000.0
+           FROM tt_cycle_log
+          WHERE dropped_at > now() - ($1::int * interval '1 hour')",
+    )
+    .bind(hours)
+    .fetch_one(&pool)
+    .await?;
 
     let buckets: Vec<TpBucket> = sqlx::query_as(
-        "SELECT date_bin(($2::int * interval '1 minute'), dropped_at, timestamptz '2000-01-01') AS t,
+        "SELECT date_bin(($2::int * interval '1 minute'), free_ts, timestamptz '2000-01-01') AS t,
                 count(*) AS n
-           FROM tt_cycle_log
-          WHERE dropped_at > now() - ($1::int * interval '1 hour')
+           FROM tt_move_log
+          WHERE free_ts > now() - ($1::int * interval '1 hour')
           GROUP BY t ORDER BY t",
     )
     .bind(hours)
@@ -97,23 +110,43 @@ pub async fn summary(
     .fetch_all(&pool)
     .await?;
 
+    // per-truck: cycle-time metrics from tt_move_log; laden km left-joined from tt_cycle_log.
     let trucks_list: Vec<TruckAgg> = sqlx::query_as(
-        "SELECT ytno,
-                count(*) AS cycles,
-                percentile_cont(0.5) WITHIN GROUP (ORDER BY cycle_s) AS median_s,
-                avg(cycle_s)::float8 AS avg_s,
-                coalesce(sum(laden_leg_m), 0) / 1000.0 AS laden_km,
-                percentile_cont(0.25) WITHIN GROUP (ORDER BY cycle_s) AS p25_s,
-                percentile_cont(0.75) WITHIN GROUP (ORDER BY cycle_s) AS p75_s,
-                count(*) FILTER (WHERE jobtype = 'DS') AS ds,
-                count(*) FILTER (WHERE jobtype = 'LD') AS ld,
-                count(*) FILTER (WHERE jobtype IS NULL OR jobtype NOT IN ('DS','LD')) AS other,
-                max(dropped_at) AS last_drop,
-                min(dropped_at) AS first_drop
-           FROM tt_cycle_log
-          WHERE dropped_at > now() - ($1::int * interval '1 hour')
-          GROUP BY ytno
-          ORDER BY cycles DESC, ytno",
+        "SELECT m.ytno,
+                m.cycles,
+                m.median_s,
+                m.avg_s,
+                coalesce(k.laden_km, 0) AS laden_km,
+                m.p25_s,
+                m.p75_s,
+                m.ds,
+                m.ld,
+                m.other,
+                m.last_drop,
+                m.first_drop
+           FROM (
+             SELECT ytno,
+                    count(*) AS cycles,
+                    percentile_cont(0.5) WITHIN GROUP (ORDER BY cycle_s) AS median_s,
+                    avg(cycle_s)::float8 AS avg_s,
+                    percentile_cont(0.25) WITHIN GROUP (ORDER BY cycle_s) AS p25_s,
+                    percentile_cont(0.75) WITHIN GROUP (ORDER BY cycle_s) AS p75_s,
+                    count(*) FILTER (WHERE jobtype = 'DS') AS ds,
+                    count(*) FILTER (WHERE jobtype = 'LD') AS ld,
+                    count(*) FILTER (WHERE jobtype IS NULL OR jobtype NOT IN ('DS','LD')) AS other,
+                    max(free_ts) AS last_drop,
+                    min(free_ts) AS first_drop
+               FROM tt_move_log
+              WHERE free_ts > now() - ($1::int * interval '1 hour')
+              GROUP BY ytno
+           ) m
+           LEFT JOIN (
+             SELECT ytno, coalesce(sum(laden_leg_m), 0) / 1000.0 AS laden_km
+               FROM tt_cycle_log
+              WHERE dropped_at > now() - ($1::int * interval '1 hour')
+              GROUP BY ytno
+           ) k ON k.ytno = m.ytno
+          ORDER BY m.cycles DESC, m.ytno",
     )
     .bind(hours)
     .fetch_all(&pool)
@@ -179,9 +212,15 @@ pub async fn detail(
 ) -> Result<Json<DetailResp>, AppError> {
     let hours = clamp_hours(q.hours);
     let limit = q.limit.unwrap_or(200).clamp(1, 1000);
+    // cycle_s and the leg TIMES come from tt_move_log (dispatch→free, same source as the summary
+    // KPI) so the drill-down matches the headline; leg METERS stay from v1 (tt_move_log has no
+    // meters). Falls back to v1 where tt_move_log has no matching row. empty_s (dispatch→pickup)
+    // includes the pre-pickup wait — consistent with the timeline's 배차(opened)→픽업 span shown here.
     let cycles: Vec<CycleRow> = sqlx::query_as(
         "SELECT v1.dropped_at, v1.jobtype, v1.vessel, v1.voyage, v1.container, v1.qc,
-                v1.cycle_s, v1.laden_leg_s, v1.laden_leg_m, v1.empty_leg_s, v1.empty_leg_m,
+                coalesce(m.cycle_s, v1.cycle_s)      AS cycle_s,
+                coalesce(m.laden_s, v1.laden_leg_s)  AS laden_leg_s, v1.laden_leg_m,
+                coalesce(m.empty_s, v1.empty_leg_s)  AS empty_leg_s, v1.empty_leg_m,
                 v1.container_to_container,
                 v2.opened_at        AS v2_opened_at,
                 v2.empty_arrived_at AS v2_empty_arrived_at,
@@ -189,6 +228,16 @@ pub async fn detail(
                 v2.laden_arrived_at AS v2_laden_arrived_at
            FROM tt_cycle_log v1
            LEFT JOIN tt_cycle_v2 v2 ON v2.ytno = v1.ytno AND v2.dropped_at = v1.dropped_at
+           LEFT JOIN LATERAL (
+             SELECT m.cycle_s, m.empty_s, m.laden_s
+               FROM tt_move_log m
+              WHERE m.ytno = v1.ytno
+                AND m.free_ts >= v1.dropped_at - interval '5 min'
+                AND m.free_ts <  v1.dropped_at + interval '5 min'
+              ORDER BY (m.contno IS DISTINCT FROM v1.container),
+                       abs(EXTRACT(EPOCH FROM (m.free_ts - v1.dropped_at)))
+              LIMIT 1
+           ) m ON true
           WHERE v1.ytno = $1 AND v1.dropped_at > now() - ($2::int * interval '1 hour')
           ORDER BY v1.dropped_at DESC
           LIMIT $3",
