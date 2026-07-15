@@ -582,6 +582,10 @@ pub struct LiveMap {
     // ⑤⑥ time-to-free self-cal (mig 0086): (state, jobtype, dist_bin) → learned median seconds-to-free,
     // per cycle stage, replacing the free_in constants. Loaded by spawn_selfcal_refresh (~15min).
     free_in_bias: RwLock<HashMap<(String, String, i16), i64>>,
+    // 정차 앵커(mig 0091): jobtype → (median, p90) seconds-to-free measured from the GPS-stationary
+    // moment (last delivering → drop), not the loose laden_arrived. Used as the dispatch base for a
+    // candidate truck that is genuinely STOPPED at its drop; moving trucks keep free_in_bias.
+    stationary_free: RwLock<HashMap<String, (i64, i64)>>,
 }
 
 /// Cap on the in-memory completed-cycle buffer. If the flusher stalls we drop the oldest
@@ -609,6 +613,7 @@ impl LiveMap {
             quay_line: RwLock::new(QuayLine::default()),
             crane_wp: RwLock::new(HashMap::new()),
             free_in_bias: RwLock::new(HashMap::new()),
+            stationary_free: RwLock::new(HashMap::new()),
             connected: AtomicBool::new(false),
             messages: AtomicU64::new(0),
             reconnects: AtomicU64::new(0),
@@ -4126,6 +4131,16 @@ pub fn spawn_selfcal_refresh(lm: Arc<LiveMap>, pool: PgPool) {
         loop {
             let _ = sqlx::query("REFRESH MATERIALIZED VIEW CONCURRENTLY learn_free_in_bias").execute(&pool).await;
             let _ = sqlx::query("REFRESH MATERIALIZED VIEW CONCURRENTLY learn_soon_idle_gate").execute(&pool).await;
+            let _ = sqlx::query("REFRESH MATERIALIZED VIEW CONCURRENTLY learn_free_in_stationary").execute(&pool).await;
+            // 정차 앵커: jobtype → (median, p90) seconds-to-free from the GPS-stationary moment.
+            if let Ok(rows) = sqlx::query_as::<_, (String, i32, i32)>(
+                "SELECT jobtype, med_s, p90_s FROM learn_free_in_stationary WHERE med_s IS NOT NULL AND n >= 100",
+            ).fetch_all(&pool).await {
+                let map: HashMap<String, (i64, i64)> = rows.into_iter()
+                    .map(|(jt, m, p)| (jt, ((m as i64).clamp(30, 3600), (p as i64).clamp(30, 3600))))
+                    .collect();
+                if !map.is_empty() { *lm.stationary_free.write().await = map; }
+            }
             // ⑥ free-in residual: learned median seconds-to-idle for soon_idle, per (jobtype, dist_bin).
             if let Ok(rows) = sqlx::query_as::<_, (String, String, i32, i32)>(
                 "SELECT state, jobtype, dist_bin, med_rem_s FROM learn_free_in_bias WHERE med_rem_s IS NOT NULL AND n >= 50",
@@ -4192,6 +4207,7 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                     resolve_crane_wp(&line, &g, &cranes)
                 };
                 let fi_bias = lm.free_in_bias.read().await; // ⑥ learned soon_idle seconds-to-idle
+                let st_free = lm.stationary_free.read().await; // 정차 앵커 (mig 0091)
                 let mut v = Vec::new();
                 for (id, p) in map.iter() {
                     if p.cls != "TT" || (now - p.last_seen_ms) / 1000 > STALE_AFTER_S {
@@ -4208,19 +4224,29 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                             // (free_in_sample writer + near-miss logger), else a momentary None
                             // jobtype misses the learned bucket and collapses to the 30s floor.
                             let jt = p.jobtype.clone().or_else(|| p.latched_jobtype.clone()).unwrap_or_default();
-                            let bin = dist_bin_of(c.nearest_rtg_m);
-                            fi_bias
-                                .get(&(s.to_string(), jt.clone(), bin))
-                                .or_else(|| fi_bias.get(&(s.to_string(), jt.clone(), -99)))
-                                .copied()
-                                .unwrap_or_else(|| free_in(s, (!jt.is_empty()).then_some(jt.as_str())).0.unwrap_or(0))
-                                .clamp(30, 3600)
+                            // 정차 앵커 (mig 0091): a truck genuinely STOPPED at its drop (arrived state
+                            // + speed<idle) frees in the GPS-stationary median (LD ~141/DS ~258) —
+                            // ~half the loose-arrival free_in estimate, correctly calibrated. Moving/
+                            // approaching trucks keep free_in_bias (they still have to reach + stop).
+                            let stopped = s != "approaching" && p.speed < IDLE_SPEED_KMH;
+                            if let Some(&(med, _p90)) = st_free.get(&jt).filter(|_| stopped) {
+                                med
+                            } else {
+                                let bin = dist_bin_of(c.nearest_rtg_m);
+                                fi_bias
+                                    .get(&(s.to_string(), jt.clone(), bin))
+                                    .or_else(|| fi_bias.get(&(s.to_string(), jt.clone(), -99)))
+                                    .copied()
+                                    .unwrap_or_else(|| free_in(s, (!jt.is_empty()).then_some(jt.as_str())).0.unwrap_or(0))
+                                    .clamp(30, 3600)
+                            }
                         }
                         _ => continue,
                     };
                     v.push((id.clone(), p.lat, p.lon, base, c.state));
                 }
                 drop(fi_bias);
+                drop(st_free);
                 v
             };
             if vehicles.is_empty() {
