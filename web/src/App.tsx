@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactElement } from "react";
+import { createContext, useContext, useEffect, useMemo, useState, type ReactElement } from "react";
 import { api, type BreakdownResponse, type HealthResponse, type KpiCard, type KpisResponse, type LiveKpi, type LiveResponse, type QcRow, type TrendResponse, type VesselRow, type VesselsResponse } from "./api";
 import { LineChart } from "./charts";
 import { deltaLabel, fmtValue, isImprovement } from "./format";
@@ -60,8 +60,71 @@ const PERIOD_GROUPS: string[][] = [
   ["last7", "last30"],
 ];
 
-function HealthPill({ health, lang }: { health: HealthResponse | null; lang: Lang }) {
+// ── live-feed health (real-time GPS pipeline) — the authoritative "is the terminal feed up?" bit.
+// Drives the global outage banner + per-page treatments. /api/livemap/health already computes a
+// green/amber/red verdict from `connected` + `last_msg_age_s` (red = !connected || age>60s). This is
+// the ONLY per-second signal; /api/health (data_freshness) is daily-cadence ETL and must not be used.
+export type FeedHealth = {
+  down: boolean; warn: boolean; connected: boolean; ageS: number | null; cause: string;
+} | null;
+const FeedHealthContext = createContext<FeedHealth>(null);
+export function useFeedHealthCtx(): FeedHealth { return useContext(FeedHealthContext); }
+
+function useFeedHealth(): FeedHealth {
+  const [f, setF] = useState<FeedHealth>(null);
+  useEffect(() => {
+    let alive = true;
+    const poll = () => fetch("/api/livemap/health").then((r) => (r.ok ? r.json() : null))
+      .then((h) => {
+        if (!alive) return;
+        if (!h) { setF({ down: true, warn: false, connected: false, ageS: null, cause: "api" }); return; }
+        setF({ down: h.color === "red", warn: h.color === "amber", connected: !!h.connected,
+               ageS: h.last_msg_age_s ?? null, cause: h.cause ?? "" });
+      })
+      .catch(() => { if (alive) setF({ down: true, warn: false, connected: false, ageS: null, cause: "api" }); });
+    poll();
+    const id = setInterval(poll, 5000);
+    return () => { alive = false; clearInterval(id); };
+  }, []);
+  return f;
+}
+
+function fmtAge(s: number, ko: boolean): string {
+  if (s < 60) return `${Math.round(s)}${ko ? "초" : "s"}`;
+  if (s < 3600) return `${Math.floor(s / 60)}${ko ? "분" : "m"}`;
+  if (s < 86400) return `${Math.floor(s / 3600)}${ko ? "시간" : "h"}`;
+  return `${Math.floor(s / 86400)}${ko ? "일" : "d"}`;
+}
+
+// Full-width outage bar shown on EVERY page when the live feed is down/lagging.
+function OutageBanner({ feed, lang }: { feed: FeedHealth; lang: Lang }) {
+  if (!feed || (!feed.down && !feed.warn)) return null;
+  const ko = lang === "ko";
+  const age = feed.ageS != null ? fmtAge(feed.ageS, ko) : null;
+  let msg: string;
+  if (feed.down) {
+    let tail: string;
+    if (feed.cause === "api") tail = ko ? " · 대시보드 API 응답 없음" : " · dashboard API not responding";
+    else if (age) tail = ko ? ` · 마지막 수신 ${age} 전 · 화면의 데이터는 정지 상태입니다` : ` · last packet ${age} ago · data on screen is frozen`;
+    else tail = ko ? " · 화면의 데이터는 정지 상태입니다" : " · data on screen is frozen";
+    msg = (ko ? "터미널 라이브 피드 끊김" : "Terminal live feed down") + tail;
+  } else {
+    msg = age ? (ko ? `라이브 피드 지연 — 마지막 수신 ${age} 전` : `Live feed lagging — last packet ${age} ago`)
+              : (ko ? "라이브 피드 지연" : "Live feed lagging");
+  }
+  return (
+    <div className={`outage-banner ${feed.down ? "down" : "warn"}`} role="alert">
+      <span className="ob-ico" aria-hidden="true">⚠</span>
+      <span className="ob-msg">{msg}</span>
+    </div>
+  );
+}
+
+function HealthPill({ health, feed, lang }: { health: HealthResponse | null; feed: FeedHealth; lang: Lang }) {
   const s = t(lang);
+  // real-time GPS feed down dominates — the pill must not read green during a live outage; otherwise
+  // fall back to the TOS/ETL rollup from /api/health.
+  if (feed?.down) return <span className="status-pill bad"><span className="dot" />{lang === "ko" ? "피드 다운" : "Feed down"}</span>;
   if (!health) return null;
   const cls = health.overall === "OK" ? "ok" : health.overall === "STALE" ? "warn" : "bad";
   const label = health.overall === "OK" ? s.healthOk : health.overall === "STALE" ? s.healthStale : s.healthDegraded;
@@ -613,11 +676,12 @@ export default function App() {
   const [page, setPage] = useState<PageKey>("kpi");
   const clock = useClock();
   const health = useHealth();
+  const feed = useFeedHealth();
   useMemo(() => { document.documentElement.setAttribute("data-lang", lang); }, [lang]);
   const pageName = (p: typeof PAGES[number]) => (lang === "ko" ? p.ko : p.en);
 
   return (
-    <>
+    <FeedHealthContext.Provider value={feed}>
       <div className="header">
         <img className="brand-logo" src="/clt-logo-w.png" alt="CLT" />
         <span className="brand-div" />
@@ -629,13 +693,14 @@ export default function App() {
           <span className="site-k">SITE</span>Westports Malaysia
         </span>
         <span className="spacer" />
-        <HealthPill health={health} lang={lang} />
+        <HealthPill health={health} feed={feed} lang={lang} />
         <span className="clock">{clock}</span>
         <div className="lang-toggle">
           <button className={`lang-btn${lang === "ko" ? " active" : ""}`} onClick={() => setLang("ko")}>KO</button>
           <button className={`lang-btn${lang === "en" ? " active" : ""}`} onClick={() => setLang("en")}>EN</button>
         </div>
       </div>
+      <OutageBanner feed={feed} lang={lang} />
       <div className="app-body">
         <nav className="sidebar">
           {PAGES.map((p) => (
@@ -657,6 +722,6 @@ export default function App() {
           {page === "kpi" ? <KpiPage lang={lang} /> : page === "tt" ? <TtPage lang={lang} /> : page === "stage2" ? <Stage2Page lang={lang} /> : page === "cycles" ? <CyclesPage lang={lang} /> : page === "learn" ? <LearnPage lang={lang} /> : page === "map" ? <LiveMapPage lang={lang} /> : page === "health" ? <HealthPage lang={lang} /> : <FeedHealthPage lang={lang} />}
         </div>
       </div>
-    </>
+    </FeedHealthContext.Provider>
   );
 }

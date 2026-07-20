@@ -1026,8 +1026,10 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
             if (sf && st !== sf) continue;
             feats.push({ type: "Feature", geometry: { type: "Point", coordinates: [d.lon, d.lat] }, properties: { id: d.id, state: st, eq, speed: d.speed, dispatch: d.dispatch ?? "" } });
           }
-        } else {
-          // replay: interpolate along captured tracks on a real-time loop.
+        } else if (!useLiveRef.current) {
+          // MANUAL replay only (canned demo loop). When the user wants live but the feed is down we do
+          // NOT draw this — the map stays frozen/empty and the stale overlay explains why, so the June
+          // demo loop can never masquerade as live data.
           const rep = replayRef.current;
           if (rep) {
             const win = rep.meta.window_s;
@@ -1063,8 +1065,17 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
 
   const win = replayRef.current?.meta.window_s ?? 180;
   const ndev = useMemo(() => replayRef.current?.meta.n_devices ?? 0, [ready]);
-  const liveActive = useLive && liveInfo.connected && liveInfo.count > 0;
   const asOfAge = liveInfo.asOf ? Math.max(0, Math.round((Date.now() - Date.parse(liveInfo.asOf)) / 1000)) : null;
+  // three explicit modes so a dead feed is NEVER mislabeled as REPLAY:
+  //   live   = user wants live AND the feed is fresh
+  //   stale  = user wants live BUT the feed is down/frozen → show last positions + a "정지" overlay
+  //            (deliberately NOT the canned replay file, which would show moving June trucks)
+  //   replay = user toggled OFF live → the canned demo loop
+  const MAP_STALE_S = 120;
+  const feedStale = useLive && (!liveInfo.connected || (asOfAge != null && asOfAge > MAP_STALE_S));
+  const mapMode: "live" | "stale" | "replay" = !useLive ? "replay" : feedStale ? "stale" : "live";
+  const liveActive = mapMode === "live";
+  const staleAge = asOfAge == null ? "?" : asOfAge >= 3600 ? `${Math.floor(asOfAge / 3600)}${ko ? "시간" : "h"}` : asOfAge >= 60 ? `${Math.floor(asOfAge / 60)}${ko ? "분" : "m"}` : `${asOfAge}${ko ? "초" : "s"}`;
   const set = (k: LayerKey, v: boolean) => setToggles((t) => ({ ...t, [k]: v }));
   const activeCount = Object.values(toggles).filter(Boolean).length;
 
@@ -1078,7 +1089,7 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
             onClick={() => setEquipSet(new Set(ALL_EQUIP))}
             title={ko ? "전체 표시" : "Show all"}
           >
-            {ko ? "전체" : "All"}<span className="meq-n">{liveActive ? liveInfo.count : ndev}</span>
+            {ko ? "전체" : "All"}<span className="meq-n">{mapMode !== "replay" ? liveInfo.count : ndev}</span>
           </button>
           {EQUIP_TABS.map((e) => (
             <button key={e.key} className={`meq${equipSet.has(e.key) ? " active" : ""}`} onClick={() => toggleEquip(e.key)} title={ko ? `${e.ko} 표시 전환` : `toggle ${e.en}`}>
@@ -1095,12 +1106,14 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
           ⟲ {ko ? "선석 수평" : "Align quay"}
         </button>
         <button
-          className={`map-live ${liveActive ? "on" : "off"}`}
+          className={`map-live ${mapMode}`}
           onClick={() => setUseLive((v) => !v)}
-          title={ko ? "라이브/리플레이 전환" : "Toggle live / replay"}
+          title={ko ? "라이브/리플레이(데모) 전환" : "Toggle live / replay (demo)"}
         >
           <span className="dot" />
-          {liveActive ? (ko ? "라이브" : "LIVE") : (ko ? "리플레이" : "REPLAY")}
+          {mapMode === "live" ? (ko ? "라이브" : "LIVE")
+            : mapMode === "stale" ? (ko ? "정지" : "STALE")
+            : (ko ? "리플레이·데모" : "REPLAY·demo")}
         </button>
         {liveActive && (
           <div className="map-delay" title={ko ? "지연 재생 — 그 사이 도착한 GPS로 차량 움직임을 부드럽게 보간" : "Delayed playback — interpolate motion from fixes that arrive during the delay"}>
@@ -1112,11 +1125,11 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
             ))}
           </div>
         )}
-        <span className="map-count mono">{counts.total} / {liveActive ? liveInfo.count : ndev}</span>
-        {liveActive ? (
-          <span className="map-clock mono" title={liveInfo.asOf ?? ""}>⟳ {asOfAge != null ? `${asOfAge}s` : "—"}{delayMin > 0 ? ` · −${delayLbl(delayMin, ko)}` : ""}</span>
+        <span className="map-count mono">{counts.total} / {mapMode !== "replay" ? liveInfo.count : ndev}</span>
+        {mapMode === "replay" ? (
+          <span className="map-clock mono">▶ {ko ? "데모" : "demo"} t+{tpos}s / {win}s</span>
         ) : (
-          <span className="map-clock mono">▶ t+{tpos}s / {win}s</span>
+          <span className={`map-clock mono${mapMode === "stale" ? " stale" : ""}`} title={liveInfo.asOf ?? ""}>⟳ {asOfAge != null ? `${asOfAge}s` : "—"}{delayMin > 0 && mapMode === "live" ? ` · −${delayLbl(delayMin, ko)}` : ""}</span>
         )}
         {liveActive && gpsHealth.total > 0 && (() => {
           const pct = (gpsHealth.outliers / gpsHealth.total) * 100;
@@ -1169,6 +1182,15 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
       )}
 
       <div className="map-canvas" ref={mapEl} />
+      {mapMode === "stale" && (
+        <div className="map-stale-overlay" role="alert">
+          <div className="mso-card">
+            <span className="mso-h">⚠ {ko ? "데이터 정지" : "DATA FROZEN"}</span>
+            <span className="mso-sub">{asOfAge == null ? (ko ? "라이브 연결 없음" : "no live connection") : (ko ? `라이브 피드 끊김 · 마지막 수신 ${staleAge} 전` : `Live feed down · last packet ${staleAge} ago`)}</span>
+            <span className="mso-note">{ko ? "표시된 차량 위치는 마지막 수신 시점에 멈춰 있습니다 (라이브 아님)" : "Vehicle positions are frozen at the last update (not live)"}</span>
+          </div>
+        </div>
+      )}
       {showWeatherFx && wx && wx.age_s < 1800 && (() => { const f = wxInfo(wx); return <WeatherFx mode={f.mode} intensity={f.intensity} storm={f.storm} />; })()}
 
       {/* right: TOS layer panel (areas / nodes / links) */}

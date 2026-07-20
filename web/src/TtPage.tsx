@@ -173,6 +173,9 @@ function LiveDispatchPool({ lang, snap, err }: { lang: Lang; snap: Snap | null; 
     .sort((a, b) => (b.dest_remaining_m ?? 1e9) - (a.dest_remaining_m ?? 1e9));
   const swapExcluded = empties.filter((d) => !isYardMove(d)).length - swap.length;
   const ageS = snap?.as_of ? Math.max(0, Math.round((Date.now() - Date.parse(snap.as_of)) / 1000)) : null;
+  // truly live = backend reports connected AND the snapshot is fresh (guards a stale "LIVE" pill that
+  // keeps the last connected:true snapshot after the feed dies).
+  const liveFresh = !!snap?.connected && (ageS == null || ageS <= 120);
 
   return (
     <section className="tcard lvp">
@@ -180,8 +183,8 @@ function LiveDispatchPool({ lang, snap, err }: { lang: Lang; snap: Snap | null; 
         <h3>{ko(lang) ? "TT 배차 풀" : "Dispatch TT Pool"}
           <span className="h3-sub">{ko(lang) ? "websocket GPS/PLC · 차량(공급)" : "websocket GPS/PLC · vehicles (supply)"}</span></h3>
         <div className="head-sub">
-          <span className={`pill ${snap?.connected ? "good" : "bad"}`}><span className="dot" />{snap?.connected ? "LIVE" : (err ? "OFF" : "…")}</span>
-          <span className="muted">{ageS != null ? `⟳ ${ageS}s` : ""}</span>
+          <span className={`pill ${liveFresh ? "good" : "bad"}`}><span className="dot" />{!snap && !err ? "…" : liveFresh ? "LIVE" : (ko(lang) ? "정지" : "STALE")}</span>
+          <span className="muted mono" style={ageS != null && ageS > 120 ? { color: "#fca5a5", fontWeight: 700 } : undefined}>{ageS != null ? `⟳ ${ageS}s` : ""}</span>
         </div>
       </div>
       <div className="tcard-body">
@@ -294,14 +297,20 @@ function LiveQcSequence({ lang, wp, snap }: { lang: Lang; wp: WorkpoolResponse |
   const working = (wp?.qcs ?? []).filter((q) => q.moves.length > 0);
   const groups = groupByVessel(working, (q) => q.vessels[0] ?? "—", (q) => q.qc);
   const ageS = wp?.as_of ? Math.max(0, Math.round((Date.now() - Date.parse(wp.as_of)) / 1000)) : null;
+  // work pool is a Postgres mirror (~90s). If its as_of goes stale the board below is a FROZEN
+  // snapshot (during the feed outage it's days old) — mark it loudly so the countdowns aren't
+  // mistaken for live. (Own signal: workpool as_of, independent of the GPS feed.)
+  const wpStale = ageS != null && ageS > 300;
+  const wpAgeTxt = ageS == null ? "" : ageS >= 86400 ? `${Math.floor(ageS / 86400)}${ko(lang) ? "일" : "d"}` : ageS >= 3600 ? `${Math.floor(ageS / 3600)}${ko(lang) ? "시간" : "h"}` : ageS >= 60 ? `${Math.floor(ageS / 60)}${ko(lang) ? "분" : "m"}` : `${ageS}${ko(lang) ? "초" : "s"}`;
   const fleetMph = snap?.crane_mph_live ?? null;
 
   return (
-    <section className="tcard">
+    <section className={`tcard${wpStale ? " wp-stale" : ""}`}>
       <div className="tcard-head">
         <h3>{ko(lang) ? "QC 작업 현황" : "QC Work Status"}
           <span className="h3-sub">{ko(lang) ? "작업 순서 · 배차/미배차(후보) 통합 (TOS+PLC/GPS)" : "work sequence · assigned + unassigned (candidates), merged (TOS+PLC/GPS)"}</span></h3>
         <div className="head-sub">
+          {wpStale && <span className="pill bad" title={wp?.as_of ?? ""}>⚠ {ko(lang) ? `정지 · ${wpAgeTxt} 전 데이터 (라이브 아님)` : `FROZEN · ${wpAgeTxt} old (not live)`}</span>}
           <span className="pill good">{ko(lang) ? "가동 QC" : "Working QC"} {working.length}</span>
           {fleetMph != null && (
             <span className="pill" style={{ borderColor: "#f59e0b", color: "#fbbf24", background: "rgba(245,158,11,0.10)" }}
@@ -323,7 +332,7 @@ function LiveQcSequence({ lang, wp, snap }: { lang: Lang; wp: WorkpoolResponse |
           <label className="qc-pastsel" title={ko(lang) ? "모든 작업에 🤖 우리 배차 표시(TOS 배정 행엔 '우리라면 누구', 같으면 ✓·다르면 빠름/느림) — 켜고 끄기" : "🤖 our dispatch on every work (on TOS-assigned rows: who we'd send, ✓ if same)"}>
             <input type="checkbox" checked={showOurs} onChange={(e) => setShowOurs(e.target.checked)} /> {ko(lang) ? "🤖 우리 배차" : "🤖 our dispatch"}
           </label>
-          <span className="muted">{ageS != null ? `⟳ ${ageS}s` : ""}</span>
+          <span className="muted mono" style={wpStale ? { color: "#fca5a5", fontWeight: 700 } : undefined}>{ageS != null ? `⟳ ${wpStale ? wpAgeTxt : `${ageS}s`}` : ""}</span>
         </div>
       </div>
       <div className="tcard-body">
@@ -570,6 +579,9 @@ function qcAssignColor(n: number): string {
 // (slack light), assigned trucks. Click a cell to jump to that QC's detailed card below.
 function QcAssignedCard({ lang, wp, snap }: { lang: Lang; wp: WorkpoolResponse | null; snap: Snap | null }) {
   const ko_ = ko(lang);
+  const ageS = wp?.as_of ? Math.max(0, Math.round((Date.now() - Date.parse(wp.as_of)) / 1000)) : null;
+  const wpStale = ageS != null && ageS > 300; // workpool mirror stale → this is a FROZEN snapshot
+  const wpAgeTxt = ageS == null ? "" : ageS >= 86400 ? `${Math.floor(ageS / 86400)}${ko_ ? "일" : "d"}` : ageS >= 3600 ? `${Math.floor(ageS / 3600)}${ko_ ? "시간" : "h"}` : ageS >= 60 ? `${Math.floor(ageS / 60)}${ko_ ? "분" : "m"}` : `${ageS}${ko_ ? "초" : "s"}`;
   const mphByQc = new Map<string, number>();
   for (const d of snap?.devices ?? []) if (d.plc?.mph != null && d.plc.mph > 0) mphByQc.set(d.id, d.plc.mph);
   // distinct assigned trucks per QC (twin de-duped, discharged DS excluded) — matches the detail card
@@ -593,11 +605,12 @@ function QcAssignedCard({ lang, wp, snap }: { lang: Lang; wp: WorkpoolResponse |
   const light = (slack: number | null) => slack == null ? "" : slack < 0 ? "🔴" : slack < 1800 ? "🟡" : "🟢";
   const jump = (qc: string) => document.getElementById(`qccol-${qc}`)?.scrollIntoView({ behavior: "smooth", block: "center" });
   return (
-    <section className="tcard">
+    <section className={`tcard${wpStale ? " wp-stale" : ""}`}>
       <div className="tcard-head">
         <h3>{ko_ ? "QC 간단 현황" : "QC Summary"}
           <span className="h3-sub">{ko_ ? "선박 출항 · 작업속도 · 배차 긴급도(🟢🟡🔴) · 배차 대수 — 클릭하면 아래 상세로 이동" : "departure · work rate · dispatch urgency · trucks — click to jump to detail"}</span></h3>
         <div className="head-sub">
+          {wpStale && <span className="pill bad" title={wp?.as_of ?? ""}>⚠ {ko_ ? `정지 · ${wpAgeTxt} 전 (라이브 아님)` : `FROZEN · ${wpAgeTxt} old`}</span>}
           <span className="muted">{ko_ ? `가동 QC ${qcs.length} · 배차 ${totalTrucks}대` : `${qcs.length} QCs · ${totalTrucks} trucks`}</span>
           {atRisk > 0 && <span style={{ color: "#ef4444", marginLeft: 8 }}>{ko_ ? `· 🔴 지연위험 ${atRisk}` : `· 🔴 ${atRisk} at risk`}</span>}
         </div>
