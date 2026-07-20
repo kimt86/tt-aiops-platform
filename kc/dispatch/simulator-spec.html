@@ -1,0 +1,234 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>해측 배차 시뮬레이터 — 시나리오 구조 & 필요 요소 — WP-TT 지식센터</title>
+  <meta name="description" content="레이아웃·라우터가 준비된 시뮬레이터에 해측(QC↔야드, TT) 배차를 모델링하는 기획 — 에뮬레이터↔정책 구조, 장비 모듈, 시나리오 스키마, 정책 훅, 보정.">
+  <link rel="stylesheet" href="/kc/assets/kc.css">
+  <script defer src="/kc/assets/kc.js"></script>
+</head>
+<body>
+<main class="kc-article" data-page="dispatch/simulator-spec" data-source="dispatch/simulator-spec.md">
+  <h1>해측 배차 시뮬레이터 — 시나리오 구조 &amp; 필요 요소 <span style="font-weight:400;color:var(--faint);font-size:0.55em;">(기획)</span></h1>
+  <p class="kc-lede">레이아웃·라우터가 준비된 시뮬레이터에 해측(QC↔야드, TT) 배차를 모델링하는 기획 — 에뮬레이터(장비 물리) ↔ 정책(배차) 구조, 장비 모듈, 시나리오 스키마, 동적 QC 작업지점·베이이동·해치커버, 정책 훅·보정. 지금은 <strong>해측만</strong>(게이트는 나중).</p>
+  <div class="kc-meta"><span class="kc-badge kind">배차 · 시뮬레이터 기획</span><span class="kc-badge living">구현자용</span></div>
+
+  <div class="kc-cal note"><span class="h">전제·범위</span><p><strong>독자</strong>: 시뮬레이터 구현자. <strong>전제</strong>: 레이아웃 + 라우터는 이미 준비됨 — 빠진 건 <strong>에뮬레이터 장비 모듈 + 시뮬레이션 시나리오</strong>. <strong>범위(지금)</strong>: 해측(quayside)만 — QC ↔ 야드 블록을 TT가 나르는 양하(DS)·적하(LD). 게이트(외부트럭·반출입)는 나중. 모든 수치/공식은 라이브 코드·DB로 검증(2026-07-01, MYT=UTC+8).</p></div>
+
+  <h2>1. "해측 작업"의 정확한 정의</h2>
+  <p>해측 = QC가 선박을 작업하고 그 컨테이너를 <strong>내부 트럭(TT)</strong>이 QC ↔ 야드 블록으로 나르는 사이클.</p>
+  <pre><code>양하 DS:  [TT 빈차]→QC 도착→QC가 배에서 내려 적재→[TT 적재]→야드 블록→YC(RTG) 적치→[TT 자유]
+적하 LD:  [TT 빈차]→야드 블록 도착→YC(RTG) 적재→[TT 적재]→QC 도착→QC가 배에 적재→[TT 자유]</code></pre>
+  <ul>
+    <li><strong>배차 결정 = 빈차 구간(TT→픽업)만.</strong> 적재 구간은 작업이 정한 고정 경로(QC↔블록).</li>
+    <li><strong>STALL(크레인 굶음)</strong>: QC가 다음 컨테이너를 처리하려는데 트럭이 없으면 대기 — 해측 성능의 핵심.</li>
+  </ul>
+  <p>포함(지금): QC DS/LD·TT 내부운반·YC 야드 핸드오버·베이이동·해치커버·STALL·선박 마감. 제외(나중·게이트): 외부 도로트럭·게이트 반입/반출·야드 재정리·철도. (배차 로직은 이미 <code>JOBTYPE IN('DS','LD')</code> 전용이라 범위 일치.)</p>
+
+  <h2>2. 아키텍처 — 에뮬레이터(장비) ↔ 정책(배차)</h2>
+  <div class="kc-flow v">
+    <div class="node accent">정책(Policy)<span class="sub">매 결정틱(60s) snapshot→배차 주문 · 우리 2단계 매처 | TOS baseline</span></div>
+    <div class="arw">⇅ 주문(ytno→work) / 상태 snapshot</div>
+    <div class="node">에뮬레이터(장비 물리)<span class="sub">Vessel─QC─YC(RTG)─TT 모듈이 시각 전진 · 라우터로 이동시간 · 이벤트 생성</span></div>
+    <div class="arw">▼ 종단 KPI</div>
+    <div class="node">MetricsCollector + CalibrationHarness (§7)</div>
+  </div>
+  <ul>
+    <li><strong>에뮬레이터</strong> = 장비가 주문을 <strong>실행</strong>하며 물리(이동·크레인 작업·핸드오버·타이밍)를 전개하고 이벤트를 냄(TOS 없이 장비 거동 재현).</li>
+    <li><strong>정책</strong> = 에뮬레이터 상태를 보고 배차 결정. 우리 정책/TOS baseline 교체 가능.</li>
+    <li>둘의 경계가 검증의 핵심: <strong>같은 에뮬레이터(물리)에 정책만 갈아끼워</strong> 성능 비교.</li>
+  </ul>
+  <div class="kc-cal warn"><span class="h">이전 초안의 잘못</span><p>QC를 "cadence+큐", YC를 "flat handover"로 뭉개 <strong>베이이동·해치커버·동적 작업지점·YC 큐</strong>를 빠뜨림. §3가 이를 장비 모듈로 1급화.</p></div>
+
+  <h2>3. 장비 에뮬레이터 상세 — 상태기계 + 이벤트</h2>
+  <h3>3.0 공통 — 이벤트 구동 + 모듈 간 핸드셰이크</h3>
+  <p>에뮬레이터는 <strong>이산사건(DES)</strong>. 각 모듈은 다음 이벤트를 시각순 큐에 예약, 클럭은 다음 이벤트로 점프. <strong>정책은 결정틱(60s)에서만</strong> 호출되고 그 사이 장비는 이벤트로 자율 전개. 모듈 결합은 이벤트로만:</p>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th>이벤트</th><th>생산→소비</th><th>효과</th></tr></thead>
+    <tbody>
+      <tr><td><code>Dispatch(ytno, work)</code></td><td>정책→TT</td><td>트럭 빈차이동 시작</td></tr>
+      <tr><td><code>TruckArriveQC(ytno, qc)</code></td><td>TT→QC</td><td>DS=빈트럭 / LD=적재트럭 도착 → 핸드셰이크</td></tr>
+      <tr><td><code>TruckArriveBlock(ytno, blk, cont)</code></td><td>TT→YC</td><td>YC 대기큐 진입</td></tr>
+      <tr><td><code>QcMoveDone(qc, cont)</code></td><td>QC→TT</td><td>DS=트럭 적재완료 / LD=트럭 비움</td></tr>
+      <tr><td><code>YcServiceDone(blk, ytno)</code></td><td>YC→TT</td><td>DS=트럭 비움(자유) / LD=트럭 적재완료</td></tr>
+      <tr><td><code>CraneStallStart/End(qc)</code></td><td>QC→Metrics</td><td>굶음(STALL) 누적</td></tr>
+      <tr><td><code>WorkPointMoved(qc, loc)</code></td><td>QC→좌표맵</td><td>동적 작업지점 갱신(§3.2)</td></tr>
+      <tr><td><code>TruckFree(ytno)</code></td><td>TT/YC/QC→가용 풀</td><td>다음 틱 후보 복귀</td></tr>
+    </tbody>
+  </table></div>
+  <p><strong>수요 노출</strong>: QC는 자기 큐의 앞쪽 horizon 미배차 컨테이너를 "dispatchable work(=Q)"로 노출(<code>live_candidate</code> Q-status 대응). 정책이 배정하면 'A', QC가 소비하면 제거.</p>
+
+  <h3>3.1 선박(Vessel) 에뮬레이터</h3>
+  <ul>
+    <li>역할: QC가 walk할 <strong>베이 플랜</strong> + <strong>출항 마감</strong>.</li>
+    <li><strong>적부구조는 데이터에 인코딩</strong> — <code>live_workqueue.queuename</code> = <code>&lt;베이&gt;&lt;D|H&gt;-&lt;D|L&gt;</code>: <code>02H-D</code>=베이02·홀드·양하, <code>08D-D</code>=베이08·덱·양하, <code>06H-L</code>=베이06·홀드·적하. <code>total_qty</code>=그 (베이,덱/홀드) 수, <code>seq</code>=QC 처리 순서.</li>
+    <li>상태: 베이별 잔여(<code>QcMoveDone</code>마다 감소). 전 베이 소진 → <code>VesselComplete</code>.</li>
+    <li><strong>출항</strong>: estdep에 떠남. 그 시각 미완 work는 마감 미스로 집계(1차: 정시 출항 가정).</li>
+  </ul>
+
+  <h3>3.2 QC 에뮬레이터 — 상태기계 ★핵심</h3>
+  <p><strong>상태</strong>: <code>IDLE → GANTRY → HATCH → AWAIT_TRUCK(STALL) → WORKING → … → DONE</code>. 보유: 현재 베이/덱홀드, 진행 work, 동적 작업지점.</p>
+  <pre><code>[다음 큐항목 (bay,dh,job,qty) 진입]
+  bay ≠ 현재베이  → GANTRY : clock += BAY_CHANGE_S(180); 현재베이=bay; emit WorkPointMoved
+  해치 전환       → HATCH  : 양하 덱→홀드 += HATCH_DS(340) | 적하 홀드→덱 += HATCH_LD(390)
+  remaining = qty
+[컨테이너 스텝] (remaining > 0)
+  이 컨테이너를 dispatchable work로 노출
+  필요 트럭이 작업지점에 있나? (DS=빈트럭 도착 / LD=이 컨테이너 실은 트럭 도착)
+    예   → WORKING : clock += move_s(learn_qc_move_time, 폴백 DS90/LD110); schedule QcMoveDone
+    아니오 → AWAIT_TRUCK : emit CraneStallStart; TruckArriveQC 대기
+on TruckArriveQC: AWAIT_TRUCK였으면 CraneStallEnd → WORKING
+on QcMoveDone(cont):
+  DS: cont 트럭 위 → 트럭 적재상태로 야드 블록 출발(TT)
+  LD: cont 배 위  → 트럭 비움 출발(TT)
+  remaining -= 1  (트윈쌍이면 -= 2)
+  remaining == 0 → 다음 큐항목 / else 컨테이너 스텝</code></pre>
+  <ul>
+    <li><strong>★ 동적 작업지점</strong>: <code>GANTRY</code>마다 갱신 = 현재 베이 안벽 위치(<code>선석위치 + 베이오프셋</code>). TT의 DS 픽업/LD 드롭 끝점이 이걸 따라감(리플레이는 QC GPS로 검증).</li>
+    <li><strong>STALL</strong> = <code>AWAIT_TRUCK</code> 누적 — 우리 정책 가치의 주 측정량. <strong>QC 진행 = max(cadence, 트럭 공급).</strong> (라이브 <code>workpool.rs</code>의 베이전환/해치 가산·move_factor와 동일.)</li>
+    <li><strong>노브</strong>: ① 에이프런 버퍼(1차 0=1:1 보수, 옵션 k대 → STALL 완화). ② LD 적재 순서(1차 큐 엄격, 옵션 도착순).</li>
+  </ul>
+
+  <h3>3.3 YC(RTG) 에뮬레이터 — 대기큐 있는 서비스</h3>
+  <p><strong>상태</strong>: <code>IDLE → SERVING → …</code> + 대기 트럭 <strong>FIFO 큐</strong>.</p>
+  <pre><code>on TruckArriveBlock: 큐에 추가; IDLE이면 서비스 시작
+[서비스 시작] state=SERVING; clock += yc_service_s(블록내 갠트리 + 리프트, rtg_move_log 분포)
+on YcServiceDone:
+  DS: cont 적치 → 트럭 비움(자유)     LD: cont 트럭 적재 → QC로 출발(TT)
+  큐 dequeue; 남았으면 다음 서비스 / else IDLE</code></pre>
+  <p><strong>큐 대기가 <code>K_RTG_Q(~544s)</code>의 큰 부분</strong> — 블록 혼잡이 핸드오버 지연을 만듦(YC move 자체는 LD 84·DS 60s). 매핑 <code>yt_topos</code>(예 <code>04U-0809</code>)→블록→YC. 1차 블록당 YC 1대·서비스 분포; 옵션 2 RTG/블록.</p>
+
+  <h3>3.4 TT(트럭) 에뮬레이터 — 사이클 상태기계</h3>
+  <p><strong>상태</strong>: <code>IDLE → EMPTY_TRAVEL → AT_PICKUP → LADEN_TRAVEL → AT_DROP → (IDLE)</code>. 이동시간=라우터. 끝점: 현위치 / QC 동적 작업지점 / 블록(YC).</p>
+  <div class="kc-cal warn"><span class="h">차량 주행속도 = GPS 실측 22.8 km/h (움직이는 30초 구간 중앙, p90 41)</span><p>⚠ 점대점 "유효속도"(직선 ~6.9 km/h)는 <strong>정지 ~47%가 섞이고 짧은 leg에 가중</strong>돼 너무 느림 — 그대로 쓰면 안 됨. <strong>라우터에 주행속도 ~23 km/h만 쓰고, 정지(큐·대기·신호)는 에뮬레이터(QC/YC 핸드오버·큐·STALL)에서 별도 모델</strong>(차량 속도에 넣으면 이중계상). 검증: 라우터(주행)+에뮬레이터(정지) 합 = 실측 leg시간·C1(TT 사이클 740s). 확률 모드: 로그정규 샘플링(<code>mu=ln(p50), sigma=(ln(p90)−ln(p50))/1.2816</code>, 실측 p90/p50≈2.4).</p></div>
+  <div class="kc-cal note"><span class="h">leg 분해 — ARRIVED가 물리 도착과 일치(중앙 −4s)</span><p>빈차 leg을 30초 GPS 모션분할로 구간시간(total_s, 비용 라벨) + 주행(drive_s ~53%)/정지(stop_s ~47%)로 쪼갬. 핵심: <strong>크레인 큐는 도착 이후이지 이동시간 안이 아님.</strong> 동일 OD 변동계수 0.758(±76%)=대기 잡음이 거리모델 정확도 바닥. <em>(한때 '진입 대기(approach)'를 1단계 신호로 쓰려 했으나 일관 측정 시 중앙 ≈0·옛 67s는 선택편향이라 폐기. 비용 라벨도 drive_s가 아니라 구간시간. <code>learn_leg_decomp</code>는 진단용이었고 retire됨 mig 0081.)</em></p></div>
+
+  <h3>3.5 워크드 예시 — DS 컨테이너 1개</h3>
+  <pre><code>t=0    [정책] TT_42(idle, 안벽 인근) → C11 베이02 양하 배정 → Dispatch
+t=0    [TT] EMPTY_TRAVEL: 라우터(현위치→C11 동적작업지점)=95s
+t=80   [QC] C11 트럭 없음 → AWAIT_TRUCK, CraneStallStart
+t=95   [TT→QC] TruckArriveQC → CraneStallEnd(굶음 15s) → WORKING move_s(DS)=90s
+t=185  [QC] QcMoveDone → TT_42 적재 → LADEN_TRAVEL(C11→02J 블록)=210s
+t=395  [TT→YC] TruckArriveBlock(02J). YC 큐 비어 즉시 SERVING=70s
+t=465  [YC] YcServiceDone → TT_42 자유 → 다음 결정틱(t=480) 후보
+지표: C11 STALL +15s, TT_42 공차 95s·적재 210s·핸드오버(90+70)s.</code></pre>
+  <p>LD는 대칭: 트럭이 <strong>블록 먼저</strong>(YC 적재) → QC(적재), QC STALL = 그 컨테이너 실은 트럭을 기다린 시간.</p>
+
+  <h3>3.6 장비 작업시간 — 스펙 분해 vs 실측 ★시간 계산의 근거</h3>
+  <div class="kc-cal warn"><span class="h">결론 — 스펙 분해는 우리 운영로그로 신뢰 불가 → 실측 분포 채택</span><p>(A) 실측 집계(<code>learn_qc_move_time</code> 중앙값+상수)는 거리·단(tier)·블록내 위치 의존을 뭉갬. (B) 스펙 분해(물리 동작×장비 속도)는 정확하나, <strong>위치 회귀로 갠트리/권상 속도 분해는 신뢰 불가</strong>: ① 무브간 gap이 truck 대기에 묻힘(QC 갠트리 회귀 ≈0), ② 단변량 회귀가 교란(YC 권상 회귀 −0.68 비물리), ③ COMP−ST 무브시간이 권상 사이클을 못 잡음. <strong>→ 실측 유효시간 <em>분포</em>를 씀</strong>(시뮬이 로그정규 샘플). 정밀 분해는 PLC 모션로그 같은 별도 계측 필요(현재 없음). 재현: <code>scripts/estimate_equipment_specs.sh</code>.</p></div>
+  <p><strong>추정된 유효 작업시간 (시뮬 입력값)</strong></p>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th>장비/작업</th><th>유효시간 (실측)</th><th>출처</th></tr></thead>
+    <tbody>
+      <tr><td><strong>QC 무브</strong>(1개)</td><td>DS <strong>90s</strong>(주88·야93) · LD <strong>121s</strong>(주117·야125)</td><td><code>learn_qc_move_time</code>, 58크레인</td></tr>
+      <tr><td><strong>YC 서비스</strong>(분포)</td><td>DS p10/p50/p90 <strong>10/51/140s</strong> · LD <strong>10/76/164s</strong> · RH 9/69/154 · GO 10/122/227</td><td><code>rtg_move_log</code> 24h</td></tr>
+      <tr><td><strong>해치커버</strong>(베이당 1회)</td><td>양하 <strong>~428s</strong> · 적하 <strong>~496s</strong></td><td>research-log</td></tr>
+      <tr><td><strong>TT 주행속도</strong></td><td><strong>22.8 km/h</strong>(움직이는 30초 중앙, p90 41)</td><td><code>truck_pos_hist</code> empty_travel</td></tr>
+      <tr><td><strong>TT 정지(오버헤드)</strong></td><td>빈차 leg의 <strong>~47%가 정지</strong>(대부분 도착지 최종접근·큐). 비용 라벨은 구간시간(정지 포함)</td><td>모션분할</td></tr>
+    </tbody>
+  </table></div>
+  <div class="kc-cal note"><span class="h">★ 순수주행(구간시간) OD — 도로망 경로시간→실제 곡선으로 가동 (2026-07-02)</span><p>순수주행 = 주행 구간 시간(출발→작업지점 도달; 경로 정체 포함·핸드오버 대기 제외) → <strong>배차 cost = 추론 도로망 최단시간 경로를 실측 곡선으로 변환</strong>(<code>roadgraph.rs RouteCost/CostCurve</code>: <code>road_route_eval</code>에서 경로시간 6구간별 실제 p50/p90 초를 매듭으로 직접 학습 — 단조 잠금·짧은 경로 바닥 ~89s·매듭 보간). L3 폴백(라우팅 불능 ~3%) = 같은 표의 맨해튼→실제 곡선(콜드스타트만 <code>quay_manhattan_m ÷ 3.30 m/s</code>). Stage-2 cost = 빈차 도착시간 = <code>free_in</code>(곧빔 잔여) + TRAVEL. <em>처음의 "비율 × 경로시간, 4구간+중점보간"은 당일 리뷰 탈락(비단조 역전·바닥 소실). 소스 변천: 순수-OD → 실현 → 움직인순간만 → 구간시간 → 도로망 곡선(현재). 삭제됨(STALE): <code>learn_travel_zone225_pure</code>, <code>learn_travel_drive_sample</code>, <code>learn_eval</code>, <code>learn_crane_approach</code>, <code>learn_leg_decomp</code>, <code>learn_travel_zone225_drive</code>. <code>learn_travel_zone225</code>(실현·핸드오버 포함)은 갱신되나 cost엔 미사용.</em> 자세히 → <a href="/kc/learn/travel-time.html">이동시간 모델</a>.</p></div>
+
+  <h2>4. ★ 시나리오 구조</h2>
+  <p>에뮬레이터를 초기화·구동하는 모든 것. 모듈 상태(§3) + 적부계획.</p>
+  <pre><code>Scenario {
+  meta: { id, start_ts, duration_s, decision_tick_s: 60, source: "replay:&lt;win&gt;"|"synthetic", seed },
+  vessels: [ { vessel_id, voyage, berth_id, berth_loc, estwkc_ts, estdep_ts, cutoff_ts,
+    bays: [ { bay, dh:"D"|"H", job:"D"|"L", qty } ] } ],          // queuename 디코드=적부계획
+  cranes: [ { qc_id, vessel_id, start_loc,
+    queue: [ { bay, dh, job, qty, deadline_ts } ] } ],            // seq 순서. work 단위
+  yards:  [ { block_id, loc, latlon, dims:{rows,bays,tiers}, pitch:{row_m,bay_m} } ],
+  equipment_specs: {                                             // 실측 분포(§3.6), 로그정규 샘플
+    qc_move_s:  { DS: 90,  LD: 121 },
+    yc_service: { DS: [10,51,140], LD: [10,76,164] },            // p10/p50/p90
+    hatch_s:    { ds: 428, ld: 496 }, bay_change_s: 180 },
+  fleet: [ { ytno, loc, latlon, state, free_at_offset_s } ],     // truck_pos_hist/classify_tt/free_in
+  env:    { travel:"router", policy_od:"router"|"learned", stochastic: bool },
+  policy: { kind:"ours"|"tos_baseline", params:{ SWITCH_PENALTY_S, NEED_HORIZON_S, fleet_size, ... } }
+}</code></pre>
+  <p><strong>개별 work는 시나리오에 정적으로 박지 않음</strong> — QC 모듈이 <code>queue</code>(베이 플랜)를 walk하며 동적 생성(베이이동·해치커버·STALL이 ready/작업지점을 시점마다 바꿈). 각 work: <code>{work_id, qc_id, queuename, container, twin_key, quay_loc=QC현재위치(동적), yard_loc=block, deadline_ts(정적)}</code>.</p>
+  <div class="kc-cal note"><span class="h">§4-주 마감</span><p><code>deadline = min(estdep−버퍼, estwkc[가드])</code>. estwkc는 대부분 쓰레기라 <strong>출항 0~6h前 정상값일 때만</strong>(라이브 <code>finish_by</code> 로직). 선박은 정시 출항 → deadline 정책무관 정적. ready는 §3.2 동적.</p></div>
+
+  <h2>5. 시나리오 만들기 — 리플레이 vs 합성</h2>
+  <ul>
+    <li><strong>(A) 합성 — 1차 권장</strong>: 선박 수·QC 수·베이 플랜(베이수×덱/홀드×수량)·블록 분포·트럭 수·마감여유·트윈비율 파라미터화. 부하/공급비/적부패턴을 의도대로 통제.</li>
+    <li><strong>(B) 리플레이</strong>: 충실 윈도 = 최근 약 2일(병목 GPS <code>truck_pos_hist</code> 2일). start_ts 트럭위치·QC 큐·마감·cadence를 실데이터로. <strong>반사실 불가</strong>(정책 바뀌면 궤적이 달라져 과거 GPS 재생 불가) → 초기조건+적부계획만 실데이터, 이후 전진 시뮬. TOS 실제배차는 baseline 교차검증용.</li>
+  </ul>
+  <p><em><code>live_*</code>는 매 ETL 덮어쓰기 → 과거 큐·마감 추이 미보존. 장기 리플레이엔 append 이력테이블 별건.</em></p>
+
+  <h2>6. 정책 훅 (코드 재사용 — 재구현 금지)</h2>
+  <p>매 <code>decision_tick_s</code>(60s): <code>snapshot → 배차</code>. 에뮬레이터 상태에서 snapshot 합성 → 정책 호출 → 주문을 에뮬레이터가 실행.</p>
+  <p><strong>우리 정책 = 2단계 매처(<code>crates/api/src/livemap.rs</code> 추출):</strong></p>
+  <ul>
+    <li>1단계(선택·위치무관): (굶는 QC 먼저 → 마감 빠른 순) + per-crane 수요캡 <code>NEED_HORIZON_S(900)/move_s</code>(DS10·LD8).</li>
+    <li>2단계(매칭·위치고려): edge=빈차도착+anti-thrash(<code>SWITCH_PENALTY_S 180</code>, <code>COMMIT_LOCK_S 1200</code>, <code>arr&lt;1800</code>). 최적해=3층 MCMF(<code>optimal_assign</code>). 긴급도는 비용에 없음(전부 1단계).</li>
+  </ul>
+  <p><strong>정책 비용추정 OD(<code>env.policy_od</code>)</strong>: <code>"router"</code>(1차, 배차결정 품질만 격리) | <code>"learned"</code>(도로망 경로시간→실제 곡선 — 라이브 배차 <code>RouteCost</code>와 동일, 라우팅 불능은 맨해튼→실제 곡선).</p>
+  <div class="kc-cal note"><span class="h">도로망 라우팅(2026-07-02 갱신)</span><p>추론 도로 그래프(<code>road_node</code>/<code>road_edge</code>·Rust 방향 Dijkstra)가 재구축 후 배차 cost에 연결 — 작업지점 5,888곳 커넥터(스냅 100%)·방향은 도로 단위 다수결·기점 정렬(경로 성공률 96.7%). 첫 판(264노드·스냅 30%)의 탈락은 재구축으로 뒤집힘. 시뮬 <code>"router"</code>도 같은 그래프를 쓰면 라이브 배차와 정합. <strong>TOS = 보정 baseline</strong>(알고리즘 역공학 금지): 알려진 행동(유휴 트럭만 배차·픽업 최단) 휴리스틱 → 같은 에뮬레이터에서 실측 KPI 재현하면 유효.</p></div>
+
+  <h2>7. 지표 &amp; 보정 (해측)</h2>
+  <p><strong>종단 KPI(두 정책)</strong>: <strong>QC STALL(★)</strong> · 처리율 · 공차주행 · 트럭 사이클타임 · 마감준수 · 가동률 · <strong>달성 가능분 F% = (시뮬 절감)/(fair_compare 상한 ~30%)</strong>.</p>
+  <p><strong>보정(디지털 트윈) — TOS baseline 시뮬이 실측 재현 후 신뢰</strong>(2026-06-26 야간확정):</p>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th>#</th><th>시뮬 출력</th><th>실측 타깃</th><th>허용오차</th></tr></thead>
+    <tbody>
+      <tr><td><strong>C1</strong></td><td>TT 사이클타임 중앙값</td><td><code>raw_k_tt_cycle.med</code> <strong>740s</strong>(p25 419·p75 973)</td><td>±15%</td></tr>
+      <tr><td><strong>C2</strong></td><td>QC move 서비스시간</td><td><code>learn_qc_move_time</code> DS <strong>90</strong>·LD <strong>121s</strong></td><td>±10%</td></tr>
+      <tr><td><strong>C3</strong></td><td>QC 처리율</td><td>K_MPH <strong>24.7~25.2</strong></td><td>±10%</td></tr>
+      <tr><td><strong>C4</strong></td><td>공차주행 비율</td><td>K_EMPTY_R <strong>46%</strong>(1.24km/job)</td><td>±3%p</td></tr>
+      <tr><td>C5</td><td>해치커버 작업시간</td><td>양하 ~428s·적하 ~496s</td><td>±20%</td></tr>
+      <tr><td>C6</td><td>QC 굶음/트럭대기</td><td>K_QC_TT_WAIT <strong>177s</strong>(같은베이만)</td><td>±25%</td></tr>
+      <tr><td>C7</td><td>YC 서비스 분포</td><td><code>rtg_move_log</code> LD p10/p50/p90 = <strong>10/76/164s</strong></td><td>p50 ±15%·꼬리</td></tr>
+      <tr><td>C8</td><td>야드(YC) 핸드오버 대기</td><td>K_RTG_Q <strong>544s</strong></td><td>±20%</td></tr>
+    </tbody>
+  </table></div>
+  <p>우선 C1→C2→C3→C4. median뿐 아니라 분포(p25/p75)도. 추출기와 같은 캡(TT사이클[120,1200]s, RTG_Q[0,1800]s, QC move[1,300]s).</p>
+  <div class="kc-cal warn"><span class="h">★ 무효화 함정</span><ul>
+    <li><strong>K_CYCLE(~40분)는 트럭 사이클 아님</strong>(컨테이너 생애 span) → <strong>K_TT_CYCLE 740s</strong> 사용.</li>
+    <li><strong>K_QC_NOMOVE 1.68x 과대</strong>(해치·베이이동 포함) → 같은베이(177s)만.</li>
+    <li>GPS <code>tt_cycle_v2</code>(~419s)=편도.</li>
+    <li><strong>K_RTG_Q(TT 야드대기) ≠ K_QC_NOMOVE(QC 트럭대기).</strong></li>
+  </ul></div>
+
+  <h2>8. 단계 (모듈 → 시나리오 → 정책)</h2>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th>Phase</th><th>산출물</th><th>완료 기준</th></tr></thead>
+    <tbody>
+      <tr><td><strong>P0 — 장비 모듈</strong></td><td>에뮬레이터: 선박·QC(베이walk+해치+동적작업지점+STALL)·YC·TT. 시나리오 스키마+합성 생성기.</td><td>합성 시나리오 1개 끝까지 전개(이벤트 정합)</td></tr>
+      <tr><td><strong>P1 — 보정</strong></td><td>TOS baseline + 결정론.</td><td><strong>C1–C4(+C5/C8) 통과</strong></td></tr>
+      <tr><td><strong>P2 — 우리 정책</strong></td><td><code>run_stage2</code> 추출·연결, 종단 KPI 양 정책.</td><td>우리 vs baseline + <strong>F%</strong></td></tr>
+      <tr><td><strong>P3 — 확률+리플레이</strong></td><td>로그정규, 2일 윈도 리플레이.</td><td>C6 + 분포 일치</td></tr>
+      <tr><td><strong>P4 — 스윕+리포트</strong></td><td>트럭대수·SWITCH_PENALTY·NEED_HORIZON A/B, fair_compare 백테스트.</td><td>헤드라인 + KC 문서</td></tr>
+    </tbody>
+  </table></div>
+
+  <h2>부록 A — 핵심 상수·인코딩</h2>
+  <pre><code>queuename = &lt;bay&gt;&lt;D|H&gt;-&lt;D|L&gt;   // 02H-D = 베이02·홀드·양하 (parse_q)
+# QC 베이 walk 가산
+BAY_CHANGE_S=180  HATCH_DS_S=340  HATCH_LD_S=390  DS_MOVE_S=90  LD_MOVE_S=110
+proc = qty*(1−twin/2)*move_s + (베이바뀜?180 : 적하H→D?390 : 양하D→H?340 : 0)
+# OD (policy_od="learned"일 때만)
+R:  도로망 경로시간 → 실제 곡선(RouteCost/CostCurve·구간시간·6구간 p50/p90 매듭·단조·바닥~89s)
+L3: 맨해튼 → 실제 곡선(같은 눈금); 콜드스타트만 맨해튼/3.30 m/s, p90=p50*1.5
+# 배차
+SWITCH_PENALTY_S=180  COMMIT_WINDOW_MS=600_000  COMMIT_LOCK_S=1200  NEED_HORIZON_S=900</code></pre>
+
+  <h2>부록 B — 구성/보정 쿼리</h2>
+  <p><code>PGPASSWORD=wp psql -h127.0.0.1 -p5433 -U wp -d wp_tt</code></p>
+  <pre><code>-- 선박 적부(베이 플랜) + QC 큐 순서
+SELECT qc,vessel,queuename,disload,seq,total_qty,comp_qty FROM live_workqueue ORDER BY qc,seq;
+-- work 끝점(야드 블록=yt_topos)
+SELECT queuename,jobtype,yt_topos,twintandem FROM live_workpool;
+-- 크레인 cadence / YC 서비스 / 트럭 사이클(C1) / 마감
+SELECT qc,jobtype,shift,med_sec FROM learn_qc_move_time;
+SELECT machno,jobtype,round(avg(dur_s)) FROM rtg_move_log GROUP BY 1,2;
+SELECT med_sec FROM raw_k_tt_cycle ORDER BY as_of DESC LIMIT 1;            -- 740
+SELECT vessel,estwkc_ts,estdep_ts,cutoff_ts FROM live_vessel_schedule;
+SELECT ytno,lat,lon,state FROM truck_pos_hist WHERE ts BETWEEN $T AND $T+interval '30s';</code></pre>
+
+  <hr>
+  <p>← <a href="/kc/dispatch/stage2-rollout.html">적용 계획</a> · <a href="/kc/dispatch/research-log.html">조사 기록</a> →</p>
+</main>
+</body>
+</html>

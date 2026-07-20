@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>실시간 websocket 데이터 & 활용 — WP-TT 지식센터</title>
+  <meta name="description" content="장비 ~450대가 매초 쏟아내는 GPS 위치와 크레인 PLC 스트림 — 그 구조와 제품에서의 활용, 그리고 데이터 품질 감사.">
+  <link rel="stylesheet" href="/kc/assets/kc.css">
+  <script defer src="/kc/assets/kc.js"></script>
+</head>
+<body>
+<main class="kc-article" data-page="data/websocket-data" data-source="architecture/websocket-data.md">
+  <h1>실시간 websocket 데이터 & 활용</h1>
+  <p class="kc-lede">장비 ~450대가 매초 쏟아내는 <strong>GPS 위치</strong>와 <strong>크레인 PLC</strong> 스트림. <strong>TOS DB(Oracle)와는 완전히 다른 시스템</strong> — "지금 어디서 무엇을 하는가"의 연속 관측.</p>
+  <div class="kc-meta"><span class="kc-badge kind">아키텍처 · 레퍼런스</span><span class="kc-badge living">리빙 문서</span></div>
+
+  <h2>개요 — websocket은 TOS가 아니다</h2>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th>구분</th><th>websocket (이 문서)</th><th>TOS Oracle</th></tr></thead>
+    <tbody>
+      <tr><td>성격</td><td><strong>연속 관측</strong> — 지금 어디서 어떻게</td><td><strong>권위적 이력</strong> — 무슨 작업이 있었나</td></tr>
+      <tr><td>시간 해상도</td><td>장비당 ~3초(GPS) · ~1초(PLC)</td><td>초 단위 timestamp(완료 이벤트)</td></tr>
+      <tr><td>저장</td><td><strong>메모리(라이브 스냅샷)</strong> — DB 미적재</td><td>Postgres raw_*/kpi_*(영구 누적)</td></tr>
+      <tr><td>깊이</td><td><strong>현재 순간만</strong>(과거 없음)</td><td>보존 기간만(~15/35일)</td></tr>
+      <tr><td>쓰임</td><td>라이브맵 · 차량 풀 · 작업 풀 융합 · 피드 헬스</td><td>KPI 산출 · 연구 학습데이터</td></tr>
+    </tbody>
+  </table></div>
+  <div class="kc-cal note"><span class="h">핵심</span><p>KPI 수치는 <strong>전부 TOS</strong>에서 나옵니다(websocket 아님). 반대로 <strong>실시간 차량/작업 상태</strong>는 websocket이 핵심. 작업 풀 화면은 둘을 융합합니다.</p></div>
+
+  <h2>두 zone · 메시지 봉투</h2>
+  <pre><code>// 봉투(공통)
+{ "data":{ "id":"TT1045", "zone":"wpt_gps", "datas":"&lt;stringified json&gt;" } }</code></pre>
+  <ul>
+    <li><strong>wpt_gps</strong> (위치 + 미션): 모든 차량/크레인 GPS + (TT) 현재 미션.</li>
+    <li><strong>ctab</strong> (크레인 PLC): 동적 크레인(C/M/Z)의 PLC — 하중·트롤리·호이스트. 핸드오버 순간의 정밀 신호.</li>
+  </ul>
+
+  <h2><code>wpt_gps</code> — gps_update (위치 + 미션)</h2>
+  <pre><code>{ "device":"TT1045", "lat":"2.9179205", "lon":"101.28711433", "speed":"8kmh",
+  "engine_on":"ON", "dtime":"11:50:27", "cur_loc":"01U", "topos1":"03U-21",
+  "jobtype":"LD", "vslname":"ESL SHEKOU", "container1":"EGSU2064058",
+  "container2":"EGSU3909308", "arrival":"ARRIVED", "fuel_level":"38.8" }</code></pre>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th>필드</th><th>의미 · 활용</th></tr></thead>
+    <tbody>
+      <tr><td><code>device, lat, lon, speed</code></td><td>장비ID · 위치 · 속도. <strong>속도&lt;3km/h + 공차 = 유휴 판정</strong>.</td></tr>
+      <tr><td><code>container1, container2</code></td><td>적재 컨테이너(2개=트윈). <strong>비어있음 = 공차/유휴</strong>의 1차 신호.</td></tr>
+      <tr><td><code>topos1</code></td><td><strong>목적지 코드</strong>(다음 핸드오버) — 블록 베이 또는 크레인. 픽업↔드롭에 따라 동적.</td></tr>
+      <tr><td><code>arrival</code></td><td>도착 플래그. 핸드오버 임박/곧유휴 판정의 핵심.</td></tr>
+      <tr><td><code>jobtype, vslname</code></td><td>작업종류(LD/DS/MO·MI) · 선박명. 드롭 사이드 결정.</td></tr>
+    </tbody>
+  </table></div>
+
+  <h2><code>ctab</code> — plc_data (크레인 PLC)</h2>
+  <p><strong>하중(load) 전이가 곧 핸드오버 순간</strong>이라 동기화의 가장 정밀한 신호. <strong>C/M/Z만 송신</strong> — RTG는 PLC가 없습니다.</p>
+  <pre><code>{ "crane":"C51", "load":1.9, "lock":"False", "land":"False", "hpos":"31.74", "tpos":"27.68" }</code></pre>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th>필드</th><th>의미 · 활용</th></tr></thead>
+    <tbody>
+      <tr><td><code>crane</code></td><td>크레인 ID. <strong>GPS device·TOS QC번호와 일치</strong> → 위치/계획 머지 연결고리.</td></tr>
+      <tr><td><code>load</code></td><td>하중(톤). 적재 ≥ 1.0t, 빈후크 ~0. 전이로 PICKUP/DROP 검출. "작업 중" 신호.</td></tr>
+      <tr><td><code>lock / land / hpos / tpos</code></td><td>트위스트락 / 안착 / 호이스트 / 트롤리 위치.</td></tr>
+    </tbody>
+  </table></div>
+  <div class="kc-cal warn"><span class="h">RTG는 PLC가 없다</span><p>양하(DS)의 블록측 핸드오버는 PLC가 없어 직접 못 봅니다 → <strong>RTG GPS와 TT GPS의 근접도</strong>로 추정(같은 bay ≈ 30m 이내).</p></div>
+
+  <h2>주기 · 핸드셰이크 · 터널</h2>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th>항목</th><th>값</th></tr></thead>
+    <tbody>
+      <tr><td><strong>wpt_gps</strong></td><td>장비당 중앙 <strong>~3초</strong>(p90 10s·최대 55s). 1Hz 아님·불규칙, 정지 시 수십 초.</td></tr>
+      <tr><td><strong>ctab PLC</strong></td><td>크레인당 거의 규칙적 <strong>~1초</strong>. 핸드오버 포착에 충분.</td></tr>
+      <tr><td>동시 추적</td><td><strong>~450대</strong>(TT~280·RTG~100·QC~28). ~40건/초.</td></tr>
+    </tbody>
+  </table></div>
+  <div class="kc-cal note"><span class="h">네트워크 — Azure 경유 터널</span><p>원천 <code>ws://172.21.30.72:9986</code>은 WSL2 NAT IP라 직접 불가. Tailscale 노드 azure-wp-poc가 사내망에 닿아 SSH 터널로 API가 수신(systemd <code>wp-ws-bridge</code>). 끊기면 라이브맵·차량 풀이 즉시 비고 피드 헬스가 적색.</p></div>
+
+  <h2>제품에서의 활용</h2>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th>엔드포인트</th><th>내용</th></tr></thead>
+    <tbody>
+      <tr><td><code>GET /api/livemap/positions</code></td><td>활성 장비(age ≤ 120s) 위치 + (TT) 배차 상태 + (크레인) PLC.</td></tr>
+      <tr><td><code>GET /api/livemap/health</code></td><td>피드 헬스 — 연결·신선도·수신율·장비 수.</td></tr>
+    </tbody>
+  </table></div>
+  <h3>차량 풀 — 배차 상태 분류</h3>
+  <p>각 TT를 매 스냅샷마다 배차 상태로 실시간 분류. <strong>standalone</strong> — websocket 신호만. (상세 <a href="/kc/data/dispatch-pools.html">차량·작업 풀 갱신</a>.) 초기 5상태(idle·empty_travel·delivering·soon_idle·wait_rtg)에서 나중에 idle을 <strong>idle/staging으로 분리해 6상태</strong>가 됐습니다.</p>
+  <div class="kc-cal note"><span class="h">왜 PLC/GPS 융합인가</span><p>적하(LD)는 QC PLC 하중 전이로 핸드오버를 ±1초로 잡지만, 양하(DS)는 RTG에 PLC가 없어 <strong>RTG GPS와 TT GPS가 같은 bay(≈30m)인지</strong>로 판정. 블록 위치는 ARRIVED TT들의 GPS로 <strong>학습(centroid)</strong>.</p></div>
+  <h3>작업 풀 융합 · 피드 헬스</h3>
+  <ul>
+    <li><strong>크레인 가동 배지</strong> — QC PLC 신선하면 그 크레인이 지금 물리적으로 도는 중 → <code>PLC live</code>.</li>
+    <li><strong>배정 트럭 실시간 상태</strong> — 각 작업의 배정 TT(TOS YTNO) 옆에 실시간 상태 점 — YTNO ↔ GPS device 매칭.</li>
+    <li><strong>피드 헬스</strong> — WS 미연결/60초+ 무수신 → 적색. 장비별 age(15s fresh/120s stale/600s 제거)·분당 메시지·정확도 감시.</li>
+  </ul>
+
+  <h2>6. 데이터 품질 감사 (2026-07-15)</h2>
+  <h3>6.1 인프라·커버리지 — 매우 우수</h3>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th>항목</th><th>실측</th></tr></thead>
+    <tbody>
+      <tr><td>갱신 간격</td><td><strong>정확히 30초</strong> (median·p90 모두 30s)</td></tr>
+      <tr><td>리커넥트</td><td><strong>0회</strong> · SSH 터널 <strong>4주+ 무재시작</strong></td></tr>
+      <tr><td>메시지율</td><td>~965/분 · 24시간 차량수 441~501대 (피드 끊김 0)</td></tr>
+      <tr><td>야드트랙터 커버리지</td><td><strong>98.4%</strong> — TOS가 쓴 트럭 495대 중 8대만 미관측(오히려 우리가 더 많이 봄: 539대)</td></tr>
+    </tbody>
+  </table></div>
+  <p>"TOS 5,575대 vs 웹소켓 539대"로 놀랄 수 있으나 — 5,033대는 <strong>외부 게이트 트럭</strong>(우리 야드트랙터 아님). 우리 차량 커버리지는 거의 완전.</p>
+  <h3>6.2 ★ 근본 한계 — "정지하면 GPS 단말이 침묵한다"</h3>
+  <div class="kc-cal danger"><span class="h">유일한 한계이자 가장 중요한 발견</span>
+    <p>전체 갱신 간격의 <strong>4%가 5분 넘는 큰 끊김</strong>(median 11분). 이 끊김의 <strong>68%가 트럭이 짐을 싣고 작업하는 중</strong>에 발생. <strong>결정타: 큰 끊김의 100%가 트럭이 멈춘 직후 시작</strong>(끊김 직전 이동량 median 0m). 즉 <strong>차량 GPS 단말이 "움직이면 보고, 멈추면 침묵"</strong>하는 이동 기반 보고 방식 — 우리 피드나 구조물 문제가 아니라 <strong>소스 단말의 성질</strong>.</p>
+  </div>
+  <h3>6.3 이것이 설명하는 것</h3>
+  <p>트럭은 <strong>멈추면 보이지 않는다</strong> — 그런데 우리가 가장 관측하고 싶은 건 <strong>멈춰서 크레인을 기다리는 그 순간</strong>. 이 하나의 성질이:</p>
+  <ul>
+    <li><strong>곧-유휴 시각(리드타임) 예측이 근본적으로 불가</strong>한 이유 — <a href="/kc/dispatch/leadtime-adr.html">ADR 0002</a>.</li>
+    <li>부하 도착 시점이 흐릿했던 이유 (도착 = 정지 = 침묵).</li>
+    <li>DS 물림 탐지 재현율이 낮은 이유 (핸드오버 = 정지 = 침묵).</li>
+  </ul>
+  <h3>6.4 고칠 수 있나</h3>
+  <ul>
+    <li><strong>우리 쪽에선 불가</strong> — 단말의 보고 정책(상류). 피드는 충실히 전달할 뿐.</li>
+    <li><strong>진짜 해결</strong> = 터미널 측 텔레매틱스 재설정(정지 중에도 보고) — 하드웨어/정책 협의.</li>
+    <li><strong>우리 완화책</strong>(latched 필드 · 지오펜스 도착 · 맵매칭)이 정확히 이 "정지 중 침묵"을 메우려던 장치.</li>
+  </ul>
+</main>
+</body>
+</html>

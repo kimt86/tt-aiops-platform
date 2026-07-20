@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>피드 의미론 실측 — WP-TT 지식센터</title>
+  <meta name="description" content="websocket GPS/PLC 피드 필드의 의미를 실측으로 확정한 결과.">
+  <link rel="stylesheet" href="/kc/assets/kc.css">
+  <script defer src="/kc/assets/kc.js"></script>
+</head>
+<body>
+<main class="kc-article" data-page="data/feed-semantics" data-source="research/feed-semantics.md">
+  <h1>피드 의미론 실측</h1>
+  <p class="kc-lede">websocket GPS/PLC 피드 필드의 의미를 실측으로 확정한 결과. <strong>이 프로젝트에서 가장 비싼 지식 — 재발견하지 말 것.</strong></p>
+  <div class="kc-meta"><span class="kc-badge kind">리서치</span><span class="kc-badge living">검증됨 · 2026-06-12</span></div>
+
+  <p>필드 전수 레퍼런스는 <a href="/kc/data/websocket-fields.html">websocket 원본 필드</a> 참고.</p>
+
+  <h2>핵심 결론</h2>
+  <ol>
+    <li><strong>container1/2 = TOS 배정 필드</strong>(물리 적재 아님). 직전 drop에 다음 박스를 사전배정(c2c). 검증: 적하(LD) 34대가 <code>container1</code>이 세팅된 채 픽업 블록에 ARRIVED.</li>
+    <li><strong>topos1 = 작업/구간 할당 신호</strong>(실측 확정). DS: 크레인(픽업)→블록(드롭), LD: 블록→크레인. <strong>topos1 플립 = 핸드오버 완료 + 중앙값 19초</strong>(PLC land 대비, n=36).</li>
+    <li><strong>arrival(ARRIVED)</strong>: 블록 ~78% / <strong>크레인 ~23%</strong>(정차 트럭) — 크레인 측 경계가 약한 근본 원인.</li>
+    <li><strong>arr_dtime</strong> = 도착 시각(도착 상태 동안 지속 → 늦게 봐도 소급 취득). <strong>lapse</strong> = 도착 후 경과 분. <strong>cur_loc</strong> = 매 프레임 상시 위치 라벨(미션 필드 아님).</li>
+    <li><strong>QC PLC(ctab) = 정확히 6키</strong>(crane/load/lock/land/hpos/tpos) — <strong>트럭·컨테이너 식별자 없음</strong>. QC/RTG는 위치만 송출 → 크레인-트럭 귀속은 <strong>플립-앵커 페어링</strong>이 유일(이후 핸드오버 수집은 포기, <a href="/kc/learn/cycle-v2-shadow.html">사이클 v2 실험</a>).</li>
+  </ol>
+
+  <h2>함정 (검증됨)</h2>
+  <ul>
+    <li><strong>raw ws 구독 시 서버가 ping 무응답</strong> → python <code>websockets</code>는 <code>ping_interval=None</code> 필수. 아니면 ~40초 무음 단절.</li>
+    <li><strong>재시작 워밍업 ~15–20분</strong>: 인메모리 상태 초기화로 직후 완료 사이클은 앞 단계 누락 → 측정은 <code>opened_at &gt; 재시작+15분</code> 필터. 운영 변동(블록 ARRIVED 78↔63%)도 큼 → <strong>비교는 페어드(같은 행 v1 vs v2)로만.</strong></li>
+  </ul>
+
+  <h2>근거 / 방법</h2>
+  <p>라이브 피드를 구독해 필드별 등장 패턴·전이를 트럭·시간대별로 교차 관찰하고, PLC 엣지(lift/land)와 topos1 플립의 시차를 페어드로 측정(캘리브레이션으로 방법론 자체 검증).</p>
+
+  <h2>열린 질문</h2>
+  <ul>
+    <li>(미검증) PLC <code>tpos</code>(트롤리)로 육측/해측 구분 가능성 — 크레인별 캘리브레이션 필요.</li>
+    <li>(미검증) <code>topos2</code>의 트윈 레그 타깃 예고 활용도.</li>
+  </ul>
+</main>
+</body>
+</html>

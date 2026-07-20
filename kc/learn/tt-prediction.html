@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TT 배차 2단계 예측 모형 — 무엇을 학습하고 어떤 학습데이터를 가공할까 — WP-TT 지식센터</title>
+  <meta name="description" content="2단계는 비용을 시간으로 바꾼다. 두 raw 데이터(TOS DB·실시간 websocket)에서 무엇을 학습 대상으로 삼고 어떤 학습데이터를 어떻게 가공할지 연구.">
+  <link rel="stylesheet" href="/kc/assets/kc.css">
+  <script defer src="/kc/assets/kc.js"></script>
+</head>
+<body>
+<main class="kc-article" data-page="learn/tt-prediction" data-source="research/tt-prediction.md">
+  <h1>TT 배차 2단계 예측 모형 — 무엇을 학습하고, 어떤 학습데이터를 가공할까</h1>
+  <p class="kc-lede">1단계(거리 기반)는 예측이 필요 없지만 2단계는 비용을 <strong>시간</strong>으로 바꾸므로 "TT가 언제 도착하는가"를 예측해야 한다. 두 raw 데이터(TOS DB·실시간 websocket)에서 무엇을 학습 대상으로 삼고, 어떤 학습데이터를 어떻게 가공할지에 대한 연구.</p>
+  <div class="kc-meta"><span class="kc-badge kind">러닝 · 연구</span><span class="kc-badge living">검증됨 · 2026-07-01</span></div>
+
+  <div class="kc-cal warn"><span class="h">이후 구현으로 갱신된 점 — 먼저 읽기</span><p>본 연구는 2단계 예측 대상·라벨 파이프라인의 <strong>설계 근거</strong>로 유효하나 이후 구체화됨: <strong>2단계 비용 = 순수 효율</strong>(빈-이동 도착시간 = <code>free_in</code> + TRAVEL)이고 <strong>긴급도·데드라인·크레인 큐는 1단계</strong>로 감(아래 "크레인대기 최대 가중치"는 이 분리로 읽으세요). <strong>① 이동시간 라벨은 순수주행 = 주행 구간 시간</strong>(<code>total_s</code>·경로 정체 포함·핸드오버 대기 제외; ARRIVED가 곧 물리 도착이라 큰 크레인 큐는 도착 이후). 현재 비용 = <strong>추론 도로망 길찾기 시간 → 실측 곡선</strong>(2026-07-02, 225m 격자 폐기). 최신 설계 → <a href="/kc/learn/travel-time.html">이동시간 모델</a>.</p></div>
+
+  <h2>한 장 요약</h2>
+  <p>2단계 비용 함수는 세 시간을 더한다 — <strong>이동 시간 + 차량 대기 + 크레인 대기</strong>. 이 셋을 후보 (차량→작업)마다 배차 시점에 미리 알 수 없으므로 예측한다. 예측의 뿌리 3가지:</p>
+  <ul>
+    <li><strong>① TT 이동 시간</strong> — 임의의 (출발→도착) 이동 소요. 모든 경로 구간의 기본 단위.</li>
+    <li><strong>② QC ETW(크레인 준비 시각)</strong> — 크레인이 현재 작업을 끝내고 다음 TT와 핸드오버를 시작 가능한 시각. 크레인 대기/차량 대기를 가름.</li>
+    <li><strong>③ 블록 핸드오버 시간(선적)</strong> — 선적 시 TT가 블록에 도착해 RTG로부터 컨테이너를 받기까지. 선적 경로에만 추가되는 지연.</li>
+  </ul>
+  <div class="kc-cal note"><span class="h">핵심 결론</span><p>이 세 예측의 <strong>정답(라벨)은 새로 만들 필요 없다.</strong> 실시간 GPS를 지도-매칭 → 상태/이벤트 → 트립/작업사이클로 가공하면 각 구간의 실제 소요 시간이 나오고, 크레인 PLC의 적재 전이(PICKUP/DROP)·TOS 작업 이력과 ±10초로 상관시키면 "도착 ↔ 핸드오버" 쌍이 완성. 즉 <strong>1단계 운영 중 record-only로 이 파이프라인을 돌리는 것 자체가 2단계 학습데이터를 자동 생산</strong>한다.</p></div>
+  <p>실측이 동기를 뒷받침: 현재 <strong>TT 이동의 약 50%가 공차</strong>, <strong>크레인이 TT를 기다리는 시간 중앙값이 시간대별 7~11분</strong>으로 출렁인다. 이 둘이 2단계가 직접 줄이려는 손실.</p>
+
+  <h2>비용 함수 분해 — 예측이 들어가는 자리</h2>
+  <pre><code>cost(v,j) = w_cw · 크레인대기 + w_vw · 차량대기 + w_tt · 이동시간   (w_cw 최대)
+ETA_v = 현재시각 + 이동시간(v위치 → j지점)          ← 예측①
+ETW_j = 크레인 준비 시각(작업 j 크레인)              ← 예측②
+크레인대기 = max(0, ETA_v − ETW_j)   차량대기 = max(0, ETW_j − ETA_v)
+ETA_v(선적) = 현재 + 이동(v→블록) + 블록 핸드오버 + 이동(블록→안벽)  ← ①+③+①</code></pre>
+  <p>양하(DS)는 TT가 안벽으로 가 크레인에게서 받지만, <strong>선적(LD)은 먼저 야드 블록에서 RTG로부터 받아</strong> 안벽으로 가져간다(한 단계 더).</p>
+  <div class="kc-cal tip"><span class="h">설계 원칙</span><p>복잡한 단일 모형이 아니라 <strong>재사용 가능한 작은 예측기 3종</strong>(이동시간·ETW·블록핸드오버)을 만들어 경로에 따라 조합. 각각 독립 학습·검증·교체 가능해 리스크 분리.</p></div>
+
+  <h2>무엇을 학습하나 — 예측 대상 정의</h2>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th>#</th><th>예측 대상</th><th>출력</th><th>정답 원천</th></tr></thead>
+    <tbody>
+      <tr><td>①</td><td><strong>TT 이동 시간</strong>(핵심)</td><td>(출발→도착) 이동 초</td><td>GPS 트립</td></tr>
+      <tr><td>②</td><td><strong>QC ETW</strong>(핵심)</td><td>다음 핸드오버 시작까지 초</td><td>크레인 PLC + MCH_OPERATION</td></tr>
+      <tr><td>③</td><td><strong>블록 핸드오버(선적)</strong>(핵심)</td><td>블록 도착→수령 완료 초</td><td>GPS 작업사이클(블록 dwell)</td></tr>
+      <tr><td>④</td><td>핸드오버 소요(QC↔TT)</td><td>교환 자체 초</td><td>PLC PICKUP/DROP 간격</td></tr>
+      <tr><td>⑤</td><td>"곧 유휴" 잔여 시간</td><td>유휴까지 초</td><td>GPS 작업사이클</td></tr>
+    </tbody>
+  </table></div>
+  <p>①②③은 비용 행렬을 직접 채우고, ④⑤는 동기화 정밀도를 높인다. 모두 동일 파이프라인 산출물에서 라벨이 나오므로 데이터 가공을 한 번 잘 해두면 다섯을 모두 학습.</p>
+
+  <h2>우리의 raw 데이터 — 두 원천</h2>
+  <ul>
+    <li><strong>TOS DB(Oracle)</strong> — 완료 작업의 권위 기록(컨테이너 이벤트·거리·크레인 작업·선석/항차 계획). 초 단위, 보존 제한.</li>
+    <li><strong>Websocket(2 zone)</strong> — 장비 ~450대. <code>wpt_gps</code>(GPS+미션, 장비당 ~3초 불규칙) · <code>ctab</code>(크레인 PLC, ~1초 규칙적). 연속 관측이라 "소요 시간"을 직접 측정.</li>
+  </ul>
+  <div class="kc-cal warn"><span class="h">보존 기간 — 즉시 행동 필요</span><p><code>JOB_ORDER_HISTORY</code>는 약 <strong>15일</strong>, <code>MCH_OPERATION/VSS</code>는 ≥35일만 보존. 2단계 학습엔 수개월치 필요 → <strong>1단계 운영 시작과 동시에 매일 스냅샷을 Postgres로 적재</strong>해 영구 축적(이미 extractor가 raw_* 적재 중, trip/cycle 단위로 확장).</p></div>
+  <p><code>wpt_gps</code>는 1Hz가 아니라 <strong>장비별 ~3초(중앙 3.2s·p90 10s·최대 55s) 불규칙 보고</strong>(이동 시 잦고 정지 시 벌어짐). <code>ctab</code> PLC는 거의 1초 규칙적이라 핸드오버 순간 포착에 충분. <strong>RTG(야드크레인)는 PLC 미수신</strong> — 블록 핸드오버(③) 정답은 RTG PLC가 아니라 TT 자신의 블록 체류 시간(GPS)에서.</p>
+
+  <h2>학습데이터 가공 파이프라인 — raw에서 라벨까지</h2>
+  <pre><code>wpt_gps: ① 투영(lat/lon→x,y) → ② 지도매칭(블록·포인트·arc) → ③ 상태분류(IDLE/이동/적·양하)
+         → ④ 단계이벤트(도착/출발/적재…) → ⑤ 트립/작업사이클(구간 소요시간)
+ctab:    PLC 파싱 → PICKUP/DROP 검출(load 0.5↔1.0 전이)
+TOS DB:  JOB_ORDER_HISTORY · MCH_OPERATION · VSS (거리·크레인 move·계획 — 검증/보강)
+세 레인 → [상관 + 라벨 저장소] → 학습 테이블</code></pre>
+  <p><code>work_cycle</code> 한 행 = "TT의 한 번의 컨테이너 운반"이며 출발/도착/적재완료 시각이 다 들어 있어 학습 테이블이 거의 그대로 만들어진다.</p>
+  <h3>라벨 생성 — 도착 ↔ 핸드오버 상관</h3>
+  <ul>
+    <li><strong>이동·체류 라벨</strong>: <code>work_cycle</code> 타임스탬프 차 — 이동시간 = <code>dest_arrive − origin_depart</code>, 블록 핸드오버 = <code>dest_work_end − dest_arrive</code>.</li>
+    <li><strong>크레인 핸드오버 라벨(②)</strong>: TT <code>dest_arrive_at</code>과 크레인 <code>crane_pickup_event.time</code>을 ±10초 창에서 매칭 → PLC 시각으로 스냅(±1초).</li>
+    <li>세 독립 신호(연속 GPS · 물리 PLC · 권위 TOS)가 같은 사건을 가리킬 때만 표본으로 채택(컨테이너번호 <code>container1↔CONTNO</code>가 강한 조인키) → 노이즈 제거.</li>
+  </ul>
+  <div class="kc-cal warn"><span class="h">비대칭 — 블록측이 약점</span><p>안벽(QC)측은 PLC가 1초 단위로 찍어 라벨이 깨끗하나, <strong>블록측(RTG)은 PLC가 없어</strong> 시각 정밀도가 낮다. 그래서 ③(블록 핸드오버)과 양하 차량 "곧 유휴" 판별이 가장 어렵다. TOS 권위 시각(<code>ACTV_DT</code>)과 인접 RTG GPS 관여 단서로 보완.</p></div>
+
+  <h2>"곧 유휴" 차량 판별 — 선적은 가능, 양하가 문제</h2>
+  <p>TT를 유휴로 만드는 것은 마지막 핸드오버(차에서 컨테이너가 내려가는 순간). 그 핸드오버 위치가 관건:</p>
+  <ul>
+    <li><strong>선적(LD)</strong>: 차를 비우는 핸드오버 = 안벽 QC → <strong>PLC 보임 ✓</strong>(QC PICKUP으로 1초 단위).</li>
+    <li><strong>양하(DS)</strong>: 차를 비우는 핸드오버 = 야드 블록 RTG → <strong>PLC 없음 ✗</strong>. GPS·예측만.</li>
+  </ul>
+  <div class="kc-cal warn"><span class="h">진짜 어려움 — POW 도착 ≠ 곧 유휴</span><p>양하 TT가 작업위치에 도착(<code>ARRIVED</code>)했다고 곧 유휴가 아니다. 그 차를 비워주는 RTG는 여러 블록·레인을 공유하며 다른 작업 중일 수 있고, PLC가 없어 "언제 받을지(대기)"가 도착 시점엔 알 수 없다. 도착~유휴 대기가 크고 가변적이라 <strong>도착만으로 판정하면 오판</strong>. 관건은 "도착 감지"가 아니라 <strong>RTG가 실제로 이 차를 받으러 왔는가(RTG 관여)와 대기 시간 예측</strong>.</p></div>
+  <div class="kc-cal tip"><span class="h">실증 — RTG 근접도가 답 (120초 라이브 캡처)</span><p>RTG GPS는 정확(중앙 2m). 도착 양하 TT의 최근접 RTG 거리 중앙 <strong>133m</strong>(6건 중 4건이 100~172m) — 도착해도 RTG가 멀리 있어 대기. 25m 이내(관여)는 0/6. → <strong>양하 곧유휴 = 도착 + (인접/배정 RTG가 같은 bay ~25m 근접)</strong>일 때만 판정. 선적은 QC PLC로 높은 신뢰·긴 호라이즌(적재차 도착→유휴 중앙 ~60초). 개별 리드타임 예측 한계 → <a href="/kc/dispatch/leadtime-adr.html">리드타임 ADR</a>.</p></div>
+  <p><strong>TOS팀 합의안(제시)</strong>: 유휴 전환 정의(선적=QC 픽오프 / 양하=블록 드롭), 호라이즌 H(선적 90~120초 / 양하 RTG 관여 후 ~30초), 신뢰 임계 τ, 초기 범위(선적만 곧유휴·양하는 점진 확대). 안전장치: 곧유휴는 계산에만 포함, 실제 배차는 유휴 순간 재실행(오판정해도 피해 없음). 곧유휴 = <strong>① 사이클 단계(드롭行/도착-핸드오버) + ② 모든 컨테이너 비움 임박(트윈 주의) + ③ 크레인 관여</strong>의 결합 판정(전부 지금 수신 신호로 실시간 감지 가능함을 실증).</p>
+
+  <h2>피처 카탈로그 (누설 방지)</h2>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th>그룹</th><th>피처</th><th>원천</th></tr></thead>
+    <tbody>
+      <tr><td>공간</td><td>출발/도착 블록·포인트·type, 직선거리, arc 경로거리, 안벽/블록 구분</td><td>투영 + 매칭 + <code>topos1</code></td></tr>
+      <tr><td>시간</td><td>시각·교대·주중/주말·교대 경과</td><td>이벤트 시각</td></tr>
+      <tr><td>혼잡</td><td>활성 TT 수·경로 arc TT 밀도·블록/안벽 큐</td><td>실시간 GPS 집계</td></tr>
+      <tr><td>크레인</td><td>현재 move 경과·최근 move EWMA·스프레더 단계·트윈/탠덤</td><td>PLC + MCH_OPER + VSS</td></tr>
+      <tr><td>작업맥락</td><td>jobtype·적재여부·선박/항차·남은 물량·NQCR</td><td>GPS 미션 + VSS</td></tr>
+    </tbody>
+  </table></div>
+  <p>라벨은 "미래"(도착·핸드오버)에서 오지만 피처는 반드시 <strong>배차 결정 시점 t₀ 이전</strong> 정보만(각 행에 t₀ 명시, 이후 값 배제).</p>
+
+  <h2>실데이터로 본 현황 — 왜 이 예측이 가치 있나 (18일치)</h2>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th>작업종류</th><th>공차 비율</th><th>사이클 중앙(분)</th></tr></thead>
+    <tbody>
+      <tr><td>DS 양하</td><td>51%</td><td>51</td></tr>
+      <tr><td>LD 선적</td><td>50%</td><td>64</td></tr>
+      <tr><td>MO 이적</td><td>53%</td><td>48</td></tr>
+      <tr><td>전체 ≈</td><td>~50%</td><td>—</td></tr>
+    </tbody>
+  </table></div>
+  <p><strong>이동의 절반이 빈 차</strong>(공차 1180~1980m/작업) → 1단계가 직접·2단계가 시간가중으로 줄이는 대상. <strong>크레인 큐 대기(YT 하차→크레인 활성)가 시간대별 7~11분 출렁임</strong>(정오·심야 최고, 12h 641s) — 이 출렁임이 동기화 부족 신호이자 ETW 예측의 표적.</p>
+
+  <h2>데이터 품질 · 함정 (반드시 처리)</h2>
+  <ul>
+    <li><strong>GPS 지터·튐</strong>(RMS ~70m) → 칼만 보정 + accuracy 임계(≤30m)에서만 핸드오버 상관, 점프 필터.</li>
+    <li><strong>불규칙·성긴 GPS</strong>(장비당 ~3초, 정지 시 30~55초) → 분할 임계 상향(예: 60s)·체류 보강, 라벨 시간해상도(±수초)를 모델 평가에 반영.</li>
+    <li><strong>시각 정합</strong>(<code>dtime</code>=MYT·초·날짜 없음, 서버 KST↔터미널 MYT 8h) → 수신시각 보정 + 자정-wrap 휴리스틱.</li>
+    <li><strong>RTG PLC 미수신</strong> → TT 블록 체류로 라벨링 + 근접 RTG GPS로 대기 추정.</li>
+    <li><strong>트윈/탠덤</strong>(2컨테이너) → <code>container2</code>로 분리 피처화·라벨 별도. <strong>희소 경로</strong> → 블록 프리픽스 집계 폴백·거리 prior 평활.</li>
+  </ul>
+
+  <h2>모델링 · 검증 접근</h2>
+  <ul>
+    <li><strong>점진적 복잡도</strong> — v0(과거 중앙값/거리÷평균속도) → v1(그래디언트 부스팅) → v2(필요 시). 항상 v0 대비 개선분 입증.</li>
+    <li><strong>정직한 검증</strong> — 시간 분할(미래 교대로·누설 차단), MAE(초)·P90, 주/야·물량·작업종류 층화, 배차 품질은 보조 시뮬레이터로 교차.</li>
+    <li><strong>record-only 자가 라벨</strong> — 1단계 운영 중 예측 vs 실제를 매 배차 기록 → 라벨 자동 누적·상시 모니터.</li>
+    <li><strong>폴백 안전</strong> — 예측 신뢰 낮음·모형 장애 시 1단계 거리비용으로 즉시 복귀(2단계는 위에 얹는 가중치라 투자 보호).</li>
+  </ul>
+
+  <div class="kc-cal note"><span class="h">한 문장</span><p>"무엇을 학습할지"는 비용 함수가 정해주고(이동시간·ETW·블록 핸드오버), "어떤 학습데이터를 가공할지"는 이미 검증된 가공 파이프라인이 정해준다 — 우리는 <strong>그 파이프라인을 1단계 운영에 record-only로 얹어 라벨을 자동 수확</strong>하면 된다.</p></div>
+
+  <hr>
+  <p><strong>관련:</strong> <a href="/kc/learn/travel-time.html">이동시간 모델</a> · <a href="/kc/learn/soon-idle-tos.html">곧 유휴 감지</a> · <a href="/kc/learn/rtg-work-cycle.html">RTG 작업 사이클</a> · <a href="/kc/learn/learning-center.html">학습 센터 기획</a></p>
+</main>
+</body>
+</html>

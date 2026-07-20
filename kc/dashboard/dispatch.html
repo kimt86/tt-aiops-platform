@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TT Dispatch & 라이브맵 — WP-TT 지식센터</title>
+  <meta name="description" content="트럭 배차 상태·작업 풀 융합·곧유휴·라이브맵 오버레이가 어떤 websocket 필드·TOS 테이블에서 오고 무슨 의미인지.">
+  <link rel="stylesheet" href="/kc/assets/kc.css">
+  <script defer src="/kc/assets/kc.js"></script>
+</head>
+<body>
+<main class="kc-article" data-page="dashboard/dispatch" data-source="dashboard/dispatch.md">
+  <h1>TT Dispatch & 라이브맵 — 실시간 값의 모든 것</h1>
+  <p class="kc-lede">TT Dispatch 페이지는 <strong>"지금 이 순간 트럭들이 어디서 무엇을 하고 있나"</strong>를 보여줍니다. 거의 전부 <strong>websocket(원천 ②, 실시간 GPS·PLC)</strong>에서 오고, 작업 풀만 <strong>TOS(원천 ①)</strong>와 섞습니다.</p>
+  <div class="kc-meta"><span class="kc-badge kind">대시보드 가이드</span><span class="kc-badge living">리빙 문서</span></div>
+
+  <div class="kc-cal warn"><span class="h">실시간 = 메모리</span><p>이 페이지의 값은 DB에 저장되지 않은 <strong>메모리 스냅샷</strong>입니다. SSH 터널이 끊기면 화면이 즉시 비고 피드 헬스가 적색이 됩니다. "과거"가 없으니 시간을 거슬러 볼 수 없습니다.</p></div>
+
+  <h2>1. 트럭 배차 상태 6종 (제일 중요)</h2>
+  <p>각 트럭은 매 스냅샷마다 6개 상태 중 하나로 분류됩니다(<code>classify_tt</code>). 분류는 <strong>GPS 신호만으로</strong> 합니다(작업 풀 배정 여부는 idle/staging 구분에만 사용).</p>
+  <div class="kc-flow">
+    <div class="node">idle<span class="sub">유휴</span></div>
+    <div class="arw">→<span class="lbl">배차</span></div>
+    <div class="node">staging<span class="sub">대기</span></div>
+    <div class="arw">→</div>
+    <div class="node">empty_travel<span class="sub">공차주행</span></div>
+    <div class="arw">→<span class="lbl">받기</span></div>
+    <div class="node">delivering<span class="sub">적재이동</span></div>
+    <div class="arw">→<span class="lbl">도착</span></div>
+    <div class="node">wait_rtg / soon_idle<span class="sub">DS 대기 / 임박</span></div>
+    <div class="arw">→<span class="lbl">넘기기</span></div>
+    <div class="node">idle</div>
+  </div>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th>상태</th><th>한국어</th><th>신호(websocket)</th><th>쉬운 뜻</th></tr></thead>
+    <tbody>
+      <tr><td><strong>idle</strong></td><td>유휴</td><td>공차(<code>container1</code> 빔) + 속도&lt;3km/h + <strong>작업풀 미배정</strong></td><td>진짜 노는 차 → 즉시 배차 가능</td></tr>
+      <tr><td><strong>staging</strong></td><td>대기(배차됨)</td><td>공차 + 정지 + <strong>작업풀에 배정됨</strong></td><td>일은 받았고 순서를 기다리는 중</td></tr>
+      <tr><td><strong>empty_travel</strong></td><td>공차 주행</td><td>공차 + 이동 중</td><td>픽업하러 빈 차로 가는 중</td></tr>
+      <tr><td><strong>delivering</strong></td><td>적재 이동</td><td>적재(<code>container1</code> 있음) + 이동 중</td><td>짐 싣고 하역지로 가는 중</td></tr>
+      <tr><td><strong>wait_rtg</strong></td><td>도착·RTG 대기 (DS)</td><td>적재 + ARRIVED at 블록 + RTG 미근접</td><td>블록에 도착했지만 RTG가 아직 안 옴</td></tr>
+      <tr><td><strong>soon_idle</strong></td><td>곧 유휴</td><td>적재 + ARRIVED + <strong>크레인 관여 중</strong> (LD=QC도착 / DS=RTG≤30m)</td><td>마지막 넘기기 진행 → 곧 빈 차</td></tr>
+    </tbody>
+  </table></div>
+  <div class="kc-cal note"><span class="h">옛 approaching은 wait_rtg로 통합</span><p><code>wait_rtg</code>는 <strong>DS(양하) 전용</strong>입니다. 예전엔 TOS ACTV(QC가 트럭에 실은 시각) 유무로 <code>wait_rtg</code>와 <code>approaching</code>을 갈랐으나, 지금은 <strong>하나(<code>wait_rtg</code>)로 통합</strong>했습니다(ACTV 신호는 free_in 추정 안에서만 반영). LD는 별도 대기 상태 없이 QC ARRIVED 즉시 <code>soon_idle</code>로 갑니다(QC는 항상 PLC가 있어 관여가 관측됨).</p></div>
+  <div class="kc-cal note"><span class="h">idle vs staging — 왜 갈랐나</span><p>예전엔 "공차+정지"면 전부 idle로 셌더니 실제로는 <strong>절반이 이미 배차된 차</strong>(순서 대기)였습니다. 작업 풀(TOS)을 교차참조해 <strong>배정된 대기 = staging</strong>, <strong>진짜 미배정 = idle</strong>로 분리해 idle 수가 정상화됐습니다.</p></div>
+
+  <h3>"크레인 관여 중"은 어떻게 아나? (soon_idle의 핵심)</h3>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th>작업</th><th>신호</th><th>정밀도</th></tr></thead>
+    <tbody>
+      <tr><td><strong>LD(적하)</strong></td><td>안벽 QC의 PLC(<code>ctab.load</code>)가 신선 = QC가 지금 이 베이에서 돈다</td><td>±1초 (PLC 직접)</td></tr>
+      <tr><td><strong>DS(양하)</strong></td><td>RTG GPS ↔ 트럭 GPS가 같은 베이(≈30m 이내)</td><td>근접 추정</td></tr>
+    </tbody>
+  </table></div>
+  <p>RTG는 PLC가 없어 직접 못 봅니다 → <strong>GPS 거리</strong>로 추정. 블록 위치는 ARRIVED한 트럭들의 GPS로 <strong>학습한 중심좌표</strong>를 써서, 크레인이 GPS를 안 쏠 때도 거리 계산이 됩니다.</p>
+
+  <h2>2. websocket 필드 → 화면 값 (lineage)</h2>
+  <p><code>/api/livemap/positions</code>가 장비별 최신 GPS를 주고 화면이 그립니다.</p>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th>화면 값</th><th>websocket 필드</th><th>뜻 / 크기 의미</th></tr></thead>
+    <tbody>
+      <tr><td>트럭 위치(지도 점)</td><td><code>lat</code>, <code>lon</code></td><td>현재 좌표</td></tr>
+      <tr><td>속도</td><td><code>speed</code></td><td>&lt;3km/h면 "정지"(유휴 판정 입력)</td></tr>
+      <tr><td>적재 여부</td><td><code>container1</code>(+<code>container2</code>)</td><td>비면 공차/유휴, 있으면 적재(또는 배정됨)</td></tr>
+      <tr><td>목적지</td><td><code>topos1</code></td><td>다음 핸드오버 지점 — 블록 베이 또는 크레인</td></tr>
+      <tr><td>도착</td><td><code>arrival</code>="ARRIVED"</td><td>핸드오버 임박 판정의 핵심</td></tr>
+      <tr><td>작업종류</td><td><code>jobtype</code></td><td>DS/LD — 픽업/드롭 방향 결정</td></tr>
+      <tr><td>크레인 작업중 배지</td><td><code>ctab.load</code> ≥ 1.0t (신선)</td><td>"이 크레인 지금 돈다"(PLC live)</td></tr>
+    </tbody>
+  </table></div>
+
+  <h2>3. "곧 빔 ~N분" (free_in) — 표시 전용 그림자</h2>
+  <p>soon_idle/도착 트럭 옆에 <strong>"곧 빔 ~N분"</strong> 추정이 붙을 수 있습니다 — 몇 분 뒤에 빈 차가 될지의 추정.</p>
+  <div class="kc-cal note"><span class="h">이제 단계별 학습 + 자가보정 (2026-07-09)</span><p>예전엔 상태별 고정 상수(운반 ~17분 · 도착대기 ~8분 · 임박 ~2분)였으나, 지금은 <strong>사이클 단계별로 실측을 학습</strong>(<code>free_in_sample</code>: delivering · approach · wait · soon)하고 <strong>잔차로 자가보정</strong>합니다(mig 0084–86). 러닝 센터의 ⑤ 곧-빔 게이트와 ⑥ 유휴분 카드도 <strong>한 카드로 통합</strong>됐습니다. 값(<code>free_in</code>)은 아직 <strong>표시 전용</strong>(그림자)이고 배차 결정엔 미사용. 상세 <a href="/kc/dashboard/learning.html">러닝 센터</a>.</p></div>
+
+  <h2>4. 작업 풀 융합 — "계획(TOS) + 실측(GPS)"</h2>
+  <p>작업 풀은 <strong>TOS의 "지금 할 일"</strong>(90초마다 갱신)과 <strong>websocket 실측</strong>을 합칩니다.</p>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th>화면 값</th><th>출처</th><th>뜻</th></tr></thead>
+    <tbody>
+      <tr><td>QC별 작업 큐 / 순서</td><td><code>JOB_QUEUE_SCHEDULE.JOB_QUE_SEQ</code></td><td>크레인이 큐를 처리하는 순서</td></tr>
+      <tr><td>잔여(백로그)</td><td><code>TOTALQTY − COMPQTY</code></td><td>그 큐에 남은 작업 수</td></tr>
+      <tr><td>ETW(크레인 준비 시각)</td><td><code>JOB_ORDER_LIST.JOB_ODR_ETW_DT</code></td><td><code>ETW − 현재</code> = 시급도</td></tr>
+      <tr><td>배정 트럭</td><td><code>JOB_ODR_YTNO</code>(=GPS device)</td><td>그 작업을 맡은 트럭 + 실시간 상태 점</td></tr>
+      <tr><td>크레인 가동 배지</td><td><code>ctab</code>(PLC 신선)</td><td>"이 QC 지금 물리적으로 돈다"</td></tr>
+      <tr><td>작업 상태</td><td><code>JOB_ODR_JOBSTATUS</code></td><td>A 활성 · <strong>Q 대기(미배정 백로그)</strong> · P 계획 · C 완료</td></tr>
+    </tbody>
+  </table></div>
+
+  <h2>5. 라이브맵 오버레이 (레이어 토글)</h2>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th>오버레이</th><th>보여주는 값</th><th>출처</th><th>색/크기 의미</th></tr></thead>
+    <tbody>
+      <tr><td><strong>장비 아이콘</strong></td><td>TT/RTG/QC 실시간 위치</td><td>GPS</td><td>종류별 아이콘, 상태별 색</td></tr>
+      <tr><td><strong>작업지점 좌표(학습)</strong></td><td>학습된 블록·크레인 중심점</td><td><code>/api/learn/topos</code></td><td>채움색 = 신뢰도, 테두리 = 블록/크레인</td></tr>
+      <tr><td><strong>주행 차선(학습)</strong></td><td>트럭이 다니는 길 + 방향</td><td><code>/api/learn/lanes</code></td><td>화살표 = 흐름, 초록=일방·회색=양방</td></tr>
+      <tr><td><strong>메트릭 격자</strong></td><td>구역별 평균속도/차량수</td><td>라이브 위치에서 계산</td><td>속도 느림🔴→빠름🟢 / 밀도 적음🔵→많음🔴</td></tr>
+      <tr><td><strong>작업 수요·미배정</strong></td><td>트럭 못 받은 작업이 몰린 곳</td><td>TOS <code>JOBSTATUS='Q'</code></td><td>주황=양하·청록=적하, 버블 크기=작업 수</td></tr>
+      <tr><td><strong>날씨 칩</strong></td><td>강수·시정</td><td>Tomorrow.io</td><td>스콜이면 적색(비≥2mm 또는 시정&lt;2km)</td></tr>
+      <tr><td><strong>GPS 헬스 칩</strong></td><td>피드 품질</td><td>자체 통계</td><td>불가능한 점프율 높으면 경고</td></tr>
+    </tbody>
+  </table></div>
+  <div class="kc-cal tip"><span class="h">메트릭 격자는 클라이언트 계산</span><p>메트릭 격자는 백엔드 없이 <strong>지금 화면의 트럭 위치에서 즉석 계산</strong>합니다 — 라이브 위치가 갱신될 때마다 같이 바뀝니다.</p></div>
+
+  <h2>6. (참고) TtPage의 트럭 칩</h2>
+  <ul>
+    <li><strong>상태별 트럭 수</strong>: 위 6개 상태의 카운트.</li>
+    <li><strong>DS 적재 칩 (<code>적재 N분</code>)</strong>: 양하 트럭이 컨테이너를 실은 뒤 경과 시간 — TOS <code>ACTV_DT</code> 기준. DS 전용.</li>
+  </ul>
+
+  <hr>
+  <p><strong>출처 문서:</strong> <a href="/kc/data/websocket-data.html">websocket 데이터</a> · <a href="/kc/data/dispatch-pools.html">차량·작업 풀 갱신</a> · <a href="/kc/data/tos-db-reference.html">TOS DB 레퍼런스</a><br>
+  <strong>다음 →</strong> <a href="/kc/dashboard/cycle.html">Cycle 해설</a></p>
+</main>
+</body>
+</html>

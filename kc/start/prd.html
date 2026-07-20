@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PRD 초안 — WP-TT 지식센터</title>
+  <meta name="description" content="무엇을·누구를 위해·어디까지 만드는가 (함께 다듬을 초안).">
+  <link rel="stylesheet" href="/kc/assets/kc.css">
+  <script defer src="/kc/assets/kc.js"></script>
+</head>
+<body>
+<main class="kc-article" data-page="start/prd" data-source="planning/prd.md">
+  <h1>PRD 초안</h1>
+  <p class="kc-lede">무엇을 · 누구를 위해 · 어디까지 만드는가.</p>
+  <div class="kc-meta">
+    <span class="kc-badge kind">PRD · 초안</span>
+    <span class="kc-badge stale">함께 다듬을 초안</span>
+  </div>
+
+  <div class="kc-cal warn">
+    <span class="h">함께 다듬을 초안</span>
+    <p>이건 확정 스펙이 아니라 <strong>출발점</strong>입니다. 범위 · 성공지표는 함께 검토해 고쳐 나갑니다.</p>
+  </div>
+
+  <h2>문제</h2>
+  <p>컨테이너 터미널의 트랜스퍼 트럭(TT) 운영은 가시성이 낮다. 어떤 트럭이 어떤 작업을 얼마나 효율적으로 도는지, 어디서 대기 · 공차가 생기는지 <strong>실시간 · 이력 모두 파악이 어렵다.</strong> 배차는 경험에 의존한다.</p>
+
+  <h2>사용자</h2>
+  <ul>
+    <li><strong>운영/배차 담당</strong> — 실시간 TT 상태 · 대기 · 병목을 본다.</li>
+    <li><strong>분석가/엔지니어</strong> — KPI · 사이클 이력으로 효율을 측정하고 개선 · 모형을 설계한다.</li>
+  </ul>
+
+  <h2>범위 (현재)</h2>
+  <ul>
+    <li>실시간 모니터링 대시보드: TT 위치 · 분류(공차/배송/대기/staging), QC · 블록 현황.</li>
+    <li>운영 KPI 7종 + websocket 실측 교차검증.</li>
+    <li><strong>작업 사이클 이력</strong>: 검증된 컨테이너 인도 단위로 적재 · 분석(학습 데이터 누적).</li>
+    <li><strong>AI 배차 (2단계) — 라이브 그림자.</strong> 1단계(수요 · 데드라인)와 2단계(비용행렬 매칭)가 실시간으로 추천을 산출하지만 <strong>아직 트럭을 제어하지 않는다</strong>(그림자로 병행 · 실측 대조).</li>
+  </ul>
+
+  <h2>범위 (다음 / 연구)</h2>
+  <ul>
+    <li><strong>배차 제어 연결</strong> — 그림자 추천이 실측 대비 검증되면 안전 게이트를 거쳐 실제 배차로 승격.</li>
+    <li><strong>2단계 이동비용</strong> = 공차이동 도착비용(free_in + 이동시간). 이동시간은 <strong>순수주행 = 주행 구간 시간</strong>(출발→작업지점 도달; 경로 정체 포함 · 핸드오버 제외)으로, <strong>추론 도로망 위 길찾기 시간을 실측 "실제시간 곡선"으로 변환</strong>해 계산한다(2026-07-02부터; 예전 225m 격자 조회는 폐기). 2단계 = 순수 효율(최소비용 매칭)이며, 긴급 · 데드라인은 1단계 몫.</li>
+    <li><strong>크레인 앞 대기는 이동비용에서 제외</strong> — 도착 후 크레인과 주고받는 대기는 이동시간이 아니라 도착 이후(크레인 스케줄) 영역.</li>
+  </ul>
+  <div class="kc-cal note">
+    <span class="h">2026-07-01 정정</span>
+    <p>크레인 앞 대기를 1단계 크레인별 신호로 넣으려 했으나(<code>learn_crane_approach</code>) 재보니 그 대기가 거의 0(옛 값은 편향)이라 폐기했다.</p>
+  </div>
+
+  <h2>비목표 (지금은 아님)</h2>
+  <ul>
+    <li>실제 자율주행 차량 제어. (모니터링 · 분석 · 추천이 우선)</li>
+    <li>prod Oracle 직접 연동(추출기/게이트웨이만 사용).</li>
+  </ul>
+
+  <h2>성공 지표 (초안 — 검증 필요)</h2>
+  <ul>
+    <li>(미검증) 사이클 감지가 운영 실측과 일치(타이밍 오차 작게, 포착률 높게).</li>
+    <li>(미검증) 대기/공차 시간 가시화로 배차 개선 여지를 정량화.</li>
+    <li>(미검증) 그림자 배차가 TOS 대비 공차/QC대기를 유의미하게 줄임.</li>
+  </ul>
+
+  <h2>열린 질문</h2>
+  <ul>
+    <li>(미검증) AI 배차의 1차 목표 지표는? (회전율 / 공차 최소화 / QC 대기 최소화 중 무엇)</li>
+    <li>운영자가 매일 보는 단일 화면은 무엇이어야 하나.</li>
+  </ul>
+</main>
+</body>
+</html>

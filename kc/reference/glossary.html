@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>용어집 &amp; FAQ — WP-TT 지식센터</title>
+  <meta name="description" content="플랫폼 문서와 대시보드에 등장하는 용어를 주제별로 정리한 용어집과 자주 묻는 질문.">
+  <link rel="stylesheet" href="/kc/assets/kc.css">
+  <script defer src="/kc/assets/kc.js"></script>
+</head>
+<body>
+<main class="kc-article" data-page="reference/glossary" data-source="knowledge/glossary.md">
+  <h1>용어집 &amp; FAQ</h1>
+  <p class="kc-lede">플랫폼 문서와 대시보드에 등장하는 용어를 주제별로 한두 줄씩 정리했습니다. 브라우저 검색(Ctrl+F)으로 찾으셔도 됩니다.</p>
+  <div class="kc-meta"><span class="kc-badge kind">레퍼런스 · 용어집</span></div>
+  <p>빠른 이동: <a href="#g-equip">① 장비·작업</a> · <a href="#g-tos">② TOS 데이터</a> · <a href="#g-ws">③ websocket 필드</a> · <a href="#g-metrics">④ 지표·개념</a> · <a href="#g-internal">⑤ 내부 시스템</a> · <a href="#faq">FAQ</a></p>
+
+  <h2 id="g-equip">① 장비 · 작업</h2>
+  <dl class="kc-gloss">
+    <dt id="tt">TT · 야드 트럭 <code>TT####</code></dt><dd>안벽(QC)과 야드 블록 사이에서 컨테이너를 운반하는 트럭. GPS device id와 TOS의 <a href="#ytno">ytno</a>가 같은 번호 체계.</dd>
+    <dt id="qc">QC · 안벽 크레인 <code>C##</code></dt><dd>안벽에서 선박↔TT 사이 컨테이너를 옮기는 크레인. QC를 멈추지 않게 TT를 제때 보내는 게 배차 핵심. <a href="#plc-load">PLC(ctab)</a> 송신.</dd>
+    <dt id="rtg">RTG · 야드 크레인 <code>ARMGC</code></dt><dd>야드 블록에서 TT↔적치장을 처리. PLC가 없어 핸드오버 관여는 <strong>TT GPS와의 근접(같은 bay ≈ 30m)</strong>으로 판정.</dd>
+    <dt id="ds">DS · 양하 <code>Discharge</code></dt><dd>선박→야드. TT 기준 <strong>픽업=안벽(QC), 드롭=블록(RTG)</strong>.</dd>
+    <dt id="ld">LD · 적하 <code>Load</code></dt><dd>야드→선박. TT 기준 <strong>픽업=블록, 드롭=안벽(QC)</strong> — 양하와 방향 반대.</dd>
+    <dt id="yard-moves">MI / MO / LC · 야드 이동</dt><dd>야드 안 이적 계열. 픽업·드롭이 모두 야드라 사이클 복원에서 <strong>첫 ARRIVED를 픽업</strong>으로 간주.</dd>
+    <dt id="twin-tandem">트윈 · 탠덤</dt><dd>컨테이너 2개를 한 번에 운반·처리. <a href="#container1">container1·container2</a>가 모두 채워지고 <code>twintandem</code> 필드로 기록.</dd>
+  </dl>
+
+  <h2 id="g-tos">② TOS 데이터</h2>
+  <p>작업 계획·배정의 권위 원천. 운영 Oracle은 추출기만 읽고 대시보드는 Postgres 복제본만 봄(<a href="#faq-oracle">FAQ</a>). 상세 → <a href="/kc/data/tos-db-reference.html">TOS DB 레퍼런스</a>.</p>
+  <dl class="kc-gloss">
+    <dt id="tos">TOS <code>Terminal Operating System</code></dt><dd>터미널 운영 시스템(Oracle). 작업 지시·이력의 권위 원천이며 <a href="#extractor">추출기</a>가 주기적으로 PostgreSQL로 복제.</dd>
+    <dt id="job-order-list">JOB_ORDER_LIST</dt><dd>TOS 라이브 작업지시 — 개별 컨테이너 move 단위로 배정 트럭(<a href="#ytno">ytno</a>)·컨테이너·<a href="#etw">ETW</a>·RTG를 담음.</dd>
+    <dt id="job-queue-schedule">JOB_QUEUE_SCHEDULE</dt><dd>QC별 작업 큐 계획 — 크레인(C##)·순서(SEQ)·양/적·진행률(잔여=TOTAL−COMP).</dd>
+    <dt id="jobstatus">JOBSTATUS <code>A / B / Q (P, C)</code></dt><dd><strong>A</strong> 활성(배차·진행중) · <strong>Q</strong> 대기(백로그) · <strong>B</strong> 차단 · P 계획 · C 완료. <a href="#utilization">가동률</a>에서 "작업중"=A, "투입"=A·B·Q.</dd>
+    <dt id="ytno">ytno <code>YTNO</code></dt><dd>작업에 배정된 TT 번호. GPS device id와 일치해 <strong>TOS 계획 ↔ websocket 실측을 잇는 연결 고리</strong>.</dd>
+    <dt id="contno">contno <code>CONTNO</code></dt><dd>컨테이너 번호. 작업과 사이클을 식별하는 기본 요소.</dd>
+    <dt id="topos-pos">topos / from_pos / to_pos</dt><dd>작업 위치 필드 — 블록-베이(예 <code>03U-21</code>) 또는 크레인(<code>C39</code>) 형식.</dd>
+    <dt id="etw">ETW · 크레인 준비시각 <code>Estimated Time of Work</code></dt><dd>크레인이 작업을 처리할 준비가 되는 예정 시각. TOS DB 컬럼은 수 시간 오차가 확인돼 정확값은 <a href="#etw-gateway">tos_etw_gateway</a>에서(<a href="#faq-etw">FAQ</a>).</dd>
+  </dl>
+
+  <h2 id="g-ws">③ websocket 필드</h2>
+  <p>GPS(wpt_gps)·크레인 PLC(ctab) 실시간 스트림. 구조와 함정 → <a href="/kc/data/websocket-data.html">실시간 websocket 데이터</a>.</p>
+  <dl class="kc-gloss">
+    <dt id="container1">container1 / container2 <code>wpt_gps</code></dt><dd><strong>물리 적재가 아니라 TOS "배정" 필드.</strong> 직전 drop에 다음 컨테이너가 사전배정(<a href="#c2c">c2c</a>)돼 값이 차 있어도 빈 차일 수 있음(<a href="#faq-container1">FAQ</a>). 2개 모두면 <a href="#twin-tandem">트윈·탠덤</a>.</dd>
+    <dt id="topos1">topos1 · 목적지 코드 <code>wpt_gps</code></dt><dd>현재 미션 목적지 — 블록 베이 또는 크레인. 픽업↔드롭에 따라 동적으로 바뀜.</dd>
+    <dt id="arrived">arrival / ARRIVED <code>wpt_gps</code></dt><dd>목적지 도착 플래그. 픽업/드롭은 <strong>도착한 측면으로 복원</strong>(LD 블록=픽업·크레인=드롭, DS 반대, MI/MO 첫 도착=픽업).</dd>
+    <dt id="cur-loc">cur_loc · 현재 위치</dt><dd>트럭이 지금 있는 위치 라벨(예 <code>01U</code>). 부가 표시용.</dd>
+    <dt id="plc-load">PLC 훅로드 <code>ctab — load (t)</code></dt><dd>크레인 후크 하중(톤). 적재 ≥1.0t·빈 후크 ~0이라 <strong>하중 전이가 곧 PICKUP/DROP 순간</strong>. QC만 송신 — RTG엔 PLC 없음.</dd>
+  </dl>
+
+  <h2 id="g-metrics">④ 지표 · 개념</h2>
+  <p>산출식 전체 → <a href="/kc/data/kpi-computation.html">KPI 산출</a>.</p>
+  <dl class="kc-gloss">
+    <dt id="cycle-time">사이클타임</dt><dd>TT 작업 1건이 도는 시간. KPI는 <strong>중위값</strong>·<strong>DS/LD 분리</strong>. 실측 TT 사이클 약 13–14분.</dd>
+    <dt id="four-phase">4단계 사이클</dt><dd><strong>공차이동</strong>(배정→픽업 도착) → <strong>받기</strong> → <strong>부하이동</strong> → <strong>주기</strong>(도착→drop). ARRIVED 의존이라 관측 못 한 단계는 추정 없이 NULL(<a href="#faq-phases">FAQ</a>).</dd>
+    <dt id="leg-decomp">공차 레그 분해 <span class="kc-badge stale">retire · mig 0081</span></dt><dd>공차 레그를 30초 GPS로 움직임/정지 분해한 진단(<code>learn_leg_decomp</code>). 비용 라벨(순수주행=구간시간)은 <code>learn_travel_sample</code>로 이관돼 제거. 당시 규명: 구간 속도 ≈13km/h(움직인 순간만 ~22.8), "6.9km/h"는 착시, 같은 OD CV 0.758.</dd>
+    <dt id="crane-approach">크레인 접근 대기 <span class="kc-badge stale">폐기 · 2026-07-01</span></dt><dd>크레인 앞 진입 대기를 1단계 신호로 쓰려 했으나 폐기. 일관 측정 시 중앙 ≈0, "중앙 67초"는 선택편향. 진짜 큐는 도착 이후(크레인 스케줄).</dd>
+    <dt id="pure-drive-cost">2단계 이동비용 · 순수주행</dt><dd>배차 2단계 이동비용 = free_in + 이동시간. 이동시간 = <strong>순수주행(주행 구간 시간)</strong>, <strong>추론 도로망 최단시간 경로를 실측 "실제시간 곡선"으로 변환</strong>(2026-07-02, <code>roadgraph.rs</code>). 라우팅 불능 ~3%만 맨해튼→실제 곡선 폴백. 225m 격자 폐기(mig 0082). → <a href="/kc/learn/travel-time.html">이동시간 모델</a>.</dd>
+    <dt id="movement-filter">이동필터 <code>150 m / 30 s</code></dt><dd>"진짜 인도" 검증 — container1 변경 엣지 + <strong>보유 ≥30초</strong> + <strong>운반 ≥150m</strong>일 때만 인도. 미달은 TOS 재배정 artifact로 기각(<a href="#faq-cycle-verify">FAQ</a>).</dd>
+    <dt id="c2c">c2c · 연속적재</dt><dd>drop 시점에 다음 컨테이너가 이미 사전배정돼 작업이 끊김 없이 이어지는 패턴.</dd>
+    <dt id="staging">staging · 배차·대기</dt><dd><strong>공차 + 정지 + 작업 배정됨</strong>. 미배정 유휴(<a href="#idle">idle</a>)와 구분(<a href="#faq-staging-soonidle">FAQ</a>).</dd>
+    <dt id="idle">idle · 유휴</dt><dd><strong>공차 + 정지 + 미배정</strong> — 즉시 배차 가능한 진짜 유휴(staging 분리 후 ~21대).</dd>
+    <dt id="utilization">TT 가동률</dt><dd>작업 풀 <strong>배정 기반</strong> — 작업중 = <a href="#jobstatus">JOBSTATUS</a> A, 투입 = A·B·Q. 60초 <a href="#util-tt-sample">util_tt_sample</a>을 시간 평균.</dd>
+    <dt id="littles-law">Little's law <code>W = L / λ</code></dt><dd>안정 상태 평균 개체 수 L = 도착률 λ × 평균 체류 W. 대기시간 추정·검증에.</dd>
+    <dt id="business-shift">운영일 · 교대</dt><dd>Night 00–07 · Day 08–15 · Evening 16–23. 경계는 모두 <strong>터미널 시간 MYT(UTC+8)</strong> 기준(서버 KST와 1시간 다름).</dd>
+  </dl>
+
+  <h2 id="g-internal">⑤ 내부 시스템</h2>
+  <p>Rust(axum) API + PostgreSQL + React/Vite 위에서 도는 파이프라인 구성 요소.</p>
+  <dl class="kc-gloss">
+    <dt id="extractor">extractor · 추출기</dt><dd>운영 Oracle을 읽는 <strong>유일한</strong> 컴포넌트. 타이머로 정해진 주기에만 조회해 Postgres에 멱등 적재(작업 풀 틱 ~90초). API 크레이트엔 Oracle 클라이언트 없음(<a href="#faq-oracle">FAQ</a>).</dd>
+    <dt id="live-workpool">live_workpool / live_assigned_tt</dt><dd>작업 풀 스냅샷(~90초 틱). 원천 = <a href="#job-queue-schedule">JOB_QUEUE_SCHEDULE</a> + <a href="#job-order-list">JOB_ORDER_LIST</a>.</dd>
+    <dt id="util-tt-sample">util_tt_sample</dt><dd>60초 주기로 TT별 배정 상태를 기록. 시간 기반 <a href="#utilization">가동률</a> 평균의 원천.</dd>
+    <dt id="tt-cycle-log">tt_cycle_log</dt><dd>검증된 사이클 1건 = 1행(작업 메타 + 단계 타임스탬프 + leg 거리/시간). UNIQUE(ytno, dropped_at) 30초 멱등 flush. CYCLES 페이지가 읽음.</dd>
+    <dt id="etw-gateway">tos_etw_gateway / wp-etw-bridge</dt><dd>정확 <a href="#etw">ETW</a> 공급 — Azure FastAPI가 TOS RPC를 폴링, SSH 터널로 받아 <code>tos_etw_cntr</code>에 upsert(TTL 30분).</dd>
+    <dt id="road-route-eval">road_route_eval</dt><dd>실측 빈 트립마다 <strong>실제 구간시간 vs 도로망 경로시간 vs 맨해튼</strong>을 나란히 쌓는 표(10분·21일 백필). ① 상시 게이트, ② 2단계 비용의 두 실측 곡선 원천.</dd>
+    <dt id="road-graph">road_node / road_edge</dt><dd>GPS 궤적에서 매시 추론한 방향 도로망(2026-07-02 재구축: 7,189노드·작업지점 5,888 커넥터·방향 도로 단위 다수결). Rust 방향 Dijkstra가 <strong>배차 2단계 이동비용을 계산</strong>(성공률 96.7%). 첫 판(264노드·스냅 30%)은 게이트 탈락 → 재구축 후 채택.</dd>
+  </dl>
+
+  <h2 id="faq">자주 묻는 질문</h2>
+  <h3 id="faq-oracle">Q. 왜 운영 Oracle(TOS)을 직접 조회하지 않나요?</h3>
+  <p>운영 TOS는 터미널의 심장이라 대시보드 조회가 부하·장애 위험이 되기 때문. <a href="#extractor">추출기</a>만 정해진 타이머에 Oracle을 읽어 Postgres로 복제하고, API 크레이트에는 Oracle 클라이언트 자체가 없어 <strong>구조적으로도 직접 조회 불가</strong>.</p>
+  <h3 id="faq-etw">Q. 화면의 ETW가 TOS DB 값과 왜 다른가요?</h3>
+  <p>TOS DB의 ETW 컬럼은 실제와 <strong>수 시간</strong> 어긋남이 확인됨. TOS RPC를 폴링하는 Azure의 <a href="#etw-gateway">tos_etw_gateway</a>에서 정확값을 받아 <code>tos_etw_cntr</code>에 적재(TTL 30분). 터널이 끊기면 DB 값으로 폴백돼 정밀도가 떨어질 수 있음.</p>
+  <h3 id="faq-idle">Q. 차량 풀의 idle 수가 갑자기 줄었습니다. 버그인가요?</h3>
+  <p>분류 교정입니다. 기존 분류가 배정 여부를 무시해 <strong>idle 102대 중 51대가 실제로는 배정된 상태</strong>였음. 공차+정지+배정 = <a href="#staging">staging</a>을 신설, idle은 진짜 미배정(~21대)만 남김.</p>
+  <h3 id="faq-cycle-verify">Q. 사이클은 어떻게 "진짜"로 검증하나요?</h3>
+  <p><a href="#movement-filter">이동필터</a> — container1 변경 엣지 + <strong>30초 이상 보유</strong> + <strong>150m 이상 운반</strong>일 때만 진짜 인도. 미달은 TOS 재배정 artifact로 기각.</p>
+  <h3 id="faq-container1">Q. container1이 차 있는데 트럭은 왜 빈 차인가요?</h3>
+  <p>container1은 물리 적재가 아니라 <strong>TOS 배정 필드</strong>. 직전 drop에 다음 컨테이너가 사전배정(<a href="#c2c">c2c</a>). 실측: LD 트럭 34대가 container1이 세팅된 채 <strong>픽업 블록</strong>에 ARRIVED. 픽업 시점은 <a href="#arrived">ARRIVED 측면 분류</a>로 복원.</p>
+  <h3 id="faq-phases">Q. 사이클 4단계가 일부만 채워진 행이 있는데요?</h3>
+  <p><a href="#four-phase">4단계 분해</a>는 ARRIVED 신호에 의존해 놓친 단계는 <strong>추정하지 않고 NULL</strong>. 재시작 등 관측 경계 artifact 56건도 규명 뒤 NULL 정리 — "픽업도착&lt;배정"을 '미리 가서 대기'로 오독했다 데이터(전수 일치, 83%가 재시작 후 첫 사이클)로 정정한 사례.</p>
+  <h3 id="faq-provisional">Q. KPI 옆 "잠정" 표시는 무엇인가요?</h3>
+  <p>낮 동안 "오늘" 값은 교대 틱이 채운 잠정치. 매일 야간(01:30 MYT) 권위 런이 어제를 다시 추출해 확정하며 확정된 날은 재스캔하지 않음. → <a href="/kc/data/kpi-computation.html">KPI 산출</a>.</p>
+  <h3 id="faq-ml">Q. ML 학습 데이터는 어디에 쌓이나요?</h3>
+  <p><a href="#tt-cycle-log">tt_cycle_log</a> — 검증된 사이클 1건당 1행으로 30초마다 멱등 flush되며 <a href="/kc/learn/tt-prediction.html">2단계 예측 모형 연구</a>의 학습 데이터로 축적. CYCLES 페이지에서 열람.</p>
+  <h3 id="faq-feed">Q. 화면에 데이터가 안 보이면 어디부터 봐야 하나요?</h3>
+  <p><strong>FEED 페이지(WS 데이터 헬스)</strong>부터. websocket 데이터는 메모리에만 살아 SSH 터널이 끊기면 라이브 맵·차량 풀이 즉시 빔. Postgres 기반 화면이면 HEALTH 페이지에서 추출기 동작 확인.</p>
+  <h3 id="faq-staging-soonidle">Q. staging과 soon_idle은 무엇이 다른가요?</h3>
+  <p><a href="#staging">staging</a>은 <strong>공차</strong>(빈 차 정지·다음 작업 배정돼 대기). soon_idle은 <strong>적재</strong>(짐 실은 채 드롭 측 도착·크레인 관여 중이라 곧 풀릴 트럭). "이미 배정돼 기다림" vs "곧 비워짐"의 차이. → <a href="/kc/data/dispatch-pools.html">배차 풀</a> §2.</p>
+
+  <hr>
+  <p><strong>관련:</strong> <a href="/kc/reference/references.html">참고 자료</a> · <a href="/kc/data/tos-db-reference.html">TOS DB 레퍼런스</a></p>
+</main>
+</body>
+</html>

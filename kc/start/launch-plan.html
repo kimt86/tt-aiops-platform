@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>정식 서비스 전환 계획서 — WP-TT 지식센터</title>
+  <meta name="description" content="그림자에서 정식 서비스로 — 남은 일은 모델이 아니라 마지막 1마일(출력·신뢰·운영·파일럿).">
+  <link rel="stylesheet" href="/kc/assets/kc.css">
+  <script defer src="/kc/assets/kc.js"></script>
+</head>
+<body>
+<main class="kc-article" data-page="start/launch-plan" data-source="planning/launch-plan.md">
+  <h1>정식 서비스 전환 계획서</h1>
+  <p class="kc-lede">그림자에서 정식 서비스로 — 남은 일은 모델이 아니라 <strong>마지막 1마일</strong>(출력 · 신뢰 · 운영 · 파일럿). 게이트 기반 롤아웃으로 정리한 살아있는 계획.</p>
+  <div class="kc-meta">
+    <span class="kc-badge living">살아있는 문서</span>
+    <span class="kc-badge kind">최종 검토 2026-07-13</span>
+    <span class="kc-badge kind">현재: 그림자</span>
+  </div>
+  <div class="kc-cal warn"><span class="h">함께 다듬는 계획</span><p>날짜가 아니라 <strong>게이트(통과 기준)</strong>로 정의합니다. 상태(✅ 완료 / 🔨 진행중 / ⬜ 미착수)는 현시점 기준입니다.</p></div>
+
+  <h2>한 줄 요지</h2>
+  <p>모델과 배차 로직은 이미 라이브 그림자로 성숙하게 돌고 있습니다. <strong>더 만들 모델이 남은 게 아니라</strong>, 정식 전환의 관건은 네 가지입니다 — <strong>① 권고를 내보내는 출력 채널, ② 우리가 더 낫다는 정량 증거, ③ 24/7 운영 견고성, ④ 단계적 파일럿.</strong></p>
+
+  <h2>현재 위치</h2>
+  <div class="kc-tablewrap">
+    <table>
+      <thead><tr><th>지표</th><th>값</th><th>의미</th></tr></thead>
+      <tbody>
+        <tr><td>선박 데드라인</td><td><strong>243척 적재</strong> ✅</td><td>출항(ESTDEP) · 완료(ESTWKC) 전부 — 1단계(마감 계산) 선행조건 해결</td></tr>
+        <tr><td>2단계 실현가능성</td><td><strong>81.8%</strong></td><td>마감 안에 도착하는 권고 비율(최근 24시간)</td></tr>
+        <tr><td>최적 매칭 이득</td><td><strong>−5.1%</strong></td><td>최적 배정이 단순 그리디 대비 아낀 공차시간</td></tr>
+        <tr><td>이동시간 GBM</td><td><strong>+8pp</strong></td><td>통계 중앙값 대비 MAPE 개선(그림자 검증 중)</td></tr>
+        <tr><td>유휴 리드타임</td><td>한계 확정 ✅</td><td>관측 신호로 개별 예측 불가 — p90 방어로 확정(<a href="/kc/dispatch/leadtime-adr.html">ADR 0002</a>)</td></tr>
+        <tr><td>가동 모델</td><td>4종 라이브</td><td>도로망 · 이동시간 · 작업지점 · QC (배차 비용 · 목적지에 실사용)</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h2>남은 작업 — 4개 워크스트림</h2>
+  <p>유형: <strong>[기술]</strong> · <strong>[조직]</strong> · <strong>[기술+조직]</strong></p>
+
+  <h3>A. 출력 · 통합 🔴 크리티컬 패스</h3>
+  <p>지금 우리 권고는 내부 그림자 기록에만 있습니다. "서비스"가 되려면 외부가 구독 · 소비할 채널과 계약이 필요합니다.</p>
+  <ul>
+    <li>⬜ <strong>A1 · 브로드캐스트 채널 구현</strong> [기술] — 배차 권고를 외부 구독용 안정 API/피드로. 스키마 · 주기 · 재전송 · 인증.</li>
+    <li>⬜ <strong>A2 · TOS/운영측 계약 합의</strong> [기술+조직] — 무슨 필드를 · 얼마나 자주 · 어떤 의미로 넘기고 TOS가 어떻게 소비할지. <em>(A1 선행 · 조직 합의)</em></li>
+    <li>⬜ <strong>A3 · 신선도 · 지연 검토</strong> [기술] — 60초 주기가 충분한지, 이벤트 기반 즉시 갱신 필요 여부.</li>
+  </ul>
+
+  <h3>B. 신뢰 확보 (검증)</h3>
+  <ul>
+    <li>✅ <strong>B1 · 유휴 리드타임 한계 확정</strong> [기술] — "몇 분 후 빌지"는 관측 신호로 개별 예측 불가로 결론(세 각도) → 중앙값 + <strong>보수적 p90 방어</strong>. <a href="/kc/dispatch/leadtime-adr.html">ADR 0002</a>. <em>재추진 금지.</em></li>
+    <li>🔨 <strong>B2 · 이동시간 GBM 그림자 → 배선</strong> [기술] — 며칠 이기면 배차 경로에 서빙.</li>
+    <li>⬜ <strong>B3 · "TOS보다 낫다"의 정량 증거</strong> [기술+조직] — 수주간 · 시나리오별 공정비교. 현재 절감치는 "대부분 원거리 교정"이라 더 단단한 근거 필요.</li>
+    <li>⬜ <strong>B4 · 실현불가 18% 규명</strong> [기술] — 마감이 틀린 건지, 트럭이 진짜 먼 건지 분해.</li>
+  </ul>
+
+  <h3>C. 운영 견고성</h3>
+  <ul>
+    <li>⬜ <strong>C1 · 장애 대응 · 강등 · 폴백</strong> [기술] — 웹소켓 끊김 · 추출기 정지 · 모델 이상값 시 우아한 강등과 안전한 폴백.</li>
+    <li>⬜ <strong>C2 · 배차 파이프라인 모니터링 · 알림</strong> [기술] — 배차 자체의 헬스 · 지연 · 이상 감시.</li>
+    <li>⬜ <strong>C3 · 프로덕션 하드닝</strong> [기술] — 연구/그림자 코드베이스를 무인 운영 등급으로.</li>
+  </ul>
+
+  <h3>D. 파일럿 · 조직 🔴 결정 필요</h3>
+  <ul>
+    <li>⬜ <strong>D1 · 단계적 롤아웃 + 롤백 설계</strong> [기술+조직] — 자문 → 부분 → 전면, 각 단계 진입/통과 기준과 롤백 절차.</li>
+    <li>⬜ <strong>D2 · 운영자 UI</strong> [기술] — 휴먼인더루프 단계에서 권고를 보고 채택/무시할 화면.</li>
+    <li>⬜ <strong>D3 · 수용기준 · 책임 · 교육</strong> [조직] — 우리 배차가 틀렸을 때의 권한/책임, 운영자 교육, TOS팀 통합.</li>
+  </ul>
+
+  <div class="kc-cal danger">
+    <span class="h">크리티컬 패스</span>
+    <p><strong>A1→A2(출력 채널 + 계약)</strong>와 <strong>D1(파일럿 설계)</strong>가 병목이며 둘 다 <strong>조직 합의</strong>가 필요합니다. <strong>B1(유휴 리드타임)</strong>은 관측 한계로 확정(ADR 0002) — 리드타임에 매달리지 말고 이 세 갈래에 집중.</p>
+  </div>
+
+  <h2>단계적 롤아웃 — 날짜가 아니라 게이트로</h2>
+  <h3>Phase 0 · 그림자 (현재)</h3>
+  <p>계산 · 권고 · 검증만. 실제 차량 지시는 TOS. 모든 모델 · 로직이 라이브로 돌며 실측과 대조됩니다.</p>
+  <blockquote><strong>통과 기준</strong> — B3 "TOS보다 낫다" 초기 증거 확보. (B1 유휴 리드타임은 관측 한계로 확정 — ADR 0002)</blockquote>
+
+  <h3>Phase 1 · 자문 (Advisory)</h3>
+  <p>운영자가 우리 권고를 <strong>화면으로 봅니다</strong> — 제어는 하지 않음. 실제 채택은 사람이 판단.</p>
+  <blockquote><strong>필요</strong> — A1 출력 · D2 운영자 UI · C2 모니터링<br><strong>통과 기준</strong> — 운영자 수용 + 권고 신뢰 + 무중단 안정.</blockquote>
+
+  <h3>Phase 2 · 부분 (Partial)</h3>
+  <p>일부 <strong>트럭/레인/교대에만</strong> 우리 배차를 실제 적용. 나머지는 TOS. 범위를 좁혀 위험을 가둡니다.</p>
+  <blockquote><strong>필요</strong> — A2 계약 · C1 폴백 · D1 롤백 · D3 책임<br><strong>통과 기준</strong> — 부분 범위에서 TOS 대비 개선 입증 · 무사고 · 폴백/롤백 실증.</blockquote>
+
+  <h3>Phase 3 · 전면 (Full)</h3>
+  <p>전 트럭을 우리 배차로. TOS는 <strong>감독 · 예외 처리</strong>. 정식 서비스.</p>
+  <blockquote><strong>전제</strong> — Phase 2 지표 지속 + C3 프로덕션 하드닝 완료 + 조직 최종 승인.</blockquote>
+
+  <h2>위험 · 미결정</h2>
+  <ul>
+    <li><strong>조직 합의가 최대 불확실성</strong> — TOS팀 통합 · 책임 소재 · 수용 기준 미정. 기술이 준비돼도 이게 없으면 Phase 1조차 못 넘음. → 조기 착수 권장.</li>
+    <li><strong>"낫다"의 정의 미합의</strong> — 공정비교 기준이 합의 안 되면 게이트 판정 불가. B3와 함께 지표 정의를 먼저 확정.</li>
+    <li><strong>곧-가용 후보는 태생적으로 흐릿함(확정)</strong> — 유휴 리드타임은 개별 예측 불가(ADR 0002). 보수적 p90으로 방어하되 <strong>지금 유휴 + 방금 빈</strong> 트럭에 주로 기대는 설계가 맞음.</li>
+  </ul>
+
+  <hr>
+  <p>관련: <a href="/kc/start/roadmap.html">로드맵 초안</a> · <a href="/kc/dispatch/index.html">배차 로직</a> · <a href="/kc/data/tos-extraction.html">TOS 데이터 추출 전수</a></p>
+</main>
+</body>
+</html>

@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>지식센터 개요 — WP-TT 지식센터</title>
+  <meta name="description" content="이 지식센터가 무엇이고 각 섹션을 어떻게 쓰는지.">
+  <link rel="stylesheet" href="/kc/assets/kc.css">
+  <script defer src="/kc/assets/kc.js"></script>
+</head>
+<body>
+<main class="kc-article" data-page="start/overview" data-source="start/overview.md">
+  <h1>지식센터 개요</h1>
+  <p class="kc-lede">이 사이트는 <strong>WP-TT 프로젝트의 단일 출처(single source of truth)</strong>입니다.</p>
+  <div class="kc-meta">
+    <span class="kc-badge kind">온보딩</span>
+    <span class="kc-badge living">리빙 문서</span>
+  </div>
+
+  <p>컨테이너 터미널 TT(트랜스퍼 트럭)의 모니터링·배차·사이클 분석과 AI 배차 연구에서 알아낸 것을 한곳에 쌓아, <strong>"예전에 알아낸 걸 다시 까먹는" 손실을 막는 것</strong>이 목적입니다. 흩어진 메모·코드 주석·세션 인수인계 파일을 대체합니다.</p>
+
+  <h2>섹션 안내</h2>
+  <div class="kc-tablewrap">
+    <table>
+      <thead><tr><th>섹션</th><th>무엇을 담나</th></tr></thead>
+      <tbody>
+        <tr><td><a href="/kc/start/overview.html">시작 &amp; 기획</a></td><td>이 개요 · <a href="/kc/start/contributing.html">글쓰기 규칙</a> · PRD · 로드맵 · 정식 전환 계획. 새 사람·새 글의 출발점.</td></tr>
+        <tr><td><a href="/kc/dashboard/index.html">대시보드 가이드</a></td><td>각 화면의 모든 값이 어디서 오고, 어떻게 계산되고, 무엇을 뜻하는지 (리빙).</td></tr>
+        <tr><td><a href="/kc/data/tos-extraction.html">데이터 &amp; 지표</a></td><td>TOS 추출 · 실시간 피드 · KPI 산출 · 사이클 분해의 단일 출처.</td></tr>
+        <tr><td><a href="/kc/dispatch/index.html">배차 (2단계)</a></td><td>어느 트럭을 어느 작업에 — 설계 · 여정 · 롤아웃 · 시뮬레이터 · 조사 기록 · ADR.</td></tr>
+        <tr><td><a href="/kc/learn/learning-center.html">학습 · 예측 &amp; 리서치</a></td><td>이동시간 · 곧-유휴 등 예측 모델과 내구성 있는 도메인 발견.</td></tr>
+        <tr><td><a href="/kc/reference/glossary.html">레퍼런스</a></td><td>용어집 &amp; FAQ · 참고자료 · 클라우드 용량 산정.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h2>어떻게 쓰나 (요약)</h2>
+  <ul>
+    <li>글을 쓰기 전에 <a href="/kc/start/contributing.html">글쓰기 규칙</a>을 확인하세요 — 페이지 골격 · 상태표시 · 링크 규칙이 모든 글에 일관 적용됩니다.</li>
+    <li>리서치 · ADR · 실험처럼 <strong>사실 정확성이 중요한 글</strong>은 상단 배지로 상태·검토 맥락을 답니다.</li>
+    <li><strong>검증 안 된 수치 · 식별자 · API 동작은 단정하지 말고 <code>(미검증)</code>으로 표기</strong>하고 "열린 질문"에 남깁니다.</li>
+    <li>관측하지 못한 값은 추정으로 채우지 않고 비워 둡니다(NULL).</li>
+  </ul>
+
+  <div class="kc-cal note">
+    <span class="h">이 사이트는 손수 만든 정적 HTML</span>
+    <p>Astro Starlight에서 이관한 <strong>자체 정적 HTML 사이트</strong>입니다. 좌측 나브는 <code>kc/assets/kc.js</code>의 <code>NAV</code>에 정의되고, 공용 셸(사이드바 · 브레드크럼 · 우측 TOC · 검색 · 이전/다음)을 스크립트가 자동 주입합니다. 운영 서버가 <code>/kc/</code>로 서빙하므로 내부 링크는 <code>/kc/…</code> 절대경로를 씁니다.</p>
+  </div>
+</main>
+</body>
+</html>

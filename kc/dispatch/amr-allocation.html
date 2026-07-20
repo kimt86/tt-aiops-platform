@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AMR 작업 할당 요구사항 및 우선순위 정의 — WP-TT 지식센터</title>
+  <meta name="description" content="컨테이너 터미널의 작업 우선순위와 안벽크레인 연동 타이밍으로부터 자동화 운반차량(AMR) 작업 할당 요구사항·우선순위를 도출하고 2단계 배차 로직을 제안.">
+  <link rel="stylesheet" href="/kc/assets/kc.css">
+  <script defer src="/kc/assets/kc.js"></script>
+</head>
+<body>
+<main class="kc-article" data-page="dispatch/amr-allocation" data-source="dispatch/amr-allocation.md">
+  <h1>AMR 작업 할당 요구사항 및 우선순위 정의 <span style="font-weight:400;color:var(--faint);font-size:0.6em;">(초안)</span></h1>
+  <p class="kc-lede">컨테이너 터미널 작업은 ① 작업 우선순위, ② 안벽크레인 연동 타이밍 측면에서 고유한 운영 특성을 가진다. 본 문서는 이 특성으로부터 자동화 운반차량(AMR)의 작업 할당 <strong>요구사항</strong>과 <strong>우선순위 기준</strong>을 도출하고, 이를 충족하는 <strong>2단계 배차 로직</strong>을 제안한다.</p>
+  <div class="kc-meta"><span class="kc-badge kind">배차 · 요구사항</span></div>
+
+  <p>‘<strong>작업 할당</strong>’은 어느 작업을 어느 차량이 수행할지를, ‘<strong>작업 우선순위</strong>’는 후보 작업 가운데 어느 것을 먼저 처리해야 하는지를 의미한다. 본 문서는 개념 수준의 요구사항을 다루며, 구체적 수치는 <a href="/kc/dispatch/stage2-design.html">상세 설계</a>에서 제시한다.</p>
+
+  <h2>1. 작업 할당이 반영해야 할 운영 특성</h2>
+  <h3>1.1 작업 우선순위 체계</h3>
+  <ul>
+    <li>최상위 기준은 <strong>선박 출항 예정시각(ETD)</strong>. 각 선박은 ETD 이전에 양하·적하 물량을 모두 완료해야 한다.</li>
+    <li>최소 단위는 컨테이너 1개의 <strong>단위 작업(move)</strong>이며 상태(계획→대기→진행→완료)로 관리. '대기'=미배정 미충족 수요, '진행'=배정되어 처리 중.</li>
+    <li>각 작업에 <strong>예정 작업시각(ETW)</strong>이 부여되고, 선박별·<strong>베이</strong> 단위 큐로 묶여 처리 순서가 정의(갑판/선창·양하/적하 구분).</li>
+    <li>우선순위는 <strong>'ETD 임박 선박' × '크레인이 곧 처리할 작업'</strong>의 조합에서 가장 높다.</li>
+  </ul>
+  <h3>1.2 안벽크레인 연동 타이밍 (핵심 제약)</h3>
+  <ul>
+    <li><strong>양하</strong>: 크레인이 선박에서 내려 차량에 적재 → 야드 운반 → 블록 하차.</li>
+    <li><strong>적하</strong>: 차량이 야드 블록에서 픽업 → 크레인으로 운반 → 크레인이 선박에 적재.</li>
+  </ul>
+  <p>차량이 적시에 공급되지 않으면 크레인이 <strong>대기</strong>한다. 안벽 생산성은 선박 체류 시간과 직결되므로 <strong>차량 미공급에 의한 크레인 대기는 최대의 손실 요인</strong>이며, 1차 목표는 이 대기 최소화이다.</p>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th>작업-ETA 산정 요소</th><th>설명</th></tr></thead>
+    <tbody>
+      <tr><td>단위 작업 처리시간</td><td>크레인 및 작업 유형(양하/적하)에 따라 상이</td></tr>
+      <tr><td>트윈 처리</td><td>1회에 2개 동시 처리 → 처리 횟수 &lt; 컨테이너 수</td></tr>
+      <tr><td>베이 변경</td><td>다른 베이로 횡행(갠트리) 이동 시 추가 시간</td></tr>
+      <tr><td>해치커버 작업</td><td>갑판↔선창 전환 시 덮개 개폐로 추가 시간</td></tr>
+    </tbody>
+  </table></div>
+  <p><strong>선행시간(리드타임)</strong>: 작업 시점보다 앞서 출발시켜야 하는 시간. 적하는 야드 블록 경유 왕복을 포함해 양하보다 <strong>현저히 길다</strong> → 작업 유형별 구분 적용.</p>
+
+  <h2>2. AMR 작업 할당 요구사항</h2>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th>번호</th><th>요구사항</th><th>근거</th></tr></thead>
+    <tbody>
+      <tr><td><strong>R1</strong></td><td><strong>마감 인지</strong>: 각 작업의 '크레인이 차량을 필요로 하는 시각'을 선박 ETD에서 크레인 잔여 작업 역산으로 산정.</td><td>1.1·1.2</td></tr>
+      <tr><td><strong>R2</strong></td><td><strong>이동시간 보정</strong>: 적시 도착하도록 구간 이동시간(선행시간)만큼 앞서 출발 지시.</td><td>1.2</td></tr>
+      <tr><td><strong>R3</strong></td><td><strong>작업 유형 구분</strong>: 적하는 블록 경유 왕복으로 선행시간이 길어 구분 적용.</td><td>1.2</td></tr>
+      <tr><td><strong>R4</strong></td><td><strong>과·과소 배차 회피</strong>: 과조기=차량 대기 손실, 과지연=크레인 대기 손실 → 균형.</td><td>1.2</td></tr>
+      <tr><td><strong>R5</strong></td><td><strong>위치 기반 매칭</strong>: 차량별 이동시간이 달라, 전체 도착시간 최소화하도록 배정.</td><td>1.2</td></tr>
+      <tr><td><strong>R6</strong></td><td><strong>불확실성 대응</strong>: 예측 오차에 민감하지 않은 구조 채택.</td><td>전반</td></tr>
+    </tbody>
+  </table></div>
+
+  <h2>3. 작업 우선순위 기준</h2>
+  <ol>
+    <li><strong>마감 긴급도</strong>: 출항·크레인 처리까지 여유가 적을수록 우선.</li>
+    <li><strong>크레인 대기 위험</strong>: 잔여 작업이 곧 소진되는 크레인에 공급되는 작업 우선.</li>
+    <li><strong>이동 실현성</strong>: 마감 내 도착 가능성 평가, 불가하면 더 근접 차량 배정.</li>
+    <li><strong>총비용 최소화</strong>: 개별이 아닌 시스템 전체 도착시간·유휴 최소화.</li>
+  </ol>
+  <div class="kc-cal note"><span class="h">원칙</span><p><strong>크레인 대기 방지(기준 2)를 차량 가동 효율(기준 4)에 우선</strong>한다. 동일 조건에서는 총비용이 낮은 배차를 선택한다.</p></div>
+
+  <h2>4. 제안 로직 — 2단계 배차</h2>
+  <h3>4.1 1단계 — 수요 결정 (위치 비고려) → R1·R3·R4 / 우선순위 1·2</h3>
+  <ul>
+    <li>크레인별 잔여 작업을 타이밍 모델로 산정해 각 컨테이너의 <strong>작업-ETA</strong> 도출.</li>
+    <li>선박 <strong>ETD로부터 역산</strong>: <strong>배차 마감 = 작업-ETA − 선행시간</strong>.</li>
+    <li>산출물 = <strong>현 시점에 차량 배차가 필요한 작업 목록</strong>. 위치 미고려라 위치 예측 오차가 마감 판정에 영향 없음(R6).</li>
+  </ul>
+  <h3>4.2 2단계 — 최적 매칭 (위치 고려) → R2·R5 / 우선순위 3·4</h3>
+  <ul>
+    <li>1단계 후보 작업 × 후보 차량(유휴·임박 유휴)을 <strong>이동시간 비용행렬</strong>로 매칭(할당 문제). 비용 = <strong>가용시점(유휴까지 남은 시간) + 공차 이동시간</strong>, 이동시간 = <strong>순수 주행시간(주행 구간 시간)</strong>(경로 정체 포함·도착 후 핸드오버 대기 제외).</li>
+    <li><strong>도착지 대기(크레인 앞 큐)는 이동시간에서 제외.</strong> 줄서기는 도착 이후(크레인 스케줄) 생기는 것. <em>(한때 "크레인별 진입 대기"로 1단계에 넣으려 했으나 그 대기가 거의 0이라 2026-07-01 폐기.)</em></li>
+    <li>위치 예측은 후보 간 <strong>상대 비교</strong>에만 쓰여 절대 오차 영향이 작다(R6).</li>
+  </ul>
+  <div class="kc-cal tip"><span class="h">요약</span><p>1단계가 우선순위(마감·크레인 대기 위험)를 결정하고, 2단계가 이를 충족하는 최소비용 매칭을 산출한다.</p></div>
+
+  <h2>5. 기대효과</h2>
+  <ul>
+    <li><strong>안벽 생산성 향상</strong> — 크레인 대기 감소로 처리량↑·체류 시간↓.</li>
+    <li><strong>출항 마감 준수율 향상</strong> — ETD 역산·우선순위화로 마감 내 완료 가능성↑.</li>
+    <li><strong>차량 운영 효율 향상</strong> — 과조기 배차 감소로 더 적은 가동으로 처리.</li>
+    <li><strong>자동화 시스템 연계</strong> — 데이터 기반 규칙을 AMR 운영 의사결정 로직으로 직접 활용.</li>
+    <li><strong>운영 일관성</strong> — 명시적 기준으로 운영자 개인 경험 의존도↓.</li>
+  </ul>
+
+  <h2>용어 정리</h2>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th>용어</th><th>정의</th></tr></thead>
+    <tbody>
+      <tr><td>AMR</td><td>자동화 운반차량(Autonomous Mobile Robot).</td></tr>
+      <tr><td>안벽크레인(QC)</td><td>선박과 부두 사이 컨테이너를 양·적하하는 크레인.</td></tr>
+      <tr><td>양하 / 적하</td><td>양하: 선박→야드. 적하: 야드→선박.</td></tr>
+      <tr><td>ETD</td><td>선박 출항 예정시각.</td></tr>
+      <tr><td>ETW</td><td>컨테이너별 예정 작업시각(크레인 처리 예상 시점).</td></tr>
+      <tr><td>단위 작업(move)</td><td>컨테이너 1개 이동을 1회로 세는 단위.</td></tr>
+      <tr><td>트윈 처리</td><td>1회에 컨테이너 2개 동시 처리.</td></tr>
+      <tr><td>베이</td><td>선박 내 길이 방향 구획. 변경 시 횡행 이동.</td></tr>
+      <tr><td>선행시간(리드타임)</td><td>작업 시점보다 앞서 차량을 출발시켜야 하는 시간.</td></tr>
+      <tr><td>작업-ETA</td><td>크레인이 특정 컨테이너를 처리할 산정 시각.</td></tr>
+      <tr><td>배차 마감</td><td>작업-ETA에서 선행시간을 뺀, 차량 배차의 최종 시점.</td></tr>
+    </tbody>
+  </table></div>
+
+  <hr>
+  <p>← <a href="/kc/dispatch/index.html">배차 로직 개요</a> · <a href="/kc/dispatch/stage2-design.html">2단계 상세 설계</a> →</p>
+</main>
+</body>
+</html>

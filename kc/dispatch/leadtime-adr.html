@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ADR 0002 — 유휴 리드타임은 예측하지 않는다 — WP-TT 지식센터</title>
+  <meta name="description" content="트럭이 '몇 분 후 유휴가 되는가'는 관측 신호(GPS·TOS)로 개별 정밀 예측이 불가능함을 세 각도로 확인. 점추정 중앙값 + 보수적 p90 방어로 확정.">
+  <link rel="stylesheet" href="/kc/assets/kc.css">
+  <script defer src="/kc/assets/kc.js"></script>
+</head>
+<body>
+<main class="kc-article" data-page="dispatch/leadtime-adr" data-source="decisions/0002-idle-leadtime-limits.md">
+  <h1>ADR 0002 — 유휴 리드타임은 예측하지 않는다</h1>
+  <p class="kc-lede">트럭이 "몇 분 후 유휴가 되는가"는 관측 가능한 신호(웹소켓 GPS·TOS)로 개별 정밀 예측이 불가능함을 세 각도로 확인. 점추정 중앙값 + 보수적 p90 방어로 확정하고 재추진하지 않는다.</p>
+  <div class="kc-meta"><span class="kc-badge kind">결정 기록 (ADR)</span><span class="kc-badge living">채택됨 · 최종 검토 2026-07-15</span></div>
+
+  <div class="kc-cal note"><span class="h">한 줄 결론</span><p><strong>"방금 비었다"(탐지)는 알 수 있지만, "몇 분 후 빌지"(리드타임)는 개별 트럭 단위로는 못 맞춘다.</strong> 대기를 만드는 크레인 큐가 우리 관측 신호에 안 보이기 때문이며, 이는 모델을 바꿔서 될 문제가 아니다. 배차는 리드타임을 점이 아니라 <strong>보수적 p90 분포</strong>로 쓴다.</p></div>
+
+  <h2>맥락 — 무엇을 하려 했나</h2>
+  <p>2단계 배차는 "지금 유휴" 트럭뿐 아니라 <strong>"곧 유휴될" 트럭</strong>도 후보 풀에 넣으려 한다. 이때 필요한 게 <strong>리드타임</strong> — "이 트럭이 몇 분 후 비는가". 리드타임은 두 조각:</p>
+  <pre><code>유휴까지 시간 = (크레인이 나에게 올 때까지 대기) + (실제 핸드오버 작업)</code></pre>
+  <ul>
+    <li><strong>핸드오버 작업</strong>: 짧고 안정적(LD ~0초, DS ~57초) — 예측 가능.</li>
+    <li><strong>대기</strong>: 크레인이 내 차례 전에 몇 개를 먼저 하느냐(다른 슬롯/베이·선측 듀얼사이클·야드 재취급 AH/RH ~26%)에 달림 — <strong>이게 전부이고, 이걸 못 맞춘다.</strong></li>
+  </ul>
+
+  <h2>결정</h2>
+  <p><strong>유휴 리드타임을 개별 정밀 예측하려는 시도를 중단한다.</strong> 대신:</p>
+  <ol>
+    <li><strong>점추정</strong> — 사이클 단계별 실측 중앙값(학습)을 후보 타이밍 기준으로.</li>
+    <li><strong>보수적 p90 방어</strong> — 배차 마감 판정은 낙관적 중앙값이 아니라 <strong>p90 도착</strong>으로. 예측이 틀려도 크레인이 트럭을 못 받아 노는 사고를 막는다.(이미 동작 중)</li>
+    <li><strong>탐지는 정확하니 그걸 쓴다</strong> — "방금 빈" 트럭은 즉시·정확히 후보 풀에.</li>
+  </ol>
+
+  <h2>근거 — 세 각도가 모두 같은 결론</h2>
+  <h3>① GPS 앞대수로 큐를 못 본다 (재설계 검증, mig 0088)</h3>
+  <p>"작업지점 도착 + GPS로 센 앞 트럭 수 × 크레인 사이클"로 예측하려 했으나 실패:</p>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th></th><th>앞대수 0인데 실제 대기</th></tr></thead>
+    <tbody>
+      <tr><td>LD</td><td>198초 = <strong>2.2 크레인 사이클</strong></td></tr>
+      <tr><td>DS</td><td>341초 = <strong>3.7 사이클</strong></td></tr>
+    </tbody>
+  </table></div>
+  <p>GPS로 "앞에 아무도 없다"인데도 크레인은 이미 2~4개를 먼저 했다. <strong>보이는 트럭 줄 ≠ 진짜 큐.</strong> 대기를 만드는 건 크레인 상태(재취급·다른 베이·선측 작업)이고 트럭 GPS엔 안 보인다.</p>
+  <h3>② 어떤 모델도 못 넘는다 (ML 벤치마크)</h3>
+  <p>관측 가능한 모든 피처(상태·RTG거리·사이클위치·크레인)를 GBM·신경망에 줘도 MAPE <strong>64→62% (+2pp뿐)</strong>. 신호가 있으면 ML이 뽑아낸다. 안 뽑힌다 = <strong>데이터에 신호가 없다.</strong></p>
+  <h3>③ TOS 크레인 기록도 실시간이 아니다 (Oracle 직접조회, 2026-07-15)</h3>
+  <p>TOS <code>MCH_OPERATION</code>에 크레인 작업 시작시각·컨테이너·트럭이 있어 한때 "이걸로 크랙할 수 있다"고 봤으나 — <strong>레코드가 완료 시점에 생성됨</strong>을 확인:</p>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th>검사</th><th>결과</th></tr></thead>
+    <tbody>
+      <tr><td>최근 1시간 생성 행 중 진행중(완료 전)</td><td><strong>0건</strong>(전체 3,301건)</td></tr>
+      <tr><td>행 생성시각 − 완료시각</td><td><strong>0초</strong>(완료 때 생성)</td></tr>
+      <tr><td>행 생성시각 − 시작시각</td><td><strong>276초(4.6분)</strong>(시작은 4.6분 전인데 그때 행 없음)</td></tr>
+    </tbody>
+  </table></div>
+  <p>즉 TOS는 작업이 <strong>끝날 때</strong> 행을 만들고 시작시각을 소급 기입한다. "지금 크레인이 이 트럭을 물기 시작했다"를 실시간으로 알 방법이 없다. RTG 이동 기록은 <strong>완료 + 추출지연(2.5~5분) 뒤에야</strong> 온다 = 리드타임이 아니라 <strong>지연된 탐지</strong>(GPS로 이미 하던 것).</p>
+
+  <h2>핵심 뉘앙스 — "아무것도 모른다"가 아니다</h2>
+  <ul>
+    <li><strong>중앙값은 안다</strong> — "DS 곧빔 트럭은 보통 ~250초 후 빈다".</li>
+    <li><strong>개별 판별이 안 된다</strong> — "지금 이 트럭이 90초일까 600초일까?"</li>
+  </ul>
+  <p>트럭이 드롭에 <strong>정차한 뒤에도</strong> 남은시간은 LD median 140초·p90 520초 / DS median 256초·p90 763초로 흩어진다.</p>
+  <div class="kc-cal warn"><span class="h">측정 정정 (2026-07-15)</span><p>초판은 "곧빔→자유"를 느슨한 70m 지오펜스/TOS 도착 기준으로 재서 p90을 ~1000~1500초로 부풀렸다. 그 "대기"의 ~50%는 트럭이 아직 이동 중(주행시간 혼입). <strong>GPS 정차 순간을 앵커</strong>로 다시 재면 진짜 대기는 절반: LD p50 140·p90 520초 / DS p50 256·p90 763초. 결론(개별 리드타임 불가)은 정정 값에서도 유지되나, 점추정·p90 캘리브레이션은 정차 앵커로 바로잡아 배차 반영(<code>learn_free_in</code> 정차 기준).</p></div>
+
+  <h2>더 근본적으로 — 트럭은 멈추면 안 보인다 (2026-07-15)</h2>
+  <p>웹소켓 데이터 감사에서 가장 깊은 원인: <strong>차량 GPS 단말이 "움직이면 보고, 멈추면 침묵"</strong>한다(큰 끊김의 100%가 트럭 정지 직후 시작). 그런데 우리가 관측하고 싶은 건 <strong>멈춰서 크레인을 기다리는 순간</strong>이다 — 바로 그때 트럭이 피드에서 사라진다. 위 세 각도의 실패는 결국 이 하나로 수렴한다: <strong>관측하려는 대상이 관측 시점에 침묵한다.</strong> 상세: <a href="/kc/data/websocket-data.html">웹소켓 데이터 품질</a>.</p>
+
+  <h2>이것이 되려면 (경계)</h2>
+  <p>대기를 보이게 하려면 <strong>크레인 작업의 실시간 진행 신호</strong>가 필요하다 — RTG PLC(없음) 또는 크레인 작업큐의 실시간 진행(TOS는 완료 후에만) 또는 <strong>차량 단말이 정지 중에도 주기 보고</strong>하도록 터미널 측 재설정. 셋 다 현재 없다. 하나가 생기면 재검토한다.</p>
+
+  <h2>대안 (검토 후 기각)</h2>
+  <ul>
+    <li><strong>GPS 앞대수 × 사이클</strong> — 큐를 못 봄(①). 기각.</li>
+    <li><strong>GBM/신경망</strong> — +2pp뿐(②). 기각.</li>
+    <li><strong>TOS <code>MCH_OPERATION</code> 실시간 물림</strong> — 사후 생성이라 실시간 불가(③). 기각.</li>
+    <li><strong>TOS <code>JOB_ORDER_LIST</code> 활성 작업(90초 라이브)</strong> — DS 활성화시각은 선측 픽업이지 블록 물림이 아님. 리드타임 신호 아님.</li>
+  </ul>
+
+  <h2>후속</h2>
+  <ul>
+    <li>GPS 앞대수·타이트 도착 그림자 로거(<code>qc_handover_edge</code>·<code>tt_wp_arrival</code>, mig 0087/0088)는 무해하여 유지하되 <strong>리드타임 목적 재추진 금지</strong>.</li>
+    <li>DS 물림 <strong>탐지</strong>(사후·지연 허용 시)에는 <code>rtg_move_log</code>가 GPS보다 나을 수 있음 — 별건.</li>
+  </ul>
+
+  <hr>
+  <p>관련: <a href="/kc/start/launch-plan.html">정식 서비스 전환 계획서</a> · <a href="/kc/learn/learning-center.html">러닝센터 기획</a></p>
+</main>
+</body>
+</html>

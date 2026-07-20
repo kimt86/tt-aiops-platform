@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>러닝 센터 — WP-TT 지식센터</title>
+  <meta name="description" content="러닝 센터의 두 탭(예측 모델·수집 데이터) — 각 모델이 무엇을 입력받아 무엇을 내고 배차의 어느 부분을 맡는지, 어떻게 채점하는지.">
+  <link rel="stylesheet" href="/kc/assets/kc.css">
+  <script defer src="/kc/assets/kc.js"></script>
+</head>
+<body>
+<main class="kc-article" data-page="dashboard/learning" data-source="dashboard/learning.md">
+  <h1>러닝 센터 — AI가 무엇을, 어떻게, 어떤 데이터로 배우나</h1>
+  <p class="kc-lede">러닝 센터는 <strong>AI가 현장 데이터로 스스로 배운 것</strong>과 <strong>그 배움의 재료(데이터)</strong>를 보여주는 페이지입니다. 두 탭으로 나뉩니다.</p>
+  <div class="kc-meta"><span class="kc-badge kind">대시보드 가이드</span><span class="kc-badge living">리빙 문서</span></div>
+
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th>탭</th><th>무엇을 보여주나</th></tr></thead>
+    <tbody>
+      <tr><td>🧠 <strong>예측 모델</strong></td><td>우리가 쓰는 예측 모델. 카드마다 <strong>입력 → 출력 → 담당</strong> + 자기채점(검증) + 학습 추이</td></tr>
+      <tr><td>🗄️ <strong>데이터 수집</strong></td><td>실시간으로 모으는 데이터 16종. 카드마다 <strong>설명·출처·쓰임·수집량</strong> + 최근 수집 내역</td></tr>
+    </tbody>
+  </table></div>
+  <div class="kc-cal tip"><span class="h">먼저 큰 그림 — 4가지</span>
+    <p>1. <strong>학습</strong> = 같은 일을 많이 보면 보통값(중앙값)을 알게 됨. 2. <strong>예측</strong> = 한 숫자가 아니라 <strong>범위(분포)</strong>. 3. <strong>정답</strong> = 실제로 일어난 일 — <strong>트럭 GPS</strong>가 1순위. 4. <strong>테스트</strong> = 예측 vs 정답 비교(MAPE·±30%·재현율).</p>
+  </div>
+
+  <h2>🧠 예측 모델 탭</h2>
+  <h3>0. 공통 개념</h3>
+  <div class="kc-flow">
+    <div class="node">① 데이터 누적<span class="sub">많이 본다</span></div>
+    <div class="arw">→</div>
+    <div class="node">② 예측<span class="sub">보통값 + 범위</span></div>
+    <div class="arw">→</div>
+    <div class="node">③ 테스트<span class="sub">예측 vs 실제(GPS)</span></div>
+    <div class="arw">↺<span class="lbl">틀린 만큼 다시 배움</span></div>
+  </div>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th>용어</th><th>쉬운 뜻</th><th>좋은 방향</th></tr></thead>
+    <tbody>
+      <tr><td><strong>MAPE</strong></td><td>예측이 실제와 평균 몇 % 빗나갔나</td><td>낮을수록 ↑</td></tr>
+      <tr><td><strong>±30% 적중률</strong></td><td>예측 ±30% 안에 실제가 들어온 비율</td><td>높을수록 ↑</td></tr>
+      <tr><td><strong>재현율</strong></td><td>실제로 일어난 일 중 미리 맞춘 비율</td><td>높을수록 ↑</td></tr>
+      <tr><td><strong>정밀도</strong></td><td>"일어난다"고 한 것 중 진짜 일어난 비율</td><td>높을수록 ↑</td></tr>
+      <tr><td><strong>리드(lead)</strong></td><td>예측 시점에서 실제까지 남은 시간</td><td>클수록 일찍 알려줌</td></tr>
+      <tr><td><strong>p10 ~ p90</strong></td><td>빠른 편 ~ 늦은 편 범위</td><td>분포의 폭</td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>정답(ground truth)은 무엇으로 보나 — GPS 우선</h3>
+  <div class="kc-flow">
+    <div class="node">예측 시점<span class="sub">곧 빌 것 같다</span></div>
+    <div class="arw">→</div>
+    <div class="node accent">트럭 GPS<span class="sub">1순위 · 짐 내린 순간</span></div>
+    <div class="arw">→<span class="lbl">GPS 공백일 때만</span></div>
+    <div class="node">TOS 기록<span class="sub">완료/하역 시각</span></div>
+  </div>
+  <div class="kc-cal note"><span class="h">왜 GPS가 1순위가 됐나 — 실화</span><p>처음엔 TOS "작업 완료" 시각을 정답으로 썼는데, 적하(LD)에서 트럭이 비고 <strong>~8분 뒤에</strong> 찍히는 행정 기록이었습니다(완료=컨테이너가 배에 실린 시각). 트럭 GPS로 교차검증하니 <strong>진짜 빈 시각과 0.5분 차이</strong>로 일치 → GPS를 1순위 정답으로. (양하 DS는 TOS 완료가 GPS와 거의 같아 그대로.)</p></div>
+
+  <h3>카드 ① — TT 이동시간 (한 trip이 몇 초 걸리나)</h3>
+  <div class="kc-tablewrap"><table><tbody>
+    <tr><th>입력</th><td>출발지→도착지 좌표 → <strong>추론 도로망 위 최단시간 경로</strong>(찻길 속도·일방 반영)</td></tr>
+    <tr><th>출력</th><td>그 구간 공차 이동시간(초)의 <strong>분포</strong>(기대 p50·보수 p90) = 경로시간을 실측 "실제시간 곡선"으로 변환</td></tr>
+    <tr><th>담당</th><td><strong>순수주행 = 주행 구간 시간(출발→작업지점) = 2단계 배차 비용</strong>. 경로 정체 포함, 도착 후 크레인 대기만 제외</td></tr>
+    <tr><th>학습</th><td>완료된 GPS 사이클에서 빈 trip을 수확 → 도로망 라우팅해 실제 vs 경로시간 기록(<code>road_route_eval</code>) → "이 경로시간이면 실제 보통 N초" 곡선(구간별 p50/p90·단조·바닥)을 매 틱 적합</td></tr>
+    <tr><th>결과</th><td>상시 게이트: 상관 0.358 vs 맨해튼 0.385(대등)·경로 성공률 96.7%</td></tr>
+  </tbody></table></div>
+  <div class="kc-cal warn"><span class="h">왜 더 못 맞히나 — 분포로 써야 함</span><p>같은 출발→도착이라도 실제 시간은 <strong>±50% 흩어집니다</strong>(56초~37분). 그 순간 교통·크레인 줄 때문이라 <strong>결정 시점엔 알 수 없는 미래</strong>. 그래서 점 하나가 아니라 <strong>분포</strong>로 씁니다.</p></div>
+  <div class="kc-cal note"><span class="h">딥러닝을 쓰면 더 나을까? — GBM 그림자 (2026-07-13)</span><p>데이터로 답했습니다: 이동시간에 <strong>GBM(그래디언트 부스팅)</strong> 그림자를 붙여보니 통계 중앙값 대비 MAPE <strong>57→49%(+8pp)</strong>, 신경망도 동률(딥러닝 추가 이득 0). 개선의 지렛대는 모델 종류가 아니라 <strong>도로망 자체</strong>(찻길 속도·혼잡)입니다. GBM은 무누수 그림자로 병행 중이며 배차는 아직 비모수 백분위수 추정을 씁니다.</p></div>
+
+  <h3>카드 ② — 작업지점 좌표 (블록·크레인이 정확히 어디?)</h3>
+  <div class="kc-tablewrap"><table><tbody>
+    <tr><th>입력</th><td>트럭이 작업점에 도착(ARRIVED)한 순간의 GPS</td></tr>
+    <tr><th>출력</th><td>각 블록·크레인의 <strong>중심 좌표</strong> + 신뢰도</td></tr>
+    <tr><th>담당</th><td><strong>존 정의·거리/비용 계산의 위치 앵커</strong> (이동 크레인은 ID가 없어 GPS로 위치를 푼다)</td></tr>
+    <tr><th>학습/결과</th><td>도착 GPS를 계속 모아 평균(중심점). 잔차(위치 오차 ±m)가 작을수록 정확 → 신뢰도 색(🟢🟠🔴)</td></tr>
+  </tbody></table></div>
+
+  <h3>카드 ③ — 주행 차선·방향</h3>
+  <div class="kc-tablewrap"><table><tbody>
+    <tr><th>입력</th><td>움직이는 트럭의 GPS 자취(격자 → 스켈레톤 → 노드·엣지)</td></tr>
+    <tr><th>출력</th><td>방향성 도로 그래프(노드·엣지 + 작업지점 커넥터)·통행 방향·평균 속도</td></tr>
+    <tr><th>담당</th><td><strong>★배차 비용의 본체</strong> — 트럭→작업지점 최단시간 길찾기(2026-07-02 연결)</td></tr>
+    <tr><th>학습/결과</th><td>GPS 자취 스켈레톤화(매시간 cron), 작업지점 5,888곳 커넥터, 도로 단위 다수결 방향·속도. 방향성 다익스트라(<code>roadgraph.rs</code>). 스냅 100%·성공률 96.7%</td></tr>
+  </tbody></table></div>
+  <div class="kc-cal note"><span class="h">한 번 탈락 → 재구축해서 배차 비용에 연결 (2026-07-02)</span><p>첫 도로망은 작업지점이 도로에서 중앙 52m 떨어져 30%만 계산 가능·상관도 낮아 <strong>탈락이 맞았습니다</strong>. 재구축: 조밀화 + <strong>작업지점 전부 커넥터</strong>(스냅 100%) + <strong>도로 단위 다수결 방향</strong>(성공률 46.6→96.7%). 격자형이라 현재 정확도는 맨해튼과 대등하지만, 도로망은 속도·혼잡 반영 <strong>여지</strong> + <strong>비격자 터미널 일반화</strong>로 채택. 격자 룩업 폐기(mig 0082).</p></div>
+
+  <h3>카드 ④ — 곧 빔 · 유휴 시각 (트럭이 곧 비나? 몇 분 뒤에?)</h3>
+  <div class="kc-cal note"><span class="h">2026-07-09 — ⑤ 곧-빔 게이트 + 유휴 분(free_in)을 한 카드로 통합</span><p>예전에 따로였던 "곧 빌 트럭 판별(게이트)"과 "몇 분 뒤 빌지(free_in)"를 <strong>'곧 빔·유휴 시각' 한 카드</strong>로 합쳤습니다(러닝 센터 7→6). 게이트는 <strong>자가보정</strong>(잔차 피드백) + <strong>near-miss 양방향 튜닝</strong>(놓친 것·헛발화 둘 다 로깅해 임계값 조정)으로, free_in은 <strong>사이클 단계별</strong>(delivering·approach·wait·soon)로 학습하고 잔차로 보정합니다.</p></div>
+  <div class="kc-tablewrap"><table><tbody>
+    <tr><th>입력</th><td>트럭 상태 · RTG까지 거리 · 발화 신호(GPS/PLC/TOS)</td></tr>
+    <tr><th>출력</th><td><strong>곧 빔(예/아니오)</strong> + <strong>몇 분 뒤에 빌지(리드)</strong></td></tr>
+    <tr><th>담당</th><td><strong>배차 공급 예측</strong> — 곧 빌 트럭을 미리 2단계 후보 풀에 넣어 둔다</td></tr>
+    <tr><th>학습</th><td>매 30초 예측을 기록 → 실제 빈 시각(<strong>GPS 정답</strong>)과 맞춰봄</td></tr>
+    <tr><th>결과(예시)</th><td>리드 <strong>DS ~5분 / LD ~3.2분</strong>. 정밀도 DS 92~93% / LD 72%. 재현율 DS ~46% / LD ~66%</td></tr>
+  </tbody></table></div>
+  <div class="kc-cal note"><span class="h">정밀도가 LD에서 더 정직해진 이유</span><p>TOS 라벨만 쓸 땐 LD 정밀도가 40%로 낮았는데, TOS가 놓친 실제 빔을 "헛발화"로 잘못 센 탓. <strong>GPS-우선 정답</strong>으로 바꾸니 72%로 — 진짜 정밀도가 드러났습니다.</p></div>
+
+  <h3>카드 ⑤ — 유휴 분: 피처로 더 맞출 수 있나 (DS·LD)</h3>
+  <p>"몇 분 후 유휴"를 <strong>추가 정보(피처)로 더 정밀하게</strong> 맞춰보려는 시도(홀드아웃 공정 채점).</p>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th></th><th>DS (양하)</th><th>LD (적하)</th></tr></thead>
+    <tbody>
+      <tr><td><strong>입력(단서)</strong></td><td>RTG까지 거리 × 발화 신호</td><td>없음(안벽이라 거리 없음)</td></tr>
+      <tr><td><strong>출력</strong></td><td>거리 구간별 중앙(≤30m 4분 → >150m 6.7분)</td><td>학습 중앙값(~3.2분)</td></tr>
+      <tr><td><strong>테스트(MAPE)</strong></td><td>~57% (평균 58% 대비)</td><td>~66%</td></tr>
+    </tbody>
+  </table></div>
+  <ul>
+    <li><strong>DS</strong>: 거리는 <em>중앙 예측</em>을 밀어주지만, per-건 오차는 거의 안 줄어듦(58→57%).</li>
+    <li><strong>LD</strong>: QC·시간대·큐를 다 시험했지만 전부 평균과 같음(~65%) → 쓸 만한 피처 없음.</li>
+    <li>공통 원인: <strong>크레인 줄(큐)이 언제 내 차례가 될지는 미리 알 수 없는 확률</strong>이라 천장이 있음.</li>
+  </ul>
+  <div class="kc-cal tip"><span class="h">그래서 결론</span><p>유휴 분 예측도 <strong>점 하나가 아니라 분포(p10~p90)</strong>로 쓰는 게 맞습니다. 더 정밀히 하려면 거리·신호가 아니라 <strong>RTG 큐 깊이/작업률 같은 동적 정보</strong>가 필요(현재 미보유). <em>(관련 후속: QC 큐 앞순위로 자유시각을 예측하는 방향 — <a href="/kc/learn/soon-idle-tos.html">곧-유휴 감지</a> 참고.)</em></p></div>
+
+  <h3>카드 ⑥ — 배차 작업시점 예측 (1단계 마감 산정)</h3>
+  <div class="kc-tablewrap"><table><tbody>
+    <tr><th>입력</th><td>배 출항(estdep) 역산 + 학습한 크레인 작업속도 + 베이별 작업 큐</td></tr>
+    <tr><th>출력</th><td><strong>크레인이 각 컨테이너를 작업할 시각</strong> → 그 작업의 <strong>배차 마감시각</strong></td></tr>
+    <tr><th>담당</th><td><strong>배차 1단계 — 긴급도·마감 산정</strong>(위치 무관)</td></tr>
+    <tr><th>학습</th><td>운영을 바꾸지 않고 예측만 기록 → 실제 작업시각과 대조(그림자). <strong>work_eta_bias 자가보정</strong>(잔차 적분 피드백, mig 0083)으로 편향 교정</td></tr>
+    <tr><th>결과</th><td>근거리(20분 내) 예측 vs 실제: 양하는 정답이 정확, 적하는 ~수분 지연 → <strong>크레인 단위 신호</strong>로 유효</td></tr>
+  </tbody></table></div>
+
+  <h3>한눈 정리표 (예측 모델)</h3>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th>카드</th><th>입력</th><th>출력</th><th>담당</th><th>정답</th></tr></thead>
+    <tbody>
+      <tr><td>① 이동시간</td><td>도로망 경로시간→실제 곡선</td><td>이동시간 분포</td><td><strong>순수주행=2단계 비용</strong></td><td>실제 trip 시간</td></tr>
+      <tr><td>② 작업점 좌표</td><td>도착 GPS</td><td>블록·크레인 좌표</td><td>위치 앵커 + 커넥터 끝점</td><td>새 GPS 잔차</td></tr>
+      <tr><td>③ 주행 차선</td><td>이동 GPS</td><td>방향 도로그래프</td><td><strong>★배차 비용의 본체</strong></td><td>실제 트럭 흐름</td></tr>
+      <tr><td>④ 곧 빔·유휴 시각</td><td>상태·RTG거리·신호</td><td>곧빔+리드</td><td>공급 예측(자가보정)</td><td>GPS 빔</td></tr>
+      <tr><td>⑤ 유휴 분(피처)</td><td>DS=거리×신호 / LD=없음</td><td>셀별 분 예측</td><td>유휴 분 정밀화</td><td>GPS 빔</td></tr>
+      <tr><td>⑥ 배차 작업시점</td><td>출항역산+속도+큐</td><td>작업시각→마감</td><td>1단계 마감(eta_bias 자가보정)</td><td>실제 작업시각</td></tr>
+    </tbody>
+  </table></div>
+
+  <h2>🗄️ 데이터 수집 탭</h2>
+  <p>모델은 결국 데이터로 배우므로, "무엇을 어디서 얼마나 모으나"가 모든 학습의 토대입니다. 카드 한 장은 <strong>설명·출처·쓰임·수집량(총/24h/1h/최근)</strong> + 펼치면 <strong>최근 50행 원본</strong>을 보여줍니다.</p>
+
+  <h3>수집 데이터 (5개 묶음)</h3>
+  <h4>원시 GPS · 위치</h4>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th>데이터</th><th>출처</th><th>쓰임</th></tr></thead>
+    <tbody>
+      <tr><td>3초 고빈도 GPS</td><td>GPS 웹소켓(이동 트럭)</td><td>도로망 그래프 추론(5일 보존)</td></tr>
+      <tr><td>30초 위치 이력</td><td>GPS 웹소켓(전체)</td><td>이력·리플레이·배차 비교의 위치 기준</td></tr>
+    </tbody>
+  </table></div>
+  <h4>사이클 · 이동시간</h4>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th>데이터</th><th>출처</th><th>쓰임</th></tr></thead>
+    <tbody>
+      <tr><td>TT 작업 사이클(5단계)</td><td>GPS+TOS 결합 추론</td><td>모든 학습의 백본·정답</td></tr>
+      <tr><td>이동시간 표본(OD)</td><td>사이클에서 수확(5분)</td><td>이동시간 모델(①)·비용행렬</td></tr>
+      <tr><td>TT 작업 로그(tt_move_log)</td><td>배차(YT_DIS_DT)+완료 크레인로그 조인</td><td>검증·cycle-time KPI·트럭별 사이클 이력 (2026-07-15 신설)</td></tr>
+      <tr><td><s>공차 leg 분해</s></td><td>—</td><td><strong>retire(mig 0081)</strong> · 라벨은 이동시간 표본 빈트립으로 이관</td></tr>
+    </tbody>
+  </table></div>
+  <h4>예측 · 검증 (그림자)</h4>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th>데이터</th><th>쓰임</th></tr></thead>
+    <tbody>
+      <tr><td>곧 빔 예측 로그(30초)</td><td>Soon-idle 정확도 검증</td></tr>
+      <tr><td>1단계 작업시점 예측(2분)</td><td>배차 마감 예측 검증</td></tr>
+      <tr><td>free_in 단계별 표본(60초)</td><td>곧 빔·유휴 시각 모델 학습(단계별)</td></tr>
+      <tr><td>2단계 매칭 그림자(60초)</td><td>배차 권고 기록·비교</td></tr>
+      <tr><td>TOS vs 우리 배차(60초)</td><td>일치/우열 비교</td></tr>
+      <tr><td>공정 1:1 비교 상세(5분)</td><td>가치 입증(절감 분해)</td></tr>
+      <tr><td>이동시간 GBM 그림자(15분)</td><td>딥러닝 벤치마크(무누수, 배차 미변경)</td></tr>
+    </tbody>
+  </table></div>
+  <h4>환경 · 외부 / TOS 정답</h4>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th>데이터</th><th>쓰임</th></tr></thead>
+    <tbody>
+      <tr><td>도로 엣지 혼잡(매시간)</td><td>혼잡 신호·시뮬</td></tr>
+      <tr><td>시간별 날씨</td><td>이동시간 피처(비 ±5%)</td></tr>
+      <tr><td>QC 굶주림 스냅샷(30초)</td><td>QC 대기 KPI(GPS)</td></tr>
+      <tr><td>TOS 권위 완료 라벨</td><td>곧빔·작업시점 정답</td></tr>
+      <tr><td>크레인 작업속도(주야)</td><td>1단계 작업시점 입력(마감 역산 속도)</td></tr>
+    </tbody>
+  </table></div>
+  <div class="kc-cal note"><span class="h">엔지니어용 — API</span><p><code>GET /api/learn/data-catalog</code> → 스트림별 총/24h/1h/최근. <code>GET /api/learn/data-sample?key=…</code> → 화이트리스트 키만 최근 50행 원본 JSON.</p></div>
+
+  <div class="kc-cal warn"><span class="h">숫자는 "현재 예시"입니다</span><p>위 점수·건수는 데이터가 쌓이며 바뀝니다. <strong>방법·구조</strong>는 고정이고 <strong>숫자</strong>는 페이지에서 실시간 갱신됩니다. 화면 값이 이 문서와 다르면 화면이 최신입니다.</p></div>
+
+  <hr>
+  <p><strong>출처 문서:</strong> <a href="/kc/learn/travel-time.html">이동시간 모델</a> · <a href="/kc/learn/soon-idle-tos.html">곧 유휴 감지</a> · <a href="/kc/learn/tt-prediction.html">TT 예측 연구</a> · <a href="/kc/dispatch/stage2-design.html">2단계 설계</a><br>
+  <strong>처음으로 →</strong> <a href="/kc/dashboard/index.html">대시보드 큰 그림</a></p>
+</main>
+</body>
+</html>

@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>QC 작업지점 — 크레인 GPS는 왜 못 믿나 — WP-TT 지식센터</title>
+  <meta name="description" content="QC의 GPS는 스프레더에 달려 선박↔트럭을 오가며 진동한다. 트럭 도착 위치가 이루는 안벽선에 크레인을 투영해 진동을 걷어낸 실제 작업지점을 얻는 방법.">
+  <link rel="stylesheet" href="/kc/assets/kc.css">
+  <script defer src="/kc/assets/kc.js"></script>
+</head>
+<body>
+<main class="kc-article" data-page="learn/qc-workpoint" data-source="research/qc-workpoint.md">
+  <h1>QC 작업지점 — 크레인 GPS는 왜 못 믿나 + 진짜 핸드오버 위치 찾기</h1>
+  <p class="kc-lede">안벽 크레인(QC)의 GPS는 스프레더에 달려 선박↔트럭을 오가며 진동한다. 그냥 평균내면 185m나 뭉개진다. 트럭 도착 위치가 이루는 한 직선(안벽선)에 크레인을 투영해 진동을 걷어낸 실제 작업지점을 얻는 방법.</p>
+  <div class="kc-meta"><span class="kc-badge kind">러닝 · 위치 학습</span><span class="kc-badge living">검증됨 · 2026-07-08</span></div>
+
+  <h2>1. 문제: 크레인 GPS가 계속 진동한다</h2>
+  <p>QC는 컨테이너를 집는 스프레더가 <strong>선박 쪽 ↔ 트럭 쪽</strong>을 매 사이클 왕복하고, <strong>크레인 GPS가 바로 이 움직이는 부분에 붙어</strong> 계속 앞뒤로 흔들립니다.</p>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th>(측정) 한 크레인 20분</th><th>트럭까지 거리</th></tr></thead>
+    <tbody>
+      <tr><td>스프레더가 <strong>트럭에 왔을 때</strong></td><td>중앙 <strong>15m</strong></td></tr>
+      <tr><td>스프레더가 <strong>선박에 갔을 때</strong></td><td>중앙 <strong>48m</strong></td></tr>
+      <tr><td>왕복 진동 폭</td><td>중앙 <strong>26m</strong></td></tr>
+    </tbody>
+  </table></div>
+
+  <h2>2. 왜 "과거 평균"도 안 되나</h2>
+  <p>크레인은 진동만 하는 게 아니라 <strong>안벽을 따라 좌우로 이동</strong>하며 여러 배·베이를 작업합니다. 과거 위치를 다 평균내면 <strong>작업 범위 전체가 뒤섞여 무려 185m나 뭉개집니다</strong>(최대 507m). 지금 어디서 작업하는지 알 수 없음.</p>
+
+  <h2>3. 해법: 트럭이 이루는 "안벽선"에 투영</h2>
+  <p>핵심 관찰: ① <strong>트럭은 진동하지 않는다</strong>(도착해 서는 자리 = 작업지점). ② <strong>모든 트럭 도착 위치는 하나의 직선 위에</strong>(트럭 레인이 안벽을 따라 뻗음 — 실측 ±11m, 안벽 4.5km·C·M·Z 전부 같은 선).</p>
+  <ol>
+    <li><strong>안벽선을 학습</strong> — 트럭들의 크레인 도착 위치로 기준 직선.</li>
+    <li><strong>각 크레인의 최근 도착 위치를 모음</strong> — 오래된 건 잊고(약 15분 반감기) 최근만 반영(옆 이동 추적).</li>
+    <li><strong>그 최근 평균을 안벽선에 투영</strong> — 선박↔트럭 진동(선에 수직)은 사라지고 "안벽의 어느 지점(베이)"만 남음.</li>
+  </ol>
+  <div class="kc-cal tip"><span class="h">역할 분담</span><p>"어느 베이냐"(안벽 방향)는 크레인이 실시간으로, "트럭 레인까지의 거리"(수직 방향)는 학습한 선이 고정해 줌 — 움직이는 부분과 고정된 부분을 나눠 각자 제일 잘하는 쪽이 담당.</p></div>
+
+  <h2>4. 결과</h2>
+  <p>배포 18분 뒤 작업 중이던 <strong>크레인 36/61개</strong>의 뭉개짐이 <strong>185m → 15m</strong>로 좁혀졌고, 옛 평균 위치에서 <strong>중앙 71m 이동</strong>해 실제 작업 중인 베이로 붙었습니다. 나머지도 트럭이 도착하기 시작하면 순차로 좁혀집니다.</p>
+
+  <h2>5. 어디에 쓰나 · 한계</h2>
+  <ul>
+    <li><strong>쓰는 곳:</strong> 라이브맵 QC 노드 위치 + 배차의 "빈 트럭이 픽업 QC까지 얼마 / 부하 트럭이 QC 도착했나" 거리 계산.</li>
+    <li><strong>정확도:</strong> 보통 ~11–15m. 진동은 완전 제거, 크레인 이동은 실시간 추적.</li>
+    <li><strong>한계:</strong> 트럭이 여러 레인을 써 GPS만으론 11m보다 정밀 불가(그 이상은 TOS 크레인 작업 정답지 필요).</li>
+    <li><strong>QC 전용</strong> — 고정 레일 위 이동만 하고 트럭 레인이 항상 같은 쪽이라 성립. 회전하는 RTG엔 안 맞음.</li>
+  </ul>
+
+  <hr>
+  <p><strong>관련:</strong> <a href="/kc/learn/soon-idle-tos.html">곧 유휴 감지</a> · <a href="/kc/learn/rtg-work-cycle.html">RTG 작업 사이클</a></p>
+</main>
+</body>
+</html>

@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Cycle 페이지 — WP-TT 지식센터</title>
+  <meta name="description" content="사이클 페이지의 모든 값이 GPS 움직임에서 어떻게 감지·분해되고 무슨 의미인지.">
+  <link rel="stylesheet" href="/kc/assets/kc.css">
+  <script defer src="/kc/assets/kc.js"></script>
+</head>
+<body>
+<main class="kc-article" data-page="dashboard/cycle" data-source="dashboard/cycle.md">
+  <h1>Cycle 페이지 — 트럭 한 바퀴를 5단계로</h1>
+  <p class="kc-lede">Cycle 페이지는 트럭의 <strong>한 바퀴</strong>가 <strong>어디서 시간을 쓰는지</strong>를 5단계(사이 4구간)로 쪼개 보여줍니다 — websocket GPS 움직임으로 직접 감지한 <strong>실제</strong> 사이클.</p>
+  <div class="kc-meta"><span class="kc-badge kind">대시보드 가이드</span><span class="kc-badge living">리빙 문서</span></div>
+
+  <div class="kc-flow v">
+    <div class="node">기간: 1h / 4h / 12h / 24h / 3d</div>
+    <div class="arw">→</div>
+    <div class="node">플릿 요약: 총 사이클 · 시간당 · 중위 · 적재거리</div>
+    <div class="arw">→</div>
+    <div class="node">트럭 리더보드 (트럭별 사이클 수 · 중위)</div>
+    <div class="arw">→</div>
+    <div class="node">트럭별 타임라인 (4구간 색 막대)</div>
+  </div>
+
+  <h2>1. 사이클은 어떻게 "감지"되나 (제일 중요한 트릭)</h2>
+  <p>문제: GPS의 <code>container1</code>은 "지금 싣고 있는 박스"가 아니라 <strong>"TOS가 배정한 박스"</strong>입니다. 트럭이 빈 차로 픽업하러 가는 동안에도 채워져 있어요. 그래서 <code>container1</code>만 보면 사이클을 못 나눕니다.</p>
+  <p>해결: <strong>물리적 증거 = 이동(movement)</strong>으로 판정합니다.</p>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th>조건</th><th>기준값</th><th>왜</th></tr></thead>
+    <tbody>
+      <tr><td>보유 시간</td><td>컨테이너를 <strong>30초 이상</strong> 들고 있었나</td><td>신호 깜빡임 제거</td></tr>
+      <tr><td>운반 거리</td><td>들고 있는 동안 <strong>150m 이상</strong> 달렸나</td><td>제자리 재배정(가짜)을 걸러냄</td></tr>
+      <tr><td>GPS 점프 가드</td><td>연속 점 사이 600m 초과 = 버림</td><td>텔레포트/오차 스파이크 방지</td></tr>
+    </tbody>
+  </table></div>
+  <p>두 조건을 통과하면 <strong>"인도 확정"</strong> = 사이클 1개 완료. (이 동일한 판정을 라이브 KPI의 사이클 중위값도 함께 쓰므로 항상 일치합니다.)</p>
+
+  <h2>2. 5이벤트 · 4구간 분해</h2>
+  <p>한 사이클은 <strong>5개 시점</strong>과 그 사이 <strong>4개 구간</strong>으로 나뉩니다. "어느 쪽에 도착했나"(ARRIVED 신호 또는 목적지 지오펜스)로 픽업/드롭을 가릅니다.</p>
+  <div class="kc-flow">
+    <div class="node accent">①배차<span class="sub">opened_at</span></div>
+    <div class="arw">→<span class="lbl">공차이동</span></div>
+    <div class="node">②픽업도착<span class="sub">empty_arrived</span></div>
+    <div class="arw">→<span class="lbl">받기</span></div>
+    <div class="node">③픽업떠남<span class="sub">pickup_left</span></div>
+    <div class="arw">→<span class="lbl">부하이동</span></div>
+    <div class="node">④부하도착<span class="sub">laden_arrived</span></div>
+    <div class="arw">→<span class="lbl">주기</span></div>
+    <div class="node accent">⑤드롭 = 빔<span class="sub">dropped_at</span></div>
+  </div>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th>구간</th><th>한국어</th><th>사이</th><th>보통 길이</th></tr></thead>
+    <tbody>
+      <tr><td>empty</td><td><strong>공차 이동</strong></td><td>①배차 → ②픽업 도착</td><td>김</td></tr>
+      <tr><td>pickup</td><td><strong>받기</strong></td><td>②픽업 도착 → ③픽업 떠남</td><td>짧음</td></tr>
+      <tr><td>laden</td><td><strong>부하 이동</strong></td><td>③픽업 떠남 → ④부하 도착</td><td>김</td></tr>
+      <tr><td>drop</td><td><strong>주기(넘기기)</strong></td><td>④부하 도착 → ⑤드롭</td><td>짧음</td></tr>
+    </tbody>
+  </table></div>
+  <div class="kc-cal note"><span class="h">옛 4단계·6이벤트 모델은 폐기</span><p>예전엔 v1 4단계와 v2 6이벤트(빈차 출발 포함)를 토글로 보여줬으나 <strong>둘 다 폐기</strong>했습니다. 현행은 위 5이벤트 하나이고, "빈차 출발"은 가장 안 잡혀 빼서 <strong>공차 = 배차→픽업 도착 한 구간</strong>입니다. 상세: <a href="/kc/data/cycle-decomposition.html">TT 사이클 분해(현행)</a>.</p></div>
+
+  <h3>픽업/드롭 측 규칙</h3>
+  <p>(목적지 <code>topos1</code>이 크레인 코드 C/M/Z냐 블록 코드냐로 판정)</p>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th>작업</th><th>픽업 측</th><th>드롭 측</th></tr></thead>
+    <tbody>
+      <tr><td>LD(적하)</td><td>야드 블록(RTG)</td><td>안벽 크레인(QC)</td></tr>
+      <tr><td>DS(양하)</td><td>안벽 크레인(QC)</td><td>야드 블록(RTG)</td></tr>
+    </tbody>
+  </table></div>
+
+  <h2>3. 플릿 요약 값</h2>
+  <p><code>/api/tt-cycles/summary?hours=</code>가 제공. 출처는 GPS 감지 사이클(<code>tt_cycle_log</code> / <code>tt_cycle_v2</code>).</p>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th>값</th><th>뜻</th><th>계산</th><th>크기 의미</th></tr></thead>
+    <tbody>
+      <tr><td><strong>총 사이클</strong></td><td>이 기간 완료한 바퀴 수</td><td>인도 확정 건수</td><td>많을수록 활발</td></tr>
+      <tr><td><strong>시간당 사이클</strong></td><td>1시간에 몇 바퀴</td><td>총 사이클 ÷ 시간</td><td>처리 속도</td></tr>
+      <tr><td><strong>중위 사이클타임</strong></td><td>한 바퀴 걸린 시간의 중앙값</td><td><code>cycle_median_s</code> (p25/p75)</td><td>짧을수록 빠른 회전. 이상치에 강함</td></tr>
+      <tr><td><strong>적재거리(중위)</strong></td><td>짐 싣고 달린 거리</td><td><code>laden_leg_m</code>(≥150m)</td><td>OD 거리 감</td></tr>
+      <tr><td><strong>Little's law 추정</strong></td><td>순환 중인 트럭 수 등 흐름 지표</td><td>W=L/λ</td><td>흐름 균형 점검</td></tr>
+    </tbody>
+  </table></div>
+  <div class="kc-cal note"><span class="h">왜 중위(median)를 쓰나</span><p>평균은 아주 긴 한두 사이클에 휘둘립니다. <strong>중위값</strong>이 "보통 얼마나 걸리나"를 더 정직하게 보여줍니다. 그래서 p25·p75도 같이 봅니다.</p></div>
+
+  <h2>4. 트럭별 타임라인 (세그먼트 막대)</h2>
+  <ul>
+    <li>트럭을 고르면 그 트럭의 사이클들이 <strong>4색 막대</strong>로 그려집니다(공차/받기/부하/주기).</li>
+    <li>막대 길이 = 각 단계 시간. 어느 단계가 길면 거기서 시간을 씀(예: "받기"가 길면 크레인 대기, "공차이동"이 길면 먼 픽업).</li>
+    <li>화면에서는 <code>배차 ≤ 픽업도착 ≤ 픽업떠남 ≤ 부하도착 ≤ 드롭</code> 순으로 정렬해 단계 합이 사이클 시간과 맞게 그립니다(DB엔 관측값 그대로, 미관측은 빈칸).</li>
+    <li>데이터: <code>/api/tt-cycles/detail?ytno=&amp;hours=</code>.</li>
+  </ul>
+
+  <h2>5. 정직한 한계 — 일부 단계는 비어 있음(NULL)</h2>
+  <p>단계 시각은 GPS 도착/지오펜스 신호에 의존합니다. 모든 사이클이 5이벤트를 다 갖지는 않습니다.</p>
+  <div class="kc-cal warn"><span class="h">부분 관측</span><p>포착율(7일, 양하/적하): 배차 100/100 · <strong>픽업도착 69/85</strong> · 픽업떠남 96/73 · 부하도착 87/79 · 드롭 100/100. 관측 못 한 시점은 <strong>NULL(추정 안 함)</strong>로 두고 화면에서는 그 토막을 접습니다. (③픽업떠남은 TOS 크레인 정답지로 추가 보정 — 상세 <a href="/kc/data/cycle-decomposition.html">사이클 분해</a>.)</p></div>
+  <p>기타 처리:</p>
+  <ul>
+    <li><strong>150m 미만 초단거리</strong> 야드 이동은 이동필터가 의도적으로 거릅니다(가짜 사이클 방지).</li>
+    <li><strong>트윈 리프트</strong>(컨테이너 2개)는 물리 1트립 = 1 사이클로 기록하고 <code>twintandem='W'</code>로 표시.</li>
+    <li><code>container1</code>↔<code>container2</code> <strong>슬롯 스왑</strong>은 "비어있지 않은 집합이 그대로면 무시"합니다.</li>
+  </ul>
+
+  <h2>6. KPI의 K_CYCLE와 뭐가 다른가요?</h2>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th></th><th>Cycle 페이지 사이클</th><th>KPI의 K_CYCLE</th></tr></thead>
+    <tbody>
+      <tr><td>출처</td><td><strong>GPS 움직임</strong>(원천 ②)</td><td><strong>TOS 이벤트</strong>(원천 ①)</td></tr>
+      <tr><td>의미</td><td>실제 트럭이 돈 한 바퀴(이동 기반)</td><td>작업 기록의 첫~마지막 이벤트 간격</td></tr>
+      <tr><td>쓰임</td><td>운영 진단·트럭별 분석·ML 라벨</td><td>공식 KPI 점수</td></tr>
+    </tbody>
+  </table></div>
+  <div class="kc-cal note"><span class="h">K_CYCLE(TOS) ↔ GPS 사이클 교차검증 (7일)</span><p>GPS 사이클(중앙 ~20분)은 K_CYCLE(중앙 ~60분)의 <strong>33~43%</strong>입니다. K_CYCLE는 배차 큐·재계획 등 <em>행정 시간</em>까지 포함하고 GPS는 <em>실제 주행</em>만 재기 때문 — <strong>절대값이 다른 게 정상</strong>. 절대값 검증은 불가, <strong>추세·비율·작업유형 순위</strong>로 교차검증합니다. 물리적 사이클·ML 라벨엔 GPS 사이클을, TOS 스코어카드엔 K_CYCLE를 쓰세요.</p></div>
+
+  <h2>7. Cycle 4구간 ↔ TT Dispatch 6상태 관계</h2>
+  <p>같은 트럭 여정을 두 방식으로 봅니다 — <strong>Cycle 4구간 = 끝난 사이클의 시간 구간(사후·GPS)</strong>, <strong>Dispatch 상태 = 지금 이 순간의 분류(실시간·웹소켓 전용)</strong>.</p>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th>Cycle 구간</th><th>대응 Dispatch 상태</th><th>비고</th></tr></thead>
+    <tbody>
+      <tr><td>(사이클 사이)</td><td><strong>idle</strong> / <strong>staging</strong></td><td>유휴 / 배차받고 대기</td></tr>
+      <tr><td>공차이동</td><td><strong>empty_travel</strong></td><td>빈 차로 픽업지로</td></tr>
+      <tr><td>받기</td><td>empty_travel→delivering 전환</td><td>픽업 적재 순간</td></tr>
+      <tr><td>부하이동</td><td><strong>delivering</strong></td><td>짐 싣고 하역지로</td></tr>
+      <tr><td>주기(넘기기)</td><td><strong>soon_idle</strong> (RTG≤50m/QC PLC) · <strong>wait_rtg</strong> (블록 도착·RTG 대기)</td><td>하역지 도착~인계</td></tr>
+    </tbody>
+  </table></div>
+  <div class="kc-cal note"><span class="h">실시간 분류는 웹소켓 전용</span><p>Dispatch 상태는 TOS DB 없이 <strong>웹소켓 GPS만</strong>으로 판정합니다(배정=latched 미션·부하 도착=ARRIVED 또는 지오펜스). 옛 <code>approaching</code>은 <code>wait_rtg</code>로 통합됐습니다.</p></div>
+
+  <hr>
+  <p><strong>출처 문서:</strong> <a href="/kc/data/cycle-decomposition.html">TT 사이클 분해 (현행)</a> · <a href="/kc/learn/rtg-work-cycle.html">RTG 작업 사이클</a> · <a href="/kc/learn/cycle-v2-shadow.html">사이클 v2 실험 이력</a><br>
+  <strong>다음 →</strong> <a href="/kc/dashboard/learning.html">러닝 센터 해설</a></p>
+</main>
+</body>
+</html>

@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TOS 데이터 추출 전수 — WP-TT 지식센터</title>
+  <meta name="description" content="우리 시스템이 터미널 본부(TOS Oracle)에서 긁어오는 모든 것 — 어느 테이블·컬럼을·어떤 주기로·얼마의 부하로·어떻게 가공해·무슨 의미로 쓰는지 18개 추출점 전수 해설.">
+  <link rel="stylesheet" href="/kc/assets/kc.css">
+  <script defer src="/kc/assets/kc.js"></script>
+</head>
+<body>
+<main class="kc-article" data-page="data/tos-extraction" data-source="architecture/tos-data-extraction.md">
+  <h1>TOS 데이터 — 무엇을·어떻게·얼마나 긁어오나 (전수 해설)</h1>
+  <p class="kc-lede">우리 시스템이 <strong>터미널 본부 시스템(TOS Oracle DB)</strong>에서 긁어오는 <strong>모든 것</strong>을 — 어느 테이블의 어느 값을 · 어떤 쿼리로 · 얼마나 자주 · 얼마의 부하로 · 어떻게 가공해 · 무슨 의미로 쓰는지 — 신입도 이해하도록 한 곳에 정리한 <strong>살아있는 참조 문서</strong>입니다.</p>
+  <div class="kc-meta"><span class="kc-badge kind">아키텍처 · 카탈로그</span><span class="kc-badge living">단일 출처 · 리빙</span></div>
+
+  <h2>1. 큰 그림 (비유로)</h2>
+  <p><strong>TOS</strong>(Terminal Operating System)는 터미널의 <strong>"본부 장부"</strong>. Oracle DB에 배·컨테이너·크레인·트럭의 모든 공식 기록이 있습니다. 그 장부를 실시간으로 직접 들여다보면 본부에 부담을 주므로, <strong>추출기(extractor)</strong>라는 일꾼이 필요한 부분만 주기적으로 사본(Postgres)에 복사합니다.</p>
+  <div class="kc-flow">
+    <div class="node accent">TOS Oracle<span class="sub">본부 장부</span></div>
+    <div class="arw">→</div>
+    <div class="node">추출기<span class="sub">주기적·읽기전용·최소부하</span></div>
+    <div class="arw">→</div>
+    <div class="node">우리 Postgres<span class="sub">사본 스냅샷</span></div>
+    <div class="arw">→</div>
+    <div class="node accent">대시보드 · 배차 매처</div>
+  </div>
+  <p>대시보드와 배차 매처는 <strong>우리 사본(Postgres)만</strong> 봅니다. 본부(Oracle)에 닿는 건 오직 추출기뿐이고, 그것도 <strong>가볍게·주기적으로·읽기만</strong>.</p>
+
+  <h2>2. 본부 접속·보호 규칙</h2>
+  <ul>
+    <li><strong>단일 통로</strong> — Oracle 접근은 <code>remote-toolbox-sql</code> 한 경로로만(<code>runner.rs</code>).</li>
+    <li><strong>직렬화</strong> — 프로세스 전역 잠금으로 동시에 두 쿼리가 본부를 때리지 않음. 항상 한 쿼리씩.</li>
+    <li><strong>읽기 전용 · 시간창 제한</strong> — 대부분 최근 1~2일치만·완료 건 제외(풀스캔 회피).</li>
+    <li><strong>타임아웃 90초 · 병렬 억제</strong> — 무거운 지표 쿼리엔 <code>NO_PARALLEL</code> 힌트.</li>
+  </ul>
+  <div class="kc-cal tip"><span class="h">한마디로</span><p>가볍게 · 한 번에 하나씩 · 최근 것만 · 읽기만.</p></div>
+
+  <h2>3. TOS가 <em>아닌</em> 데이터 (범위 밖)</h2>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th>데이터</th><th>출처</th><th>TOS인가</th></tr></thead>
+    <tbody>
+      <tr><td>트럭·크레인 GPS 위치</td><td>실시간 websocket 피드</td><td>❌</td></tr>
+      <tr><td>크레인 PLC 센서(하중·잠금)</td><td>같은 websocket</td><td>❌</td></tr>
+      <tr><td>날씨(기온·강수)</td><td>Open-Meteo 외부 API</td><td>❌</td></tr>
+    </tbody>
+  </table></div>
+  <p>라이브맵의 트럭 움직임·크레인 물리 작업·비 여부는 TOS가 아니라 위 실시간 피드/외부 API에서 옵니다 → <a href="/kc/data/websocket-data.html">websocket 데이터</a>.</p>
+
+  <h2>4. 주기 한눈에 (어떤 일꾼이 언제 도나)</h2>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th>타이머</th><th>주기</th><th>무엇을</th></tr></thead>
+    <tbody>
+      <tr><td><code>wp-workpool</code></td><td>~90초</td><td>라이브 작업 풀 — 작업큐·작업·배정 트럭·선박 일정 (①~④)</td></tr>
+      <tr><td><code>wp-handover</code></td><td>~60초</td><td>작업 완료(핸드오버) 신호 (⑤)</td></tr>
+      <tr><td><code>wp-rtg-moves</code></td><td>~5분</td><td>야드 크레인(RTG) 이동 이벤트 (⑥)</td></tr>
+      <tr><td><code>wp-shift-t1</code></td><td>~3분</td><td>운영 지표 — 가벼운 묶음 (⑦~⑮)</td></tr>
+      <tr><td><code>wp-shift-t2</code></td><td>~15분</td><td>운영 지표 — 무거운 묶음 (⑯~⑰)</td></tr>
+      <tr><td><code>wp-nightly</code></td><td>매일 01:30 MYT</td><td>하루치 지표 전체 재계산 (권위 확정)</td></tr>
+    </tbody>
+  </table></div>
+
+  <h2>라이브 배차 데이터 (약 90초마다)</h2>
+
+  <h3>① workqueue — QC 작업큐 계획·진척률</h3>
+  <p class="kc-meta-line"><code>JOB_QUEUE_SCHEDULE</code> → <code>live_workqueue</code> · 🟢 가벼움 · PK(qc,vessel,queuename)</p>
+  <p>QC별 작업큐 계획(어느 QC가 어느 선박/큐를 언제·진척률 완료/총). 삭제 안 됐고 QC 지정됐고 ~1일 내 수정됐고 미완료(또는 6시간 내 완료)인 큐만. 매 tick 전체 삭제 후 upsert. UI 각 QC 진척률 표시 + 배차 매처가 (vessel+queuename) 조인으로 QC 붙임(Oracle 팬아웃 회피).</p>
+  <div class="kc-cal note"><span class="h">알아둘 점</span><p><code>ACTIVEYN</code>은 NULL 많아 신뢰 불가 → 진척률(TOTALQTY&gt;COMPQTY)+수정시간으로 활성 판단. queuename은 재사용됨(현재 스냅샷만 유지). voyage·disload는 NULL 가능.</p></div>
+
+  <h3>② workpool — 배차 입력 + UI 작업 카드</h3>
+  <p class="kc-meta-line"><code>JOB_ORDER_LIST</code> → <code>live_workpool</code>·<code>live_candidate</code> · 🟢 가벼움</p>
+  <p>완료 안 된(COMPDATE null) DS·LD 작업(A/Q 상태)을 최근 2일(CRE_DT≥TRUNC−2)에서 한 번에 뽑음. Rust에서 상태 분리: <strong>A(배정)</strong>→즉시 live_workpool(etw/actv/upd 파싱), <strong>Q(미배정, ytno NULL)</strong>→집계((queuename,vessel,jobtype,src_block) 키)→live_candidate. 사후 live_workqueue와 조인해 qc 첨부. 배차 매처의 미배정 수요·배정 move의 ETW/위치 소스, UI 작업카드, 배정 시각(upd_ts) 경유 TOS-vs-자사 비교.</p>
+  <div class="kc-cal note"><span class="h">알아둘 점</span><p>msnseq null이면 배차 후 미적재. yt_topos는 LD에서만 소스블록(block_prefix). etw_dt 파싱 실패는 null로 침묵. 쌍 이동(twin)=같은 contno·다른 row. Q상태 ytno=null만 candidate 집계.</p></div>
+
+  <h3>③ assigned_tt — TT 배정 풀(가동률 분모)</h3>
+  <p class="kc-meta-line"><code>JOB_ORDER_LIST</code> → <code>live_assigned_tt</code> · 🟢 가벼움 · 매 tick 전체 리셋</p>
+  <p>미완료 작업 중 배정 트럭(YTNO NOT NULL)+상태(A/B/Q)만, DISTINCT로 트럭당 1행. <strong>모든 작업 종류 포함</strong>(선박 DS/LD + 야드 MI/MO/LC) — 그래서 가동률 분모에 정확. 분자(A=진행)·분모(A+B+Q=배차)로 K_UTIL_TT 계산. livemap.rs가 ~30초마다 live_workpool과 조인해 배정 메타 캐시 갱신.</p>
+  <div class="kc-cal note"><span class="h">알아둘 점</span><p>스냅샷(이력 없음). 예정(P)·미배차 용역트럭·유휴 트럭은 여기 없음(TOS 가시성 한계). 미배정 컨테이너 수요는 다른 테이블(workpool Q행).</p></div>
+
+  <h3>④ vessel_schedule — 선박 항차 일정 마스터</h3>
+  <p class="kc-meta-line"><code>VSB_VOYAGE</code> → <code>live_vessel_schedule</code> · 🟢 가벼움 · PK(vessel,voyage)</p>
+  <p>취소 안 된(CANCEL='N') + 출항예정 −2~+10일 항차. 입항(ESTBER)·<strong>작업완료(ESTWKC=배차 primary deadline)</strong>·출항(ESTDEP)·컷오프·실입항(ACTBER)·실출항(ACTDEP)·계획 양하/적하 수량. DATE||TIME(MYT)→UTC 변환. 배차가 데드라인(ESTWKC/ESTDEP)·계획 물량을 제1 제약으로 사용, 대시보드 'Vessel Schedule' 카드.</p>
+  <div class="kc-cal note"><span class="h">알아둘 점</span><p>DATE/TIME 컬럼이 VARCHAR라 문자열 범위 비교만. ACTBER/ACTDEP는 실제 전까진 null(미래 예정과 혼동 금지). 선박 마스터이지 작업 카드 아님.</p></div>
+
+  <h2>거의 실시간 (작업 완료·RTG 이동)</h2>
+
+  <h3>⑤ handover — 완료 이벤트 권위 라벨</h3>
+  <p class="kc-meta-line"><code>JOB_ORDER_HISTORY</code>(JOBSTATUS='C') → <code>tos_handover_label</code> · 🟢 가벼움 · PK(contno,point,seqno)</p>
+  <p>마지막 워터마크 이후 새로 완료된 DS/LD 핸드오버를 증분 폴링. 인덱스 레인지 스캔(IDX_JOBHIST_DATETIME)+FETCH FIRST 3000. YTNO·ARMGC(야드측 RTG/ES)·완료시각(comp_ts)·활성(actv_ts)·하차(dis_ts). <code>etl_watermark</code>로 증분 추적, <code>&gt;=</code>+ON CONFLICT로 경계 중복 배제. 차량이 "정확히 언제 비었나"의 권위 라벨 — DS는 GPS/PLC 신호가 약해 TOS 정답 필수. 라이브 곧-유휴 예측의 사후 평가함수.</p>
+  <div class="kc-cal warn"><span class="h">알아둘 점 — ACTV_DT 의미</span><p><code>ACTV_DT</code>는 "RTG가 물리적으로 집은 순간"이 아니라 "QC 양하 완료(트럭 적재) 시점" — RTG 들어올림은 ACTV 이후 약 11분. DS는 블록도착(DIS)→활성화(ACTV) 중앙 7.7분 변동. 보존 한계: JOB_ORDER_HISTORY ~15일 → 깊은 백필 불가.</p></div>
+
+  <h3>⑥ rtg_moves — 야드 크레인 전체 작업 스트림</h3>
+  <p class="kc-meta-line"><code>MCH_OPERATION</code>(RTG|ES) → <code>rtg_move_log</code> · 🟢 가벼움 · PK(machno,contno,seqno)</p>
+  <p>오늘 완료된 RTG/ES 작업을 워터마크 이후 증분 수집(IDX_MCH_OPERATION_COMPDATE·최대 5000행/폴). 전체 작업(DS/LD/RH/AH/GI/GO/MI/MO). <code>dur_s</code>=comp−st(0~3600초만). <strong>핵심: DS 트럭 대기의 ~80%는 RTG가 다른 작업(재배치·게이트·정리) 중이라</strong> — 이 데이터로 RTG 백로그를 계산해 대기 예측 피처로 사용.</p>
+  <div class="kc-cal note"><span class="h">알아둘 점</span><p>trk_id는 보유작업(AH/RH)에서 NULL. contno는 첫 11자만. 증분(워터마크)이라 과거 재추출 불가(리셋 필요).</p></div>
+
+  <h3>⑦ voyage_plan — 항차별 계획 물량</h3>
+  <p class="kc-meta-line"><code>VSS_STATISTICS</code> → <code>raw_voyage_plan</code> · 🟢 가벼움 · T1 3분</p>
+  <p>지난 3일 vessel/voyage별 계획 컨테이너 최댓값(MAX VAN, NOT NULL만)·상위 120행. 진행 중 항차는 VSS_STT_MOVES가 NULL이므로 <strong>VAN이 분모의 유일한 신뢰 출처</strong>. 대시보드 LIVE 탭 vessel_shift 진행률 프로그레스바(실적/계획)의 분모. 배차 미사용(vessel panel 전용).</p>
+
+  <h2>운영 지표 — 빠른 묶음 (T1, 약 3분마다)</h2>
+
+  <h3>⑧ k_mph_realtime — QC 처리량(move/hr)</h3>
+  <p class="kc-meta-line"><code>MCH_OPERATION</code>(C##, LD/DS) → <code>raw_k_mph_realtime</code> · 🟢 가벼움</p>
+  <p>단일 DAY의 QC별 GROUP BY: 총 move·load/discharge 분해·<strong>active_hours</strong>(COMPTIME 첫 2자 DISTINCT 시간 수)·K_MPH=move/active_hours·차량/컨테이너 다양성. TOP 30. 각 QC의 유휴 갭 제외된 진짜 처리 효율. 대시보드 "K_MPH" 카드가 active_hours 가중 평균으로 표시.</p>
+  <div class="kc-cal note"><span class="h">알아둘 점</span><p>active_hours는 시간(HH) 단위라 '08:01~08:59'도 1시간(보수적). shift 실시간은 <code>k_mph_shift</code> 별도 테이블(시계열).</p></div>
+
+  <h3>⑨ k_crane_q_daily — 야드 핸드오버 대기 (일일)</h3>
+  <p class="kc-meta-line"><code>JOB_ORDER_HISTORY</code> → <code>raw_k_crane_q_daily</code> · 🟢 가벼움 · PK(work_date,jobtype)</p>
+  <p><code>crane_q_sec=(ACTV_DT−YT_DIS_DT)*86400</code>, 0~1800초만(in_range=가중치). work_date×jobtype당 개수·평균·중앙·표준편차·이상치. K_RTG_Q("TT가 야드 핸드오버를 기다림"). <strong>대시보드 숨김.</strong></p>
+  <div class="kc-cal warn"><span class="h">알아둘 점 — YT_DIS_DT는 DISpatch(배차)</span><p><code>YT_DIS_DT</code>는 하차가 아니라 <strong>배차(dispatch) 시각</strong>이어서 (ACTV_DT−YT_DIS_DT)는 순수 대기가 아니라 배차→야드활성 전 구간을 재 <strong>과대 가능</strong>(K_RTG_Q 숨김의 한 이유). SQL엔 ARMGC 필터 없음(모든 크레인 수집). DB/쿼리의 'K_CRANE_Q' 이름은 기술부채 회피로 유지(실명 K_RTG_Q). → <a href="/kc/data/tos-db-reference.html">TOS DB 레퍼런스</a>.</p></div>
+
+  <h3>⑩ k_crane_q_hour — 야드 대기(시간별 분포)</h3>
+  <p class="kc-meta-line"><code>JOB_ORDER_HISTORY</code> → <code>raw_k_crane_q_hour</code> · 🟡 보통 · T2/야간</p>
+  <p>⑨와 같은 계산을 시간대(0~23)로 분해 — "어느 시간에 RTG 대기가 길었나". alert_threshold(μ+2σ). K_RTG_Q 자체가 숨김이라 전시 안 되나 24시간 패턴·야간 편향 검증 등 백엔드 분석용.</p>
+
+  <h3>⑪ k_tt_cycle — 당일 트럭 사이클(TOS 근사)</h3>
+  <p class="kc-meta-line"><code>MCH_OPERATION</code>(C##, LD/DS) → <code>raw_k_tt_cycle</code> · 🟢 가벼움 · PK(snapshot_date)</p>
+  <p>같은 트럭의 연속 QC-move 간격(120~1200초만) 중앙값 = 한 사이클(픽업→운송→드롭→복귀). DS/LD 분리(K_CYCLE_DS/LD). <strong>대시보드 K_CYCLE 핵심 지표</strong>(<code>Σ(med_sec·samples)/Σsamples</code>).</p>
+  <div class="kc-cal warn"><span class="h">알아둘 점 — GPS 사이클과 다름</span><p>TOS K_CYCLE은 배차 대기·재계획 등 행정 시간 포함, GPS는 물리 주행만. 교차검증: TOS ≈ GPS의 233~303%(TOS 중앙 ~60분 ↔ GPS 중앙 ~20분). 자세히 → <a href="/kc/data/kpi-accuracy.html">KPI 정확도</a>. (2026-07-15부터 <code>tt_move_log</code>로 배차→완료 두 앵커 재산출.)</p></div>
+
+  <h3>⑫ k_empty — 공차거리/공차비율</h3>
+  <p class="kc-meta-line"><code>JOB_ORDER_HISTORY</code> → <code>raw_k_empty</code> · 🟡 보통 · PK(date,jobtype,shift)</p>
+  <p>작업 1건=(CONTNO,POINT,SEQNO)로 접고 첫 이벤트 시각으로 교대 판정 → (jobtype×shift) 집계. 적재(LNDN)·공차(UN_LNDN) 거리 0~5000m만(이상치 제외). K_EMPTY_R(공차비율)=Σ공차/Σ(공차+적재). 배차 성과 평가·최적화 근거.</p>
+
+  <h3>⑬ k_qc_q — QC 유휴 갭 분석</h3>
+  <p class="kc-meta-line"><code>MCH_OPERATION</code>(C##, LD/DS) → <code>raw_k_qc_q</code> · 🟡 보통 · PK(date,qc)</p>
+  <p>QC별 연속 작업군 사이 갭(idle_sec)을 시간대별로 분류. <code>HAVING≥</code>(day=10,shift=2). K_QC_NOMOVE(모든 갭). <strong>2026-06-18 same_bay 컬럼 추가</strong>: 같은 베이 갭만=진짜 트럭대기(K_QC_TT_WAIT), 베이 변경 갭=QC 이동.</p>
+  <div class="kc-cal warn"><span class="h">알아둘 점 — 전체 gap ≠ 트럭대기</span><p>초기(2026-06-17 이전)엔 모든 갭을 트럭대기로 계산해 <strong>~1.8배 과대평가</strong>(실제 ~45%가 QC 이동/해치). same_bay(QUEUENAME 변화 없음)로 진짜 starvation 분리. 과거 데이터는 same_bay=NULL이라 필터 불가.</p></div>
+
+  <h3>⑭ k_util_crane — 크레인(QC/YC) 가동률</h3>
+  <p class="kc-meta-line"><code>MCH_OPERATION</code>(C##/RTG%) → <code>raw_k_util_crane</code> · 🟡 보통 · PK(date,machno)</p>
+  <p>크레인별 겹침 구간 병합 → active_sec_merged(유휴 제외) → k_util_merged_24h(=active/86400). TOP 60. 대시보드 K_UTIL_CRANE·배차 리소스 제약(작업가능 크레인 식별).</p>
+
+  <h3>⑮ k_util_tt — 야드 트랙터 가동률</h3>
+  <p class="kc-meta-line"><code>CDY_MACHINE</code>+<code>MCH_WORKTIME</code>+<code>MCH_WORKSTOP</code> → <code>raw_k_util_tt</code> · 🟢 가벼움 · PK(date,machno)</p>
+  <p>YT별 근무 세션(login/logout) 겹침 병합 → active_min − stop_min = productive_min → k_util_capped=min(1, productive/경과분). logout_anomaly(겹침=미로그아웃). 야간 배포 누적 이력.</p>
+  <div class="kc-cal warn"><span class="h">알아둘 점 — 세션 기반(실시간 아님)</span><p>MCH_WORKTIME은 <strong>로그아웃 후에야 행 확정</strong> → 현재 활동 중 TT는 미포함. 실시간 util은 websocket GPS + 작업풀로 계산(<a href="/kc/data/kpi-accuracy.html">KPI 정확도</a>). 이 세션값(근무 기준)과 화면값(할당 기준 ≈63%)은 다름.</p></div>
+
+  <h2>운영 지표 — 무거운 묶음 (T2, 약 15분마다)</h2>
+
+  <h3>⑯ k_mph_voyage — 항차별 확정 성과</h3>
+  <p class="kc-meta-line"><code>VSS_STATISTICS</code> → <code>raw_k_mph_voyage</code> · 🟢 가벼움 · PK(vessel,voyage)</p>
+  <p>최근 30일 확정 항차의 컨테이너/TEU/move(싱글/트윈/탠덤)·소요시간(gross/net/berth)·생산성(GQCR/NQCR=k_mph, GBP/NBP=k_bp). TOP 30. TOS 확정값이라 변경·replay 불가. 선박 역량 평가·선사 계약 성과 검증.</p>
+
+  <h3>⑰ k_cycle — 작업 사이클(핸들링 span)</h3>
+  <p class="kc-meta-line"><code>JOB_ORDER_HISTORY</code> → <code>raw_k_cycle</code> · 🟡 보통 · PK(date,jobtype)</p>
+  <p>작업(jobtype×contno×point×seqno)의 첫~마지막 이벤트 간격(transitions&gt;1만) jobtype별 평균·중앙·사분위·이상치(avg+2σ). TOP 15. <em>주의: 이는 컨테이너 핸들링 span(≈40분)이지 트럭 사이클이 아님</em> — 표시 K_CYCLE는 ⑪(k_tt_cycle)를 씀.</p>
+
+  <h2>학습용 (크레인 작업시간)</h2>
+
+  <h3>⑱ qc_move_time — 배차 선행시간 학습 모델</h3>
+  <p class="kc-meta-line"><code>MCH_OPERATION</code>(C/M/Z, LD/DS) → <code>learn_qc_move_time</code> · 🟢 가벼움 · 매일 밤 1회</p>
+  <p>최근 3일 연속 QC move 간격(1~300초, 순수 처리 cadence)의 크레인·작업종류별 중앙값(표본≥30). 배차 엔진의 ETA/데드라인 계산 입력. <code>med_sec</code> 없으면 상수 fallback(양하 ~90초, 적하 ~110초). 크레인별 편차 큼(양하 79~128초) — 개별 학습 모델의 이유.</p>
+  <div class="kc-cal note"><span class="h">알아둘 점</span><p>Rolling(날짜 키 없음) — 매일 밤 DELETE+INSERT로 최신 3일만. Quay crane만(C/M/Z), RTG/ES 제외.</p></div>
+
+  <h2>부하 한눈 요약</h2>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th>#</th><th>추출</th><th>주기</th><th>부하</th><th>원천 테이블</th></tr></thead>
+    <tbody>
+      <tr><td>1</td><td>workqueue</td><td>T1 90초</td><td>🟢</td><td><code>JOB_QUEUE_SCHEDULE</code></td></tr>
+      <tr><td>2</td><td>workpool</td><td>~90초</td><td>🟢</td><td><code>JOB_ORDER_LIST</code></td></tr>
+      <tr><td>3</td><td>assigned_tt</td><td>~90초</td><td>🟢</td><td><code>JOB_ORDER_LIST</code></td></tr>
+      <tr><td>4</td><td>vessel_schedule</td><td>~90초</td><td>🟢</td><td><code>VSB_VOYAGE</code></td></tr>
+      <tr><td>5</td><td>handover</td><td>~60초</td><td>🟢</td><td><code>JOB_ORDER_HISTORY</code></td></tr>
+      <tr><td>6</td><td>rtg_moves</td><td>~5분</td><td>🟢</td><td><code>MCH_OPERATION</code></td></tr>
+      <tr><td>7</td><td>voyage_plan</td><td>T1 3분</td><td>🟢</td><td><code>VSS_STATISTICS</code></td></tr>
+      <tr><td>8</td><td>k_mph_realtime</td><td>T1 3분 + 야간</td><td>🟢</td><td><code>MCH_OPERATION</code></td></tr>
+      <tr><td>9</td><td>k_crane_q_daily</td><td>T1 3분 + 야간</td><td>🟢</td><td><code>JOB_ORDER_HISTORY</code></td></tr>
+      <tr><td>10</td><td>k_crane_q_hour</td><td>T2/야간</td><td>🟡</td><td><code>JOB_ORDER_HISTORY</code></td></tr>
+      <tr><td>11</td><td>k_tt_cycle</td><td>T1 3분 + 야간</td><td>🟢</td><td><code>MCH_OPERATION</code></td></tr>
+      <tr><td>12</td><td>k_empty</td><td>T1 3분 + 야간</td><td>🟡</td><td><code>JOB_ORDER_HISTORY</code></td></tr>
+      <tr><td>13</td><td>k_qc_q</td><td>T1 3분 + 야간</td><td>🟡</td><td><code>MCH_OPERATION</code></td></tr>
+      <tr><td>14</td><td>k_util_crane</td><td>T1 3분 + 야간</td><td>🟡</td><td><code>MCH_OPERATION</code></td></tr>
+      <tr><td>15</td><td>k_util_tt</td><td>T1 3분 + 야간</td><td>🟢</td><td><code>CDY_MACHINE</code></td></tr>
+      <tr><td>16</td><td>k_mph_voyage</td><td>T2 15분 + 야간</td><td>🟢</td><td><code>VSS_STATISTICS</code></td></tr>
+      <tr><td>17</td><td>k_cycle</td><td>T2 15분 + 야간</td><td>🟡</td><td><code>JOB_ORDER_HISTORY</code></td></tr>
+      <tr><td>18</td><td>qc_move_time</td><td>매일 밤 1회</td><td>🟢</td><td><code>MCH_OPERATION</code></td></tr>
+    </tbody>
+  </table></div>
+
+  <div class="kc-cal danger"><span class="h">유지보수 규칙 — 추출이 바뀌면 이 문서도 함께</span><p>이 문서는 <strong>"우리가 본부에서 무엇을 긁는가"의 단일 출처</strong>입니다. 쿼리·주기·테이블·컬럼을 바꾸면 해당 카드를, 새 추출을 추가하면 카드+요약표를, 없애면 카드+표 줄을 함께 고칩니다. "실제 추출 ↔ 이 문서"가 1:1로 맞아야 본부 부담을 한눈에 통제하고 신입에게 그대로 보여줄 수 있습니다.</p></div>
+  <p><em>부하 수치는 쿼리 구조·시간창·주기로부터의 추정입니다(본부에 추가 부담을 주지 않으려 실측하지 않음).</em></p>
+
+  <hr>
+  <p><a href="/kc/data/tos-db-reference.html">TOS DB 레퍼런스 (테이블·컬럼 사전)</a> →</p>
+</main>
+</body>
+</html>

@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>websocket로 KPI 정확도 향상 — WP-TT 지식센터</title>
+  <meta name="description" content="초당 GPS/PLC로 실시간 구간 정확도를 끌어올리고, 잘못 측정되던 지표(TT 사이클 등)를 바로잡은 방법.">
+  <link rel="stylesheet" href="/kc/assets/kc.css">
+  <script defer src="/kc/assets/kc.js"></script>
+</head>
+<body>
+<main class="kc-article" data-page="data/kpi-accuracy" data-source="architecture/kpi-accuracy.md">
+  <h1>websocket로 KPI 정확도 향상</h1>
+  <p class="kc-lede">KPI의 권위는 <strong>TOS</strong>지만, TOS는 몇 분마다 당겨오고 시간 단위로 버킷팅되며 — 때로는 <strong>아예 다른 양을 잽니다</strong>. 초당 GPS/PLC로 실시간 구간 정확도를 올리고 잘못 측정되던 지표를 바로잡습니다. (외부 평가 4회 반영)</p>
+  <div class="kc-meta"><span class="kc-badge kind">아키텍처 · 방법론</span><span class="kc-badge living">리빙 문서</span></div>
+
+  <h2>30초 요약 — 무엇이 어떻게 정확해지나</h2>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th>KPI</th><th>TOS의 문제</th><th>websocket 보정</th></tr></thead>
+    <tbody>
+      <tr><td><strong>TT 사이클</strong></td><td><strong>아예 다른 양</strong> — 컨테이너 작업 생애 span(≈40분)</td><td>GPS로 <strong>실제 트럭 사이클</strong>(배달→배달) ≈10–15분(중앙 ~13분)</td></tr>
+      <tr><td><strong>K_MPH</strong></td><td>3분마다 당김 + 정시버킷</td><td>크레인 PLC 사이클 초당 카운트 → 실시간 QC 처리량</td></tr>
+      <tr><td><strong>K_QC_NOMOVE</strong></td><td>유휴갭 교대 중 과소</td><td>크레인 유휴 + 무트럭 직접 감지 → 기아 실시간</td></tr>
+      <tr><td><strong>K_UTIL</strong></td><td>로그인 세션 기준(논다고 안 빠짐)</td><td>현재 작업중 트럭 비율 — 즉시 교차검증</td></tr>
+    </tbody>
+  </table></div>
+  <div class="kc-cal note"><span class="h">핵심 메시지</span><p>두 방식: ① <strong>더 신선하게</strong>(초당 신호), ② <strong>올바른 양을 측정</strong>(TT 사이클: TOS가 잘못된 걸 재고 있었음). 특히 ②가 본질적 향상. websocket은 <strong>대체가 아니라 보정</strong>이고, 화면에 <strong>⚡(실시간)</strong>으로 구분 표시.</p></div>
+
+  <h2>TT 사이클 재검토 — 잘못 측정되던 지표</h2>
+  <p>대시보드 "TT 사이클 타임"이 <strong>≈40분</strong>으로 비정상적으로 길었습니다.</p>
+  <ul>
+    <li><strong>TOS가 재던 것(잘못) ≈40분</strong>: 컨테이너 작업의 전체 이벤트 span((CONTNO,POINT,SEQNO)별 첫~마지막, 작업당 ~9–12개). 트럭 운반 루프 아님.</li>
+    <li><strong>실제 TT 사이클(GPS) ≈10–15분</strong>: 트럭이 배달→배달까지 한 바퀴.</li>
+  </ul>
+  <h3>조치 — GPS로 실제 사이클 측정</h3>
+  <p>핵심은 <strong>배달 이벤트</strong>를 옳게 잡는 것. 처음엔 "container1 비움"으로 셌는데 틀렸습니다:</p>
+  <pre><code>container1 비움(loaded→EMPTY)만 셈        →   ~90/시간   (❌ 너무 적음)
+container1 변경(nonempty→다른값)을 셈     →  ~574/시간   (✓ 현실적)
+                                            └ 배달의 75%가 A→B 직접전환(빈 값 안 거침)</code></pre>
+  <div class="kc-cal note"><span class="h">왜 정확해지나</span><p>트럭은 A를 배달하고 곧바로 B를 받아 container1이 A→B로 바뀌며 빈 값을 거의 안 거칩니다. "비움"만 보면 배달의 3/4을 놓쳐 처리량 폭망·사이클 폭주. <strong>"비어있지 않은 값에서 다른 값으로의 변경"</strong>을 배달로 세니 574/h로 현실화.</p></div>
+  <div class="kc-cal warn"><span class="h">막다른 길 — 시간 하한으로 "예쁜 값" 만들기 (외부 평가 #3 기각)</span><p>median이 3.0분으로 짧자 "사이클은 더 길어야" 선입견으로 캡 하한을 2→3분으로 올렸으나, 이는 <strong>순환논리</strong>(하한을 올리면 median은 기계적으로 상승) → 기각. <strong>정답 = GPS 이동으로 배달을 직접 검증</strong>: container1이 바뀔 때 트럭이 <strong>≥150m</strong> 움직였으면 진짜 배달, 안 움직였으면 재배정 아티팩트로 기각(600m 점프 가드). "사이클은 길다" 가정 없이 관측 행동으로 판정.</p></div>
+  <div class="kc-cal warn"><span class="h">정직한 한계 — 아티팩트·150m 편향·유휴 포함</span><p>실측(1h): 진짜 배달 236 vs 아티팩트 66 ≈ <strong>78% 진짜</strong>(건수 노출). 150m 컷은 초단거리 하울을 잘라 median을 <strong>약간 위로</strong> 편향(이 지표가 "상한·방향성"인 이유, 100–150m 근접 기각 건수 별도 노출). 배달→배달 간격은 잠깐의 유휴도 포함 → <strong>활성 사이클의 상한</strong>이라 화면 라벨도 "배달간격". n≥20부터만 median 표시·항상 IQR과 함께.</p></div>
+
+  <h3>조치 — TOS로도 트럭 사이클 근사 (GPS와 교차검증)</h3>
+  <p>GPS는 실시간 전용이라, <strong>TOS DB만으로도</strong> 트럭 사이클을 근사. 핵심은 <strong><code>MCH_OPERATION</code></strong>: 크레인 move마다 <strong>트럭 ID(<code>TRK_ID</code>)</strong>와 완료시각이 남습니다(≥35일). QC move(<code>^C##</code>, LD/DS)만 골라 TRK_ID별 완료시각 정렬 → 연속 move 간격 = 한 사이클.</p>
+  <div class="kc-cal note"><span class="h">교차검증 — 독립된 두 방법이 일치</span><p>실측(n=160): <strong>TOS MCH_OPERATION ≈14.2분</strong>, 같은 시기 <strong>GPS ≈13분</strong>. 완전히 다른 출처가 ~13–14분으로 <strong>수렴</strong> — 둘 다 옳은 트럭 사이클을 잰다는 강한 증거이자 TOS의 40분 span과 명백히 다름. 파이프라인 구현 완료(<code>c10_k_tt_cycle.sql</code> → <code>raw_k_tt_cycle</code> → K_CYCLE 카드). <em>(참고: 이 GPS 사이클 기반 cycle-time은 2026-07-15 tt_move_log로 배차→완료 두 TOS 앵커로 재산출됨 — <a href="/kc/dispatch/research-log.html">조사 기록</a>.)</em></p></div>
+
+  <h2>K_MPH · K_QC_NOMOVE · K_UTIL 실시간</h2>
+  <ul>
+    <li><strong>K_MPH</strong>: 크레인 PLC 하중의 빈→적재 상승 에지 = move 1회. 40초 최소간격·롤링 1시간 카운트. 하중 신호가 지저분해 <strong>방향성 교차검증용</strong>.</li>
+    <li><strong>K_QC_NOMOVE</strong>: 가동 QC가 마지막 move 후 유휴(120초↑)인데 도착 TT가 없으면 ≈트럭 대기. 인과 단정 안 함(<strong>후보 신호</strong>, 안벽 QC 한정).</li>
+  </ul>
+  <div class="kc-cal note"><span class="h">K_UTIL — "작업 할당" 기준 (오류 3회 교정)</span><p>정확한 정의: <strong>가동 = 작업 할당~완료</strong>(큐잉 중 멈춰도 가동), <strong>유휴 = 할당 없는 시간</strong>. ① "이동·적재 중"만 가동으로 봐 할당 정차 트럭을 유휴로 오인 → ② GPS 작업필드로 판정하니 13%로 폭락(이 필드는 간헐적, 스냅샷은 대량 누락) → ③ 선박작업(DS/LD)만 봐 야드이동(MI/MO/LC)을 유휴로 오인. 교정: <strong>할당 출처 = TOS 작업풀</strong>(분모·분자 모두 TOS). 실측 <strong>≈63%</strong>(활성 250 / 배치 ~397) — GPS 맨드(~402)와 일치해 견고. 의미: 작업 걸린 ~400대 중 활성 250대뿐, ~147대는 큐 대기 = 과잉공급. 60초마다 <code>util_tt_sample</code>에 적재 → 교대 평균 = 시간기반 가동률.</p></div>
+
+  <h2>한계 · 정직한 노트 (외부 평가 4회 반영)</h2>
+  <ul>
+    <li><strong>TOS가 최종 권위</strong> — websocket은 실시간 추정·교차검증. 화면 ⚡로 구분.</li>
+    <li><strong>트윈/탠덤 과소</strong> — container1 변경 1회라 배달을 1로 셈 → λ가 ~20% 과소.</li>
+    <li><strong>배달 검증</strong> — GPS 이동 ≥150m로(시간 아님). 정지 상태 변경=아티팩트로 기각·건수 노출.</li>
+    <li><strong>콜드스타트</strong> — 재시작 후 윈도우가 찰 때까지(~10분) 표본 부족. 이후 안정.</li>
+  </ul>
+  <p>구현: <code>crates/api/src/livemap.rs</code> · <code>crates/core/src/kpi.rs</code> · <code>web/src/App.tsx</code>.</p>
+
+  <hr>
+  <p>← <a href="/kc/data/kpi-computation.html">KPI 산출</a> · <a href="/kc/data/dispatch-pools.html">배차 풀 (라이브)</a> →</p>
+</main>
+</body>
+</html>

@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>대시보드 완전 해설 — WP-TT 지식센터</title>
+  <meta name="description" content="대시보드의 모든 페이지·모든 숫자를 처음 보는 사람도 이해하도록 — 큰 그림과 데이터 출처.">
+  <link rel="stylesheet" href="/kc/assets/kc.css">
+  <script defer src="/kc/assets/kc.js"></script>
+</head>
+<body>
+<main class="kc-article" data-page="dashboard/index" data-source="dashboard/index.md">
+  <h1>대시보드 완전 해설 — 큰 그림과 데이터 출처</h1>
+  <p class="kc-lede">대시보드의 <strong>모든 페이지에서 보이는 모든 숫자</strong>가 무슨 뜻이고, 어디서 왔고, 어떻게 계산됐는지 — 처음 보는 사람도 이해하도록 풀어 쓴 살아있는 설명서.</p>
+  <div class="kc-meta"><span class="kc-badge kind">대시보드 가이드</span><span class="kc-badge living">리빙 문서</span></div>
+
+  <div class="kc-cal tip"><span class="h">이 문서 묶음은 무엇인가요</span><p>이 페이지는 <strong>큰 그림</strong>이고, 페이지별 상세는 옆 목차의 KPI · TT Dispatch · Cycle · 러닝 센터로 이어집니다.</p></div>
+  <div class="kc-cal warn"><span class="h">유지보수 규칙 — 중요</span><p>이 문서는 <strong>화면(프론트엔드)이 바뀌면 같이 업데이트</strong>합니다. "화면의 숫자 ↔ 설명"이 항상 1:1로 맞아야 신뢰할 수 있는 단일 출처가 됩니다.</p></div>
+
+  <h2>1. 먼저, 여기는 어떤 곳인가요?</h2>
+  <p>항만 터미널을 <strong>아주 거대한 택배 물류센터</strong>라고 생각하세요. 다만 택배 상자 대신 <strong>컨테이너</strong>(쇠로 된 큰 박스)를 다룹니다.</p>
+  <div class="kc-flow">
+    <div class="node">배<span class="sub">Vessel</span></div>
+    <div class="arw">↔</div>
+    <div class="node accent">QC<span class="sub">안벽 크레인 (배↔부두)</span></div>
+    <div class="arw">↔</div>
+    <div class="node accent">TT 트럭<span class="sub">부두↔야드 왕복</span></div>
+    <div class="arw">↔</div>
+    <div class="node accent">RTG<span class="sub">야드 크레인</span></div>
+    <div class="arw">↔</div>
+    <div class="node">야드 블록<span class="sub">보관</span></div>
+  </div>
+  <p>방향: <strong>DS(양하)</strong>는 배→야적장, <strong>LD(적하)</strong>는 그 반대(야적장→배).</p>
+
+  <h3>등장인물 (장비)</h3>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th>약자</th><th>정식</th><th>쉬운 설명</th></tr></thead>
+    <tbody>
+      <tr><td><strong>TT</strong></td><td>Transfer Truck (야드 트럭)</td><td>컨테이너를 싣고 부두↔야적장을 오가는 트럭. <strong>이 대시보드의 주인공.</strong> ~280대</td></tr>
+      <tr><td><strong>QC</strong></td><td>Quay Crane (안벽 크레인)</td><td>배와 부두 사이에서 컨테이너를 드는 큰 팔. ID는 <code>C##</code>. ~28대</td></tr>
+      <tr><td><strong>RTG</strong></td><td>야드 갠트리 크레인</td><td>야적장에서 컨테이너를 쌓고 내림. ~100대</td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>두 가지 일의 방향 (이게 모든 곳에 나옵니다)</h3>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th>약자</th><th>뜻</th><th>방향</th><th>트럭이 하는 일</th></tr></thead>
+    <tbody>
+      <tr><td><strong>DS</strong></td><td>양하 (Discharge)</td><td>배 → 야적장</td><td>QC가 배에서 내린 컨테이너를 트럭이 받아 야적장으로 가져가 RTG에 넘김</td></tr>
+      <tr><td><strong>LD</strong></td><td>적하 (Load)</td><td>야적장 → 배</td><td>RTG가 야적장에서 꺼낸 컨테이너를 트럭이 받아 부두로 가져가 QC에 넘김</td></tr>
+    </tbody>
+  </table></div>
+  <div class="kc-cal note"><span class="h">핵심 한 줄</span><p>DS는 "배에서 야드로", LD는 "야드에서 배로". 트럭은 양쪽 다 <strong>컨테이너를 받아 → 옮겨 → 넘기면 → 빈 차가 됩니다(= 유휴).</strong></p></div>
+
+  <h2>2. 트럭의 하루 = "사이클"의 반복</h2>
+  <p>트럭 한 대는 같은 동작을 계속 반복합니다. 이 한 바퀴를 <strong>사이클(cycle)</strong>이라고 부릅니다.</p>
+  <div class="kc-flow">
+    <div class="node">빈 차<span class="sub">유휴</span></div>
+    <div class="arw">→<span class="lbl">① 공차 주행</span></div>
+    <div class="node">픽업지</div>
+    <div class="arw">→<span class="lbl">② 받기</span></div>
+    <div class="node">적재</div>
+    <div class="arw">→<span class="lbl">③ 적재 주행</span></div>
+    <div class="node">하역지</div>
+    <div class="arw">→<span class="lbl">④ 넘기기</span></div>
+    <div class="node">빈 차<span class="sub">유휴</span></div>
+  </div>
+  <ul>
+    <li><strong>공차(empty)</strong> = 짐이 없는 상태, <strong>적재(laden)</strong> = 짐을 실은 상태.</li>
+    <li><strong>유휴(idle)</strong> = 짐도 없고 다음 일도 안 받아 <strong>놀고 있는</strong> 상태. (놀리면 손해 → 대시보드가 이걸 줄이려 함)</li>
+    <li><strong>trip</strong> = 한 번의 "쭉 이동". 컨테이너 1개 작업 = 보통 <strong>2 trip</strong>.</li>
+  </ul>
+
+  <h2>3. 숫자는 어디서 오나요? — 두 개의 데이터 원천</h2>
+  <p>대시보드의 모든 값은 <strong>딱 두 곳</strong>에서 옵니다. 이 구분이 제일 중요합니다.</p>
+  <p><strong>배치 경로</strong></p>
+  <div class="kc-flow">
+    <div class="node">TOS Oracle<span class="sub">작업 기록 · 15/35일</span></div>
+    <div class="arw">→<span class="lbl">추출기 틱</span></div>
+    <div class="node accent">Postgres<span class="sub">영구 누적</span></div>
+    <div class="arw">→<span class="lbl">읽기</span></div>
+    <div class="node">API</div>
+    <div class="arw">→</div>
+    <div class="node">대시보드</div>
+  </div>
+  <p><strong>실시간 경로</strong></p>
+  <div class="kc-flow">
+    <div class="node">GPS · PLC<span class="sub">websocket</span></div>
+    <div class="arw">→<span class="lbl">SSH 터널 · 메모리만</span></div>
+    <div class="node">API</div>
+    <div class="arw">→</div>
+    <div class="node">라이브맵 · 피드 · 사이클</div>
+  </div>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th></th><th>TOS Oracle (원천 ①)</th><th>websocket (원천 ②)</th></tr></thead>
+    <tbody>
+      <tr><td>성격</td><td><strong>공식 기록</strong> — 무슨 일이 있었나</td><td><strong>실시간 관측</strong> — 지금 어디서 뭐 하나</td></tr>
+      <tr><td>시간</td><td>초 단위(완료 이벤트)</td><td>GPS ~3초 / PLC ~1초마다</td></tr>
+      <tr><td>저장</td><td>Postgres에 영구 누적</td><td><strong>메모리만</strong>(끊기면 화면이 빔)</td></tr>
+      <tr><td>깊이</td><td>최근 며칠치</td><td><strong>지금 이 순간뿐</strong></td></tr>
+      <tr><td>주로 쓰는 곳</td><td><strong>KPI 숫자</strong>, 학습 라벨</td><td><strong>라이브맵·배차 상태</strong>, 사이클 감지</td></tr>
+    </tbody>
+  </table></div>
+  <div class="kc-cal note"><span class="h">한 문장 요약</span><p><strong>KPI 페이지의 점수는 전부 TOS(원천 ①)</strong>, <strong>TT Dispatch의 실시간 트럭 상태는 전부 websocket(원천 ②)</strong>, <strong>러닝 센터는 둘을 섞어</strong> 만듭니다. Cycle 페이지는 websocket으로 트럭 움직임을 추적해 만든 사이클입니다.</p></div>
+
+  <h3>두 원천을 잇는 열쇠 — 같은 ID</h3>
+  <ul>
+    <li>트럭: TOS의 <code>JOB_ODR_YTNO</code>(예 <code>TT1153</code>) = websocket GPS <code>device</code>. → 계획과 실위치를 합침.</li>
+    <li>크레인: TOS의 <code>JOB_QUE_CRANENO</code>(예 <code>C51</code>) = websocket PLC <code>crane</code>. → 계획과 "지금 도는 중"을 합침.</li>
+  </ul>
+
+  <h2>4. TOS의 주요 "일기장"(테이블) 4권</h2>
+  <p>KPI·사이클·학습의 재료가 되는 핵심 테이블입니다. (자세한 컬럼은 <a href="/kc/data/tos-db-reference.html">TOS DB 레퍼런스</a>)</p>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th>테이블</th><th>한 줄 뜻</th><th>1행 =</th><th>여기서 나오는 것</th></tr></thead>
+    <tbody>
+      <tr><td><code>JOB_ORDER_HISTORY</code></td><td>컨테이너 작업 이력</td><td>작업의 한 이벤트</td><td>공차거리·사이클·핸드오버 대기</td></tr>
+      <tr><td><code>MCH_OPERATION</code></td><td>크레인 작업 기록</td><td>크레인 move 1건</td><td>QC 처리량(MPH)·QC 대기</td></tr>
+      <tr><td><code>MCH_WORKTIME</code> / <code>WORKSTOP</code></td><td>트럭 근무/정지 시간</td><td>트럭 근무 세션</td><td>TT 가동률</td></tr>
+      <tr><td><code>JOB_ORDER_LIST</code> / <code>JOB_QUEUE_SCHEDULE</code></td><td><strong>라이브</strong> 작업 풀</td><td>대기/진행 중 작업</td><td>TT Dispatch 작업 큐·미배정 수요</td></tr>
+    </tbody>
+  </table></div>
+
+  <h2>5. websocket의 두 신호</h2>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th>zone</th><th>누가 보냄</th><th>핵심 필드</th><th>쓰임</th></tr></thead>
+    <tbody>
+      <tr><td><code>wpt_gps</code></td><td>모든 장비(TT/RTG/QC)</td><td><code>lat/lon</code> · <code>speed</code> · <code>container1</code>(배정) · <code>topos1</code>(목적지) · <code>arrival</code> · <code>jobtype</code></td><td>위치 표시 + 트럭 상태 분류</td></tr>
+      <tr><td><code>ctab</code></td><td>동적 크레인(C/M/Z만)</td><td><code>crane</code>(ID) · <code>load</code>(하중 톤)</td><td>"크레인 작업 중" + 핸드오버 순간 포착</td></tr>
+    </tbody>
+  </table></div>
+  <div class="kc-cal warn"><span class="h">꼭 기억할 함정 2가지</span>
+    <p>1. <strong>RTG(야드 크레인)는 PLC 신호가 없습니다.</strong> 그래서 양하(DS) 블록 쪽 "넘기는 순간"은 직접 못 보고, <strong>RTG와 트럭의 GPS 거리(≈30m 이내면 작업 중)</strong>로 추정합니다.</p>
+    <p>2. <strong><code>container1</code>은 "지금 싣고 있는 박스"가 아니라 "TOS가 배정한 박스"</strong>입니다. 트럭이 빈 차로 픽업하러 가는 동안에도 채워져 있습니다.</p>
+  </div>
+
+  <h2>6. 시간대 주의 — MYT (터미널 현지)</h2>
+  <ul>
+    <li>터미널/TOS는 <strong>MYT(말레이시아, UTC+8)</strong> 기준입니다.</li>
+    <li><strong>화면에 사람에게 보이는 시각은 터미널 현지 시간(MYT)</strong>으로 표시합니다. (예전 KST 표시는 폐기 — 현지 운영자 기준에 맞춤.)</li>
+    <li>날짜·교대(shift) 경계는 항상 터미널 시간 기준으로 계산합니다(안 그러면 "오늘"이 어긋나 0이 뜸).</li>
+  </ul>
+
+  <h2>7. 페이지 안내</h2>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th>페이지</th><th>한 줄</th><th>주 원천</th><th>상세</th></tr></thead>
+    <tbody>
+      <tr><td><strong>KPI</strong></td><td>터미널이 오늘 얼마나 잘 돌아갔나 (6개 점수)</td><td>TOS ①</td><td><a href="/kc/dashboard/kpi.html">KPI 해설</a></td></tr>
+      <tr><td><strong>TT Dispatch</strong></td><td>지금 트럭들이 어디서 뭐 하나 (실시간 지도·상태)</td><td>websocket ②</td><td><a href="/kc/dashboard/dispatch.html">Dispatch 해설</a></td></tr>
+      <tr><td><strong>Cycle</strong></td><td>트럭 한 바퀴가 어떻게 쪼개지나</td><td>websocket ②</td><td><a href="/kc/dashboard/cycle.html">Cycle 해설</a></td></tr>
+      <tr><td><strong>러닝 센터</strong></td><td>AI가 무엇을·어떻게 학습하고 얼마나 잘 맞히나</td><td>①+②</td><td><a href="/kc/dashboard/learning.html">러닝 센터 해설</a></td></tr>
+    </tbody>
+  </table></div>
+  <p>다음 → <a href="/kc/dashboard/kpi.html">KPI 페이지 해설</a>부터 한 값씩 뜯어봅니다.</p>
+</main>
+</body>
+</html>

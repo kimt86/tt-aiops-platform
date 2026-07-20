@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TT 작업 사이클 감지 로직 — WP-TT 지식센터</title>
+  <meta name="description" content="websocket GPS 피드에서 트럭 작업 사이클을 끊김 없이 감지하고 검증된 사이클을 분해·적재하는 내부 메커니즘.">
+  <link rel="stylesheet" href="/kc/assets/kc.css">
+  <script defer src="/kc/assets/kc.js"></script>
+</head>
+<body>
+<main class="kc-article" data-page="data/cycle-detection" data-source="architecture/cycle-detection-v1.md">
+  <h1>TT 작업 사이클 감지 로직</h1>
+  <p class="kc-lede">websocket GPS 피드에서 모든 야드 트럭의 작업 사이클을 끊김 없이 감지하고, 검증된 사이클을 분해해 영구 적재하는 내부 메커니즘.</p>
+  <div class="kc-meta"><span class="kc-badge kind">아키텍처</span><span class="kc-badge stale">일부 대체됨</span></div>
+
+  <div class="kc-cal warn"><span class="h">현행 상태</span><p>이 문서의 <strong>이동필터 완료 판정</strong>(30초↑ 보유 + 150m↑ 주행)은 <strong>여전히 사이클 완료의 권위 기준</strong>입니다. 다만 <strong>4단계 leg 분해는 현행 5이벤트 모델(<a href="/kc/data/cycle-decomposition.html">사이클 분해</a>)로 대체</strong>됐고, 별도 leg 모션 분해(<code>learn_leg_decomp</code>)는 retire(mig 0081)됐습니다. 아래 4단계 서술은 초기 v1 메커니즘 기록으로 읽으세요.</p></div>
+
+  <h2>1. 왜 내부적으로 사이클을 감지하는가</h2>
+  <p>출발점은 운영 화면의 이상 — "지금 유휴" 트럭이 비정상적으로 많았습니다. WP-TT GPS는 <strong>이벤트 드리븐</strong>이라 빠진 작업 필드가 비어 버리고, 순간 필드가 빈 트럭을 그대로 분류하면 <strong>배정받아 일하던 트럭이 유휴로 둔갑</strong>합니다.</p>
+  <div class="kc-cal note"><span class="h">실측 (2026-06-10)</span><p>dispatch=idle로 분류된 102대 중 <strong>51대(50%)가 TOS 작업풀에 실제 배정(A)</strong>. 진짜 미배정은 약 21대. → 세 목표: ① 끊김 없는 추적(latch+작업풀 교차참조), ② 사이클 축적(<code>tt_cycle_log</code>), ③ 라이브 교정(배정됐는데 대기=staging).</p></div>
+
+  <h2>2. 데이터의 진실 — container1은 '배정' 필드다</h2>
+  <p><code>container1</code>은 트럭이 물리적으로 싣고 있는 게 아니라 <strong>TOS가 배정한</strong> 컨테이너. TOS는 직전 인도 시점에 다음 작업을 미리 배정(c2c)하므로 빈 채로 픽업지로 달리는 동안에도 차 있습니다.</p>
+  <div class="kc-cal tip"><span class="h">검증</span><p>적하(LD) 트럭 <strong>34대가 container1이 세팅된 채 픽업 블록에 ARRIVED</strong> — 아직 컨테이너를 받지도 않았는데. container1 변화 엣지만 보면 공차 구간은 구조적으로 안 보입니다.</p></div>
+
+  <h2>3. 인도(drop) 판정 — 이동필터</h2>
+  <p>인도 후보 = <code>container1</code>이 비어있지 않은 값에서 다른 값으로 바뀌는 순간. 진짜 인도로 인정되려면 두 조건 모두 통과:</p>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th>조건</th><th>상수</th><th>의미</th></tr></thead>
+    <tbody>
+      <tr><td>보유 시간</td><td><code>MIN_LOADED_MS = 30초</code></td><td>컨테이너를 30초 이상 (필드 깜빡임 제거)</td></tr>
+      <tr><td>운반 거리</td><td><code>MIN_CARRY_TRIP_M = 150 m</code></td><td>갖고 있는 동안 150m 이상 주행 (정지 재배정 기각)</td></tr>
+    </tbody>
+  </table></div>
+  <p>거리 누적엔 GPS 점프 가드(<code>MAX_FIX_STEP_M = 600 m</code>). 미달로 기각 → artifact(TOS 재배정 의심)로 별도 집계.</p>
+  <div class="kc-cal note"><span class="h">설계 원칙</span><p>사이클 감지기는 이 검증 엣지를 <strong>그대로 재사용</strong>(감싸기). 별도 감지기를 안 만들어 라이브 KPI(사이클 중위값)와 사이클 로그가 항상 같은 사건을 봅니다.</p></div>
+
+  <h2>4. 끊기지 않는 상태 — latch & 작업풀 교차참조</h2>
+  <ul>
+    <li><strong>필드 latch</strong>: heartbeat가 작업 필드를 생략해도 직전 값 유지. <code>latched_*</code>는 새 값이 실제 도착했을 때만 갱신, 검증 인도 완료 시 비움.</li>
+    <li><strong>작업풀 교차참조</strong>: 백그라운드 태스크가 ~30초마다 <code>live_assigned_tt ⨝ live_workpool</code>을 읽어 트럭별 배정 캐시(<code>assigned_pool</code>) 유지. staging 분류·사이클 오픈 메타에 사용. 5분 스테일 기준.</li>
+  </ul>
+
+  <h2>5. 사이클의 생애 — 상태머신</h2>
+  <p>미배정 → <strong>container1 세팅 = 사이클 오픈</strong> → 공차이동 → 받기 → 부하이동 → 주기 → <strong>인도 = 완료</strong> → 다음 배정.</p>
+  <p><strong>핵심:</strong> 사이클은 물리적 픽업이 아니라 <strong>container1이 세팅되는 순간(= 배정 관측)에 열립니다</strong>. 사이클의 논리적 시작(<code>assigned_at</code>)은 공차 leg 시작(직전 인도)으로 소급 기록됩니다.</p>
+
+  <h2>6. 4단계 분해 — ARRIVED 측면 분류 <span style="font-weight:400;color:var(--faint);font-size:14px;">(→ 현행은 5이벤트)</span></h2>
+  <p>container1이 배정 필드인 이상, 물리적 픽업/인도는 ARRIVED 신호를 "어느 쪽에 도착했는가"로 갈라 복원합니다.</p>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th>단계</th><th>구간</th></tr></thead>
+    <tbody>
+      <tr><td>공차이동</td><td><code>assigned_at → pickup_arrived_at</code></td></tr>
+      <tr><td>받기</td><td><code>pickup_arrived_at → pickup_left_at</code></td></tr>
+      <tr><td>부하이동</td><td><code>pickup_left_at → arrived_at</code></td></tr>
+      <tr><td>주기</td><td><code>arrived_at → dropped_at</code></td></tr>
+    </tbody>
+  </table></div>
+  <p>측면 분류: LD=블록픽업·크레인드롭, DS=반대. <strong>상승엣지만</strong> 인정(스테일 ARRIVED 오인 방지). 표시 클램프로 단조 순서 보증(DB엔 관측값 그대로).</p>
+
+  <h2>7. 영속화 — tt_cycle_log</h2>
+  <p>완료 사이클은 메모리 버퍼에 쌓였다 30초마다 PostgreSQL로. 재시작 안전.</p>
+  <ul>
+    <li>flusher 30초 배치 INSERT. <code>UNIQUE(ytno, dropped_at)</code> + <code>ON CONFLICT DO NOTHING</code>으로 <strong>멱등</strong>.</li>
+    <li>재시작 손실 = 진행 중 사이클 1건 + 미flush 버퍼(~30초). 적재량 ~14,000건/일, append-only, ML용 전량 보존.</li>
+    <li>단계 시각은 <strong>관측 못 한 단계는 NULL</strong>(추정 금지).</li>
+  </ul>
+
+  <h2>8. 라이브 분류 교정 — idle vs staging</h2>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th>상태</th><th>조건</th></tr></thead>
+    <tbody>
+      <tr><td><strong>staging</strong></td><td>공차 + 정지 + <strong>배정됨</strong> → 픽업 순서 대기(가용 자원 아님)</td></tr>
+      <tr><td><strong>idle</strong></td><td>공차 + 정지 + <strong>진짜 미배정</strong> → 즉시 배차 가능</td></tr>
+    </tbody>
+  </table></div>
+  <p>적용 후 idle이 ~102 → ~21로 정상화. staging은 active엔 포함되나 Little's law의 L에선 제외.</p>
+
+  <h2>9. 정직한 한계와 데이터 품질</h2>
+  <div class="kc-cal warn"><span class="h">부분 관측 · assigned_at은 프록시</span><p>단계 시각은 ARRIVED 의존이라 모든 사이클이 4단계를 다 갖지 않음. <code>assigned_at</code>은 GPS에 TOS 배차 시각이 없어 공차 leg 시작(≈직전 drop) 프록시(c2c 덕에 거의 일치하나 "TOS 배차 기록"은 아님).</p></div>
+  <div class="kc-cal tip"><span class="h">관측경계 아티팩트 — 발견과 정정</span><p>"픽업도착 &lt; 배정" 역전 행이 나왔으나, 전수 조사 결과 역전 전부가 assigned==pickup(공차 시작 미관측 fallback)이고 83%가 재시작 후 첫 사이클 — 운영 현상이 아니라 관측 경계 아티팩트. 조치: 공차 leg 시작을 실제 관측한 경우에만 시딩 + 오염 행 정리. "트럭은 배차 없이 작업지점을 알 수 없다"는 상식이 데이터 검증의 잣대가 된 사례.</p></div>
+  <ul>
+    <li><strong>트윈/탠덤</strong>: 물리 1트립 = 1건(<code>twintandem='W'</code>). c1↔c2 슬롯 스왑(20분 50회)은 "비-빈 {c1,c2} 집합이 그대로면 스왑"으로 판정해 가짜 인도 방지.</li>
+    <li>150m 미만 초단거리는 이동필터가 의도적으로 거름.</li>
+  </ul>
+
+  <h2>10. 어디서 쓰이나</h2>
+  <ul>
+    <li><strong>CYCLES 페이지</strong> · <strong>API</strong>(<code>/api/tt-cycles/summary·detail</code>) · <strong>라이브 KPI</strong>(같은 인도 엣지) · <strong>ML 학습 데이터</strong>(<a href="/kc/learn/tt-prediction.html">예측 모형</a>의 per-job 라벨).</li>
+  </ul>
+  <p>용어는 <a href="/kc/reference/glossary.html">용어집</a>, 과정은 <a href="/kc/dispatch/research-log.html">연구 일지</a>, 차세대 설계는 <a href="/kc/learn/cycle-v2-shadow.html">사이클 v2</a> 참고.</p>
+</main>
+</body>
+</html>

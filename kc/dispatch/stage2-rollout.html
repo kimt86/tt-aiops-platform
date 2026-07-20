@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>실제 적용까지 — 안전하게 켜는 단계별 계획 — WP-TT 지식센터</title>
+  <meta name="description" content="2단계 최적 배차를 그림자에서 실제 운영으로 옮길 때 무엇을 어떤 순서로 확인하고 어떤 안전장치를 두는지 — 단계·통과 기준·되돌리기·아직 모델에 없는 위험.">
+  <link rel="stylesheet" href="/kc/assets/kc.css">
+  <script defer src="/kc/assets/kc.js"></script>
+</head>
+<body>
+<main class="kc-article" data-page="dispatch/stage2-rollout" data-source="dispatch/stage2-rollout.md">
+  <h1>실제 적용까지 — 안전하게 켜는 단계별 계획</h1>
+  <p class="kc-lede">2단계 최적 배차를 <strong>실제로 켜기 전에</strong> 무엇을 어떤 순서로 확인하고 어떤 안전장치를 두는지 — 단계·통과 기준·되돌리기·아직 모델에 없는 위험까지. 기술 용어 없이 읽을 수 있게 썼습니다.</p>
+  <div class="kc-meta"><span class="kc-badge kind">배차 · 계획</span></div>
+
+  <h2>지금 어디에 있나</h2>
+  <p>지금은 <strong>그림자(연습) 모드</strong>. 컴퓨터가 "이 트럭을 이 작업에 보내면 좋겠다"를 계속 계산·기록하지만 <strong>실제 배차는 전혀 건드리지 않습니다.</strong> 여기서 이미 확인된 것:</p>
+  <ul>
+    <li>최적 배정이 단순 방식보다 <strong>전체 도착시간을 줄이고</strong> <strong>급한 작업 마감 누락도 줄였습니다.</strong></li>
+    <li>추천이 <strong>흔들리지 않습니다</strong>(안정적). 이동시간은 실제 GPS 주행 기록으로 배운 값(<strong>추론 도로망 경로시간→실제 곡선</strong>, 2026-07-02~)을 씁니다.</li>
+  </ul>
+
+  <h2>4단계로 켠다</h2>
+  <div class="kc-flow">
+    <div class="node accent">A. 그림자<span class="sub">지금 · 무간섭</span></div>
+    <div class="arw">→</div>
+    <div class="node">B. 참고 표시<span class="sub">사람이 보고 판단</span></div>
+    <div class="arw">→</div>
+    <div class="node">C. 제한 적용<span class="sub">일부 구역/시간/대수</span></div>
+    <div class="arw">→</div>
+    <div class="node">D. 전체 적용</div>
+  </div>
+  <ul>
+    <li><strong>A. 그림자 (지금)</strong> — 추천을 기록·검증만. 운영 무간섭.</li>
+    <li><strong>B. 참고 표시</strong> — 추천을 현장/관제에 보여주되 따를지는 사람이 결정. 추천과 실제 결정을 나란히 비교.</li>
+    <li><strong>C. 제한 적용</strong> — 아주 좁은 범위(한 블록 묶음·한 교대·소수 트럭)에서만 실제로 따름. 언제든 끌 스위치와 함께.</li>
+    <li><strong>D. 전체 적용</strong> — 위 단계들이 충분히 안정적이라 확인된 뒤에만.</li>
+  </ul>
+  <div class="kc-cal tip"><span class="h">지금 가능 — 라이브 맵 권고 오버레이</span><p>라이브 맵에서 <strong>"AI 배차 권고"</strong>를 켜면 추천이 트럭→작업 지점 <strong>점선</strong>으로 표시(초록=제때, 주황=늦음, 라벨에 트럭→크레인·예상 분). <strong>참고용일 뿐 실제 배차는 안 바뀝니다.</strong> B단계의 첫 도구.</p></div>
+
+  <h2>넘어가기 전 통과 기준 (Go / No-Go)</h2>
+  <p>각 단계로 넘어가려면 <strong>충분한 기간</strong> 아래가 모두 성립해야 합니다.</p>
+  <ul>
+    <li><strong>효율이 실제로 더 낫다</strong> — 트럭 도착·대기가 기존보다 나빠지지 않음.</li>
+    <li><strong>마감을 더 놓치지 않는다</strong> — 급한 작업 마감 누락이 늘지 않음.</li>
+    <li><strong>크레인을 굶기지 않는다</strong> — "트럭이 없어 멈추는" 일이 늘지 않음(오히려 줄어야).</li>
+    <li><strong>추천이 안정적이다</strong> — 트럭이 작업을 들락날락하지 않음.</li>
+    <li><strong>현장 거부가 적다</strong> — 사람이 추천을 뒤집는 비율이 낮음.</li>
+  </ul>
+  <p>하나라도 어긋나면 넘어가지 않고 이전 단계로 돌아갑니다.</p>
+
+  <h2>안전장치</h2>
+  <div class="kc-cal danger"><span class="h">가장 중요 — 끄기 스위치</span><p><strong>언제든 한 번에 기존 방식으로 되돌릴 수 있어야</strong> 합니다. 이상이 보이면 즉시 끄고 원인을 본 뒤 다시 켭니다.</p></div>
+  <ul>
+    <li><strong>좁은 범위부터</strong> — 정해진 구역·시간·대수로 한정. 문제가 나도 영향이 작게.</li>
+    <li><strong>바닥 안전선</strong> — 어떤 경우에도 크레인을 멈추게 두지 않음. 추천이 이상하면 <strong>가장 가까운 가용 트럭을 보내는 기본 동작</strong>으로 자동 전환.</li>
+    <li><strong>사람이 항상 우선</strong> — 현장/관제가 언제든 추천을 무시·수정.</li>
+    <li><strong>그림자는 계속</strong> — 실제 적용 중에도 "안 따랐다면 어땠을까"를 같이 기록.</li>
+    <li><strong>상시 감시 + 경보</strong> — 마감 누락·크레인 멈춤·흔들림이 기준을 넘으면 자동 경보, 필요시 자동 끄기.</li>
+  </ul>
+
+  <h2>아직 모델이 모르는 것 (위험)</h2>
+  <p>추천이 좋아도 컴퓨터가 아직 보지 못하는 현장 규칙이 있습니다. 실제 적용 전에 반드시 반영하거나 적용 범위에서 <strong>빼야</strong> 합니다.</p>
+  <ul>
+    <li><strong>특별 취급</strong> — 위험물·냉동·초과중량·우선 화물 등.</li>
+    <li><strong>장비·통행 제약</strong> — 특정 트럭만 가는 곳, 일방통행·통제 구역, 정비 중 장비.</li>
+    <li><strong>운영자의 의도</strong> — 사람이 아는 단기 계획(곧 들어올 배, 장비 이동 예정 등).</li>
+  </ul>
+  <div class="kc-cal note"><span class="h">원칙</span><p><strong>모르는 건 건드리지 않는다.</strong> 모델이 다루지 못하는 작업·구역은 적용 범위에서 빼고 기존 방식 그대로 둡니다.</p></div>
+
+  <h2>되돌리기 계획</h2>
+  <ul>
+    <li>이상 징후(마감 누락 급증·크레인 멈춤·흔들림)가 보이면 <strong>즉시 끄기</strong> → 기존 방식 자동 복귀.</li>
+    <li>끈 뒤 무엇이 어긋났는지 그림자 기록으로 분석.</li>
+    <li>원인을 고치고 이전 단계부터 다시 시작.</li>
+  </ul>
+
+  <div class="kc-cal tip"><span class="h">한마디로</span><p><strong>천천히 · 좁게 · 되돌릴 수 있게.</strong> 그림자에서 충분히 확인 → 사람이 보며 판단 → 아주 좁은 범위에서 실제로 따라봄 → 기준 통과 시에만 확대. 언제든 끌 수 있고 크레인은 절대 멈추지 않게.</p></div>
+
+  <hr>
+  <p>자세한 화면은 <a href="/kc/dashboard/stage2-match.html">MATCH 페이지 해설</a>, 만들어 온 과정은 <a href="/kc/dispatch/stage2-journey.html">2단계 여정</a>을 보세요.</p>
+</main>
+</body>
+</html>

@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>OD 이동시간 모델 — 도로망 경로시간 비용 — WP-TT 지식센터</title>
+  <meta name="description" content="배차 3대 입력 중 ③ OD 이동시간이 작업점 코드 → 225m 격자 → 추론 도로망 경로시간→실제시간 곡선으로 진화한 기록, 그리고 모델의 입력·출력(분포)·학습 명세.">
+  <link rel="stylesheet" href="/kc/assets/kc.css">
+  <script defer src="/kc/assets/kc.js"></script>
+</head>
+<body>
+<main class="kc-article" data-page="learn/travel-time" data-source="research/travel-time.md + research/travel-time-model.md">
+  <h1>OD 이동시간 모델 — 배차 입력과 도로망 경로시간 비용</h1>
+  <p class="kc-lede">배차 의사결정의 입력은 셋 — <strong>① 차량 작업 완료 시점, ② 완료 지점, ③ 완료지점→후보 작업지점 이동시간</strong>. 본 글은 <strong>③ OD 이동시간</strong>이 작업점 코드 → 225m 존 격자 → <strong>추론 도로망 경로시간→실제시간 곡선</strong>으로 진화해 온 기록과, 모델의 입력·출력(분포)·학습 명세를 함께 정리합니다.</p>
+  <div class="kc-meta"><span class="kc-badge kind">러닝 · 모델</span><span class="kc-badge living">가동 · 최종 검토 2026-07-02</span></div>
+
+  <h2>한 장 요약</h2>
+  <ol>
+    <li><strong>① 완료 시점:</strong> <code>free_in</code>(곧 빔 ~N분) — 도착 8분·운반 17분·임박 2분, <code>tt_cycle_v2</code>로 측정(<a href="/kc/learn/soon-idle-tos.html">곧유휴 연구</a>). 표시 전용.</li>
+    <li><strong>② 완료 지점:</strong> 작업점 코드(<code>topos1</code>) + 학습 중심좌표 → lat/lon. 라이브.</li>
+    <li><strong>③ OD 이동시간 — 현재(2026-07-02):</strong> 추론 도로망 위 경로시간 → 실측 "실제시간 곡선"으로 변환. 잰 값의 정의는 <strong>순수주행 = 주행 구간 시간</strong>(출발→작업지점 도달; 경로 정체 포함·핸드오버 대기 제외). 225m 존 격자 룩업은 <strong>폐기</strong>(mig 0082). 라우팅 안 되는 소수 쌍(~3%)만 맨해튼 거리→실제 곡선 폴백.</li>
+  </ol>
+  <div class="kc-cal warn"><span class="h">비용 소스 변천 — 정의 4번 + 소스 1번 정리됨</span><p>③ 이동시간 비용이 <strong>순수(pure) → 실측(realized) → 순수주행(움직임만) → 순수주행(구간시간, 격자 룩업) → 도로망 경로시간→실제 곡선(현재)</strong>으로 바뀌었습니다. "움직인 순간만"은 경로 정체까지 벗겨 틀렸고(2026-07-01 정정), 격자 룩업은 커버리지 구멍·격자 태생 한계(다리·일방 표현 불가)로 도로망 라우팅으로 대체(2026-07-02·mig 0082). <strong>삭제된 파이프라인</strong>(문서에 살아있다고 적혀 있으면 낡은 것): <code>learn_travel_zone225_pure/drive</code>, <code>learn_travel_drive_sample</code>, <code>learn_eval</code>, <code>learn_crane_approach</code>(mig 0079), <code>learn_leg_decomp</code>(mig 0081). <code>learn_travel_zone225</code>(실측·핸드오버 포함)은 갱신되나 비용엔 미사용(참조용).</p></div>
+
+  <h2>왜 존인가 — v0의 두 문제</h2>
+  <p>v0는 OD 키가 작업점 풀코드(<code>06T-3233</code>, <code>C21</code>)였습니다.</p>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th>문제</th><th>측정</th><th>처방</th></tr></thead>
+    <tbody>
+      <tr><td><strong>블록 희소</strong></td><td>고유 OD쌍 23,630 중 신뢰(n≥10) <strong>136뿐</strong>(~1.4표본/쌍)</td><td>베이 단위 버킷</td></tr>
+      <tr><td><strong>안벽 앵커 오류</strong></td><td>QC가 이동해 같은 <code>C21</code>이 시점마다 다른 물리위치</td><td>GPS 격자 → (지금은 도로망)</td></tr>
+    </tbody>
+  </table></div>
+
+  <h2>trip이란? (모델의 단위)</h2>
+  <pre><code>빈다 ─[① 유휴]─[② 공차 주행]─[③ 픽업 대기+적재]─ 찬다 ─[④ 적재 주행]─[⑤ 드롭 대기+하역]─ 빈다 …
+                └──── trip ────┘                    └──── trip ────┘</code></pre>
+  <p><strong>trip = 출발지에서 움직이기 시작한 순간 → 목적지에 도달한 순간</strong>(순수 주행 = 이 구간 전체 시간). 경계는 모션 이벤트지 핸드오버가 아님 → 유휴·크레인 대기는 trip에 안 들어감. 컨테이너 작업 1건 = 2 trip(공차 + 적재). 출처: GPS 사이클 추적기 <code>tt_cycle_v2</code>의 레그 left→arrived(속도 기반 모션 경계).</p>
+  <div class="kc-cal note"><span class="h">라벨 = 주행 구간 시간 (2026-07-01 정정)</span><p>한때 라벨을 "움직인 순간만 센 시간(<code>drive_s</code>, 레그의 ~53%)"으로 뒀는데 틀렸습니다. 경로에서 신호·정체로 멈춘 시간은 진짜 이동시간의 일부(날씨·혼잡이 예측할 몫)라 빼면 가까운/먼 트럭 차이를 뭉갬. 반대로 "핸드오버까지 포함"은 크레인 대기까지 섞여 과대. <strong>정답은 그 가운데 — 출발부터 작업지점 도달까지의 구간 시간(<code>total_s</code>).</strong> <code>ARRIVED</code>가 곧 물리 도착(중앙 −4s)이라 큰 크레인 큐는 도착 이후에 있어 자연히 빠짐. 실측 중앙: 거리 781m·구간 237초(13km/h)인데 움직인 순간만 세면 120초(22km/h)로 과소.</p></div>
+
+  <h2>출력 — 왜 "분포"인가 ⭐</h2>
+  <div class="kc-cal tip"><span class="h">가장 중요한 설계 결정</span><p>출력 = 한 숫자(❌ "350초")가 아니라 <strong>분포</strong>(✅ "보통 350초 · 빠르면 200 · 늦으면 700"). 근거: 같은 OD인데도 주행시간이 크게 흩어짐 — 움직인 순간만 잰 성분조차 <strong>동일 OD 내 변동계수 0.758(±76%)</strong>. 모델이 부족해서가 아니라 주행에 정지·큐 노이즈가 섞이고 야드가 확률 시스템이라서 — 결정 시점엔 관측 불가능한 미래 상태. 정직한 출력은 <strong>기댓값 + 불확실폭</strong>.</p></div>
+
+  <h2>입력 설계 ⭐</h2>
+  <p><strong>철칙: "결정 시점에 아는 것"만.</strong> trip 시작 전에 배차하므로 그때 모르는 건 못 씀. ❌ 실제로 달린 경로/거리(사후정보=컨닝) → 대신 "그 OD에서 보통 얼마나 도는지" 학습값.</p>
+  <h3>㉠ "어디서 어디로" — OD 간 차이 (순위 결정, 됨)</h3>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th>입력</th><th>정체</th><th>신호</th></tr></thead>
+    <tbody>
+      <tr><td><strong>도로망 경로시간</strong></td><td>추론 도로망 위 최단시간 경로(차선 속도 반영)</td><td><strong>현재 배차 비용의 본체</strong></td></tr>
+      <tr><td>Manhattan 거리</td><td>안벽 좌표계 격자 거리(<code>quay_manhattan_m</code>)</td><td>라우팅 불능 쌍의 폴백</td></tr>
+      <tr><td><s>출발/도착 존</s></td><td><s>225m OD 격자</s></td><td><s>폐기</s>(mig 0082)</td></tr>
+    </tbody>
+  </table></div>
+  <h3>㉡ "그 순간의 상태" — OD 내부 변동 공략 (수집 중)</h3>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th>입력</th><th>정체</th><th>상태</th></tr></thead>
+    <tbody>
+      <tr><td>날씨(우천)</td><td>시간별 강수 → 우천 시 ~5% 느림</td><td>🔄 약하지만 실재</td></tr>
+      <tr><td>엣지 혼잡</td><td>도로 엣지별 트럭 밀도</td><td>전용도로라 주행속도 영향 ≈0</td></tr>
+      <tr><td>시간대(dow/hour)</td><td>—</td><td>약함, 보조</td></tr>
+    </tbody>
+  </table></div>
+
+  <h2>비용 만드는 법 — 경로시간 → 실제시간 곡선 (+ 폴백)</h2>
+  <ol>
+    <li><strong>도로망 경로시간</strong>: 트럭 위치→작업지점을 추론 도로망(<code>road_node</code>/<code>road_edge</code>) 위에서 최단 '시간'으로(차선별 학습 속도·일방통행 반영). 작업지점 5,888곳이 전부 커넥터로 도로에 붙어 사실상 모든 쌍 계산(성공률 96.7%).</li>
+    <li><strong>경로시간→실제시간 곡선(잔차 학습)</strong>: 경로시간은 물리 추정이라 실제와 체계적으로 다름. 검증 표에서 "이 정도 경로시간이면 실제로 보통 N초"를 6구간(&lt;30/60/120/240/480/≥480초)으로 배워 각 구간 실제 <strong>p50(기대)·p90(보수)</strong>를 매듭으로, 사이는 선형 보간, 첫 매듭 아래는 <strong>바닥 유지(~89초)</strong>, 매듭값에 <strong>단조 잠금</strong>(먼 트럭이 더 싸질 수 없음). 실측 매듭: 경로 19초→실제 89/296 · 90초→102/351 · 344초→193/455 · 713초→296/591 (p50/p90).</li>
+    <li><strong>폴백(라우팅 불능, ~3%)</strong>: 같은 표에서 배운 맨해튼 거리→실제 곡선(R층과 같은 실현 스케일이라 티어 섞여도 공정). 거리÷속도(<code>quay_manhattan_m ÷ 3.30 m/s</code>)는 콜드스타트만.</li>
+  </ol>
+  <div class="kc-cal warn"><span class="h">처음 넣었던 "비율 곱하기" 보정은 당일 리뷰에서 탈락</span><p>처음엔 실제÷경로시간 비율(짧은 1.40배·긴 0.41배)을 구간별로 배워 곱했으나 결함 2개로 같은 날 직접 곡선으로 교체: (a) 비율이 스케일 따라 급감해 경로시간×비율이 <strong>거리에 비단조</strong>(가까운 트럭이 더 비싸져 마감 필터 뒤집힘, 충족률 20.6% 붕괴), (b) 곱셈만으로 짧은 경로 실측 바닥 소실(15초→21초, 실제 ~89초). 곡선 교체 후 마감 충족률 <strong>81.6% 정상화</strong>. 비용 티어: <strong>R</strong>(도로망) / <strong>L3</strong>(맨해튼 폴백). 트럭 스냅 150m(주기장 차선 밖), 작업지점 60m(커넥터로 0m).</p></div>
+
+  <h2>도로망 — 한 번 탈락, 다시 만들어 채택 (2026-07-02)</h2>
+  <p>225m 격자는 너무 거칠어(좁은 다리·일방통행 표현 불가) 버리고 도로망 라우팅을 목표로. GPS로 추론한 도로망을 시간당 Python cron이 생산(<code>scripts/reinfer_roadgraph.sh</code>)해 <code>road_node</code>/<code>road_edge</code>에 적재, Rust 방향 Dijkstra(<code>crates/api/src/roadgraph.rs</code>)가 비용 계산.</p>
+  <div class="kc-cal note"><span class="h">첫 게이트 탈락 → 재구축 통과 (경위)</span><p><strong>첫 판(~264노드)은 탈락이 맞았습니다</strong>(작업점 도로에서 중앙 52m·30%만 계산·상관 Manhattan보다 낮음). 재구축: ① 조밀화(길을 35m 조각), ② <strong>작업점 5,888곳 전부 커넥터로 도로 연결</strong>(52m→0m·100%), ③ <strong>방향은 부모 도로 단위 다수결</strong>(조각별은 지그재그 충돌해 길 끊김) + 지오메트리 기점 정렬(거울상 방지) — 경로 성공률 46.6%→<strong>96.7%</strong>, ④ 트럭 스냅 150m. 이 터미널은 격자형이라 경로거리≈Manhattan(상관 0.998)로 현재 정확도는 대등(경로시간 0.358 vs Manhattan 0.385, 상시 게이트로 측정) — 그래도 도로망을 쓰는 이유는 <strong>천장</strong>(차선속도·혼잡을 반영한 경로'시간')과 <strong>일반성</strong>(비격자 터미널에도 작동).</p></div>
+  <p>검증기(<code>road_route_eval</code>)는 10분마다 실측 빈 트립을 라우팅해 실제(순수주행 라벨) vs 경로시간 vs Manhattan을 나란히 쌓음(21일 자가 백필) — 이 표가 <strong>상시 게이트 지표</strong>이자 <strong>두 비용 곡선의 학습 원천</strong>. 도로망이 좋아지면 곡선과 게이트 수치가 저절로 따라감.</p>
+
+  <h2>실측 발견 (수치)</h2>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th>항목</th><th>결과</th></tr></thead>
+    <tbody>
+      <tr><td>경로 계산 성공률</td><td>46.6% → <strong>96.7%</strong> · 작업점 스냅 52m→<strong>0m(100%)</strong></td></tr>
+      <tr><td>도로망 경로시간 ↔ 실제</td><td>corr <strong>0.358</strong> vs Manhattan <strong>0.385</strong> — 대등권</td></tr>
+      <tr><td>경로거리 ↔ Manhattan</td><td>corr <strong>0.998</strong>(격자형 터미널) — 도로망 가치는 정확도가 아니라 헤드룸+일반성</td></tr>
+      <tr><td>마감 충족(라우팅층)</td><td>비율 곱 20.6% 붕괴 → 직접 곡선 <strong>81.6% 정상화</strong></td></tr>
+      <tr><td>같은 OD 내 변동</td><td>CV <strong>0.758(±76%)</strong> — 진짜 확률성, 시간↔거리 corr ~0.38 천장</td></tr>
+      <tr><td>주행 구간 속도</td><td>≈ <strong>13 km/h</strong>(구간시간) · 움직인 순간만 ~22.8 km/h</td></tr>
+      <tr><td>크레인 진입 대기</td><td><strong>폐기</strong> — 일관 측정 시 중앙 ≈0(옛 67초는 선택편향)</td></tr>
+      <tr><td>날씨(우천)</td><td>~5% 느림(약하나 실재) · 엣지 혼잡 ≈0</td></tr>
+    </tbody>
+  </table></div>
+  <div class="kc-cal warn"><span class="h">크레인 진입 대기 → 폐기 (2026-07-01·mig 0079)</span><p>크레인 앞 진입 대기(<code>arrived − gps_arrived</code>)를 1단계 신호로 쓰려 했으나 폐기. 일관 측정(구간창 안 50m 첫 도착) 시 중앙 ≈0(양하 −1s·적하 −3s)였고, "중앙 67초"는 도착 전에 근처에 찍힌 트럭 절반만 센 <strong>선택편향</strong> + 크레인 좌표를 부두 중심점으로 잡은 부정확. 진짜 크레인 큐는 이동시간이 아니라 도착 이후(크레인 스케줄 = work_eta 영역)라 1단계 마감에 넣지 않음.</p></div>
+
+  <h2>데이터 파이프라인</h2>
+  <pre><code>GPS(이동 트럭) ─매시간 재추론─▶ 도로망 그래프 road_node/road_edge (조밀화 + 작업점 커넥터·방향=부모도로 다수결)
+                                    │
+tt_cycle_v2 ─▶ 빈트립 구간시간 ─▶ learn_travel_sample(leg_ord=0)   │
+                   │                                            ▼
+                   └─10분 검증기: 빈트립 라우팅─▶ road_route_eval (실제 vs 경로시간 vs Manhattan)
+                                                     │
+            배차 비용(매 틱) ◀── 두 실측 곡선: 경로시간→실제 p50/p90 (R) · 맨해튼→실제 (L3)</code></pre>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th>테이블/매트뷰</th><th>내용</th><th>용도</th></tr></thead>
+    <tbody>
+      <tr><td><code>road_node</code>/<code>road_edge</code></td><td>추론 도로망(7,189 노드 — 작업점 5,888 커넥터 포함·일방·차선속도)</td><td><strong>배차 비용의 본체</strong></td></tr>
+      <tr><td><code>road_route_eval</code></td><td>빈트립 1건/행: 실제 구간시간(라벨)·경로시간·경로거리·Manhattan</td><td><strong>두 곡선의 원천 + 상시 게이트</strong></td></tr>
+      <tr><td><code>learn_travel_sample</code> (leg_ord=0)</td><td>빈트립: 구간시간·출발=직전드롭·좌표</td><td>라벨 원천(3주·GPS불필요)</td></tr>
+      <tr><td><code>learn_travel_zone225</code></td><td>존쌍별 실측(핸드오버 포함) p50/p90</td><td>참조용(비용 미사용)</td></tr>
+      <tr><td><s>learn_travel_zone225_drive</s></td><td colspan="2"><strong>폐기(mig 0082)</strong> · <s>learn_leg_decomp</s> retire(mig 0081) · <s>learn_crane_approach</s> 폐기(mig 0079)</td></tr>
+    </tbody>
+  </table></div>
+
+  <h2>배차에서 쓰는 법</h2>
+  <ul>
+    <li>후보를 <strong>p50(기대)로 순위</strong> → 명백히 가까운 트럭 선택(분포 안 겹치면 확실).</li>
+    <li><strong>폭(p10~p90)으로 리스크 관리</strong> — 꽉 짜지 말고 슬랙, 자주 재평가(그리디/롤링).</li>
+    <li>점추정 정밀 최적화 <strong>금지</strong>(노이즈 바닥 밑은 환상).</li>
+  </ul>
+  <div class="kc-cal note"><span class="h">예시 한 건</span><p><strong>입력:</strong> <code>06T-12(블록) → C29(안벽), 공차</code>, 14:30, 비 안 옴 → 도로망 라우팅(경로시간 340초) → <strong>출력(주행):</strong> 곡선에서 <strong>p50 ~193초·p90 ~455초</strong> → <strong>배차:</strong> p50으로 순위, p90으로 마감 여유 검사(크레인 진입 대기 항목 없음 — 측정 ≈0이라 폐기).</p></div>
+  <div class="kc-cal tip"><span class="h">중간 결론</span><p>③ 이동시간은 거친·분포형 입력 — 정밀 점예측은 천장이 낮음(CV 0.758). 배차는 기댓값 + 폭으로 쓰고, 정밀 경쟁 대신 <strong>유휴 제거 + 가용성(곧유휴)</strong> 같은 통제 가능한 레버에 집중. 개선 경로 = 도로망 자체를 살찌우기(차선 속도·혼잡 → 경로'시간'의 헤드룸).</p></div>
+
+  <hr>
+  <p><strong>관련:</strong> <a href="/kc/learn/soon-idle-tos.html">곧 유휴 감지</a> · <a href="/kc/learn/rtg-work-cycle.html">RTG 작업 사이클</a> · <a href="/kc/learn/tt-prediction.html">예측 모형 연구</a></p>
+</main>
+</body>
+</html>

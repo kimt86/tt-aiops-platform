@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>차량 배차 로직 — 두 단계로 나눠 정하기 — WP-TT 지식센터</title>
+  <meta name="description" content="배가 떠나야 하는 마감과 트럭 도착 시간을 함께 따져, 어느 트럭을 어느 안벽크레인에 보낼지 두 단계로 정하는 방법.">
+  <link rel="stylesheet" href="/kc/assets/kc.css">
+  <script defer src="/kc/assets/kc.js"></script>
+</head>
+<body>
+<main class="kc-article" data-page="dispatch/index" data-source="dispatch/index.md">
+  <h1>차량 배차 로직 — 두 단계로 나눠 정하기</h1>
+  <p class="kc-lede">배가 떠나야 하는 시간(마감)과 트럭이 도착하는 시간을 함께 따져, 어느 트럭을 어느 안벽크레인(QC)에 보낼지 <strong>데드라인 인지 2단계</strong>로 정하는 방법. 설계는 이 글에, 알아본 과정은 <a href="/kc/dispatch/research-log.html">조사 기록</a>에 쌓습니다.</p>
+  <div class="kc-meta"><span class="kc-badge kind">배차 · 설계</span><span class="kc-badge living">리빙 문서</span></div>
+
+  <div class="kc-cal note"><span class="h">지금 상태</span><p><strong>1단계(마감 정하기)</strong>는 라이브(그림자) — 배 출항·작업완료 예정을 가져와 크레인별 여유·컨테이너별 배차 마감을 화면에 표시. 크레인별 처리속도·트윈·베이 이동·해치커버까지 반영하고, <strong>유령전환 버그 수정 + 작업 ETA 편향 자가보정</strong>(<code>learn_work_eta_bias</code>) 적용. <strong>2단계(트럭 짝짓기)</strong>도 구축 — 비용행렬 = <strong>곧 빌 때까지(free_in) + 추론 도로망 경로시간</strong>. 둘 다 아직 <strong>추천만(진짜 배차 미연결)</strong>인 그림자 모드입니다.</p></div>
+
+  <h2>1. 무엇을 하려는 걸까</h2>
+  <p>부두에는 여러 QC가 동시에 배 작업을 합니다. 트럭이 모자라면 크레인이 멈추고, 너무 몰리면 낭비입니다. 그래서 <strong>두 가지 시간</strong>을 같이 보고 트럭을 알맞게 나눠 줍니다.</p>
+  <ol>
+    <li><strong>마감 시간</strong> — 이 컨테이너 작업이 늦어도 언제까지 끝나야 배가 제때 떠날 수 있나.</li>
+    <li><strong>도착 시간</strong> — 트럭을 보내면 언제쯤 크레인에 도착해 주고받기가 끝나나.</li>
+  </ol>
+
+  <h2>2. 왜 두 단계로 나눌까</h2>
+  <p>이 부두는 완전 자동이 아니라 데이터가 깔끔하지 않고 <strong>"트럭이 몇 분 뒤 도착할지" 예측이 잘 안 맞습니다.</strong> 그래서 잘 안 맞는 예측 때문에 <em>마감 판단</em>까지 흔들리지 않도록, <strong>"무엇을 해야 하나"(작업)</strong>와 <strong>"누구를 보낼까"(트럭)</strong>를 <strong>따로</strong> 풉니다.</p>
+  <div class="kc-flow v">
+    <div class="node accent">1단계 · 무엇을 할지 (트럭 위치 안 봄)<span class="sub">배 출항 + 크레인 남은 일 → 작업마다 마감 → 마감 vs 평균 도착시간 → "지금 트럭 필요한 작업들"</span></div>
+    <div class="arw">▼</div>
+    <div class="node">2단계 · 누구를 보낼지 (트럭 위치 봄)<span class="sub">각 트럭×각 작업 도착시간 표 → 합이 최소가 되게 짝짓기 → 최종 배차</span></div>
+  </div>
+  <div class="kc-cal tip"><span class="h">핵심</span><p><strong>1단계에서는 어떤 트럭이 어디 있는지 보지 않습니다.</strong> "보통 이만큼 걸린다"는 평균만 쓰니 판단이 흔들리지 않습니다. 잘 안 맞는 위치 예측은 2단계의 "누가 더 가깝나" 비교에만 쓰여 조금 틀려도 영향이 작습니다.</p></div>
+
+  <h2>3. 1단계 — 무엇을 할지 정하기 (트럭 위치 안 봄)</h2>
+  <p><strong>무엇을 보고:</strong> 배가 작업 끝내야 하는 시각(작업완료·출항 예정), 각 크레인에 남은 일의 양, 그리고 트럭이 <strong>보통 도착해 핸드오버까지 끝내는 시간</strong>(양하 ≈5분, 적하 ≈20분 — 적하는 야적장 블록에서 컨테이너를 먼저 집어와야 해서 김).</p>
+  <p><strong>어떻게:</strong> ① "배가 끝내야 할 시각까지 남은 시간"을 남은 작업들에 나눠 <strong>작업마다 마감</strong>(나누는 기준 = 그 크레인의 최근 양하/적하 처리속도). ② <code>마감 − 평균 도착시간 ≤ 지금</code> 이면 <strong>이 작업은 지금 트럭을 붙여야 함.</strong></p>
+  <div class="kc-cal note"><span class="h">크레인별·트윈·베이·해치커버 반영</span><ul>
+    <li><strong>처리속도</strong>는 크레인별·양적하별로 다름(양하 1개당 ~90초/39개, 적하 ~110초/32개, 같은 작업도 크레인마다 79~115초). 데드라인 역산엔 각 크레인의 최근 속도를 사용.</li>
+    <li><strong>트윈</strong>(한 번에 2개): 무브 1번=2개 처리 → 시간은 "남은 컨테이너"가 아니라 <strong>"남은 무브 수"</strong>로(현재 ~25%가 트윈).</li>
+    <li><strong>베이 이동</strong>: 옆 베이로 옮길 때 갠트리 이동(중앙 ~3분)을 베이 전환 횟수만큼 더함.</li>
+    <li><strong>해치커버</strong>: 양하는 덱→홀드 전 커버 열기(~7분), 적하는 홀드→덱 전 커버 덮기(~8분)를 한 베이에 덱·홀드가 다 남으면 한 번 더함.</li>
+  </ul></div>
+  <p><strong>결과:</strong> "지금 배차해야 할 작업 목록" — 이게 그대로 2단계의 후보 작업.</p>
+
+  <h2>4. 2단계 — 누구를 보낼지 정하기 (트럭 위치 봄)</h2>
+  <p><strong>무엇을 보고:</strong> 1단계가 고른 작업들, 보낼 수 있는 트럭(노는 트럭 + 곧 비는 트럭), 트럭·크레인의 현재 위치와 학습된 이동시간 기록.</p>
+  <p><strong>어떻게:</strong> ① <em>각 트럭 × 각 작업</em>에 대해 도착 비용 = <strong>빌 때까지 남은 시간(free_in) + 작업 자리까지 빈 차 이동시간</strong>. 노는 트럭은 free_in=0이라 이동시간만. ② 그 표에서 <strong>모든 트럭 도착시간의 합이 최소</strong>가 되게 짝지음(마감은 1단계가 이미 챙겼으니 여기선 전체가 가장 빨리 자리 잡게).</p>
+  <div class="kc-cal note"><span class="h">'이동시간' 정의 — 순수 주행시간</span><p>트럭이 움직이기 시작해 작업 자리에 도달할 때까지(경로에서 신호·정체로 잠깐 멈춘 것도 포함, 도착 후 크레인과의 대기만 제외). 크레인 앞 줄서기는 도착 <em>이후</em>라 이동시간에 안 넣음. 추정 방법 → <a href="/kc/dispatch/stage2-design.html#도착-시간-추정">도착 시간 추정</a>.</p></div>
+
+  <h2>5. 필요한 재료가 준비됐나</h2>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th>필요한 것</th><th>상태</th><th>설명</th></tr></thead>
+    <tbody>
+      <tr><td>트럭→크레인 <strong>이동시간 예측</strong></td><td>✅</td><td>추론 도로망 길찾기 시간 → 실측 "실제시간 곡선" 변환(2026-07-02~; 라우팅 안 되는 쌍은 맨해튼 거리→곡선). 225m 격자표는 폐기</td></tr>
+      <tr><td>크레인 <strong>남은 일 목록</strong>·컨테이너·예정시각</td><td>✅</td><td>실시간 작업 목록</td></tr>
+      <tr><td>크레인별 <strong>양하/적하 처리속도</strong></td><td>✅</td><td>크레인 작업 기록에서 크레인·작업종류별 최근 속도</td></tr>
+      <tr><td>크레인·트럭 <strong>위치</strong></td><td>✅</td><td>학습된 크레인 위치 + 실시간 GPS</td></tr>
+      <tr><td><strong>배가 떠나는 시간</strong>(출항·작업완료 예정)</td><td>✅</td><td>선박 항차 표(<code>VSB_VOYAGE</code>)를 주기 적재(<code>live_vessel_schedule</code>)</td></tr>
+    </tbody>
+  </table></div>
+
+  <h2>6. 정한 것들 (2026-06-18)</h2>
+  <ol>
+    <li><strong>마감 기준</strong> = 배 출항 예정 시각 + 더 직접적인 작업완료 예정 시각(둘 다 선박 항차 표).</li>
+    <li><strong>1단계 '보통 걸리는 시간'</strong> = 양하/적하 각각 최근 기록의 중앙값(고정값 아님). 1차: 양하 ≈5분, 적하 ≈20분.</li>
+    <li><strong>1단계 결과</strong> = "지금 배차해야 할 작업 목록"(= 2단계 후보).</li>
+    <li><strong>2단계 목표</strong> = 지금부터 모든 트럭이 첫 작업지점 도착까지 걸리는 시간의 합 최소화. 대상 = 노는 트럭 + 곧 비는 트럭.</li>
+  </ol>
+
+  <h2>7. 1단계가 화면에 어떻게 보이나</h2>
+  <p>'TT 배차 현황' 화면(추천만, 진짜 배차는 안 함):</p>
+  <ul>
+    <li><strong>선박마다</strong>: 출항 예정 시각과 지금부터 남은 시간.</li>
+    <li><strong>크레인마다</strong>: 신호등 여유 — 🟢 충분 / 🟡 빠듯 / 🔴 못 끝낼 위험('여유' = 출항 전 남은 일을 다 끝내고도 남는 시간).</li>
+    <li><strong>컨테이너마다</strong>: 배차 마감 카운트다운(<strong>빨강이면 지금 보내야 함</strong>) + 크레인 작업 예정 시각.</li>
+    <li>크레인을 <strong>클릭</strong>하면 그 크레인의 상세 작업 순서로 이동.</li>
+  </ul>
+
+  <h2>8. 잘 되는지 어떻게 확인하나 (검증)</h2>
+  <ol>
+    <li><strong>예측이 맞나 (정확도)</strong> — "X분 뒤 작업된다"는 예측을 실제 작업 시각과 비교(예측을 기록해 두고 평균 오차 산출).</li>
+    <li><strong>도움이 되나 (효과)</strong> — "지금 트럭 보내야 함"인데 안 갔을 때 실제로 그 크레인이 트럭이 없어 멈췄는지 확인(K_QC_NOMOVE 신호).</li>
+  </ol>
+  <p>둘 다 <strong>같은 기록</strong>(예측 표)에서 함께 재고, 며칠 모은 뒤 한 번에 결과를 냅니다.</p>
+
+  <h2>9. 지킬 원칙</h2>
+  <ul>
+    <li><strong>먼저 추천만</strong> — 맞는지 확인한 뒤 적용.</li>
+    <li><strong>관측 못 한 값은 비워둠</strong>(억지 추정 금지).</li>
+    <li>사람이 보는 시간은 <strong>현지(말레이시아 MYT) 시간</strong>으로.</li>
+  </ul>
+
+  <hr>
+  <p><strong>알아본 과정 →</strong> <a href="/kc/dispatch/research-log.html">차량 배차 — 조사 기록</a></p>
+</main>
+</body>
+</html>

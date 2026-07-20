@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TOS DB 종합 레퍼런스 — WP-TT 지식센터</title>
+  <meta name="description" content="Westports TOS(Oracle) 테이블·컬럼·보존특성·코드를 총망라한 단일 진실 소스.">
+  <link rel="stylesheet" href="/kc/assets/kc.css">
+  <script defer src="/kc/assets/kc.js"></script>
+</head>
+<body>
+<main class="kc-article" data-page="data/tos-db-reference" data-source="architecture/tos-db-reference.md">
+  <h1>TOS DB 종합 레퍼런스</h1>
+  <p class="kc-lede">Westports <strong>TOS(Oracle)</strong> — 제품이 쓰는 권위적 데이터 원천의 테이블·컬럼·보존특성·코드. "어디서 무엇이 나오고, 얼마나 남고, 무엇을 조심해야 하는가"의 단일 진실 소스.</p>
+  <div class="kc-meta"><span class="kc-badge kind">레퍼런스</span><span class="kc-badge living">리빙 문서</span></div>
+
+  <h2>개요 · 데이터 아키텍처</h2>
+  <p>데이터는 두 원천에서 나와 <strong>Postgres 3-tier</strong>로 흐릅니다. 대시보드/API는 <strong>Postgres만</strong> 읽고, <strong>prod Oracle은 추출기만</strong> 건드립니다(읽기전용·인덱스레인지·<code>FETCH FIRST</code>·<code>NO_PARALLEL</code>).</p>
+  <pre><code>TOS Oracle  ──(추출기: 일/교대 틱)──▶  Postgres L0 raw_* ──▶ L1 kpi_daily ──▶ L2 baseline
+TOS Oracle  ──(추출기: 작업풀 90s)────▶  Postgres live_workqueue/live_workpool
+websocket   ──(SSH 터널 → API 인제스트)▶ 메모리(라이브맵·배차)  ※DB 미적재
+대시보드/API ──읽기──▶ Postgres only    ※Oracle 직접 접근 절대 금지</code></pre>
+
+  <h2>보존 기간 — 가장 중요한 특성</h2>
+  <p>TOS Oracle은 <strong>롤링 보존</strong>이라 오래된 날짜가 자동 삭제됩니다.</p>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th>소스 테이블</th><th>보존</th><th>영향받는 KPI</th></tr></thead>
+    <tbody>
+      <tr><td><code>JOB_ORDER_HISTORY</code></td><td>약 15일</td><td>공차·공차비율·사이클·핸드오버대기</td></tr>
+      <tr><td><code>MCH_OPERATION</code> / <code>VSS_STATISTICS</code></td><td>≥ 35일</td><td>MPH·QC대기·가동률·항차 통계</td></tr>
+      <tr><td><code>YT_DIS_DT</code>/<code>ACTV_DT</code></td><td>오래된 날 희소</td><td>K_RTG_Q</td></tr>
+    </tbody>
+  </table></div>
+  <div class="kc-cal warn"><span class="h">실무 결론 — 깊은 백필 불가</span><p>공차/사이클 <strong>~15일</strong>, MPH/QC대기/가동률 <strong>~35일</strong>까지만 백필 가능. 그 이전(특히 1~4월)은 Oracle에서 이미 삭제. <strong>과거 깊이는 "추출을 시작한 시점"부터 앞으로만 영구 누적</strong>.</p></div>
+
+  <h2>TOS Oracle 테이블</h2>
+  <h3>3.1 <code>JOB_ORDER_HISTORY</code> — 컨테이너 작업 이력</h3>
+  <p>이동거리·사이클·크레인 큐 대기의 원천. 한 작업 = (CONTNO, POINT, SEQNO).</p>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th>컬럼</th><th>의미</th></tr></thead>
+    <tbody>
+      <tr><td><code>JOB_HIST_DATE/TIME</code></td><td>이벤트 날짜(인덱스 술어)/시각.</td></tr>
+      <tr><td><code>JOB_HIST_JOBTYPE</code></td><td>LD 적하·DS 양하·MO/MI 이적·RH 재취급·GI/GO 게이트.</td></tr>
+      <tr><td><code>JOB_HIST_CONTNO / POINT / SEQNO</code></td><td>(CONTNO·POINT·SEQNO) = 한 작업.</td></tr>
+      <tr><td><code>JOB_HIST_ARMGC</code></td><td>작업 크레인 ID. <strong>주의: RTG·ES·XXX만 — C##(안벽)은 없음</strong>(야드측).</td></tr>
+      <tr><td><code>YT_DIS_DT → JOB_HIST_ACTV_DT</code></td><td>차이 = <strong>크레인 큐 대기(K_RTG_Q)</strong> = <code>(ACTV_DT − YT_DIS_DT)·86400</code>초.</td></tr>
+      <tr><td><code>LNDN_TRV_RNG / UN_LNDN_TRV_RNG</code></td><td><strong>적재거리 / 공차거리</strong>(미터). 공차비율 = Σ공차/Σ(적재+공차).</td></tr>
+    </tbody>
+  </table></div>
+  <div class="kc-cal warn"><span class="h">⚠ YT_DIS_DT 의미 재검토 (2026-07-15 소스 조사)</span><p>이 표는 <code>YT_DIS_DT</code>를 "TT 하차 시각"으로 서술하지만, TOS 소스(<code>oss-core</code> jobschedule.relay)와 데이터 대조 결과 <strong>실은 "DISpatch(배차 배정) 시각"</strong>입니다("DIS"=DIScharge 아님). 그러면 <strong>K_RTG_Q = ACTV_DT − YT_DIS_DT가 하차→활성이 아니라 배차→활성(≈전체 사이클)을 재는 셈이라 과대</strong>일 수 있어 감사 필요. 상세 <a href="/kc/dispatch/research-log.html">조사 기록</a>.</p></div>
+
+  <h3>3.2 <code>MCH_OPERATION</code> — 크레인 작업 기록 (move 단위)</h3>
+  <p>QC 생산성(MPH)·QC 유휴·크레인 가동률의 원천. 깊게 보존(≥35일).</p>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th>컬럼</th><th>의미</th></tr></thead>
+    <tbody>
+      <tr><td><code>MCH_OPER_MACHNO</code></td><td><code>^C[0-9]+$</code> = QC(안벽), RTG·M·Z 등.</td></tr>
+      <tr><td><code>ST_DT</code></td><td>move 시작(단, 완료 시 소급 기록되는 큐잉 시각).</td></tr>
+      <tr><td><code>COMPDATE + COMPTIME</code></td><td>완료(물리적 완료). 인덱스 술어 = COMPDATE.</td></tr>
+      <tr><td><code>TRK_ID</code></td><td>이 move를 처리한 트럭(TT) ID.</td></tr>
+    </tbody>
+  </table></div>
+  <p>인터벌 병합으로 크레인 가동 구간을 만들고, <strong>병합 구간 사이의 갭 = QC 유휴(K_QC_NOMOVE)</strong>.</p>
+
+  <h3>3.3 <code>VSS_STATISTICS</code> — 항차 계획·실적</h3>
+  <p>(선박, 항차)당 1행. 계획 물량·규격 혼합·공식 생산성(<code>GQCR/NQCR</code> = 공식 MPH). 30일 윈도우.</p>
+
+  <h3>3.4 작업시간·장비 마스터 (가동률 입력)</h3>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th>테이블</th><th>의미</th></tr></thead>
+    <tbody>
+      <tr><td><code>MCH_WORKTIME</code></td><td>TT 작업/로그인 세션 → 가동률(K_UTIL_TT).</td></tr>
+      <tr><td><code>MCH_WORKSTOP</code></td><td>TT 정지/휴식 → 가동시간에서 차감.</td></tr>
+      <tr><td><code>CDY_MACHINE</code></td><td>장비 마스터. TYPE='YT'로 TT 필터.</td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>3.5 라이브 작업지시 — 작업 풀 (현재 진행/대기)</h3>
+  <p>완료 이력(3.1~3.4)과 달리 <strong>지금 처리할 작업</strong>은 두 라이브 테이블에. 90초 추출 → TT 페이지. (<a href="/kc/data/dispatch-pools.html">차량·작업 풀 갱신</a>)</p>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th>JOB_ORDER_LIST 컬럼</th><th>의미</th></tr></thead>
+    <tbody>
+      <tr><td><code>JOB_ODR_JOBSTATUS</code></td><td>A 활성 · Q 대기 · P 계획 · B 차단 · C 완료. 라이브 = A/Q/P/B + COMPDATE IS NULL.</td></tr>
+      <tr><td><code>JOB_ODR_YTNO</code></td><td><strong>배정된 TT</strong>. GPS device와 일치.</td></tr>
+      <tr><td><code>JOB_ODR_ETW_DT</code></td><td><strong>ETW = 크레인 준비 시각</strong>. ETW − 현재 = 시급도.</td></tr>
+      <tr><td><code>JOB_ODR_ARMGC / CONTNO / YT_TOPOS</code></td><td>야드크레인 / 컨테이너 / 야드 블록-베이.</td></tr>
+    </tbody>
+  </table></div>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th>JOB_QUEUE_SCHEDULE 컬럼</th><th>의미</th></tr></thead>
+    <tbody>
+      <tr><td><code>JOB_QUE_CRANENO</code></td><td><strong>QC</strong>(C##). websocket GPS/PLC 크레인 id와 직접 매칭.</td></tr>
+      <tr><td><code>JOB_QUE_SEQ</code></td><td>QC가 큐를 처리하는 순서.</td></tr>
+      <tr><td><code>TOTALQTY / COMPQTY</code></td><td><strong>잔여(백로그) = TOTAL − COMP</strong>.</td></tr>
+    </tbody>
+  </table></div>
+
+  <h2>코드 · 의미 사전</h2>
+  <p><strong>작업종류</strong>: LD 적하 · DS 양하 · MO/MI 구내이적 · RH 재취급 · GI/GO 게이트. 배차 핵심은 LD·DS·MO·MI.<br>
+  <strong>장비 프리픽스</strong>: TT 야드트럭 · RTG 야드 갠트리 · C## 안벽(QC) · M## 모바일하버 · Z# 스트래들 · ES/RS 스태커.</p>
+  <div class="kc-cal warn"><span class="h">PLC를 주는 크레인</span><p>실시간 PLC(<code>ctab</code>)는 <strong>동적 크레인 C/M/Z만</strong> 송신. <strong>RTG는 PLC 미수신</strong> → 양하 블록측 핸드오버는 GPS·근접도로만 추정.</p></div>
+  <p><strong>POINT_TYPE</strong>: 1 안벽 · 2 블록 side · 3 블록 end · 4 buffer · 5 게이트IN · 6 게이트OUT · 7 battery · 10 handler · 11 pinning. 레이아웃은 mm CAD → 아핀 투영으로 lat/lon(RMS ~70m).</p>
+
+  <h2>7개 KPI 정의</h2>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th>KPI</th><th>단위·방향</th><th>정의 (소스)</th></tr></thead>
+    <tbody>
+      <tr><td><strong>K_EMPTY</strong> 공차거리</td><td>km/Job · 낮↑</td><td>Σ공차m / Σjobs / 1000</td></tr>
+      <tr><td><strong>K_EMPTY_R</strong> 공차비율</td><td>% · 낮↑</td><td>Σ공차m / Σ(공차+적재)m</td></tr>
+      <tr><td><strong>K_CYCLE</strong> 사이클타임</td><td>s · 낮↑</td><td>작업 첫~마지막 이벤트 간격의 jobs-가중평균</td></tr>
+      <tr><td><strong>K_UTIL</strong> TT 가동률</td><td>% · 높↑</td><td>TT별 min(1, 가동분/경과분)의 평균·100 (avg-of-ratios)</td></tr>
+      <tr><td><strong>K_QC_NOMOVE</strong> QC 대기</td><td>s · 낮↑</td><td>QC 병합 구간 사이 유휴 갭 평균</td></tr>
+      <tr><td><strong>K_MPH</strong> QC 처리량</td><td>move/hr · 높↑</td><td>QC move/active-hour의 active_hours-가중평균</td></tr>
+      <tr><td><strong>K_RTG_Q</strong> (숨김)</td><td>s · 낮↑</td><td>(ACTV_DT − YT_DIS_DT) — 야드 핸드오버 대기(위 caveat 참조)</td></tr>
+    </tbody>
+  </table></div>
+
+  <h2>서빙 모델 (PostgreSQL 3-tier)</h2>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th>계층</th><th>역할</th></tr></thead>
+    <tbody>
+      <tr><td>L0 raw (<code>raw_*</code>)</td><td>Oracle 일 스냅샷(분자/분모 보존). 멱등 upsert.</td></tr>
+      <tr><td>L1 rollup (<code>kpi_daily</code>)</td><td>KPI별 일 권위 값(트렌드·이력 소스).</td></tr>
+      <tr><td>L2 stats (<code>kpi_baseline</code>)</td><td>4주 롤링 + Welch t-test.</td></tr>
+      <tr><td>LIVE (<code>kpi_shift</code> 등)</td><td>현재 교대 누적 → "오늘"을 Oracle 재스캔 없이.</td></tr>
+      <tr><td>작업풀 (<code>live_workqueue/pool</code>)</td><td>90초 full-replace.</td></tr>
+    </tbody>
+  </table></div>
+  <div class="kc-cal warn"><span class="h">시간대(필수)</span><p>서버는 KST지만 터미널/Oracle은 <strong>MYT(UTC+8, Westports)</strong>. 교대 감지·기간 경계는 반드시 <code>wp_core::shift::terminal_now()</code> 사용(서버 <code>Local::now()</code>를 쓰면 교대 1h 오판·0행). 화면 표시 시각도 터미널 현지(MYT).</p></div>
+
+  <h2>함정 · 운영 노트</h2>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th>함정</th><th>대응</th></tr></thead>
+    <tbody>
+      <tr><td>SQL 주석의 아포스트로피</td><td><code>--</code> 주석에 <code>'</code>가 있으면 toolbox/Oracle HTTP 400. 곱슬따옴표도 금지.</td></tr>
+      <tr><td>시간대 MYT vs KST</td><td><code>terminal_now()</code> 필수.</td></tr>
+      <tr><td>K_RTG_Q 라벨 오해</td><td>"QC 대기" 아님 — 야드 핸드오버 대기(ARMGC=RTG/ES). + YT_DIS_DT 의미 재검토(위).</td></tr>
+      <tr><td>RTG PLC 없음</td><td>양하 블록측은 GPS·근접도로 추정.</td></tr>
+      <tr><td>보존 한계</td><td>깊은 과거는 백필 불가. 깊이는 앞으로만 누적.</td></tr>
+      <tr><td>직접 ssh+curl 금지</td><td>Oracle 접근은 승인된 <code>remote-toolbox-sql</code>만.</td></tr>
+    </tbody>
+  </table></div>
+</main>
+</body>
+</html>

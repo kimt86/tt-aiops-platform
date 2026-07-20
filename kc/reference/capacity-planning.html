@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>클라우드 용량 산정 — CPU · 메모리 — WP-TT 지식센터</title>
+  <meta name="description" content="플랫폼(대시보드·실시간 수집·KPI)과 배차 로직(1·2단계)을 클라우드에 띄울 때 필요한 vCPU·메모리·스토리지 추정. ML 학습은 별도 서버.">
+  <link rel="stylesheet" href="/kc/assets/kc.css">
+  <script defer src="/kc/assets/kc.js"></script>
+</head>
+<body>
+<main class="kc-article" data-page="reference/capacity-planning" data-source="architecture/capacity-planning.md">
+  <h1>클라우드 용량 산정 — CPU · 메모리</h1>
+  <p class="kc-lede">플랫폼(대시보드·실시간 수집·KPI)과 <strong>배차 로직(1·2단계)</strong>을 클라우드에 띄울 때 필요한 vCPU·메모리·스토리지 추정. <strong>ML 학습은 다른 서버</strong>에서 별도 산정. 핵심: <strong>서빙·배차는 가볍고, 무거운 건 학습</strong>.</p>
+  <div class="kc-meta"><span class="kc-badge kind">레퍼런스 · 인프라</span><span class="kc-badge living">기준 2026-06-09</span></div>
+
+  <h2>권장 사양 요약</h2>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th>구분</th><th>최소</th><th>권장</th><th>넉넉(여유)</th><th>비고</th></tr></thead>
+    <tbody>
+      <tr><td><strong>1단계</strong> 플랫폼+규칙배차</td><td>4 vCPU·8 GB</td><td><strong>8 vCPU·16 GB</strong></td><td>8 vCPU·16–32 GB</td><td>단일 노드 가능 (+관리형 Postgres 2–4 vCPU·8–16 GB 별도)</td></tr>
+      <tr><td><strong>2단계</strong> +예측 추론</td><td>플랫폼 8·16 +배차 4·8</td><td><strong>플랫폼 8·16 +배차/추론 8·16</strong></td><td>합쳐 16 vCPU·32 GB</td><td>추론 가벼움(트리)</td></tr>
+      <tr><td><strong>학습</strong> (별도·배치)</td><td>16 vCPU·64 GB</td><td><strong>32 vCPU·128 GB</strong></td><td>+GPU 1장</td><td>배치·spot 가능</td></tr>
+    </tbody>
+  </table></div>
+  <div class="kc-cal note"><span class="h">사이징 원칙 — 의도된 여유</span><p>수치는 <strong>의도적으로 보수적(넉넉)</strong>하게, <strong>범위(최소→권장→넉넉)</strong>로 제시. 권장값에 이미 헤드룸이 들어 있어 <strong>실측 부하 테스트·모니터링 이후 다운사이징(right-size down) 가능</strong> — 이 버퍼는 의도된 것. 불확실하면 권장~넉넉에서 시작하고 안정화되면 비용을 줄이세요.</p></div>
+  <div class="kc-cal note"><span class="h">왜 가벼운가</span><p>실시간 서빙·배차 부하는 <strong>websocket 수집(~90 msg/s)</strong>과 대시보드 폴링이 대부분인데 둘 다 가벼움(코어 1개 미만). 배차 최적화(헝가리안)·예측 추론도 결정당 수~수십 ms. <strong>진짜 자원이 드는 건 ML "학습"</strong>이고 상시가 아니라 배치라 별도 서버에서 필요할 때만.</p></div>
+
+  <h2>구성요소 — 무엇이 자원을 쓰나</h2>
+  <ul>
+    <li><strong>① 플랫폼(상시)</strong> — API(axum, WS 수집 + 메모리 라이브맵 + 대시보드 서빙) · PostgreSQL · 추출기(타이머) · 웹(정적) · SSH 터널.</li>
+    <li><strong>② 배차 엔진(상시)</strong> — 차량 풀·후보 작업 풀을 읽어 매칭/배정(헝가리안). 1단계=규칙, 2단계=결정 시 예측 추론 호출 후 최적화.</li>
+    <li><strong>③ ML 학습(배치·별도)</strong> — 누적 데이터로 2단계 모형 학습. 상시 아님(야간/주간), 다른 서버(CPU 다코어, 필요 시 GPU).</li>
+  </ul>
+
+  <h2>워크로드 규모 — 사이징 근거</h2>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th>항목</th><th>값 (측정/추정)</th><th>자원 함의</th></tr></thead>
+    <tbody>
+      <tr><td>추적 장비</td><td>~450대 (TT~280·RTG~100·QC~28+)</td><td>메모리 라이브맵 &lt; 5 MB</td></tr>
+      <tr><td>websocket 수신율</td><td>~70–90 msg/s (GPS ~40 + PLC ~30–50)</td><td>JSON 파싱 — 코어 &lt; 2%</td></tr>
+      <tr><td>대시보드 동시 사용자</td><td>5–50 (내부)</td><td>폴링 서빙 — 코어 &lt; 10%</td></tr>
+      <tr><td>추출 주기</td><td>작업풀 90s · 교대 3/15분 · 야간 1회</td><td>버스트 1코어 수초, 평균 무시</td></tr>
+      <tr><td>배차 결정 주기</td><td>이벤트/2–5초</td><td>최적화 결정당 수~수십 ms</td></tr>
+      <tr><td>서빙 DB 크기</td><td>KPI·스냅샷 수 GB (느린 증가)</td><td>RAM 1–2 GB로 캐시</td></tr>
+    </tbody>
+  </table></div>
+  <p>장비가 450대뿐이고 메시지도 초당 ~90건. 배차 최적화도 "유휴 트럭 × 후보 작업"의 작은 행렬(수백×수백)이라 헝가리안이 ms 단위로 끝남 — 대규모 트래픽 서비스가 아니라 <strong>한 터미널 규모의 실시간 제어</strong>라 코어·메모리 요구가 작다.</p>
+
+  <h2>1단계 사이징 — 플랫폼 + 규칙 배차</h2>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th>컴포넌트</th><th>vCPU 평상→권장→넉넉</th><th>RAM 평상→권장→넉넉</th></tr></thead>
+    <tbody>
+      <tr><td>API (axum + WS 수집 + 라이브맵)</td><td>0.3 → 1.5 → 2.5</td><td>150 MB → 1 → 2 GB</td></tr>
+      <tr><td>PostgreSQL</td><td>0.5 → 2 → 4</td><td>1 → 4 → 8 GB</td></tr>
+      <tr><td>추출기 (타이머)</td><td>~0.05 → 1 → 1.5*</td><td>100 → 256 → 512 MB</td></tr>
+      <tr><td>배차 엔진 (규칙·헝가리안)</td><td>0.3 → 1.5 → 2.5</td><td>256 MB → 1 → 2 GB</td></tr>
+      <tr><td>웹·터널·OS 오버헤드</td><td>~0.1 → 0.5 → 1</td><td>64 MB → 1 → 2 GB</td></tr>
+      <tr><td><strong>합계 (단일 노드)</strong></td><td><strong>~1.3 → 4 → 8 vCPU</strong></td><td><strong>~1.6 → 8 → 16 GB</strong></td></tr>
+    </tbody>
+  </table></div>
+  <div class="kc-cal tip"><span class="h">1단계 권장</span><p><strong>최소 4 vCPU·8 GB → 권장 8 vCPU·16 GB</strong> 단일 노드로 전부 수용. 운영 안정성을 원하면 PostgreSQL은 관리형(2–4 vCPU·8–16 GB)으로 분리. 예: AWS m6i.2xlarge / GCP e2-standard-8 / Azure D8s_v5. 실측 후 4 vCPU·8 GB로 줄일 여지가 큼.</p></div>
+
+  <h2>2단계 사이징 — + 예측 추론</h2>
+  <p>배차 결정 때 모형으로 예측(이동시간·ETW·블록 핸드오버)을 만들어 더 정확히 매칭. 추론은 1단계 위에 얇게 얹힘(학습은 별도).</p>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th>추가분 (배차/추론 노드)</th><th>vCPU 평상→권장→넉넉</th><th>RAM 평상→권장→넉넉</th></tr></thead>
+    <tbody>
+      <tr><td>예측 추론 (배차 엔진 내)</td><td>+0.5 → 1.5 → 2.5</td><td>+0.3 → 1 → 2 GB</td></tr>
+      <tr><td>피처 조립 (라이브+캐시)</td><td>+0.3 → 1 → 2</td><td>+0.2 → 1 → 2 GB</td></tr>
+      <tr><td>학습데이터 적재 (record-only)</td><td>+0.2 → 0.5 → 1</td><td>+0.2 → 0.5 → 1 GB</td></tr>
+      <tr><td><strong>배차/추론 노드 합</strong></td><td><strong>~1.1 → 4 → 8 vCPU</strong></td><td><strong>~1 → 8 → 16 GB</strong></td></tr>
+    </tbody>
+  </table></div>
+  <div class="kc-cal note"><span class="h">왜 추론이 가벼운가</span><p>2단계 예측은 표 형식 — <strong>그래디언트 부스팅 트리</strong>(LightGBM/XGBoost) 추론은 건당 µs, 모형은 RAM 수십 MB. 결정당 수천 건 예측해도 한 자릿수 ms. <strong>GPU 불필요</strong>(학습 때만 선택). 노드 사양은 추론보다 운영 격리·버스트 여유용.</p></div>
+
+  <h2>ML 학습 — 별도 서버 (배치)</h2>
+  <p>2단계 모형을 누적 데이터로 학습. 상시가 아니라 야간/주간 배치라 서빙 클러스터와 분리된 서버에서 필요할 때만. 데이터 규모: 완료 작업 ~15K move/일 → 6개월 ≈ 2.7M 행 × 피처 30–50개. 학습 행렬 ≈ ~1 GB(중간물 포함 4–16 GB).</p>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th>접근</th><th>vCPU 최소→권장</th><th>RAM 최소→권장</th><th>GPU</th><th>학습시간(1회)</th></tr></thead>
+    <tbody>
+      <tr><td><strong>트리모형</strong>(LightGBM/XGBoost) — 권장</td><td>16 → 32</td><td>64 → 128 GB</td><td>—</td><td>수분 ~ 1시간</td></tr>
+      <tr><td>딥러닝 (선택: 시퀀스/그래프)</td><td>8 → 16</td><td>32 → 64 GB</td><td>1× T4/A10/L4</td><td>수 시간</td></tr>
+      <tr><td>대형 딥러닝 (선택·여유)</td><td>16 → 32</td><td>64 → 128 GB</td><td>1× A100(40–80G)</td><td>수 시간~</td></tr>
+    </tbody>
+  </table></div>
+  <div class="kc-cal note"><span class="h">학습 서버 권장</span><p>ETW·이동시간 예측은 트리모형으로 충분 → <strong>최소 16 vCPU·64 GB → 권장 32 vCPU·128 GB (GPU 불필요)</strong>. 배치라 spot/preemptible로 비용 절감, 학습 끝나면 종료. <strong>학습 산출물(모형 파일, 수~수십 MB)만 서빙 노드로 배포</strong>.</p></div>
+  <div class="kc-cal warn"><span class="h">학습은 데이터 누적이 선행</span><p>2단계 학습엔 수개월치 필요. TOS 보존은 ~15/35일뿐이라(<a href="/kc/data/tos-db-reference.html">레퍼런스 §2</a>), <strong>1단계 운영과 동시에 매일 스냅샷을 적재</strong>해 두어야 6–12개월 뒤 학습 가능(record-only 파이프라인).</p></div>
+
+  <h2>스토리지 · 네트워크</h2>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th>항목</th><th>크기/대역</th><th>권장 (최소→권장→넉넉)</th></tr></thead>
+    <tbody>
+      <tr><td>서빙 PostgreSQL</td><td>KPI·스냅샷 수 GB, 느린 증가</td><td>100 → 150 → 250 GB SSD (자동 확장)</td></tr>
+      <tr><td>학습데이터 (집약 피처)</td><td>수 GB → 수십 GB / 누적</td><td>10 → 50 → 100 GB</td></tr>
+      <tr><td>GPS 원시 보관(학습용·선택)</td><td>~0.5–0.8 GB/일 → ~200–300 GB/년</td><td>오브젝트 스토리지 콜드 — 넉넉히 1–2 TB</td></tr>
+      <tr><td>websocket 수신 대역</td><td>~90 msg/s × ~300 B ≈ 27 KB/s in</td><td>무시 가능 (상한 ~1 Mbps)</td></tr>
+      <tr><td>대시보드 egress</td><td>20명 ~1.2 MB/s</td><td>~50 Mbps면 충분</td></tr>
+    </tbody>
+  </table></div>
+  <div class="kc-cal warn"><span class="h">스토리지 주의 — GPS 원시</span><p>가장 큰 스토리지 항목은 학습용 GPS 원시 보관(연 ~200–300 GB). 대부분 예측은 move 단위 집약 피처로 충분하므로 원시는 샘플링/집약하거나 오브젝트 스토리지 콜드 계층(1–2 TB 예산·수명주기 자동 만료). 실시간 서빙은 GPS를 메모리에만 두고 DB에 안 쌓음(<a href="/kc/data/websocket-data.html">websocket 문서</a>).</p></div>
+
+  <h2>권장 · 주의</h2>
+  <ul>
+    <li><strong>넉넉히 시작, 실측 후 다운사이징.</strong> 1단계는 권장 8 vCPU·16 GB 단일 노드로 출발해 모니터링 후 조정.</li>
+    <li><strong>가용성(HA).</strong> 배차가 운영에 직접 관여하면 앱·배차 노드 이중화(2 AZ) + PostgreSQL 관리형(자동 failover).</li>
+    <li><strong>분리 원칙.</strong> ① 서빙 ② 배차/추론 ③ 학습을 분리(장애·부하 격리). 학습은 절대 서빙 클러스터에서 돌리지 않음.</li>
+    <li><strong>확장·비용.</strong> 사용자 수백 명이면 API 수평 확장. 학습 노드는 spot/preemptible + 배치 종료, GPS 원시는 콜드 스토리지.</li>
+  </ul>
+  <div class="kc-cal danger"><span class="h">전제·한계</span><p>위 수치는 한 터미널(Westports) 규모·내부 사용자·측정된 메시지율 기준의 추정이며 <strong>의도적으로 보수적인 헤드룸을 포함한 범위</strong>. 실제 값은 (가) 동시 사용자 (나) 배차 결정 주기 (다) 2단계 모형 복잡도 (라) GPS 원시 보관 정책에 따라 달라짐. <strong>부하 테스트와 모니터링으로 검증</strong> 후 다운사이징해 확정하세요.</p></div>
+
+  <hr>
+  <p><strong>관련:</strong> <a href="/kc/data/kpi-computation.html">KPI 산출</a> · <a href="/kc/data/dispatch-pools.html">배차 풀</a> · <a href="/kc/reference/references.html">참고 자료</a></p>
+</main>
+</body>
+</html>

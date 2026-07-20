@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>사이클 감지 v2 — 그림자 검증 — WP-TT 지식센터</title>
+  <meta name="description" content="6-이벤트 사이클 모델의 그림자(병렬) 검증 — v2.2→v2.6 반복과 게이트. 2026-06-12 시점 실험 기록.">
+  <link rel="stylesheet" href="/kc/assets/kc.css">
+  <script defer src="/kc/assets/kc.js"></script>
+</head>
+<body>
+<main class="kc-article" data-page="learn/cycle-v2-shadow" data-source="experiments/cycle-v2-shadow.md">
+  <h1>사이클 감지 v2 — 그림자 검증</h1>
+  <p class="kc-lede">6-이벤트 사이클 모델의 그림자(병렬) 검증 — v2.2→v2.6 반복과 게이트.</p>
+  <div class="kc-meta"><span class="kc-badge kind">러닝 · 실험</span><span class="kc-badge stale">역사 기록 · 2026-06-12</span></div>
+
+  <div class="kc-cal warn"><span class="h">갱신 — 현행은 별도 문서</span><p>현행 사이클 분해(5단계로 축소·데이터 소스·2단계 TOS 보정)는 <strong><a href="/kc/data/cycle-decomposition.html">TT 사이클 분해 — 현행</a></strong>으로 이관됐습니다. 아래 "외부 정답지 없음"은 <strong>정정</strong>: 이후 크레인 작업 로그(<code>rtg_move_log</code>·<code>qc_move_log</code>)로 핸드오버 정답지가 생겼습니다(단 트럭 사건은 상차=픽업의 <code>comp_ts</code>만). 아래는 2026-06-12 시점 실험 기록으로 보존.</p></div>
+
+  <h2>가설</h2>
+  <p>레그(leg, topos1 타깃 단위) 기반 차세대 사이클 감지(v2)가 현행 이동필터(v1)보다 <strong>사이클 경계와 trip별 도착을 더 정확하게</strong> 잡을 수 있다. v1 핫패스는 건드리지 않고 <strong>그림자(병렬)</strong>로 <code>tt_cycle_v2</code>에 적재해 같은 행(<code>ytno</code>+<code>dropped_at</code>)으로 페어드 비교.</p>
+  <p><strong>수집 우선순위:</strong> ① 사이클 열림/닫힘 시각(최우선) → ② 각 trip 시작·도착 위치+시각 → ③ 크레인 핸드오버 시작/종료(있으면 좋고 없으면 뺌).</p>
+
+  <h2>방법 — 비교·게이트 규칙</h2>
+  <ul>
+    <li><strong>페어드 비교</strong>: 같은 <code>(ytno, dropped_at)</code>에서 v1 vs v2(운영 변동이 양쪽에 동일 작용).</li>
+    <li><strong>워밍업 필터</strong>: 재시작 직후 ~15분 내 완료 사이클은 앞 단계 누락 → <code>opened_at &gt; 재시작+15분</code>만 평가.</li>
+  </ul>
+
+  <h2>핵심 발견 (확정)</h2>
+  <ul>
+    <li><strong>크레인(QC) 도착은 GPS로 못 잡는다</strong> — QC GPS가 디바이스맵에 유효 진입하지 않아 <code>arrived</code>가 거의 0. 약경계의 근본 원인.</li>
+    <li>그래서 크레인 도착은 <strong><code>cur_loc=WHARF</code>의 ~200초 조기 latch를 이후 <code>ARRIVED</code>로 업그레이드</strong>해서 얻음(Fix A). |Δ| 200초→1초.</li>
+    <li><strong>닫힘 <code>dropped_at</code> = container1 클리어</strong>(≈인계 종료 + TOS 갱신, 드롭 도착 후 중앙 ~5.5분) — 물리적 들어올림 순간이 아님.</li>
+    <li>v2는 <strong>거짓 분할 억제</strong>로 경계가 v1보다 정확: 2분 미만 비정상 사이클 v1 7.5% → v2 0.9%, 중앙 길이 14→17.6분.</li>
+  </ul>
+
+  <h2>6-이벤트 모델 (현재)</h2>
+  <p>핸드오버 <em>시작 시각</em>은 웹소켓으로 신뢰도 있게 관측 불가(QC PLC에 트럭 식별자 없음) → 수집 포기. 받기·주기는 체류 간격으로 대체.</p>
+  <pre><code>사이클시작 ─[공차이동]─ 공차완료 ─[받기]─ 부하시작 ─[부하이동]─ 부하완료 ─[주기]─ 사이클종료
+           (공차이동시작)</code></pre>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th>이벤트</th><th>컬럼</th><th>관측</th></tr></thead>
+    <tbody>
+      <tr><td>① 사이클 시작</td><td><code>opened_at</code></td><td>첫 배정 신호(topos1/container1)</td></tr>
+      <tr><td>② 공차이동 시작</td><td><code>empty_travel_start_at</code></td><td>오픈 후 첫 출발. ①→②=배차 후 대기. 선배치면 NULL</td></tr>
+      <tr><td>③ 공차이동 완료</td><td><code>empty_arrived_at</code></td><td>픽업 도착</td></tr>
+      <tr><td>④ 부하이동 시작</td><td><code>pickup_left_at</code></td><td>픽업 출발 = topos1 플립</td></tr>
+      <tr><td>⑤ 부하이동 완료</td><td><code>laden_arrived_at</code></td><td>드롭 도착</td></tr>
+      <tr><td>⑥ 사이클 종료</td><td><code>dropped_at</code></td><td>container1 클리어(이동필터)</td></tr>
+    </tbody>
+  </table></div>
+  <p>받기 = ④−③, 주기 = ⑥−⑤ (체류).</p>
+
+  <h2>반복 이력과 결과</h2>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th>버전</th><th>변경</th><th>핵심 결과</th></tr></thead>
+    <tbody>
+      <tr><td>v2.2</td><td>레그 트래커 기준선</td><td>크레인측 |Δ| ~200초, LD픽업 45%</td></tr>
+      <tr><td><strong>v2.3</strong></td><td>A(cur_loc→arr_dtime)·B(선배치)·C(조기종료 이월)</td><td><strong>|Δ| 200→1초</strong>, 주순서위반 0</td></tr>
+      <tr><td><strong>v2.4/4.1</strong></td><td>D(v1 블록도착 백필) + 단조 클램프</td><td>블록 포착 v1 추월(LD픽업 67%&gt;64%, DS드롭 84%&gt;80%)</td></tr>
+      <tr><td><strong>v2.5/5.1</strong></td><td>6-이벤트 모델(핸드오버 제거·공차이동시작 추가)</td><td>전 경계 단조 0, 배차후 대기 중앙 24초</td></tr>
+      <tr><td><strong>v2.6</strong></td><td>container1 픽업 레그 보장</td><td><strong>픽업 도착 66→84%</strong>, 드롭전용 1-레그 급감</td></tr>
+    </tbody>
+  </table></div>
+  <p><strong>게이트:</strong> G1 약경계 포착 · G2 강경계 ≥ v1−5%p · G3 |Δ| 중앙 ≤ 30초 · G4 순서위반 0. 현황: G3·G4 통과, 블록측 G2 통과, G1 DS픽업 절대 60%는 크레인 신호 한계로 미달하나 v1을 +5~13%p 추월.</p>
+
+  <h2>해석 / 다음</h2>
+  <ul>
+    <li>타이밍은 v1과 사실상 동일(1초), 경계는 더 정확, 픽업 포착 84%. → 승격 후보.</li>
+    <li>CYCLES 페이지에 6이벤트 노출 완료(v1/v2 토글, 미관측=빈칸).</li>
+    <li>(미검증) LD픽업 포착이 표본별 출렁(−4~+3%p) — 24h로 중심값 확정 필요. 잔존 1-레그(~29%)는 크레인 드롭 도착 미관측이라 NULL 유지(허위 생성 금지).</li>
+  </ul>
+
+  <hr>
+  <p><strong>관련:</strong> <a href="/kc/data/cycle-decomposition.html">TT 사이클 분해(현행)</a> · <a href="/kc/data/cycle-detection.html">사이클 감지 로직</a> · <a href="/kc/learn/tt-prediction.html">예측 모형 연구</a></p>
+</main>
+</body>
+</html>

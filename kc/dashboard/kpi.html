@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>KPI 페이지 — WP-TT 지식센터</title>
+  <meta name="description" content="메인 KPI 6개가 어떤 TOS 테이블·컬럼에서 어떻게 계산되고 값이 무슨 의미인지.">
+  <link rel="stylesheet" href="/kc/assets/kc.css">
+  <script defer src="/kc/assets/kc.js"></script>
+</head>
+<body>
+<main class="kc-article" data-page="dashboard/kpi" data-source="dashboard/kpi.md">
+  <h1>KPI 페이지 — 6개 점수의 모든 것</h1>
+  <p class="kc-lede">KPI 페이지는 <strong>"터미널이 이 기간 얼마나 잘 돌아갔나"</strong>를 6개 점수로 보여줍니다. 모든 KPI는 <strong>TOS Oracle(원천 ①)</strong>에서 나옵니다 — websocket 아님.</p>
+  <div class="kc-meta"><span class="kc-badge kind">대시보드 가이드</span><span class="kc-badge living">리빙 문서</span></div>
+
+  <div class="kc-flow v">
+    <div class="node">기간 선택 (오늘 / 어제 / 7일 / 30일 …)</div><div class="arw">→</div>
+    <div class="node">점수 카드 6개 (값 + 기준선 대비 + 미니 추세선)</div><div class="arw">→</div>
+    <div class="node">이력 매트릭스 (일 / 주 / 월 추세)</div><div class="arw">→</div>
+    <div class="node">QC별 처리량 분해 (팝업)</div>
+  </div>
+
+  <h2>1. 점수 카드 읽는 법 (공통)</h2>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th>요소</th><th>뜻</th><th>어떻게</th></tr></thead>
+    <tbody>
+      <tr><td><strong>큰 숫자</strong></td><td>이 기간의 KPI 값</td><td>아래 §2의 계산식</td></tr>
+      <tr><td><strong>기준선 대비</strong></td><td>평소보다 좋아졌나/나빠졌나</td><td><strong>최근 4주 롤링 평균</strong> 비교 + Welch t-검정으로 유의성 판단</td></tr>
+      <tr><td><strong>미니 추세선</strong></td><td>최근 흐름</td><td>일자별 KPI 값을 선으로</td></tr>
+    </tbody>
+  </table></div>
+  <div class="kc-cal note"><span class="h">방향이 다릅니다</span><p>어떤 KPI는 <strong>낮을수록 좋고</strong>(공차거리·사이클·대기), 어떤 건 <strong>높을수록 좋습니다</strong>(가동률·처리량). 카드는 방향에 맞춰 색으로 표시합니다.</p></div>
+
+  <h2>2. 6개 KPI 하나씩 (+ 숨은 2개)</h2>
+
+  <h3>① K_EMPTY — 공차거리 (km/Job) · 낮을수록 좋음</h3>
+  <p>컨테이너 1개를 나르려고 트럭이 <strong>빈 차로 달린 거리</strong>(낭비 주행). 출처 <code>JOB_ORDER_HISTORY.UN_LNDN_TRV_RNG</code> · 작업 수. 계산 <code>Σ공차m ÷ Σ작업수 ÷ 1000</code>. 작을수록 효율적 배차.</p>
+
+  <h3>② K_EMPTY_R — 공차비율 (%) · 낮을수록 좋음</h3>
+  <p>달린 전체 거리 중 <strong>빈 차 비율</strong>. 계산 <code>Σ공차m ÷ Σ(공차m+적재m)</code>. 높을수록 빈 주행 낭비↑.</p>
+
+  <h3>③ K_CYCLE — 사이클타임 (초) · 낮을수록 좋음</h3>
+  <p>컨테이너 1개 작업이 <strong>처음부터 끝까지 걸린 시간</strong>. 출처 <code>JOB_ORDER_HISTORY</code> — 한 작업(CONTNO·POINT·SEQNO)의 첫~마지막 이벤트 간격. 계산 = 작업별 (마지막−첫) 시각의 <strong>작업 수 가중 평균</strong>. 보통 <strong>~60분</strong> 수준(TOS 행정시간 포함 — 아래 참고).</p>
+  <div class="kc-cal note"><span class="h">KPI의 K_CYCLE vs Cycle 페이지의 사이클 — 교차검증</span><p>이름은 같지만 <strong>측정 대상이 다릅니다.</strong> <strong>K_CYCLE(TOS) = 작업의 첫~마지막 이벤트 간격</strong> — 배차 큐·재계획 등 <em>행정 시간</em>까지 포함(중앙 <strong>~60분</strong>). <strong>Cycle 페이지(GPS) = 실제 주행 한 바퀴</strong>(중앙 ~20분). GPS가 K_CYCLE의 <strong>33~43%</strong> — 잰 게 달라 <strong>절대값 불일치가 정상</strong>. K_CYCLE는 KPI/추세엔 신뢰, <em>물리적</em> 사이클·ML 라벨엔 GPS 사이클을. — <a href="/kc/dashboard/cycle.html">Cycle 해설</a></p></div>
+
+  <h3>④ K_UTIL — TT 가동률 (%) · 높을수록 좋음</h3>
+  <p>트럭들이 근무 시간 중 <strong>실제로 일한 비율</strong>. 출처 <code>MCH_WORKTIME</code> − <code>MCH_WORKSTOP</code>. 계산 = <strong>트럭별</strong> <code>min(1, 가동분÷경과분)</code>을 <strong>평균</strong>(비율들의 평균).</p>
+  <div class="kc-cal warn"><span class="h">K_UTIL은 특수</span><p>"비율들의 평균"이라 주/월은 단순 평균으로 합치면 틀립니다 → 일 단위 원자료에서 다시 계산. 오늘분은 <code>util_tt_shift</code>에서 재조합.</p></div>
+
+  <h3>⑤ K_QC_TT_WAIT — QC 트럭 대기 (초) · 낮을수록 좋음 · 보조 GPS</h3>
+  <p>안벽 크레인(QC)이 <strong>트럭을 기다린 시간</strong> — <em>같은 베이</em>에서 move 사이 빈 갭(≈진짜 트럭 대기). 베이 이동/해치 제외. 메인 출처 <code>MCH_OPERATION</code>(같은 <code>QUEUENAME</code> 갭). 보조 <strong>K_QC_TT_WAIT_GPS</strong> = <em>지금</em> 굶는 QC 수·평균 대기(QC PLC idle인데 그 밑에 트럭 GPS 없음).</p>
+  <div class="kc-cal note"><span class="h">왜 '같은 베이'만 세나 (TOS 실측 5일)</span><p>QC엔 LD/DS move만 기록되고 해치·베이이동은 move 행이 없어, <em>모든</em> 갭을 합치면(숨김 지표 <strong>K_QC_NOMOVE</strong>) 트럭 대기를 <strong>~1.8배 과대평가</strong>. 5일 조사: 베이 변경 ≈45%(갠트리/해치, 대기 아님)·같은 베이 ≈55%(≈진짜 대기). 그래서 메인은 <strong>베이 불변 갭만</strong>, 보조는 <strong>GPS로 '트럭 없음'까지 확인</strong>.</p></div>
+
+  <h3>⑥ K_MPH — QC 처리량 (move/시간) · 높을수록 좋음</h3>
+  <p>크레인이 <strong>1시간에 컨테이너를 몇 번 옮겼나</strong>(생산성 핵심). 출처 <code>MCH_OPERATION</code>. 계산 <code>move수 ÷ 가동시간(hr)</code>의 가동시간 가중 평균.</p>
+
+  <h3>(숨김) K_RTG_Q — 야드 핸드오버 대기 (초)</h3>
+  <p>트럭이 야적장에 짐을 내려놓고 <strong>RTG가 받아갈 때까지</strong> 기다린 시간. <code>(JOB_HIST_ACTV_DT − YT_DIS_DT) × 86400</code>.</p>
+  <div class="kc-cal warn"><span class="h">이름 오해 주의 — K_RTG_Q ≠ "QC 대기"</span><p>K_RTG_Q는 안벽 QC가 아니라 <strong>야드(RTG) 쪽 핸드오버 대기</strong>입니다. "QC가 트럭을 기다림"은 위의 <strong>K_QC_TT_WAIT</strong>. (참고: <code>YT_DIS_DT</code>의 의미는 재검토 여지가 있음 — <a href="/kc/dispatch/research-log.html">조사 기록</a> 참조.)</p></div>
+
+  <h3>(숨김) K_QC_NOMOVE — QC 무브 공백 (초)</h3>
+  <p>QC가 <strong>move를 안 한 모든 갭</strong>(≤30분) — 트럭 대기 + 베이이동/해치 포함. 트럭 대기를 ~1.8배 과대평가(§⑤ 함정) → 표시는 K_QC_TT_WAIT로, 백엔드 수집만 유지(대조용).</p>
+
+  <h2>3. "오늘"부터 "30일"까지 — 기간은 어떻게 합쳐지나</h2>
+  <ul>
+    <li><strong>과거 날들</strong>: 매일 밤 만든 <strong>일 단위 원자료(<code>raw_*</code>)</strong>의 분자/분모를 그대로 합침 → 정확.</li>
+    <li><strong>오늘(진행 중)</strong>: 교대마다 누적되는 라이브 테이블(<code>kpi_shift</code>)에서 폴드.</li>
+    <li>6개는 합/비율로 결합, <strong>K_UTIL만</strong> 원자료에서 재계산.</li>
+  </ul>
+  <div class="kc-flow">
+    <div class="node">과거일들<span class="sub">raw_* (분자/분모 합산)</span></div>
+    <div class="arw">→</div>
+    <div class="node accent">기간 KPI 값</div>
+    <div class="arw">←</div>
+    <div class="node">오늘(진행중)<span class="sub">kpi_shift (교대 누적)</span></div>
+  </div>
+
+  <h2>4. 기준선(baseline)과 "의미 있는 변화"</h2>
+  <ul>
+    <li><strong>기준선</strong> = 최근 <strong>4주 롤링 평균</strong>. "평소 수준".</li>
+    <li>이번 값이 기준선보다 좋아졌나/나빠졌나 + <strong>Welch t-검정</strong>으로 "우연이 아니라 진짜 달라진 것인지"까지 → 노이즈에 안 속게.</li>
+  </ul>
+
+  <h2>5. 이력 매트릭스 · QC별 분해</h2>
+  <ul>
+    <li><strong>이력 매트릭스</strong>: 일/주/월 KPI 변화를 격자+선그래프로.</li>
+    <li><strong>QC별 처리량 분해</strong>: K_MPH를 <strong>크레인(C##)별로</strong> 쪼개 어느 크레인이 빠르고 느린지(<code>/api/breakdown/qc</code>).</li>
+  </ul>
+
+  <h2>6. (참고) 페이지 상단의 라이브 QC 요약</h2>
+  <p>KPI 카드와 별개로 <strong>지금 도는 QC</strong>를 요약하는 줄이 있을 수 있습니다(예 "QC 평균 처리량(PLC)", "QC 수·평균 대기"). 이건 TOS 점수가 아니라 <strong>websocket PLC(실시간)</strong> 기반 참고용. (상세 <a href="/kc/dashboard/dispatch.html">TT Dispatch 해설</a>)</p>
+
+  <hr>
+  <p><strong>출처 문서:</strong> <a href="/kc/data/tos-db-reference.html">TOS DB 레퍼런스</a> · <a href="/kc/data/kpi-computation.html">KPI 계산</a> · <a href="/kc/data/kpi-accuracy.html">KPI 정확도</a><br>
+  <strong>다음 →</strong> <a href="/kc/dashboard/dispatch.html">TT Dispatch 해설</a></p>
+</main>
+</body>
+</html>

@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TT 사이클 분해 (현행) — WP-TT 지식센터</title>
+  <meta name="description" content="야드 트럭 한 바퀴를 5개 이벤트·4개 구간으로 나누는 방법 — 각 시점을 무슨 신호로 잡는지, 포착율까지.">
+  <link rel="stylesheet" href="/kc/assets/kc.css">
+  <script defer src="/kc/assets/kc.js"></script>
+</head>
+<body>
+<main class="kc-article" data-page="data/cycle-decomposition" data-source="architecture/cycle-decomposition.md">
+  <h1>TT 사이클 분해 — 현행 5단계 모델</h1>
+  <p class="kc-lede">트럭 한 바퀴(사이클)를 지금 우리가 어떻게 5단계로 쪼개는지 정리한 현행 레퍼런스. 이 분해(<code>tt_cycle_v2</code>)는 <strong>운영 진단·트럭별 분석·배차 학습 데이터</strong>의 토대이며, 배차 2단계의 <strong>공차 주행 비용</strong>이 여기서 나옵니다.</p>
+  <div class="kc-meta"><span class="kc-badge kind">아키텍처</span><span class="kc-badge living">리빙 문서</span></div>
+
+  <h2>0. 왜 어려운가</h2>
+  <p>GPS의 <code>container1</code>은 <strong>"물리적으로 실린 박스"가 아니라 "TOS가 배정한 박스"</strong>입니다. 빈 차로 픽업하러 가는 동안에도 채워져 있어 <code>container1</code>만으론 구간을 못 나눕니다. 그래서 <strong>물리적 증거 = GPS 움직임</strong>으로 감지하고 <strong>레그(leg)</strong> 단위로 쪼갭니다.</p>
+  <div class="kc-cal note"><span class="h">v1과 v2의 역할 분담</span><p>사이클 <strong>완료 판정</strong>은 v1(<code>tt_cycle_log</code>) — 박스를 <strong>30초↑ 들고 150m↑</strong> 달렸을 때만 진짜 인도. v2(<code>tt_cycle_v2</code>)는 그 한 바퀴 <strong>내부를 단계로 분해</strong>. 둘은 같은 행 <code>(트럭, 인도시각)</code>으로 1:1 대응.</p></div>
+
+  <h2>1. 5이벤트 · 구간</h2>
+  <div class="kc-flow">
+    <div class="node accent">①배차<span class="sub">opened_at</span></div>
+    <div class="arw">→<span class="lbl">공차</span></div>
+    <div class="node">②픽업 도착<span class="sub">empty_arrived</span></div>
+    <div class="arw">→<span class="lbl">받기</span></div>
+    <div class="node">③픽업 떠남<span class="sub">pickup_left</span></div>
+    <div class="arw">→<span class="lbl">부하 이동</span></div>
+    <div class="node">④부하 도착<span class="sub">laden_arrived</span></div>
+    <div class="arw">→<span class="lbl">주기</span></div>
+    <div class="node accent">⑤드롭<span class="sub">dropped_at</span></div>
+  </div>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th>이벤트</th><th>컬럼</th><th>뜻</th></tr></thead>
+    <tbody>
+      <tr><td>① 배차</td><td><code>opened_at</code></td><td>이 트럭에 새 일이 배정된 순간</td></tr>
+      <tr><td>② 픽업 도착</td><td><code>empty_arrived_at</code></td><td>빈 차로 픽업 지점에 도착</td></tr>
+      <tr><td>③ 픽업 떠남</td><td><code>pickup_left_at</code></td><td>짐 싣고 픽업 지점을 떠남(= 상차 완료)</td></tr>
+      <tr><td>④ 부하 도착</td><td><code>laden_arrived_at</code></td><td>짐 싣고 하역 지점에 도착</td></tr>
+      <tr><td>⑤ 드롭</td><td><code>dropped_at</code></td><td>인도 완료 = 사이클 끝 (기본키)</td></tr>
+    </tbody>
+  </table></div>
+  <div class="kc-cal note"><span class="h">왜 "빈차 출발" 시점을 뺐나</span><p>예전 모델은 공차 구간을 "빈차 출발"에서 더 쪼갰으나 그 시점이 <strong>가장 안 잡히고</strong>(DS 45%·LD 17%) 쪼개도 얻는 게 없어 <strong>"배차→픽업 도착"을 한 구간</strong>으로 둡니다. 관측률이 <strong>35%/12% → 69%/85%</strong>로 크게 오름. 다만 출발 준비 시간이 섞여, 순수 주행 비용은 준비가 거의 0인 <strong>유휴 트럭의 "배차→도착"</strong>에서 깨끗이 뽑습니다.</p></div>
+
+  <h2>2. 각 시점을 무슨 신호로 잡나</h2>
+  <p><strong>① 배차</strong>: 직전 인도 후 처음 들어온 배정 신호(container1 빈→참, 또는 topos1 변경). 작업종류는 이때 확정. <strong>100% 잡힘.</strong></p>
+  <p><strong>② 픽업 도착</strong>(제일 까다로움): 우선순위 사다리로 잡습니다.</p>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th>순위</th><th>소스</th><th>무엇</th></tr></thead>
+    <tbody>
+      <tr><td>1</td><td><code>arr_dtime</code></td><td>피드가 주는 도착 시각(가장 정확·재시작에 강함)</td></tr>
+      <tr><td>2</td><td><code>arrived</code></td><td>GPS ARRIVED 플래그가 처음 켜지는 순간</td></tr>
+      <tr><td>3</td><td><code>cur_loc</code></td><td>현재 위치 라벨이 목적 블록/안벽과 일치(정지 중일 때만)</td></tr>
+      <tr><td>4</td><td><code>gps</code></td><td>크레인 GPS와 60m 이내(크레인 픽업만)</td></tr>
+      <tr><td>—</td><td><code>v1</code></td><td>사다리가 놓쳤을 때 v1 추적기 도착으로 사후 보완</td></tr>
+    </tbody>
+  </table></div>
+  <div class="kc-cal warn"><span class="h">cur_loc는 ~200초 일찍 찍힌다 → 업그레이드</span><p>안벽 대기줄에서 위치 라벨이 실제 도착보다 <strong>~200초 먼저</strong> latch됩니다. <code>cur_loc</code> 도착은 "거친 값"으로 두고, 이후 <code>arr_dtime</code>/<code>arrived</code>가 오면 덮어써 교정(200초→1초).</p></div>
+  <p><strong>③ 픽업 떠남</strong>: 도착 후 다시 움직이기 시작(≥5초 뒤 3km/h↑) = 상차 완료. <strong>④ 부하 도착</strong>: ②와 똑같은 도착 사다리. <strong>⑤ 드롭</strong>: v1의 검증된 인도(30초↑ + 150m↑) = <code>container1</code> 비워짐(드롭 도착 후 중앙 ~5.5분). 기본키.</p>
+  <div class="kc-cal note"><span class="h">물리적 드롭의 TOS 정답지 — 이제 RTG+QC 양쪽 확보 (2026-07-15)</span><p><code>container1</code> 클리어는 편의 프록시. <strong>진짜 완료는 TOS 크레인 로그(MCH_OPERATION)</strong>에 있고, RTG측은 <code>rtg_move_log</code>로 추출 중(양하 드롭 87% 대응). <strong>QC측(적하 드롭)도 이제 <code>qc_move_log</code>로 trk_id 연결 추출</strong> — LD dropped_at을 QC comp_ts로 검증하니 <strong>+27초</strong>로 일치. 더 정밀한 드롭 앵커·검증에 사용 가능(<a href="/kc/dispatch/research-log.html">조사 기록</a>).</p></div>
+
+  <h2>3. 픽업/드롭이 QC냐 RTG냐 — 왜 RTG가 안 보이나</h2>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th>작업</th><th>픽업 측</th><th>드롭 측</th></tr></thead>
+    <tbody>
+      <tr><td><strong>양하(DS)</strong></td><td>안벽 크레인 QC</td><td>야드 블록 RTG</td></tr>
+      <tr><td><strong>적하(LD)</strong></td><td>야드 블록 RTG</td><td>안벽 크레인 QC</td></tr>
+    </tbody>
+  </table></div>
+  <div class="kc-cal warn"><span class="h">QC는 잘 보이고, RTG는 잘 안 보인다</span><p><strong>QC</strong>는 PLC 신호를 직접 보내 핸드오버가 또렷. <strong>RTG는 PLC가 없어</strong> GPS 근접(30m)으로만 추정 → <strong>양하 드롭 핸드오버는 16%만</strong> 깔끔히 잡힘. 이게 양하 "곧 빔" 예측이 흐린 근본 원인.</p></div>
+
+  <h2>4. 레그(leg) — 분해의 기본 단위</h2>
+  <p><strong>레그 1개 = 목적지 코드 1개</strong>(배정 → 도착 → 핸드오버 → 출발). 한 사이클은 두 인도 사이의 레그들의 연속. 인도가 확정되면 레그들을 픽업/드롭으로 가르고 각 쪽 도착·출발로 이벤트를 채웁니다. 레그 원본은 <code>legs</code>(jsonb)에 저장.</p>
+
+  <h2>5. 정직 원칙 — 못 본 건 NULL, 순서 보증</h2>
+  <p><strong>추측하지 않습니다.</strong> 관측 못 한 시점은 NULL. 시간 순서가 뒤집히면(백필·재시작) 덜 믿을 만한 쪽을 NULL 처리.</p>
+  <h3>시점별 소스 + 포착율 (최근 7일)</h3>
+  <p>각 시점은 <strong>1단계(사이클 완료 즉시 = 웹소켓 GPS 추정)</strong>로 먼저 채우고, 가능하면 <strong>2단계(추후 TOS 정답지 보정)</strong>로 덮습니다.</p>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th>시점</th><th>1단계: 라이브 추정</th><th>2단계: 보정(크레인 정답지)</th><th>포착율 DS/LD</th></tr></thead>
+    <tbody>
+      <tr><td>① 배차</td><td>TOS 배정 신호</td><td>—</td><td>100 / 100</td></tr>
+      <tr><td>② 픽업 도착</td><td>트럭 GPS 사다리</td><td>—</td><td>69 / 85</td></tr>
+      <tr><td><strong>③ 픽업 떠남</strong></td><td>트럭 GPS(이동 재개)</td><td><strong>크레인 <code>comp_ts</code></strong>(LD=RTG 정확 / DS=QC 단조가드)</td><td>96/73 → <strong>통합 97/94</strong></td></tr>
+      <tr><td>④ 부하 도착</td><td>트럭 GPS</td><td>—</td><td>87 / 79</td></tr>
+      <tr><td>⑤ 드롭</td><td><code>container1</code> 클리어</td><td>(하차 comp_ts는 트럭 순간 아님)</td><td>100 / 100</td></tr>
+    </tbody>
+  </table></div>
+  <div class="kc-cal note"><span class="h">2단계 픽업 보정 — 가동 중 + 크레인 시각 의미(확정)</span><p>③ 픽업 완료를 크레인 <code>comp_ts</code>로 보정하는 루프가 5분마다(<code>pickup_done_at</code>, mig 0088). <strong>단조 가드</strong>로 comp_ts가 [픽업 도착~부하 도착] 창 안일 때만 채택. 커버리지 LD ~72%·DS ~14%(축적 중), 순서 오류 0. — MCH_OPERATION의 <code>ST_DT</code>는 <strong>큐잉 시각</strong>(완료 시 소급 기록·간격 극가변), <strong><code>comp</code>가 물리적 완료</strong>. RTG(LD 픽업)는 작업 ~1분이라 comp ≈ 상차 완료로 깨끗.</p></div>
+
+  <h2>6. 알려진 한계와 진행 중 대응</h2>
+  <ul>
+    <li><strong>양하 드롭(RTG) 핸드오버 16%</strong> — RTG에 PLC가 없어 GPS 근접으로만. RTG GPS 이력 수집(<code>rtg_pos_hist</code>)으로 블록 격자축 기준 보정 연구 중.</li>
+    <li><strong>RTG 대기시간은 예측 불가</strong> — RTG는 작업 큐가 없고 선착순도 아니라 개별 대기는 넓은 밴드로 다룸.</li>
+    <li><strong>공차 구간에 출발 준비가 섞임</strong> — 깨끗한 주행 비용은 유휴 트럭 사이클에서 뽑고, 바쁜 트럭의 준비 시간은 트럭 현재 상태로 따로 추정.</li>
+  </ul>
+
+  <hr>
+  <p><strong>관련 문서:</strong> <a href="/kc/dashboard/cycle.html">Cycle 페이지</a> · <a href="/kc/data/cycle-detection.html">사이클 감지 v1</a> · <a href="/kc/learn/cycle-v2-shadow.html">v2 실험 이력</a> · <a href="/kc/learn/rtg-work-cycle.html">RTG 작업 사이클</a></p>
+</main>
+</body>
+</html>

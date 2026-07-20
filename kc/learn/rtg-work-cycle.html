@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>RTG 작업 사이클 — 왜 양하 대기가 예측 안 되나 — WP-TT 지식센터</title>
+  <meta name="description" content="양하(DS) 트럭의 RTG 대기는 큐가 아니라 RTG의 전체 혼합 작업(80%가 비-DS)에 좌우된다. 그 상세 로그가 MCH_OPERATION에 있었다는 발견과 RTG 전체 백로그 피처.">
+  <link rel="stylesheet" href="/kc/assets/kc.css">
+  <script defer src="/kc/assets/kc.js"></script>
+</head>
+<body>
+<main class="kc-article" data-page="learn/rtg-work-cycle" data-source="research/rtg-work-cycle.md">
+  <h1>RTG 작업 사이클 — 왜 양하 대기가 예측 안 되나 + 숨은 상세 로그</h1>
+  <p class="kc-lede"><a href="/kc/learn/soon-idle-tos.html">곧유휴 연구</a>에서 양하(DS) 트럭의 RTG 대기(<code>actv→comp</code> 중앙 ~12분, p90 34분)가 정밀 예측이 안 되는 게 드러났다. 그 <strong>왜</strong>를 파다가 TOS에 RTG 상세 작업 로그가 이미 있었다는 것을 발견했다.</p>
+  <div class="kc-meta"><span class="kc-badge kind">러닝 · 조사</span><span class="kc-badge living">검증됨 · 2026-06-15</span></div>
+
+  <h2>한 장 요약</h2>
+  <ol>
+    <li><strong>RTG 대기는 "줄 서는 큐"가 아니다.</strong> 블록 큐 길이·시간대·RTG 식별자 어느 것도 대기 예측 못 함(관측 피처로 분산 ~93% 미설명, 최선 block조차 LOO R² +0.07).</li>
+    <li><strong>RTG는 로밍한다.</strong> 블록당 고정 RTG는 12%뿐, 평균 3블록, move의 37%가 주력 블록 밖.</li>
+    <li><strong>발견: <code>MCH_OPERATION</code>에 RTG move가 상세히 찍힌다</strong>(시작 ST_DT + 완료, 2일 55,024건). 대시보드 추출기가 QC(<code>^C</code>)만 필터해 안 보였을 뿐.</li>
+    <li><strong>물리 핸드오버는 ~60초</strong>. 그런데 우리 <strong>DS 핸드오버는 RTG 작업의 ~20%뿐</strong> — 나머지 80%는 RH(재정리)·AH·게이트·재배치. <strong>12분 대기 = RTG가 그 사이 다른 move 5~10개를 끼워넣는 시간.</strong></li>
+    <li>→ DS 큐로는 예측 안 됨. <strong>RTG 전체 백로그</strong>가 미시도 핵심 피처. <code>rtg_move_log</code>로 적재 시작(mig 0032).</li>
+  </ol>
+
+  <h2>1. 양하 대기는 큐가 아니다 — 조사 결과</h2>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th>후보 피처</th><th>대기 예측력</th></tr></thead>
+    <tbody>
+      <tr><td>블록 큐 길이(겹치는 트럭 수)</td><td>corr ≈ −0.01 — 혼잡해도 대기 안 늘어남</td></tr>
+      <tr><td>시간대</td><td>corr ≈ 0.008</td></tr>
+      <tr><td>블록 정체성</td><td>LOO R² +0.07 (유일한 양수, 미약)</td></tr>
+      <tr><td>RTG 식별자(armgc)</td><td>LOO R² −0.007 (사실상 0)</td></tr>
+      <tr><td>근처 RTG 공급/부하</td><td>|corr| ≤ 0.17 (방향만: 공급↑→대기↓)</td></tr>
+      <tr><td><strong>나머지</strong></td><td><strong>~93% 미설명</strong></td></tr>
+    </tbody>
+  </table></div>
+  <p>블록 큐 0대든 6대든 총 대기 ~21분으로 일정 — "줄이 쌓이는 큐"가 아님. 블록별 상수도 무효(시간대별 SD ~7.7분 &gt; 블록 간 SD ~4.1분, 자기상관 ~0.05~0.12).</p>
+
+  <h2>2. RTG 로밍 — "블록당 고정" 아님</h2>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th>지표</th><th>값</th></tr></thead>
+    <tbody>
+      <tr><td>단일 블록 고정 RTG</td><td>187대 중 <strong>22대(12%)</strong></td></tr>
+      <tr><td>RTG당 distinct 블록(중앙/평균)</td><td>3 / 3.05</td></tr>
+      <tr><td>주력 블록 밖 move</td><td><strong>37.2%</strong></td></tr>
+      <tr><td>블록당 distinct RTG(평균)</td><td>2.0</td></tr>
+    </tbody>
+  </table></div>
+
+  <h2>3. 발견 — <code>MCH_OPERATION</code>에 RTG 상세 로그가 있다</h2>
+  <p>RTG move도 <code>ST_DT</code>(시작) + <code>COMPDATE‖COMPTIME</code>(완료)로 찍힘. 대시보드 KPI 추출기가 <code>^C[0-9]</code>(QC)만 떠서 안 가져왔을 뿐, 데이터는 있었다. RTG 작업 taxonomy + 실제 작업시간:</p>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th>jobtype</th><th>의미</th><th>트럭 동반</th><th>중앙 작업시간</th></tr></thead>
+    <tbody>
+      <tr><td>LD</td><td>적재(야드→트럭)</td><td>O</td><td>77s</td></tr>
+      <tr><td><strong>RH</strong></td><td><strong>재정리</strong></td><td>X(하우스키핑)</td><td>68s</td></tr>
+      <tr><td>DS</td><td>양하(트럭→야드)</td><td>O</td><td><strong>63s</strong></td></tr>
+      <tr><td>AH</td><td>(하우스키핑)</td><td>X</td><td>38s</td></tr>
+      <tr><td>MI/MO</td><td>야드 재배치</td><td>O</td><td>45~82s</td></tr>
+      <tr><td>GI/GO</td><td>게이트 인/아웃</td><td>O</td><td>106~142s</td></tr>
+    </tbody>
+  </table></div>
+  <p>물리 핸드오버 ~60초. 우리 <strong>DS는 RTG 작업의 ~20%</strong>, RH+AH 등 하우스키핑 ~30%+, 나머지 LD/MI/MO/게이트.</p>
+
+  <h2>4. 12분 미스터리 해소</h2>
+  <p>한 RTG의 실제 ~30분 스트림 예: <code>LD → AH → AH → GO → AH → AH → AH → LD → MI → MI → MI</code>. DS 트럭이 활성(ACTV) 후 12분 기다린 건 <strong>RTG가 그 사이 AH 재정리·다른 트럭 LD/MI를 5~10개 끼워넣기 때문.</strong> 진짜 큐는 DS 줄이 아니라 <strong>RTG 전체 혼합 작업</strong>이고 그 80%가 DS 라벨엔 안 보였다.</p>
+
+  <h2>5. 추적 가능 단계 (5시점/4구간)</h2>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th>시점</th><th>출처</th><th>다음 구간</th></tr></thead>
+    <tbody>
+      <tr><td>트럭 QC 배치 <code>YT_DIS_DT</code></td><td>JOB_ORDER_HISTORY</td><td>→ QC 양하까지 ~7분</td></tr>
+      <tr><td><strong>QC 양하 완료 <code>ACTV_DT</code></strong>(=트럭 적재)</td><td>JOB_ORDER_HISTORY</td><td><strong>→ 운반+블록대기+RTG 차례 ≈11분 (다른 move 끼임)</strong></td></tr>
+      <tr><td>RTG move 시작 <code>ST_DT</code></td><td>MCH_OPERATION</td><td>→ 실제 들기 ~60초</td></tr>
+      <tr><td>RTG move 완료</td><td>MCH_OPERATION</td><td>→ 마감</td></tr>
+      <tr><td>주문 완료 <code>'C'</code></td><td>JOB_ORDER_HISTORY</td><td>—</td></tr>
+    </tbody>
+  </table></div>
+  <div class="kc-cal warn"><span class="h">ACTV_DT 3차 재정정 (2026-06-16, n=3270)</span><p>RTG는 PLC가 없어 ±1초 물리 집기 순간은 없음(<code>ST_DT</code>는 60초 move 단위라 충분). TOS 직접 조인 검증: <code>ACTV_DT</code> = <strong>QC 양하 완료(트럭 적재) 시점</strong>(QC 물리 move 완료와 0초 일치, 위반 0/3464)이고, RTG 물리 들어올림은 ACTV +~11분. 칩 "적재 N분"은 QC가 실어준 뒤 경과지 RTG가 처리 중이라는 뜻이 아님.</p></div>
+
+  <h2>6. 예측 재시험 (2026-06-15) — 원인은 밝혔으나 예측 천장은 그대로</h2>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th>가설 피처</th><th>corr(피처, 대기)</th><th>해석</th></tr></thead>
+    <tbody>
+      <tr><td><strong>대기 중 RTG가 끼워넣은 전체 move 수</strong>(사후)</td><td><strong>0.70</strong></td><td>메커니즘 확정 — move당 +1.5~2분</td></tr>
+      <tr><td>RTG 최근 30분 처리량(활성시점)</td><td>0.01</td><td>무관 — 바쁜/한가한 RTG 대기 동일</td></tr>
+      <tr><td>RTG 동시 활성 DS 수요(활성시점)</td><td>0.21</td><td>약함(최선), 분산 ~4%</td></tr>
+    </tbody>
+  </table></div>
+  <ul>
+    <li><strong>✅ 메커니즘 규명:</strong> DS 대기 = RTG 전체 혼합 작업량(corr 0.70). DS 큐(corr 0) 실패 이유(작업의 80%를 못 봐서)가 정량 확인.</li>
+    <li><strong>❌ 예측은 여전히 막힘:</strong> 활성 시점 관측 가능한 RTG 상태로는 예측 불가. 이유: RTG가 끼워넣을 move는 활성화 <em>후</em> 기사가 실시간 결정 → 활성 시점엔 알 수 없음.</li>
+  </ul>
+  <div class="kc-cal note"><span class="h">배차 시사점</span><p>DS 자유시점은 점추정 불가 — 시간비용 행렬의 DS 항은 거친 분포(중앙 ~12분 + IQR)로 두고, 동시 DS 수요만 약하게 가산. 정밀 노력은 예측 가능한 LD/QC측에. → <a href="/kc/dispatch/leadtime-adr.html">리드타임 ADR</a>.</p></div>
+
+  <hr>
+  <p><strong>관련:</strong> <a href="/kc/learn/soon-idle-tos.html">곧 유휴 감지</a> · <a href="/kc/learn/tt-prediction.html">예측 모형 연구</a> · <a href="/kc/data/tos-db-reference.html">TOS DB 레퍼런스</a></p>
+</main>
+</body>
+</html>

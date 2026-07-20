@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>KPI 산출 — 7개 지표가 어떻게 계산되는가 — WP-TT 지식센터</title>
+  <meta name="description" content="대시보드의 모든 KPI를 TOS Oracle에서 추출해 PostgreSQL 3계층에 누적·집계하는 파이프라인. 부하 최소화와 정확한 기간 합산.">
+  <link rel="stylesheet" href="/kc/assets/kc.css">
+  <script defer src="/kc/assets/kc.js"></script>
+</head>
+<body>
+<main class="kc-article" data-page="data/kpi-computation" data-source="architecture/kpi-computation.md">
+  <h1>KPI 산출 — 7개 지표가 어떻게 계산되는가</h1>
+  <p class="kc-lede">대시보드의 모든 KPI는 <strong>TOS Oracle</strong>에서 추출해 <strong>PostgreSQL에 누적</strong>하고 거기서 집계합니다. 두 원칙 — <strong>운영 Oracle 부하 최소화</strong>(정해진 시각에만·가져온 날은 영구 보관)와 <strong>정확한 기간 합산</strong>(분자/분모를 보존해 어떤 구간도 정확 결합).</p>
+  <div class="kc-meta"><span class="kc-badge kind">아키텍처 · 파이프라인</span><span class="kc-badge living">리빙 문서</span></div>
+
+  <h2>30초 요약</h2>
+  <ul>
+    <li><strong>어디서</strong> — KPI는 전부 TOS Oracle에서. 추출기만 Oracle을 읽고 결과를 Postgres에 누적.</li>
+    <li><strong>어떻게</strong> — 원천 행을 <strong>분자/분모로 보존</strong>(L0) → 일 단위 권위 값(L1) → 기준선·유의성(L2). 대시보드는 Postgres만 읽음.</li>
+    <li><strong>왜 정확</strong> — 평균/비율을 단순 평균하지 않고 <strong>분자합/분모합</strong>으로 결합 → 일·주·월 어떤 구간도 정확.</li>
+  </ul>
+  <div class="kc-cal note"><span class="h">핵심 트릭</span><p>"오늘"은 진행 중인데도 Oracle을 재스캔하지 않습니다. 교대 틱이 이미 가져온 현재-교대 누적(<code>kpi_shift</code>)을 과거일 값에 폴드해 합산합니다. 야간에 권위 값으로 확정.</p></div>
+
+  <h2>7개 KPI 정의</h2>
+  <p>대시보드는 6개 표시(K_RTG_Q 숨김). 모두 <strong>intensive</strong>(평균·비율)라 기간 합산 시 분자/분모로 정확 결합. 각 KPI의 <strong>가중치</strong> = 진짜 분모.</p>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th>KPI</th><th>단위·방향</th><th>정의 (TOS 소스)</th><th>가중치</th></tr></thead>
+    <tbody>
+      <tr><td><strong>K_EMPTY</strong> 공차거리</td><td>km/Job · 낮을수록↑</td><td>Σ공차m / Σjobs / 1000 (JOB_ORDER_HISTORY)</td><td>jobs</td></tr>
+      <tr><td><strong>K_EMPTY_R</strong> 공차비율</td><td>% · 낮을수록↑</td><td>Σ공차m / Σ(공차+적재)m</td><td>미터</td></tr>
+      <tr><td><strong>K_CYCLE</strong> 사이클타임</td><td>s · 낮을수록↑</td><td>작업 첫~마지막 이벤트 간격의 jobs-가중평균</td><td>jobs</td></tr>
+      <tr><td><strong>K_UTIL</strong> TT 가동률</td><td>% · 높을수록↑</td><td>TT별 min(1, 가동분/경과분)의 평균·100 — avg-of-ratios</td><td>(평균)</td></tr>
+      <tr><td><strong>K_QC_NOMOVE</strong> QC 대기</td><td>s · 낮을수록↑</td><td>QC 병합 active 구간 사이 유휴 갭 평균 (MCH_OPERATION C##)</td><td>idle_periods</td></tr>
+      <tr><td><strong>K_MPH</strong> QC 처리량</td><td>move/hr · 높을수록↑</td><td>QC move/active-hour의 active_hours-가중평균</td><td>active_hours</td></tr>
+      <tr><td><strong>K_RTG_Q</strong> 야드 대기 <em>(숨김)</em></td><td>s · 낮을수록↑</td><td>(ACTV_DT − YT_DIS_DT) — TT 하차→야드 핸드오버</td><td>in_range</td></tr>
+    </tbody>
+  </table></div>
+  <div class="kc-cal warn"><span class="h">K_QC_NOMOVE ≠ K_RTG_Q · YT_DIS_DT 주의</span><p><strong>K_QC_NOMOVE</strong>(표시) = "QC가 트럭을 기다림"(안벽 크레인 유휴 갭). <strong>K_RTG_Q</strong>(숨김) = "TT가 야드에서 핸드오버를 기다림"(ARMGC=RTG). 또한 <code>YT_DIS_DT</code>는 <strong>DISpatch(배차 시각)</strong>이지 하차가 아니어서, K_RTG_Q(ACTV_DT − YT_DIS_DT)는 대기가 아니라 <strong>배차→야드활성 전 구간</strong>을 재 <strong>과대 가능</strong>(그래서 숨김). 컬럼 상세 → <a href="/kc/data/tos-db-reference.html">TOS DB 레퍼런스</a>.</p></div>
+
+  <h2>KPI별 추출·가공·적재 (4단계)</h2>
+  <p>각 KPI는 <strong>① 소스 · ② 가공+왜 · ③ 적재 · ④ 롤업</strong>으로 나뉩니다. 공통 규약: 일 단위 SQL은 <code>{{DAY_STR}}</code>(YYYYMMDD)을 인덱스-세이프 리터럴로 주입. DAY 경로는 <code>{{TIME_PREDICATE}}</code>를 빈 문자열로(검증본과 바이트 동일), SHIFT 경로는 교대 창을 끼움. <code>/*+ NO_PARALLEL */</code> + <code>FETCH FIRST</code>로 부하 억제. 모든 <code>raw_*</code> upsert는 <code>ON CONFLICT (PK) DO UPDATE</code>(멱등).</p>
+
+  <h3>K_EMPTY · K_EMPTY_R — 공차거리 / 공차비율</h3>
+  <p>같은 SQL(<code>e4_k_empty_decomposition.sql</code>)로 같은 <code>raw_k_empty</code> 행에서 나옵니다(분자만 다름). 소스 <code>JOB_ORDER_HISTORY</code>: <code>LNDN_TRV_RNG</code>(적재m)·<code>UN_LNDN_TRV_RNG</code>(공차m). 작업 1건=(CONTNO,POINT,SEQNO,JOBTYPE,DATE)로 먼저 접고 (jobtype×shift)로 집계.</p>
+  <pre><code>-- 롤업 (→ kpi_daily)
+K_EMPTY   = round(Σtotal_empty_m / Σjobs / 1000, 4)                    sample_n=Σjobs
+K_EMPTY_R = round(Σtotal_empty_m / Σ(empty_m+laden_m) * 100, 4)        sample_n=Σjobs</code></pre>
+  <div class="kc-cal note"><span class="h">왜 합을 저장하나 · 왜 0~5000m로 거르나</span><p>비율을 단순 평균하면(작업량 다른 날 동등 취급) 틀리므로 <strong>분자·분모 합</strong>을 보존. 한 작업의 정상 주행 범위를 벗어난 값(센서 오류·결측)은 0~5000m로 걸러 비율 오염 방지. 적재/라이브 가중치: K_EMPTY=jobs, K_EMPTY_R=Σ(empty+laden)미터.</p></div>
+
+  <h3>K_CYCLE — 작업 사이클 타임</h3>
+  <p><code>JOB_ORDER_HISTORY</code>에서 작업 1건=(CONTNO,POINT,SEQNO). <code>cycle_sec=(MAX−MIN(DATE||TIME))*86400</code>. <code>transitions>1</code>(이벤트 1개면 0초 제외), 이상치 임계 <code>AVG+2σ</code>로 <code>outlier_n</code> 별도 카운트. 롤업: <code>value=round(Σ(avg_sec·jobs)/Σjobs,1)</code>, 가중치=jobs.</p>
+  <div class="kc-cal warn"><span class="h">이 값은 컨테이너 핸들링 span (≈40분)</span><p>K_CYCLE(JOB_ORDER_HISTORY)은 트럭 사이클이 아니라 컨테이너 작업 생애 span입니다. 실제 트럭 사이클(≈13분)은 GPS·MCH_OPERATION로 재산출 → <a href="/kc/data/kpi-accuracy.html">KPI 정확도</a>. 2026-07-15부터는 <code>tt_move_log</code>(배차 YT_DIS_DT → 크레인 free)로 카드가 재배선됨.</p></div>
+
+  <h3>K_UTIL — TT 가동률</h3>
+  <p>소스: <code>CDY_MACHINE</code>(YT 목록)·<code>MCH_WORKTIME</code>(로그인 세션)·<code>MCH_WORKSTOP</code>(정지). 겹치는 세션을 병합(로그아웃 누락 대비) → <code>productive_min = active_min_merged − stop_min</code> → <code>k_util_capped = LEAST(1.0, productive_min/{{ELAPSED_DENOM}})</code>(DAY=1440분, SHIFT=교대 경과분).</p>
+  <div class="kc-cal warn"><span class="h">K_UTIL은 특별 취급 — avg-of-ratios</span><p>TT별 비율을 먼저 구한 뒤 평균(×100)하므로 다른 6개처럼 분자/분모 단순합으로 결합 불가. 주/월·"오늘"은 <code>util_tt_shift</code>(TT별 productive_min + 교대 elapsed_min)에서 <strong>TT별 min(1,Σ가동/Σ경과)</strong>을 만들어 평균×100으로 재조합. <code>kpi_shift.agg_weight=NULL</code>. <em>(참고: 세션 기반 K_UTIL은 ~95% 과대 → 화면은 TOS 작업풀 기반 ≈63%를 씀, <a href="/kc/data/kpi-accuracy.html">KPI 정확도</a>.)</em></p></div>
+
+  <h3>K_QC_NOMOVE — QC 대기 (표시)</h3>
+  <p><code>MCH_OPERATION</code>에서 <code>REGEXP_LIKE(MACHNO,'^C[0-9]+$')</code> 안벽 크레인·<code>JOBTYPE IN('LD','DS')</code>. 잇닿은 move를 active 구간으로 병합 → 구간 사이 갭 = 유휴(<code>LEAD(gs)−ge</code>). 30분(1800초) 초과 갭은 작업종료/교대 공백으로 제외. <code>HAVING COUNT(*)≥{{QCQ_HAVING}}</code>(day=10, shift=2). 롤업: <code>value=round(Σ(avg_idle_sec·idle_periods)/Σidle_periods,1)</code>, 가중치=idle_periods.</p>
+
+  <h3>K_MPH — QC 처리량 (move/hr)</h3>
+  <p><code>MCH_OPERATION</code>, LD/DS만. <code>active_hours = COUNT(DISTINCT SUBSTR(COMPTIME,1,2))</code>(실작업 시각 수) → <code>k_mph_per_active_hour = moves/active_hours</code>. 롤업: <code>value=round(Σ(k_mph·active_hours)/Σactive_hours,2)</code>, <code>sample_n=count(distinct vessel/voyage)</code>.</p>
+  <div class="kc-cal warn"><span class="h">N과 가중치가 다름</span><p>화면 <code>sample_n</code>=항차 수지만 실제 결합 가중치=<code>Σactive_hours</code>. <code>shift.rs</code>가 <code>kpi_shift.agg_weight=Σactive_hours</code>를 따로 저장 — sample_n으로 폴백하면 K_MPH는 근사가 됨. 왜 active_hours로 나누나: 크레인은 24h 내내 일하지 않아 실작업 시각으로만 나눠야 "작업 중 처리율".</p></div>
+
+  <h3>K_RTG_Q — 야드 핸드오버 대기 (숨김)</h3>
+  <p><code>JOB_ORDER_HISTORY</code>: <code>crane_q_sec=(ACTV_DT − YT_DIS_DT)*86400</code>, 0~1800초만(<code>in_range</code>). ARMGC=RTG. 적재 <code>raw_k_crane_q_daily</code>, 가중치=in_range. (표는 위 K_QC_NOMOVE와 다른 대기·YT_DIS_DT=배차라 과대 → 숨김.)</p>
+  <div class="kc-cal note"><span class="h">정리 — 분자·분모 보존의 일관성</span><p>6개 표시 KPI는 가중치(=진짜 분모)를 <code>raw_*</code>·<code>kpi_shift.agg_weight</code>에 보존: K_EMPTY=jobs, K_EMPTY_R=Σ미터, K_CYCLE=jobs, K_MPH=active_hours, K_QC_NOMOVE=idle_periods, K_RTG_Q=in_range. 덕분에 어떤 구간도 <code>Σ(value·weight)/Σweight</code>로 정확 결합. K_UTIL만 avg-of-ratios라 <code>util_tt_shift</code>로 재조합.</p></div>
+
+  <h2>3계층 — 원천에서 화면까지</h2>
+  <div class="kc-flow">
+    <div class="node accent">TOS Oracle<span class="sub">완료 작업 이력 · 추출기만 읽음</span></div>
+    <div class="arw">▼</div>
+    <div class="node">raw_k_* (L0)<span class="sub">일 스냅샷 · 분자/분모 보존 · 멱등 upsert</span></div>
+    <div class="arw">▼</div>
+    <div class="node">kpi_daily (L1)<span class="sub">KPI별 일 권위 값 · 야간 확정/틱 잠정</span></div>
+    <div class="arw">▼</div>
+    <div class="node">kpi_baseline (L2)<span class="sub">4주 롤링 기준선 + Welch t-test</span></div>
+  </div>
+  <p>대시보드/API는 <strong>L1·L2와 LIVE 테이블만</strong> 읽습니다(Oracle 미접근, 구조적 보장). LIVE: <code>kpi_shift · kpi_shift_history · vessel_shift · util_tt_shift</code> — 현재 교대 누적(틱이 채움) = "오늘"의 입력.</p>
+
+  <h2>"오늘"을 Oracle 재스캔 없이</h2>
+  <p>오늘은 진행 중이라 권위 값이 없고, 매번 Oracle을 긁으면 부하가 큽니다. 그래서 범위를 <code>raw_to = min(to, 오늘−1)</code>에서 나누고, 오늘분은 <code>kpi_shift</code>의 (값·가중치) 합을 더합니다(<code>agg.rs</code>). "오늘"이 포함된 어떤 기간(this_week/this_month/last7)도 라이브로 반영되되 <strong>제2 Oracle 스캔 0</strong>. K_UTIL만 <code>util_tt_shift</code>에서 정확 재조합.</p>
+
+  <h2>추출 스케줄 (systemd 타이머)</h2>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th>작업</th><th>주기 · 내용</th><th>Oracle 부하</th></tr></thead>
+    <tbody>
+      <tr><td><strong>야간</strong> wp-nightly</td><td>01:30 MYT — 어제 <strong>권위</strong> 전체 추출 + transform(L1) + baseline(L2). 1회 풀스캔(~32s).</td><td>1회/일</td></tr>
+      <tr><td><strong>교대 틱 T1</strong> wp-shift-t1</td><td>~3분 — MPH·QC대기·가동률 + 선박 패널. MCH_OPERATION 1회.</td><td>LOW</td></tr>
+      <tr><td><strong>교대 틱 T2</strong> wp-shift-t2</td><td>~15분 — 공차·사이클·크레인대기. JOB_ORDER_HISTORY.</td><td>MEDIUM</td></tr>
+    </tbody>
+  </table></div>
+  <div class="kc-cal tip"><span class="h">잠정 → 권위</span><p>낮 동안 "오늘"은 교대 틱이 채운 <strong>잠정</strong> 값(provisional 배지). 밤 01:30 야간 런이 어제를 권위 값으로 확정·기준선 갱신. 한 번 권위 확정된 날은 다시 스캔하지 않아 이력은 "추출 시작 시점부터 앞으로" 영구 누적(보존 한계 → <a href="/kc/data/tos-db-reference.html">TOS 레퍼런스</a>).</p></div>
+
+  <h2>일 / 주 / 월 이력</h2>
+  <p><code>GET /api/kpis/history?gran=day|week|month</code> — 버킷×6KPI 매트릭스, <strong>Postgres 전용·Oracle 0</strong>. 일별은 <code>kpi_daily</code> 피벗, 주/월별은 버킷마다 <code>agg.aggregate(from,to)</code> 재사용(과거 raw + 오늘 kpi_shift 정확 결합, K_UTIL 포함). 버킷은 터미널 시간(MYT), 데이터 없는 버킷은 <code>—</code>.</p>
+
+  <h2>주의 사항</h2>
+  <ul>
+    <li><strong>K_UTIL avg-of-ratios</strong> — 단순 평균 금지. 주/월은 일 raw에서 재계산, 오늘은 util_tt_shift에서 재조합.</li>
+    <li><strong>시간대 MYT</strong> — 터미널/Oracle=MYT(UTC+8). 교대·기간 경계는 반드시 터미널 시간(안 그러면 창이 데이터를 놓쳐 0행).</li>
+    <li><strong>잠정</strong> — 오늘/현재 기간은 야간 확정 전까지 잠정. K_QC_NOMOVE는 교대 중 과소 가능.</li>
+    <li><strong>보존 한계</strong> — 깊은 과거는 Oracle에서 삭제되어 백필 불가 → <a href="/kc/data/tos-db-reference.html">TOS 레퍼런스</a>.</li>
+  </ul>
+
+  <hr>
+  <p>← <a href="/kc/data/feed-semantics.html">피드 의미론</a> · <a href="/kc/data/kpi-accuracy.html">websocket 정확도</a> →</p>
+</main>
+</body>
+</html>

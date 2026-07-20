@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>5분 요약 — WP-TT 지식센터</title>
+  <meta name="description" content="전체 플랫폼을 5분에 — 문제, 아키텍처, 지표, 라이브 기능, 다음 단계.">
+  <link rel="stylesheet" href="/kc/assets/kc.css">
+  <script defer src="/kc/assets/kc.js"></script>
+</head>
+<body>
+<main class="kc-article" data-page="start/summary" data-source="start/summary.md">
+  <h1>5분 요약</h1>
+  <p class="kc-lede">전체 플랫폼을 5분에 — 문제, 아키텍처, 지표, 라이브 기능, 그리고 다음 단계까지 한 페이지로 압축했습니다.</p>
+  <div class="kc-meta">
+    <span class="kc-badge kind">온보딩</span>
+    <span class="kc-badge living">리빙 문서</span>
+  </div>
+
+  <p>각 섹션 끝의 링크가 해당 챕터 본문으로 이어집니다.</p>
+
+  <h2>① 문제 — QC를 굶기지 않는 배차</h2>
+  <p>컨테이너 터미널의 생산성은 안벽 크레인(QC)이 결정합니다. 컨테이너를 내릴 때(양하·DS)도 실을 때(적하·LD)도 야드 트럭(TT)이 제때 크레인 아래에 있어야 하며, TT가 늦으면 QC는 그대로 멈춥니다 — 우리는 이것을 "QC가 굶는다"고 부릅니다. 배차가 어려운 이유는 구조적입니다. TT는 특정 QC 전속이 아니라 공유 풀에서 배차되고, 작업 수요는 본선 작업 계획에 따라 시시각각 출렁이며, 다음 작업 예정시각(ETW) 같은 핵심 신호조차 TOS DB 값은 수 시간의 오차를 보였습니다.</p>
+  <p>그래서 이 플랫폼은 "개선" 이전에 "측정"부터 시작합니다. 2026-06-08 고객사 워킹 세션에서 문제를 정의했고, <strong>측정(KPI) → 실시간 가시화(배차 풀·라이브 맵) → AI 배차</strong>의 순서로 접근합니다.</p>
+  <p><a href="/kc/learn/tt-dispatch-problem.html">→ 챕터 01 · 문제 — 스마트 TT 배차 워킹 세션</a></p>
+
+  <h2>② 아키텍처 — 운영 DB 무접촉 원칙</h2>
+  <p>운영 Oracle TOS는 API가 <strong>절대 직접 질의하지 않습니다</strong>(API 크레이트에는 Oracle 클라이언트 자체가 없습니다). 추출기(extractor)가 타이머로 필요한 테이블만 PostgreSQL에 복제하고, Rust(axum) API는 Postgres만 바라보며, React/Vite 대시보드가 이를 소비합니다.</p>
+  <div class="kc-cal note">
+    <span class="h">데이터 경로</span>
+    <p><strong>배치</strong> — <code>Oracle TOS</code>(읽기만) → <em>extractor 타이머 복제</em> → <code>PostgreSQL</code> → <em>Rust(axum) API</em> → <code>React 대시보드</code></p>
+    <p><strong>실시간</strong> — <code>GPS · 크레인 PLC</code>(websocket) → <em>SSH 터널</em> → <em>같은 API로 합류</em> → <code>맵 · 피드 · 사이클</code></p>
+  </div>
+  <p>모든 지표는 TOS가 "말하는 것"과 차량이 "실제로 움직인 것"을 교차 검증하며 만들어집니다.</p>
+  <p><a href="/kc/data/tos-db-reference.html">→ 챕터 02 · TOS DB 레퍼런스</a> · <a href="/kc/data/websocket-data.html">실시간 websocket 데이터</a></p>
+
+  <h2>③ 핵심 지표 — 무엇을 어떻게 재는가</h2>
+  <p>대시보드 KPI 페이지는 일/주/월 이력과 함께 다음 지표를 제공합니다.</p>
+  <div class="kc-tablewrap">
+    <table>
+      <thead><tr><th>지표</th><th>한 줄 정의</th><th>소스</th></tr></thead>
+      <tbody>
+        <tr><td>사이클타임</td><td>한 작업 사이클의 소요시간 중위값 — 양하(DS)/적하(LD)는 특성이 달라 분리 집계합니다.</td><td>융합</td></tr>
+        <tr><td>공차거리 · 공차비율</td><td>빈 차로 주행한 거리와, 전체 주행 대비 그 비율. 실측 GPS로 교차 검증합니다.</td><td>TOS</td></tr>
+        <tr><td>TT 가동률</td><td>작업 풀 배정 기반 — A(작업중)·A/B/Q(투입)를 60초 샘플로 시간 평균.</td><td>TOS</td></tr>
+        <tr><td>QC 대기</td><td>QC가 트럭을 기다린 시간 — 크레인 가동 구간 사이의 유휴 갭 평균.</td><td>TOS</td></tr>
+        <tr><td>시간당 처리량</td><td>QC가 한 시간에 처리한 move 수(move/hr) — 크레인 PLC 훅로드 신호로 교차 검증.</td><td>융합</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p><a href="/kc/data/kpi-computation.html">→ 챕터 03 · KPI 산출 방법</a> · <a href="/kc/data/kpi-accuracy.html">websocket로 정확도 보강</a></p>
+
+  <h2>④ 라이브 기능 — 대시보드 페이지들</h2>
+  <p>대시보드는 <strong>KPI · TT · CYCLES · MAP · HEALTH · FEED</strong> 페이지로 구성됩니다. 핵심 네 가지:</p>
+  <ul>
+    <li><strong>TT · 배차 현황</strong> — 작업 풀(수요)과 차량 풀(공급)을 한 화면에. extractor가 약 90초마다 TOS 작업 큐를 복제하고, 정확한 ETW는 Azure 게이트웨이(SSH 터널)에서 받아 보강합니다.</li>
+    <li><strong>MAP · 라이브 맵</strong> — GPS websocket 기반 — MapLibre + ESRI 지도 위에 터미널 차량의 실시간 위치를 그립니다.</li>
+    <li><strong>CYCLES · 사이클 이력</strong> — 사이클을 단계별로 분해해 막대로 보여줍니다. 관측하지 못한 단계는 추정하지 않고 NULL로 둡니다.</li>
+    <li><strong>FEED · WS 데이터 헬스</strong> — GPS·PLC websocket 수신 상태를 감시합니다 — 라이브 지표의 신뢰 전제 조건입니다.</li>
+  </ul>
+  <p>차량 풀 분류는 한 차례 교정을 거쳤습니다. "미배정 유휴(idle)"로 집계되던 차량 중 상당수가 실은 배정 상태였고, 지금은 공차+정지+배정을 <strong>staging(배차·대기)</strong>으로 분리해 idle은 진짜 미배정만 셉니다.</p>
+  <p><a href="/kc/data/dispatch-pools.html">→ 챕터 04 · 배차 풀 (라이브)</a></p>
+
+  <h2>⑤ 지금과 다음 — 측정에서 예측으로</h2>
+  <p>모든 인도 사이클은 사이클 로그에 기록됩니다 — 트럭(ytno)·작업 메타(작업유형/모선/항차/컨테이너/QC/트윈탠덤)·단계별 타임스탬프·구간(leg) 거리/시간을 멱등하게 적재합니다. 인도 판정은 엄격합니다: GPS의 <code>container1</code>이 비-빈 값에서 바뀌는 엣지에 보유 ≥30초·운반 ≥150m 이동필터를 걸어, TOS 재배정 같은 artifact를 기각합니다.</p>
+  <p>이 과정에서 websocket의 <code>container1</code>이 물리 적재가 아니라 TOS의 <strong>"배정" 필드</strong>임을 실측으로 규명했고(적하 트럭이 <code>container1</code>이 세팅된 채 픽업 블록에 도착), 한때 "미리 가서 대기"로 오독했던 패턴도 데이터로 정정했습니다. 관측하지 못한 값은 NULL로 남기는 것이 원칙입니다.</p>
+  <div class="kc-cal note">
+    <span class="h">현행 — 2단계 이동비용</span>
+    <p>이동비용은 <strong>도로망 경로시간 → 실제시간 곡선</strong>으로 산출합니다(격자 룩업은 폐기). <strong>순수주행 = 배차받아 움직여 작업지점에 도달할 때까지의 구간시간</strong>(경로 정체 포함·도착 후 크레인 대기 제외). 초기엔 도로망 라우팅이 게이트에서 맨해튼 거리보다 나빴으나, 07-02 재구축(작업지점 커넥터·방향 다수결)으로 곡선 보정 후 채택했습니다.</p>
+  </div>
+  <p>다음 단계는 <strong>2단계 예측 모형</strong>입니다 — ① 작업 소요시간 예측, ② 그 위의 배차 최적화. 크레인 대기가 이동시간 밖(도착 이후)에 있음을 규명했고, 지금 쌓이는 사이클 로그가 이 연구의 연료입니다.</p>
+  <div class="kc-tablewrap">
+    <table>
+      <thead><tr><th>날짜</th><th>마일스톤</th></tr></thead>
+      <tbody>
+        <tr><td>2026-06-08</td><td>고객사 워킹 세션 — 문제 정의</td></tr>
+        <tr><td>2026-06-09</td><td>KPI 대시보드 구축 · TOS DB/websocket 문서화 · 지식센터 개설</td></tr>
+        <tr><td>2026-06-10</td><td>정확 ETW 연동 · 가동률 재정의 · 사이클 로그 가동 · CYCLES 페이지</td></tr>
+        <tr><td>2026-07-02</td><td>도로망 재구축 → <strong>배차 이동비용 = 도로망 경로시간 → 실제시간 곡선</strong>(격자 룩업 폐기)</td></tr>
+        <tr><td>2026-07-09</td><td>곧빔·유휴 카드 통합 · free_in 단계별 학습 · work_eta_bias 자가보정 · 이동시간 GBM 그림자</td></tr>
+        <tr><td>2026-07-15</td><td><code>tt_move_log</code> 신설(배차 <code>YT_DIS_DT</code>→완료 두 TOS 앵커) · cycle-time KPI 교정 · 장애 시 프론트 명확 표시</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p><a href="/kc/learn/tt-prediction.html">→ 챕터 05 · 2단계 예측 모형 연구</a> · <a href="/kc/dispatch/research-log.html">연구 일지</a></p>
+</main>
+</body>
+</html>

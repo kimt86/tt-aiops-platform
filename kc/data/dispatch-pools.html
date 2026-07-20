@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>차량 풀 · 작업 풀 갱신 — WP-TT 지식센터</title>
+  <meta name="description" content="차량 풀(공급·websocket 실시간)과 작업 풀(수요·TOS 90초)이 각각 어떻게 갱신되고 화면에서 어떻게 융합되는가.">
+  <link rel="stylesheet" href="/kc/assets/kc.css">
+  <script defer src="/kc/assets/kc.js"></script>
+</head>
+<body>
+<main class="kc-article" data-page="data/dispatch-pools" data-source="architecture/dispatch-pools.md">
+  <h1>차량 풀 · 작업 풀이 어떻게 갱신되는가</h1>
+  <p class="kc-lede">TT 배차의 두 축 — <strong>차량 풀</strong>(어떤 트럭이 비었는가 · 공급)과 <strong>작업 풀</strong>(어떤 크레인 작업이 트럭을 기다리는가 · 수요). 둘은 갱신 방식이 완전히 다릅니다.</p>
+  <div class="kc-meta"><span class="kc-badge kind">아키텍처</span><span class="kc-badge living">리빙 문서</span></div>
+
+  <h2>두 풀 — 갱신 방식이 다르다</h2>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th></th><th>차량 풀 (공급)</th><th>작업 풀 (수요)</th></tr></thead>
+    <tbody>
+      <tr><td>출처</td><td>websocket GPS/PLC (TOS 아님)</td><td>TOS 라이브 작업지시 2테이블</td></tr>
+      <tr><td>갱신</td><td>API 메모리 스냅샷 → 화면 ~2.5초 폴링</td><td>추출기 90초 → Postgres → 화면 ~15초 폴링</td></tr>
+      <tr><td>방식</td><td>standalone — 각 TT를 실시간 상태 분류</td><td>QC별 작업 시퀀스 + 배정 트럭 + ETW</td></tr>
+    </tbody>
+  </table></div>
+  <div class="kc-cal note"><span class="h">왜 다른가</span><p>차량 상태는 <strong>직접 관측</strong>됩니다(트럭이 GPS로 자기 상태를 송신). 작업 계획은 <strong>TOS의 미래 의도</strong>라 websocket에 없어 DB에서 주기적으로 가져옵니다. 화면(Part 4)은 둘을 <strong>융합</strong>합니다.</p></div>
+
+  <h2>Part 1 · 차량 풀 갱신 — 실시간 (websocket)</h2>
+  <p>API가 websocket 두 zone을 받아 <strong>장비별 최신 위치 스냅샷을 메모리에 유지</strong>하고 <code>/api/livemap/positions</code>로 노출. 화면은 ~2.5초 폴링. (데이터 자체는 <a href="/kc/data/websocket-data.html">websocket 문서</a>.)</p>
+  <h3>신선도 — 메모리 스냅샷의 age-out</h3>
+  <ul>
+    <li><strong>fresh</strong> ≤ 15초 · <strong>active(표시)</strong> ≤ 120초 · <strong>lost(제거)</strong> 600초 초과 → 장비가 떠나면 자동 소멸.</li>
+    <li>DB에 안 쌓음 — 현재 순간만. 터널이 끊기면 즉시 빔(피드 헬스가 감시).</li>
+  </ul>
+  <h3>배차 상태 분류 (TT)</h3>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th>상태</th><th>뜻 · 화면</th></tr></thead>
+    <tbody>
+      <tr><td><code>idle</code> 현재 유휴</td><td>공차 + 정지 + <strong>미배정</strong> → 즉시 배차 가능. 배차 풀 1열.</td></tr>
+      <tr><td><code>staging</code> 배차·대기</td><td>공차 + 정지 + <strong>배정됨</strong> → 순서 대기(노는 게 아님).</td></tr>
+      <tr><td><code>soon_idle</code> 곧 유휴</td><td>적재 + 마지막 핸드오버 진행 중 → 곧 풀림.</td></tr>
+      <tr><td><code>empty_travel</code> 공차 주행</td><td>공차로 픽업 향함. 목적지 멀면(≥150m) 스왑 후보.</td></tr>
+      <tr><td><code>delivering</code> 적재 이동</td><td>적재하고 이동 중(아직 도착 전).</td></tr>
+      <tr><td><code>wait_rtg</code> 도착·RTG 대기</td><td>블록 도착했으나 RTG 미관여 → 아직 대기.</td></tr>
+    </tbody>
+  </table></div>
+  <div class="kc-cal note"><span class="h">idle → idle/staging 분리 (총 6상태)</span><p>이 문서 초판(2026-06-09)은 5상태였으나, "공차+정지"의 절반이 실은 배정된 차(순서 대기)여서 <strong>배정된 대기 = <code>staging</code></strong>, 진짜 미배정 = <code>idle</code>로 분리해 <strong>6상태</strong>가 됐습니다. 상세 <a href="/kc/dashboard/dispatch.html">TT Dispatch 해설</a>.</p></div>
+
+  <h2>Part 2 · 배차 상태 분류 상세</h2>
+  <p>각 TT를 매 스냅샷마다 결정 트리로 분류. <strong>websocket 신호만</strong> 사용. 상수: 유휴속도 <strong>3km/h</strong> · RTG 같은bay <strong>30m</strong> · 스왑 최소거리 <strong>150m</strong>.</p>
+  <pre><code>적재 여부 = container1 이 비었나?
+공차(빈 차)
+  ├ 속도 &lt; 3km/h · 미배정 ────────▶ idle          (즉시 배차 가능)
+  ├ 속도 &lt; 3km/h · 배정됨 ────────▶ staging       (순서 대기)
+  └ 이동 중 ─────────────────────▶ empty_travel  (목적지 거리로 스왑성 판정)
+적재
+  ├ arrival ≠ ARRIVED ──────────▶ delivering    (아직 운반 중)
+  └ ARRIVED + 드롭 사이드 도착
+      ├ 안벽(LD): QC PLC 신선 ──▶ soon_idle     (크레인 관여 확인)
+      └ 블록(DS/MO/MI):
+          ├ RTG GPS ≤ 30m ─────▶ soon_idle     (같은 bay = 핸드오버 중)
+          └ RTG 멀음 ──────────▶ wait_rtg      (도착 ≠ 곧유휴)</code></pre>
+  <div class="kc-cal warn"><span class="h">양하(DS)가 어려운 이유 — RTG엔 PLC가 없다</span><p>적하는 QC PLC 하중 전이로 핸드오버를 ±1초로 잡습니다. 하지만 양하 블록측 RTG는 PLC가 없어 <strong>RTG GPS와 TT GPS가 같은 bay(≈30m)인지</strong>로 판정. 블록에 <em>도착만</em> 했다고 곧유휴로 보면 오판(<code>wait_rtg</code>).</p></div>
+  <h3>블록 위치 학습 (centroid)</h3>
+  <p>크레인이 항상 GPS를 쏘지 않으므로 <strong>ARRIVED TT들의 GPS로 블록/베이 위치를 학습</strong>(코드별 이동평균). 공차 TT가 픽업 목적지까지 몇 m 남았는지를 TOS 의존 없이 추정 → 스왑성 판정.</p>
+
+  <h2>Part 3 · 작업 풀 갱신 — TOS 90초 스냅샷</h2>
+  <p>TOS 라이브 작업지시를 90초마다 끌어옵니다. (컬럼 상세는 <a href="/kc/data/tos-db-reference.html">TOS 레퍼런스</a>)</p>
+  <ul>
+    <li><strong><code>JOB_ORDER_LIST</code></strong> — 개별 컨테이너 move — 배정 트럭·ETW·컨테이너·RTG. <strong>JOBSTATUS A만</strong>(완료행도 보관되므로 라이브 필터 필수).</li>
+    <li><strong><code>JOB_QUEUE_SCHEDULE</code></strong> — QC별 작업 큐 계획 — 크레인·순서·진행률. <strong>잔여 = TOTAL−COMP</strong>.</li>
+  </ul>
+  <div class="kc-cal note"><span class="h">조인은 Postgres에서 (Oracle 아님)</span><p>큐 이름이 항차마다 재사용돼 Oracle에서 조인하면 fan-out. 활성 move만 뽑고 QC는 깨끗한 현재 큐 스냅샷으로 Postgres에서 붙임. ETW는 MYT→UTC 파싱.</p></div>
+
+  <h2>Part 4 · 두 풀의 융합 — QC 작업 시퀀스</h2>
+  <p>"QC 작업 시퀀스 & 배차(라이브)" 패널은 작업 풀(TOS 계획)을 차량 풀/websocket(실측)과 합칩니다. QC당 한 컬럼, 세 신호의 융합:</p>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th>신호</th><th>출처</th><th>화면 표현</th></tr></thead>
+    <tbody>
+      <tr><td>TOS 계획</td><td>작업 풀 (90초)</td><td>무엇을·어느 순서로·어느 트럭에·언제(ETW)</td></tr>
+      <tr><td>PLC 실측</td><td>websocket ctab</td><td>그 크레인이 지금 돌면 헤더에 <code>PLC live</code></td></tr>
+      <tr><td>트럭 GPS</td><td>차량 풀</td><td>배정 트럭 옆에 실시간 상태 점(유휴/곧유휴/…)</td></tr>
+    </tbody>
+  </table></div>
+  <p>연결 고리: TOS의 <code>YTNO</code> ↔ GPS device, TOS의 QC(C##) ↔ PLC crane. "이 작업에 배정된 트럭이 지금 실제로 어디서 뭘 하는지"가 한 줄에 보입니다.</p>
+
+  <h2>Part 5 · 한계 · 노트</h2>
+  <ul>
+    <li><strong>활성 작업은 전부 배정됨</strong>: TOS의 <code>A</code>는 "트럭이 이미 배차된 진행 작업". "미배차 수요"는 대기(Q) 백로그이고 깊이는 <strong>잔여 = TOTAL−COMP</strong>로 표시.</li>
+    <li><strong>대기(Q)는 개별 카드 없음</strong>: ETW·순서·배정이 없는 묶음 → 큐 단위 잔여 수치로만.</li>
+    <li><strong>차량 풀 standalone</strong>: 차량 분류는 websocket만으로. 곧유휴 LD는 ~1분 전 사전 판정, DS는 RTG 근접 확인 후.</li>
+    <li><strong>다음 단계(2단계)</strong>: 두 풀을 입력으로 <strong>AI 전역 매칭</strong>이 더 나은 배차를 제안 — <a href="/kc/learn/tt-prediction.html">예측 모형 연구</a>.</li>
+  </ul>
+</main>
+</body>
+</html>

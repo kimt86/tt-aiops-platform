@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>1단계는 어떻게 만들고 확인했나 — WP-TT 지식센터</title>
+  <meta name="description" content="배차 1단계(언제까지 트럭을 보내야 하나)를 만들며 시도하고, 데이터를 보며 고치고, 실제와 비교해 확인한 과정을 쉬운 말로.">
+  <link rel="stylesheet" href="/kc/assets/kc.css">
+  <script defer src="/kc/assets/kc.js"></script>
+</head>
+<body>
+<main class="kc-article" data-page="dispatch/stage1-journey" data-source="dispatch/stage1-journey.md">
+  <h1>1단계는 어떻게 만들고 확인했나</h1>
+  <p class="kc-lede">차량 배차 1단계(언제까지 트럭을 보내야 하나)를 만들면서 — 무엇을 시도했고, 데이터를 보며 무엇을 고쳤고, 실제와 비교해 무엇을 확인했는지 — 누구나 이해할 수 있게 풀어 쓴 기록.</p>
+  <div class="kc-meta"><span class="kc-badge kind">배차 · 이야기</span></div>
+
+  <h2>우리가 풀려던 문제</h2>
+  <p>안벽 크레인이 일을 계속하려면 <strong>트럭이 제때 옆에 와 있어야</strong> 합니다. 너무 늦으면 크레인이 멈춰(배가 항구에 더 오래 묶임=손해), 너무 일찍 보내면 트럭이 놀게(낭비) 됩니다. 그래서 1단계가 하는 일 한 줄: <strong>"각 작업에 트럭을 언제까지 보내야 하는가?"</strong>(= <strong>배차 마감</strong>) 정하기.</p>
+
+  <h2>기본 아이디어 — 배가 떠나는 시각에서 거꾸로 계산</h2>
+  <div class="kc-flow">
+    <div class="node accent">배 출항 시각<span class="sub">정해진 시각에 출항</span></div>
+    <div class="arw">−</div>
+    <div class="node">크레인 처리 시간<span class="sub">남은 작업 처리</span></div>
+    <div class="arw">=</div>
+    <div class="node">작업 예정 시각<span class="sub">언제쯤 작업할지</span></div>
+    <div class="arw">−</div>
+    <div class="node">트럭 도착 시간</div>
+    <div class="arw">=</div>
+    <div class="node accent">배차 마감<span class="sub">이때까진 보내야</span></div>
+  </div>
+  <p>마감이 임박한 작업일수록 급하고, 출항까지 여유가 많은 작업은 천천히 해도 됩니다.</p>
+
+  <h2>크레인이 얼마나 걸리는지 알아내기 (계속 더 정교하게)</h2>
+  <p>"크레인이 걸리는 시간"을 정확히 알아야 전체가 맞습니다. 처음엔 대충 잡았다가 <strong>실제 작업 기록을 보며</strong> 다듬었습니다.</p>
+  <ul>
+    <li><strong>크레인마다·작업 종류마다 속도가 다름</strong> → 정해진 가정이 아니라 실제 데이터에서 속도를 배움.</li>
+    <li><strong>한 번에 두 개(트윈)</strong> — 실제 '들어 올리는 횟수'는 컨테이너 개수보다 적음.</li>
+    <li><strong>칸 이동(베이 변경)</strong> — 배의 다른 칸으로 옮길 때 시간이 더 걸림.</li>
+    <li><strong>덮개 작업(해치커버)</strong> — 갑판↔선창을 오갈 때 덮개 여닫느라 시간이 더 걸림.</li>
+  </ul>
+
+  <h2>안전하게 — '옆에서 따라 해 보기'</h2>
+  <p>새 방식을 바로 적용하면 위험하니 <strong>실제로는 아무것도 바꾸지 않고</strong> 계산을 옆에서 조용히 기록만 하고, 실제로 일어난 일과 나중에 비교해 맞았는지 확인했습니다(운영에 손대지 않아 사고 없음).</p>
+
+  <h2>맞는지 확인하기 — 두 가지 질문</h2>
+  <ol>
+    <li><strong>얼마나 정확한가?</strong> — "이 컨테이너는 언제쯤 작업될 것" 예측 vs 실제 작업 시각.</li>
+    <li><strong>효과가 있는가?</strong> — "지금 트럭 보내야" 짚은 것이 실제로 크레인이 트럭 없어 멈춘 상황과 맞는지.</li>
+  </ol>
+
+  <h2>확인하다 발견한 것 — 그리고 고친 것</h2>
+  <h3>1) 예측이 평균은 맞는데 하나하나는 들쭉날쭉</h3>
+  <p>컨테이너 <strong>한 개 단위</strong>로는 거칠었습니다(가장 큰 이유는 <strong>작업 순서 정보가 부정확</strong>). 다만 <strong>크레인 단위</strong>(이 크레인이 곧 트럭이 필요한가)로는 쓸 만했습니다.</p>
+  <h3>2) 가까운 작업을 약 10분 '일찍' 예측하는 버릇</h3>
+  <p>곧 할 작업을 실제보다 ~10분 빠르게 예측 — 원인은 크레인이 <strong>지금 하는 작업을 마저 끝내는 시간</strong>을 안 넣어서. → 보정.</p>
+  <h3>3) "크레인이 멈췄다" 신호가 너무 자주 울림</h3>
+  <p>트럭이 없어서가 아니라 <strong>덮개 작업·칸 이동처럼 다른 이유로 잠깐 쉬는 것</strong>까지 멈춤으로 잡음. → <strong>"근처에 빈 트럭이 한 대도 없을 때"만</strong> 진짜 멈춤으로 재정의하니 잘못 울림이 <strong>약 40배</strong> 감소.</p>
+  <h3>4) 가장 중요한 발견</h3>
+  <div class="kc-cal note"><span class="h">평소엔 트럭 부족으로 멈추는 일이 거의 없다</span><p>2·3을 바로잡고 보니 우리가 측정하려던 "막을 수 있었던 멈춤"이 이 시기엔 별로 없었습니다. → ① 진짜 효과 측정엔 <strong>배가 몰리고 트럭이 빠듯한 바쁜 시기</strong> 데이터가 필요. ② 평소엔 "멈춤 막기"보다 <strong>차량을 더 효율적으로(더 적게·덜 놀게) 쓰는 것</strong>에 더 큰 가치.</p></div>
+
+  <h2>지금까지의 결론</h2>
+  <ul>
+    <li>1단계 뼈대 — 출항 시각에서 거꾸로 계산 + 실제 데이터로 배운 크레인 속도 + 트럭 도착시간 — 을 만들고, 운영을 건드리지 않고 옆에서 계속 검증 중.</li>
+    <li>컨테이너 하나하나 예측은 데이터 한계로 거칠지만, <strong>크레인 단위 신호로는 유효</strong>.</li>
+    <li>진짜 효과 측정은 바쁜 시기 데이터가 더 필요 → <a href="/kc/dispatch/stage2-journey.html">2단계</a>로 무게를 넓혀 가는 중.</li>
+  </ul>
+  <div class="kc-cal tip"><span class="h">한마디로</span><p>한 번에 완성한 게 아니라 <strong>만들고 → 실제와 비교하고 → 틀린 부분을 고치고 → 다시 확인하는</strong> 과정을 반복하며 다듬어 왔습니다.</p></div>
+
+  <hr>
+  <p>← <a href="/kc/dispatch/stage2-design.html">2단계 설계</a> · <a href="/kc/dispatch/stage2-journey.html">2단계 여정</a> →</p>
+</main>
+</body>
+</html>

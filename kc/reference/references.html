@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>참고자료 — WP-TT 지식센터</title>
+  <meta name="description" content="외부 명세·도구 링크와 내부 코드 위치, 운영 환경.">
+  <link rel="stylesheet" href="/kc/assets/kc.css">
+  <script defer src="/kc/assets/kc.js"></script>
+</head>
+<body>
+<main class="kc-article" data-page="reference/references" data-source="knowledge/references.md">
+  <h1>참고자료</h1>
+  <p class="kc-lede">외부 명세·도구 링크와 내부 코드 위치, 운영 환경.</p>
+  <div class="kc-meta"><span class="kc-badge kind">레퍼런스</span></div>
+
+  <h2>내부 (코드·운영)</h2>
+  <ul>
+    <li>라이브 GPS 적재 + 사이클 상태머신 · 배차 매처: <code>crates/api/src/livemap.rs</code></li>
+    <li>사이클 이력 API: <code>crates/api/src/cycles.rs</code>(<code>/api/tt-cycles/*</code>)</li>
+    <li>도로망 라우터(방향 Dijkstra) + 비용 곡선: <code>crates/api/src/roadgraph.rs</code>(<code>RouteCost</code>/<code>CostCurve</code>)</li>
+    <li>도로망 재추론 cron: <code>scripts/reinfer_roadgraph.sh</code>(GPS→스켈레톤→링크·매시)</li>
+    <li>학습·정확도 하니스: <code>crates/api/src/learn.rs</code></li>
+    <li>DB 마이그레이션: <code>db/migrations/</code>(최신 0080대 — 도로망 비용 전환·격자 룩업 폐기 등)</li>
+    <li>대시보드 프론트엔드: <code>web/src/</code>(CYCLES 페이지 = <code>CyclesPage.tsx</code>)</li>
+    <li>지식센터(이 사이트): <code>kc/</code> — 손수 만든 정적 HTML(빌드 단계 없음), 공용 셸은 <code>kc/assets/kc.js</code>가 클라이언트에서 주입. 운영 API가 <code>kc/</code>를 <code>/kc/</code> 경로로 서빙.</li>
+  </ul>
+
+  <h2>운영 환경</h2>
+  <ul>
+    <li>DB: PostgreSQL 17 · <code>postgresql://wp:wp@127.0.0.1:5433/wp_tt</code></li>
+    <li>API 서비스: <code>systemctl --user {restart,status} wp-api.service</code>(release 빌드 실행)</li>
+    <li>대시보드: <code>http://100.95.189.16:8080</code>(Tailscale) · 지식센터 <code>/kc/</code></li>
+    <li>시간대: DB·로그는 UTC, 사람이 보는 시각은 터미널 현지 <strong>MYT(UTC+8)</strong>로 변환(터미널=말레이시아 Westports/Port Klang)</li>
+  </ul>
+
+  <h2>외부 (도구·표준)</h2>
+  <ul>
+    <li><a href="https://open-meteo.com/">Open-Meteo</a> — 날씨(기온·강수) 무료 API. 이동시간 모델의 우천 피처 원천.</li>
+    <li><a href="https://en.wikipedia.org/wiki/Hungarian_algorithm">헝가리안(Kuhn–Munkres) 알고리즘</a> — 2단계 최소비용 매칭.</li>
+    <li><a href="https://en.wikipedia.org/wiki/Dijkstra%27s_algorithm">다익스트라 최단경로</a> — 도로망 방향 라우팅.</li>
+  </ul>
+
+  <div class="kc-cal note"><span class="h">참고</span><p>운영 절차·로드맵은 <a href="/kc/start/roadmap.html">기획 / 로드맵</a>에, 검증 명령은 이 프로젝트의 README/코드 주석에 둡니다. (지식센터는 2026-07 Astro Starlight에서 손수 만든 정적 HTML로 이관됨 — 옛 Starlight/Pagefind 참조는 더 이상 유효하지 않음.)</p></div>
+
+  <hr>
+  <p><strong>관련:</strong> <a href="/kc/reference/glossary.html">용어집 &amp; FAQ</a> · <a href="/kc/reference/capacity-planning.html">클라우드 용량 산정</a></p>
+</main>
+</body>
+</html>

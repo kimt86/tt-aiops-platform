@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>차량 배차 — 조사 기록 — WP-TT 지식센터</title>
+  <meta name="description" content="두 단계 배차 방법을 실제로 만들기 위해 알아본 것과 알아낸 결과를 날짜순으로 쌓아두는 기록 + 플랫폼 구축 연구 일지.">
+  <link rel="stylesheet" href="/kc/assets/kc.css">
+  <script defer src="/kc/assets/kc.js"></script>
+</head>
+<body>
+<main class="kc-article" data-page="dispatch/research-log" data-source="dispatch/research-log.md + journal/research-log.md">
+  <h1>차량 배차 — 조사 기록</h1>
+  <p class="kc-lede"><a href="/kc/dispatch/index.html">두 단계 배차 방법</a>을 실제로 만들려고 알아본 과정과 결과를 날짜순으로 모읍니다. 오판·번복·재검증을 그대로 적습니다 — 성공만 남긴 일지는 다음 사람을 돕지 못하기 때문입니다.</p>
+  <div class="kc-meta"><span class="kc-badge kind">배차 · 조사 일지</span><span class="kc-badge living">리빙 로그</span></div>
+  <div class="kc-cal note"><span class="h">적는 방법</span><p>새 내용이 <strong>맨 위로</strong>. 날짜는 현지(말레이시아 MYT) 시간. 각 항목은 <strong>무엇을 알아봤나 → 무엇을 알아냈나(데이터·숫자) → 결정·다음 할 일</strong> 순서. 추측과 사실은 구분하고 확인 못 한 건 "아직 모름"이라 적습니다.</p></div>
+
+  <h2>질문 정리 현황</h2>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th>#</th><th>질문</th><th>상태</th></tr></thead>
+    <tbody>
+      <tr><td>1</td><td>마감의 기준</td><td>✅ 배 출항 시각(출항 예정). 작업완료 예정도 함께</td></tr>
+      <tr><td>2</td><td>1단계 '트럭이 보통 걸리는 시간'</td><td>✅ 양하/적하별 최근 추세(중앙값). 양하 ≈5분·적하 ≈20분</td></tr>
+      <tr><td>3</td><td>1단계 결과 형태</td><td>✅ "지금 배차해야 할 작업 목록"(= 2단계 후보)</td></tr>
+      <tr><td>4</td><td>2단계 목표·대상</td><td>✅ 첫 작업지점 도착까지 총합 최소화. 대상=노는+곧 비는 트럭</td></tr>
+      <tr><td>5</td><td>배가 떠나는 시각이 어디 있나</td><td>✅ 선박 항차 표(<code>VSB_VOYAGE</code>)에 출항·작업완료·접안·마감 다 있음</td></tr>
+    </tbody>
+  </table></div>
+
+  <h2>2026-07-02 — 도로망을 다시 만들어 배차 비용에 배선 (격자 룩업 폐기)</h2>
+  <p><strong>알아냈나(숫자).</strong> 7-01 탈락의 진짜 원인은 "도로망이라는 방향"이 아니라 <strong>만듦새</strong>: ① 작업지점이 도로에서 중앙 52m 떨어져 30%만 계산 가능, ② 길 방향을 35m 조각마다 따로 정해 한 도로 안에서 방향이 충돌(실패 500건 중 499건이 "길은 있는데 방향 경로 없음"). 재구축: 더 촘촘 + 작업지점 5,888곳 전부 도로 연결(커넥터, 스냅 52m→0m) + 방향은 도로 전체 다수결(경로 성공률 46.6%→95.9%). 이 터미널은 격자형이라 경로거리 ≈ 맨해튼(상관 0.998)이라 정확도는 대등하나(경로시간 0.341 vs 맨해튼 0.383) <strong>천장</strong>(찻길 속도·혼잡 반영)과 <strong>일반성</strong>으로 채택.</p>
+  <div class="kc-cal warn"><span class="h">같은 날 정정 — 비율 곱 보정 → "실제시간 곡선"으로 교체</span><p>배선 직후 적대적 리뷰(30 에이전트)에서 비율 보정 결함 2개 확정: ① 비율이 스케일 따라 급감해 경로시간×비율이 <strong>거리에 비단조</strong>(가까운 트럭이 먼 트럭보다 비싸져 마감 충족률 20.6% 붕괴), ② 곱셈만으로 짧은 경로 실측 바닥 소실(15초 경로가 21초로, 실제 ~89초). <strong>교체</strong>: 같은 검증 표에서 "이 정도 경로시간이면 실제로 보통 N초"를 6구간 실제 p50/p90 매듭으로 직접 배워 씀(단조 잠금·바닥 유지·매듭 보간). 폴백도 맨해튼→실제 곡선으로 통일. 교체 후 마감 충족률 <strong>81.6% 정상화</strong>, 지오메트리 기점 정렬로 경로 성공률 <strong>96.7%</strong>, 게이트 0.358 vs 0.385.</p></div>
+  <p><strong>결정.</strong> 2단계 이동비용 = 도로망 경로시간 → 실제시간 곡선(기대 p50·보수 p90), 225m 격자 룩업 <strong>폐기</strong>(mig 0082). 라우팅 불능(~3%)만 맨해튼→실제 곡선 폴백. 검증기를 상시 게이트로 되살려 실측 상관 추적(이 표가 두 비용 곡선의 학습 원천). 다음: 찻길 속도·혼잡 정밀화(헤드룸).</p>
+
+  <h2>2026-07-01 (오후) — 정정: 순수주행 = '주행 구간 시간' · 진입 대기 폐기 · lead 재보정</h2>
+  <p>오전 기록의 두 가지가 뒤집힘(mig 0079).</p>
+  <ul>
+    <li><strong>순수주행 정의 정정.</strong> "움직인 순간만 센 시간(<code>drive_s</code>)"은 경로 정체로 멈춘 시간(진짜 이동의 일부)까지 빼 가까운/먼 트럭 차이를 뭉갬. <strong>올바른 순수주행 = 움직이기 시작해 작업지점 도달까지의 구간 시간</strong>(경로 정체 포함, 도착 후 크레인 대기만 제외). 실측 중앙 거리 781m에 구간 237초(13km/h)인데 움직인 순간만 세면 120초(22km/h)로 과소. → 폴백 속도 6.33→3.30 m/s.</li>
+    <li><strong>크레인 진입 대기 폐기.</strong> 트럭 전체를 다시 재니 대기 중앙값이 거의 0(양하 −1초·적하 −3초). "중앙 67초"는 도착 전 크레인 근처에 찍힌 트럭 절반만 센 <strong>선택편향</strong>이었고 크레인 좌표도 평균 부두 좌표로 부정확. → <code>learn_crane_approach</code> 폐기. 진짜 줄서기는 도착 이후(크레인 스케줄).</li>
+    <li><strong>대신 1단계 마감여유(lead)를 여정 기반 재보정.</strong> 고정값(양하 300·적하 1200초)을 실측 여정 p75로: <strong>양하 450·적하 1180초</strong>. (적하 여정은 처음부터 끝까지 직접 재야 함 — 단계별 중앙값을 더하면 과소평가.)</li>
+  </ul>
+
+  <h2>2026-07-01 (오전) — 도로망 '탈락'(음성 게이트) · 2단계 비용 = free_in + 순수주행 · 빈차 분해</h2>
+  <div class="kc-cal warn"><span class="h">이후 갱신</span><p>아래 "도로망 탈락"은 7-02 재구축으로 뒤집힘(맨 위 참고). "순수주행=움직인 순간만"·"인계대기를 1단계로"는 위 오후 정정으로 뒤집힘.</p></div>
+  <ul>
+    <li><strong>① 도로망 길찾기 — 만들었으나 탈락.</strong> GPS로 도로 뼈대 추론(약 264 노드·353 방향엣지)·방향성 다익스트라·검증 로거까지 완성. 검증(585 구간): 도로 상관 0.490 &lt; 직선 0.565로 <strong>오히려 나쁨</strong>, 게다가 구간 30%만 도로에 붙음(작업지점이 도로에서 중앙 62m). 6-29 백테스트에선 이겼는데 진 이유: 격자(22m)를 실제 도로망 그래프에 옮기니 커버리지 부족. 인프라는 재료로 보존.</li>
+    <li><strong>② 2단계 비용 = free_in + 순수 주행시간.</strong> = 빈 트럭이 작업지점 도착까지 = <code>free_in</code>(빌 때까지) + 이동(TRAVEL). 마감·긴급도는 1단계 몫, 2단계는 순수 효율.</li>
+    <li><strong>③ 빈차 구간 분해 — 크레인 대기는 도착 이후.</strong> 도착(ARRIVED)이 곧 물리적 도착(중앙 −4초) → 줄서기는 도착 이후, 이동시간 안이 아님. "중앙 속도 6.9 km/h"는 오해, 실제 ~22.8 km/h. 같은 OD 변동계수 0.758(±76%)=큐 잡음이 거리모델 정확도 바닥.</li>
+  </ul>
+
+  <h2>2026-06-30 — OD 예측을 'tier 폴백' → '피처 학습 모델'로 전환</h2>
+  <div class="kc-cal note"><span class="h">이후 갱신</span><p>여기서 만든 도로망 길찾기는 7-01 탈락 후 7-02 재구축으로 배차 비용 본체로 채택, 격자 폐기(맨 위 참고).</p></div>
+  <p>3계층(기억→라우팅→맨해튼 폴백)을 <strong>하나의 학습 모델</strong>이 여러 단서를 종합하는 구조로(deep research 결론 = 라우팅 baseline + 학습 결합기 + 날씨·혼잡 피처). 구조: ① 끝점→도로망 노드 매칭(고정 블록=학습 좌표 닻, 이동 크레인=GPS snap), ② 피처(라우팅 시간·맨해튼·날씨·혼잡·시간대), ③ 모델(gradient boosting급, 딥러닝 불요). 핵심 선결조건 = 촘촘·정밀·GPS정합 도로망(3초 재추론 + 작업지점 5,877 앵커).</p>
+
+  <h2>2026-06-29 — OD 도착시간에 '방향성 도로망 길찾기' 계층 추가 설계</h2>
+  <p>셀별(약 22m) 방향·일방통행·속도로 방향성 길찾기 그래프를 만들어 백테스트(12,683 leg):</p>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th>방법</th><th>corr</th><th>MAE</th><th>MAPE</th></tr></thead>
+    <tbody>
+      <tr><td><strong>방향+속도 길찾기</strong></td><td><strong>0.827</strong></td><td><strong>61s</strong></td><td><strong>44.8%</strong></td></tr>
+      <tr><td>직선(격자 맨해튼)</td><td>0.793</td><td>71s</td><td>48.2%</td></tr>
+      <tr><td>이전: 무방향·균일속도</td><td>0.745</td><td>73s</td><td>53.3%</td></tr>
+    </tbody>
+  </table></div>
+  <p>→ 방향·속도를 넣자 직선을 앞섬. 단 여러 번 다녀본 OD쌍 기록(중앙값)은 여전히 더 정확(≈30%)이라 길찾기는 <em>기록 없는 구간의 폴백</em>으로. 결정: 비용 룩업을 3계층으로(① 학습 OD 기록 ② 방향성 도로망 길찾기 미리계산 ③ 직선÷속도). 혼잡도는 셀→도로 구간 기준으로 옮기면 병목을 더 잘 봄(단 전용 도로라 주로 모니터링·시뮬용).</p>
+
+  <h2>2026-06-20 — 1단계 정리: 화면 표시 마무리 + 검증 계획</h2>
+  <p>그림자 화면: 선박마다 출항+남은 시간, 크레인마다 여유 신호등(🟢🟡🔴), 컨테이너마다 배차 마감 카운트다운+작업 예정. 다듬으며 바로잡은 것: '마감' 대신 "실제 작업 시점"·"배차 마감"으로 / 배별 구분(베이 이름 겹침) / 카운트다운을 '데이터 받은 시각'에 고정. 검증 계획: ① 정확도(예측 vs 실제 작업 시각) ② 효과(배차 신호 뒤 실제 크레인 멈춤) — 같은 예측 로거에서 함께.</p>
+
+  <h2>2026-06-19 — 1단계 정밀화: 트윈·마무리버퍼·크레인별 무브시간</h2>
+  <ul>
+    <li><strong>트윈</strong>: 선박별 트윈 비율(<code>twintandem='W'</code>)로 컨테이너→무브 환산 <code>무브 ≈ 컨×(1−비율/2)</code>.</li>
+    <li><strong>마무리 버퍼</strong>: 출항 약 30분 전 끝나야 → 여유(slack)에 −30분.</li>
+    <li><strong>크레인별·양적하별 무브시간</strong>: 상수 대신 각 크레인 최근 실제 간격(<code>learn_qc_move_time</code>, 57크레인). 양하 중앙 89초·적하 116초, 같은 작업도 크레인별 79~128초.</li>
+  </ul>
+
+  <h2>2026-06-18 (밤) — 마감 표시·의미 정립 (연속 개선)</h2>
+  <ul>
+    <li><strong>표시 = '마감'이 아니라 '실제 작업 시점'.</strong> 마감(출항 역산)이 <code>11시간 22분</code>처럼 비현실적으로 큼(출항 멀고 QC 여유 커서). 트럭이 필요한 시점 = QC가 그 컨테이너를 실제 처리하는 시점(누적 작업)이지 출항 역산 마감이 아님. <strong>배차 긴급도 = 작업ETA − 핸드오버 리드타임.</strong> 칩을 <code>⏳ 작업까지 67분</code>으로.</li>
+    <li><strong>마감을 무브(컨테이너) 단위로</strong> 분산(베이 단위→무브별 마감 = 베이 마감 − 그 뒤 남은 무브×무브시간).</li>
+    <li><strong>위치 표시 정정.</strong> 양하(DS)의 <code>yt_topos</code>엔 야드 블록이 아니라 QC 코드(야드 블록 미정)·RTG 빔. 적하(LD)는 <code>yt_topos</code>=출발 블록·RTG 있음. 표시: 적하 <code>← 블록(RTG)</code>·양하 <code>→ 야드</code>.</li>
+    <li><strong>마감 계산(그림자) 1차 완성.</strong> 선박 출항(ESTDEP)에서 각 QC 남은 베이 역산. 베이별 = 남은 컨테이너×무브시간 + 베이이동(~3분) + 해치커버(양하 덱→홀드 ~5.7분/적하 홀드→덱 ~6.5분). QC 헤더 <code>🏁 출항 · 여유 ±N</code>.</li>
+    <li><strong>선박 일정 적재 + 마감=출항(ESTDEP).</strong> <code>VSB_VOYAGE</code>를 <code>live_vessel_schedule</code>로 주기 적재. 발견: 작업완료 예정(ESTWKC)은 stale(오늘 출항 배가 3주 전 날짜)이라 신뢰 불가, 출항(ESTDEP)은 현재값 → 마감은 ESTDEP.</li>
+    <li><strong>작업 수량 단위 = 컨테이너(무브 아님).</strong> 잔여는 큐 수량(계획−완료). 검증: 한 선박(MCSO) 큐 합 2488 = 양하 1283+적하 1205. 컨테이너=단일×1+트윈×2, 무브=단일+트윈.</li>
+  </ul>
+
+  <h2>2026-06-18 (저녁) — 데드라인 역산 재료: 처리속도·트윈·베이·해치커버·출항소스</h2>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th>작업</th><th>1개당 처리 간격</th><th>시간당</th></tr></thead>
+    <tbody>
+      <tr><td>양하(내림)</td><td>약 90초</td><td>약 39개</td></tr>
+      <tr><td>적하(실음)</td><td>약 110초</td><td>약 32개</td></tr>
+    </tbody>
+  </table></div>
+  <p>적하가 일관되게 느리고, 같은 작업도 크레인별 차이 큼(양하 79~115·적하 107~131초). → 데드라인 역산의 처리속도는 각 크레인 최근 양하/적하 속도. <strong>트윈</strong>: 남은 작업의 ~25%가 트윈 → 시간은 "남은 무브 수"로. <strong>베이 이동</strong>: 중앙 ~171초(~3분)를 베이 전환 횟수만큼 가산.</p>
+  <p><strong>해치커버 전환 시간 측정</strong>(큐 이름의 덱/홀드 표시로):</p>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th>작업</th><th>전환</th><th>중앙 간격</th><th>정상 무브</th></tr></thead>
+    <tbody>
+      <tr><td>양하</td><td>덱→홀드 (커버 열기)</td><td><strong>428초 (~7분)</strong></td><td>89초</td></tr>
+      <tr><td>적하</td><td>홀드→덱 (커버 덮기)</td><td><strong>496초 (~8분)</strong></td><td>115초</td></tr>
+    </tbody>
+  </table></div>
+  <p><strong>출항 시각 소스 찾음(질문 5).</strong> <code>VSB_VOYAGE</code>에 출항(ESTDEP)·작업완료(ESTWKC)·접안(ESTBER)·화물마감(CUTOFF)·실제 시각·계획 물량 모두. 리드타임 1차: 양하 ≈5분(빈차 4.5+핸드오버 0.8), 적하 ≈20분(블록 왕복 포함). ~4배 차이라 양하/적하 각각 중앙값으로.</p>
+
+  <h2>2026-06-18 — 시작 · 방법 정함 · 재료 점검</h2>
+  <p><strong>두 단계</strong>로 정하기로 결정(1단계 마감·위치 안 봄 / 2단계 트럭 매칭·위치 봄). 이유: 데이터가 깔끔하지 않고 도착 예측이 잘 안 맞아 그 예측이 마감 판단까지 망치지 않게. 재료 점검: ✅ 트럭 이동시간 예측·✅ 크레인 남은 일·✅ 위치 / ❌ <strong>배가 떠나는 시각(당시 없음)</strong> → 가장 먼저 출항 시각 소스 찾기.</p>
+
+  <hr>
+  <h2 style="margin-top:2em;">이전 — 플랫폼 구축 연구 일지 (2026-06-08 ~ 06-15)</h2>
+  <p class="kc-lede" style="font-size:15px;">배차 조사 이전, 플랫폼(데이터 파이프라인·대시보드·지표)을 세우며 시도하고·틀리고·정정한 기록.</p>
+
+  <h3>2026-06-08 · 문제 정의</h3>
+  <p>Westports(말레이시아) 운영진과 워킹 세션 — 야드 트럭(TT) 배차를 데이터 기반으로 측정·개선한다는 목표를 문제 수준에서 정의. 이후 모든 구축·분석은 이 날 질문으로 거슬러 감. → <a href="/kc/learn/tt-dispatch-problem.html">스마트 TT 배차 세션 기록</a></p>
+
+  <h3>2026-06-09 · 측정 기반 구축</h3>
+  <ul>
+    <li><strong>대시보드·KPI 파이프라인 가동 — "운영 DB 무접촉" 원칙.</strong> Rust(axum)+PostgreSQL+React. 추출기만 Oracle을 타이머 주기로 Postgres에 복제, API는 Oracle 직접 조회 안 함(API 크레이트에 Oracle 클라이언트 없음). KPI·TT·MAP·HEALTH·FEED 페이지 가동. → <a href="/kc/data/kpi-computation.html">KPI 산출</a>·<a href="/kc/data/tos-db-reference.html">TOS DB 레퍼런스</a></li>
+    <li><strong>실시간 websocket + 작업 풀 미러링.</strong> SSH 터널로 GPS(<code>wpt_gps</code>)·PLC(<code>ctab</code>) 수신 시작 — "차량이 실제 움직인 것"을 보는 두 번째 눈. 작업 풀을 90초 주기로 <code>live_workpool</code>+<code>live_assigned_tt</code>에 미러링. → <a href="/kc/data/websocket-data.html">websocket 데이터</a>·<a href="/kc/data/dispatch-pools.html">배차 풀</a></li>
+    <li><strong>지식센터 개설 — 기술 문서 8편.</strong> "측정 근거를 코드 밖에 남긴다"는 원칙. → <a href="/kc/index.html">안내</a>·<a href="/kc/reference/capacity-planning.html">클라우드 용량 산정</a></li>
+  </ul>
+
+  <h3>2026-06-10 · 정밀화와 정정 (절반은 "우리가 틀렸던 것")</h3>
+  <ul>
+    <li><strong>DB의 ETW는 수 시간 어긋남.</strong> <code>JOB_ODR_ETW_DT</code>를 그대로 쓰면 실제와 수 시간 차 → Azure <code>tos_etw_gateway</code>(TOS RPC 폴링)에서 정확값 수신(<code>tos_etw_cntr</code>, TTL 30분).</li>
+    <li><strong>TT 가동률 재정의</strong> — 배정 기반(A=작업, A·B·Q=투입) + 60초 샘플(<code>util_tt_sample</code>) 시간 기반 평균.</li>
+    <li><strong>idle 102대 중 51대는 사실 배정 상태</strong> — 공차+정지+배정 = <strong>staging</strong> 신설, idle은 진짜 미배정만(~21대). → <a href="/kc/data/dispatch-pools.html">배차 풀</a></li>
+    <li><strong>container1은 적재가 아니라 "배정"</strong> — TOS 배정 필드(c2c). LD 34대가 container1 세팅된 채 픽업 블록 ARRIVED(적재 전). 픽업 시점은 ARRIVED 측면 분류로 복원. → <a href="/kc/data/kpi-accuracy.html">정확도 보강</a></li>
+    <li><strong>사이클 로그(tt_cycle_log) 가동</strong> — 보유 ≥30초 + 운반 ≥150m 이동 필터로 가짜 인도 기각. ML 학습 데이터 축적 시작. → <a href="/kc/learn/tt-prediction.html">예측 모형</a></li>
+    <li><strong>"픽업 도착 &lt; 배정" 역전 23건 — 오독·전수 조사·번복.</strong> "미리 가서 대기"라는 해석은 <strong>틀림</strong>. 전수 조사 결과 전부 assigned==pickup, 83%가 재시작 후 첫 사이클 = 관측 경계 아티팩트. 시딩 가드 추가·오염 56행 정리. <em>해석을 붙이기 전에 데이터를 전수로 확인할 것.</em></li>
+  </ul>
+
+  <h3>2026-06-14 · 곧유휴 감지 — TOS 보조 연구</h3>
+  <p>웹소켓만으론 <strong>양하(DS) 곧유휴 정확도가 구조적으로 약함</strong>(RTG가 PLC 미전송 — 드롭측 크레인 도착 포착이 LD 50.1% vs <strong>DS 0.0%</strong>). 멀티에이전트 연구(9 에이전트, 삼각측량): 곧유휴 입력 대부분이 이미 <code>live_workpool</code>에 90초 주기로 존재 → LD엔 Oracle 추가추출 불필요. prod Oracle 저부하 직접조회 허용 후 2차 검증: <code>JOB_ORDER_LIST</code>의 <code>JOB_ODR_ACTV_DT</code>+<code>YTNO</code>+<code>ARMGC</code>로 웹소켓이 0%로 못 잡던 DS 핸드오버 시작+대상차량을 TOS 라이브로 직접 관측(DS 활성 113건). → <a href="/kc/learn/soon-idle-tos.html">곧 유휴 감지 — TOS 최소부하</a></p>
+
+  <h3>2026-06-15 · RTG 작업 사이클 — 양하 대기의 정체</h3>
+  <p>양하(DS) 대기가 정밀 예측 안 되는 원인: <strong>블록 큐·시간대·RTG 식별자 어느 것도 대기를 예측 못 함</strong>(분산 ~93% 미설명). RTG는 로밍(move의 37%가 주력 블록 밖). 그러다 <strong><code>MCH_OPERATION</code>에 RTG move가 상세히 찍힌다는 걸 발견</strong>(2일 55,024건, KPI 추출기가 QC만 필터해 안 보였을 뿐). 물리 핸드오버 ~60초인데 <strong>DS 핸드오버는 RTG 작업의 ~20%뿐</strong> — 나머지 80%는 RH·AH·게이트·재배치. <strong>12분 대기 = RTG가 그 사이 다른 move 5~10개를 끼워넣는 시간.</strong> RTG 전체 move를 <code>rtg_move_log</code>(5분 주기)로 적재 시작. → <a href="/kc/learn/rtg-work-cycle.html">RTG 작업 사이클</a></p>
+
+  <hr>
+  <p><strong>설계 글 →</strong> <a href="/kc/dispatch/index.html">차량 배차 로직</a></p>
+</main>
+</body>
+</html>

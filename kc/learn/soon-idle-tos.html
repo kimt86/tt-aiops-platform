@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>곧 유휴될 차량 감지 — TOS DB 최소부하 + QC/RTG 핸드오버 — WP-TT 지식센터</title>
+  <meta name="description" content="웹소켓만으론 양하(DS) 곧유휴 정확도가 약하다. TOS DB에 최소 부하로 QC·RTG 핸드오버 시작 시점과 대상 차량을 얻는 방안 — 과정과 결과, prod Oracle 직접 검증 2차 반영.">
+  <link rel="stylesheet" href="/kc/assets/kc.css">
+  <script defer src="/kc/assets/kc.js"></script>
+</head>
+<body>
+<main class="kc-article" data-page="learn/soon-idle-tos" data-source="research/soon-idle-tos.md">
+  <h1>곧 유휴될 차량 감지 — TOS DB 최소부하 + QC/RTG 핸드오버</h1>
+  <p class="kc-lede">배차의 핵심 하나는 <strong>곧 유휴될 차량을 미리 감지</strong>하는 것. 웹소켓만으론 <strong>양하(DS)가 구조적으로 약하고</strong>(RTG가 PLC 미전송) 라벨 확보도 어렵다. TOS DB를 보조로 쓰되 부하를 최소로 주면서 (1) 핸드오버 시작 시점, (2) 대상 차량을 얻는 방안 연구.</p>
+  <div class="kc-meta"><span class="kc-badge kind">러닝 · 연구</span><span class="kc-badge living">검증됨 · 2026-06-14 (2차)</span></div>
+
+  <h2>한 장 요약 — 두 핵심에 대한 직답</h2>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th>핵심 질문</th><th>선적(LD) — 안벽 QC</th><th>양하(DS) — 야드 RTG</th></tr></thead>
+    <tbody>
+      <tr><td><strong>(1) 핸드오버 "시작 시점"</strong></td><td>권위(사후) <code>MCH_OPERATION.ST_DT</code> · 라이브 임박 QC PLC load 전이(~1초) · 예측 <code>JOB_ODR_ETW_DT</code></td><td><strong>TOS 라이브 직접 관측</strong> <code>JOB_ODR_ACTV_DT</code>(=QC 양하 완료·트럭 적재) · 권위 <code>JOB_HIST_ACTV_DT</code> · 웹소켓 보조 RTG GPS ≤30m. 단 ACTV=QC 적재이지 RTG 물리집기 아님(+~11분)</td></tr>
+      <tr><td><strong>(2) 핸드오버 "대상 차량"</strong></td><td>사후 <code>TRK_ID</code> · 라이브 <code>JOB_ODR_YTNO</code>(GPS device id와 동일)</td><td>라이브 <code>JOB_ODR_YTNO</code> · 이력 <code>JOB_HIST_YTNO</code>(DS 87% 채움) · 담당 RTG <code>ARMGC</code></td></tr>
+    </tbody>
+  </table></div>
+  <div class="kc-cal warn"><span class="h">핵심 비대칭(실측)</span><p>차를 비우는 핸드오버가 LD는 PLC 있는 <strong>QC</strong>에서, DS는 PLC 없는 <strong>RTG</strong>에서. 라이브 <code>tt_cycle_log</code>(61,279 사이클)에서 <strong>드롭측 크레인 도착 포착 = LD 50.1% vs DS 0.0%</strong>(DS 23,219건 중 4건만 PLC로 잡힘). → "선적 곧유휴는 풀리고, 양하 곧유휴는 구조적으로 어렵다".</p></div>
+  <div class="kc-cal tip"><span class="h">권장 — 하이브리드</span><p>웹소켓을 1차 라이브 감지로, TOS를 권위·라벨·지연보정 2차로. LD는 PLC가 긴 호라이즌(~90~120초)을, DS는 RTG 근접이 짧은 호라이즌(관여 후 ~30초)만 주되 <strong>RTG 미관여 차는 풀에 넣지 않음</strong>(오포함 방지).</p></div>
+  <p><strong>최소부하 결론:</strong> 곧유휴 입력의 대부분(대상차량·작업종류·ETW·배정RTG·POW)은 이미 <code>live_workpool</code>에 90초 주기로 존재 → <strong>LD엔 Oracle 추가추출 불필요</strong>(234행 전부 ytno·armgc, 95% ETW). DS도 거의 공짜로: 같은 90초 스캔에 <strong><code>JOB_ODR_ACTV_DT</code> 컬럼만 추가</strong>(Oracle 추가 쿼리 0).</p>
+
+  <h2 id="연구-2차">연구 2차 — prod Oracle 직접 검증 (2026-06-14)</h2>
+  <p>1차는 운영 Oracle 직접조회 금지 제약하에 삼각측량했고 몇 가지를 <code>(미검증)</code>으로 남겼습니다. 저부하 직접조회 허용으로 완화되어 prod TOS Oracle에 직접 질의(직렬·인덱스안전·행수 캡, ~8개 바운드 쿼리) — <strong>양하(DS) 곧유휴 신호가 TOS 라이브에 직접 존재</strong>함을 발견.</p>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th>1차 (미검증)</th><th>2차 검증 결과</th></tr></thead>
+    <tbody>
+      <tr><td>HISTORY가 대상 트럭ID를 직접 주는가</td><td><strong>확정 — <code>JOB_HIST_YTNO</code> 실재</strong>(DS 이력 87% 채움)</td></tr>
+      <tr><td>워터마크용 datetime 인덱스 존재</td><td><strong>확정 — <code>IDX_JOBHIST_DATETIME</code>=(DATE‖TIME, JOBSTATUS)</strong></td></tr>
+      <tr><td><code>ACTV_DT</code> 의미 (DS)</td><td><strong>✅ QC 양하 완료(트럭 적재)</strong>: ACTV==QC move 완료 0초 일치(위반 0/3464). RTG 물리 들어올림은 ACTV +~11분</td></tr>
+      <tr><td><code>ACTV_DT</code> 의미 (LD)</td><td>⚠️ 비대칭 — RTG 픽업 완료와 느슨(±90초 34%뿐). LD 칩은 "적재" 단언 불가 → <strong>"활성 N분"</strong>으로 분리 표기</td></tr>
+    </tbody>
+  </table></div>
+  <p><strong>새 핵심 발견:</strong> 진행중(<code>COMPDATE IS NULL</code>) 주문 한 행에 대상트럭·담당RTG·활성시각·블록작업점이 함께. 라이브 상태(NOW): DS 활성(A·YT_STATUS F·ACTV 있음) <strong>113건</strong>이 <code>ACTV_DT</code>+<code>YTNO</code>+<code>ARMGC</code> 보유(ARMGC 전부 RTG/ES). LD 활성 114건은 ACTV 미세팅(단계가 일러서 — LD는 QC PLC 웹소켓이 이미 잘 잡아 상호보완).</p>
+  <div class="kc-cal note"><span class="h">타이밍 실측 (라이브 DS 활성 n=121)</span><p>블록 대기(DIS→ACTV) 중앙 <strong>461초(~7.7분)</strong>, p75 788초 — "DS 도착 ≠ 곧유휴" 정량 확인. ACTV 경과(진행중) 중앙 361초 + 롱테일(11~18분) → <code>ACTV_DT</code>는 느슨한 활성 신호(±초 물리집기 아님). "30초 카운트다운"이 아니라 "이 트럭이 QC 양하를 마치고 풀릴 방향으로 가는 중(자유까지 ~12분)이며 대상이 누구인지"를 주는 신호.</p></div>
+
+  <h2>웹소켓 단독 분류의 약점</h2>
+  <p>현행 곧유휴는 순수 웹소켓 분류(<code>classify_tt()</code>). 각 TT를 5개 상태로: <code>idle / empty_travel / delivering / soon_idle / wait_rtg</code>(+staging). 세 약점:</p>
+  <ul>
+    <li><strong>DS엔 물리 신호 없음</strong> — PLC(<code>ctab</code>)는 안벽 C/M/Z만, RTG 미수신.</li>
+    <li><strong>도착 ≠ 곧유휴</strong> — RTG가 여러 블록·레인 공유해 도착 차를 바로 안 받음("도착했으나 RTG 멀어 대기"=<code>wait_rtg</code>).</li>
+    <li><strong>GPS는 성기다</strong> — 장비당 ~3초, 정지 시 30~55초(도착/출발 시각 ±수십 초 흔들림).</li>
+  </ul>
+  <p>라벨 난제: <code>container1</code>은 TOS 배정 필드이지 물리 적재가 아님(<a href="/kc/data/feed-semantics.html">피드 의미론</a>). DS 드롭측엔 정밀화할 신호가 없음(QC측은 PLC ±1초, RTG측은 GPS dwell만).</p>
+
+  <h2>TOS 신호 매핑</h2>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th></th><th>테이블</th><th>구분 키</th><th>시작/완료</th></tr></thead>
+    <tbody>
+      <tr><td>QC(안벽)</td><td><code>MCH_OPERATION</code>(권위·사후)</td><td><code>MACHNO ^C[0-9]+$</code></td><td><code>ST_DT</code>+<code>COMP</code> 쌍 ○</td></tr>
+      <tr><td>RTG(블록)</td><td><code>JOB_ORDER_HISTORY</code>(대기 기반·사후)</td><td><code>ARMGC</code>(RTG/ES)</td><td><code>YT_DIS_DT→ACTV_DT</code> 대기만</td></tr>
+    </tbody>
+  </table></div>
+  <p>핵심 파생 <code>K_RTG_Q = (ACTV_DT − YT_DIS_DT)</code>초 = "TT 하차 → 야드 크레인 활성 대기". RTG/블록측 신호임을 DB가 증명(in-range 이벤트 97.1%가 DS). <strong>라이브 임박 신호는 <code>MCH_OPERATION</code>이 아니다</strong>(모든 추출이 완료일 인덱스로 시작 → 완료 move만). 라이브 진행중·ETW는 <code>JOB_ORDER_LIST</code>(90초)+PLC.</p>
+
+  <h2>최소부하 추출 설계</h2>
+  <p>90초 주기로 <strong>이미 있는 것</strong>(live_workpool 234행): 대상차량 <code>ytno</code>(100%)·작업종류·ETW(95%)·배정RTG(100%). → LD 곧유휴엔 Oracle 추가추출 불필요. <strong>추가 필요 단 하나</strong>: 양하 "방금 유휴" 권위 확정 = <code>JOB_ORDER_HISTORY.ACTV_DT</code> 저지연 감지.</p>
+  <p>현 부하: workpool 90초 = WORKPOOL ~1.2s + WORKQUEUE ~1.6s + ASSIGNED ~0.85s = <strong>~3.7s/tick</strong>. 이미 적용된 최소부하 기법: 진행중-only(<code>COMPDATE IS NULL</code>)·상태 화이트리스트·시간경계·인덱스 안전 술어·직렬화·API Oracle 무접근. 미적용이던 증분 워터마크는 아래에서 가동.</p>
+
+  <h2>하이브리드 감지 로직 — 폴백 사다리</h2>
+  <pre><code>1순위: QC PLC load 전이 (LD, ±1초)       → soon_idle 확정 + 긴 호라이즌
+2순위: live_workpool ETW (LD/DS, 90초)   → 임박시각 1차 예측
+3순위: RTG GPS ≤30m (DS, bay 수준)       → 관여 확인 시에만 soon_idle, 짧은 호라이즌
+4순위: ACTV_DT 증분 폴링 (DS, 30~60초)   → 사후 권위 확정·라벨 (호라이즌 0)
+관측 못 함                                → NULL (추정 금지)</code></pre>
+  <p>신뢰 점수: LD-PLC &gt; DS-RTG관여 &gt; ETW단독 &gt; 도착단독(부적합). <strong>DS는 반드시 도착+RTG 관여 둘 다 충족 시에만 풀 포함.</strong></p>
+
+  <h2>구현 상태 (2026-06-14 — 4건 완료)</h2>
+  <ol>
+    <li><strong>✅ 라이브 수집</strong>: 90초 <code>workpool.sql</code>에 <code>JOB_ODR_ACTV_DT</code> 추가 → <code>live_workpool.actv_ts</code>(Oracle 추가쿼리 0, mig 0029). DS 활성 103건 전부 actv_ts+ytno+armgc 보유.</li>
+    <li><strong>✅ 분류 보정</strong>: <code>classify_tt()</code> DS 분기에 TOS 보정 훅 — GPS RTG 미근접(&gt;30m)이어도 TOS ACTV면 soon_idle 보정(웹소켓 ∪ TOS). <strong>DS 곧유휴 GPS단독 4 → 22로 ~5.5배.</strong> <code>적재 N분</code> 배지 노출.</li>
+    <li><strong>✅ 라벨 수집</strong>: <code>wp-handover.timer</code>(60초)가 완료(<code>JOBSTATUS='C'</code>)를 <code>IDX_JOBHIST_DATETIME</code> 워터마크로 증분 폴링 → <code>tos_handover_label</code>(mig 0030). 권위 호라이즌(DS): ACTV→실제유휴 중앙 ~10.2분·블록대기 ~12.3분.</li>
+    <li><strong>✅ 정확도 하니스</strong>: <code>spawn_soon_idle_logger</code>(30초)가 트립당 첫 진입을 <code>tt_soon_idle_pred</code>(mig 0031)에 적재 — source·<code>gps_would_fire</code>(반사실) 동반. 정답 = GPS 우선(<code>tt_cycle_v2.dropped_at</code>), 공백 시 TOS 폴백. 학습센터 ④ 섹션 노출. 예측 60건 중 DS 38의 34가 tos_only(GPS단독이면 89% 놓침).</li>
+  </ol>
+  <div class="kc-cal warn"><span class="h">리스크 (구조적)</span><p>DS 물리 순간 부재(RTG PLC 없음) → "정확히 언제 비었나"는 GPS dwell/ACTV_DT 근사만. 보존 한계: <code>JOB_ORDER_HISTORY</code> ~15일·<code>MCH_OPERATION</code> ~35일. 개별 리드타임 예측 불가 결론 → <a href="/kc/dispatch/leadtime-adr.html">리드타임 ADR</a>.</p></div>
+
+  <hr>
+  <p><strong>관련:</strong> <a href="/kc/learn/tt-prediction.html">예측 모형 연구</a> · <a href="/kc/data/feed-semantics.html">피드 의미론</a> · <a href="/kc/learn/rtg-work-cycle.html">RTG 작업 사이클</a> · <a href="/kc/data/tos-db-reference.html">TOS DB 레퍼런스</a> · <a href="/kc/learn/cycle-v2-shadow.html">사이클 v2</a></p>
+</main>
+</body>
+</html>

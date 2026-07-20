@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>websocket 원본 필드 레퍼런스 — WP-TT 지식센터</title>
+  <meta name="description" content="GPS/PLC 피드가 실제로 보내는 모든 필드를 원본 프레임을 떠서 구현자 관점으로 정리한 필드 사전.">
+  <link rel="stylesheet" href="/kc/assets/kc.css">
+  <script defer src="/kc/assets/kc.js"></script>
+</head>
+<body>
+<main class="kc-article" data-page="data/websocket-fields" data-source="architecture/websocket-fields.md">
+  <h1>websocket 원본 필드 레퍼런스</h1>
+  <p class="kc-lede">GPS/PLC 피드가 실제로 보내는 <strong>모든 필드</strong>를 원본 프레임을 떠서 구현자 관점으로 정리한 "필드 사전". 상위 개요는 <a href="/kc/data/websocket-data.html">실시간 websocket 데이터</a>.</p>
+  <div class="kc-meta"><span class="kc-badge kind">레퍼런스</span><span class="kc-badge living">리빙 문서</span></div>
+
+  <h2>1 · 봉투 & 두 개의 존</h2>
+  <pre><code>{"data":{"id":"TT1045","zone":"wpt_gps","datas":"&lt;문자열로 인코딩된 JSON&gt;"}}</code></pre>
+  <ul>
+    <li><code>data.id</code> — 장비 ID. <code>data.zone</code> — 피드 종류. <code>data.datas</code>는 <strong>문자열</strong>이라 한 번 더 JSON 파싱.</li>
+    <li><strong><code>wpt_gps</code> 존</strong> → <code>gps_update</code>(차량 GPS, ~3초). <strong><code>ctab</code> 존</strong> → <code>plc_data</code>(크레인 PLC, ~1초).</li>
+  </ul>
+
+  <h2>2 · 전체 26개 키 — 실제 프레임</h2>
+  <p>한 프레임에 <strong>항상 26개 키가 모두 포함</strong>됩니다. 해당 장비/상황에 없는 값은 빈 문자열(또는 0).</p>
+  <pre><code>// 활성 LD 트럭 (도착 상태)
+{ "device":"TT1253", "lat":"2.93590967", "lon":"101.29527217", "speed":"1kmh",
+  "engine_on":"ON", "cur_loc":"WHARF_12", "lapse":20, "arrival":"ARRIVED",
+  "arr_dtime":"20:48:19", "container1":"CMAU8919605", "topos1":"C14",
+  "container2":"", "topos2":"", "vslname":"CNC URANUS", "jobtype":"LD" }</code></pre>
+  <div class="kc-cal note"><span class="h">관찰</span><p>약 1,660 프레임을 28초간 떠보니 26개 키가 매 프레임 존재. 미션 필드는 대부분 빈값이고 소수에만 값(예 <code>topos2</code> 8.3%). 이게 "할당 이벤트성"의 직접 증거.</p></div>
+
+  <h2>3 · 정체성·위치·모션 — 항상 실림</h2>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th>필드</th><th>의미 · 관찰</th></tr></thead>
+    <tbody>
+      <tr><td><code>device</code></td><td>장비 ID(불변). 앞 알파벳이 종류 — TT/RTG/C·M·Z.</td></tr>
+      <tr><td><code>lat / lon</code></td><td>위치. <strong>문자열</strong>로 옴. <code>0,0</code>이면 무픽스 → 버림.</td></tr>
+      <tr><td><code>speed</code></td><td>속도, 끝의 <code>kmh</code> 떼고 파싱. <strong>&lt;3km/h = 정지</strong>.</td></tr>
+      <tr><td><code>accuracy</code></td><td>GPS 정확도(m). 스파이크 시 위치 점프 → 거리 누적에 600m 점프가드.</td></tr>
+      <tr><td><code>distance</code></td><td>⚠️ <strong>항상 0.0 — 무용</strong>. 우리가 GPS로 직접 경로거리를 누적.</td></tr>
+      <tr><td><code>userid</code></td><td>운전자 ID+전화. <strong>HTML <code>&lt;br/&gt;</code>이 박혀 옴</strong> → 정제 필요.</td></tr>
+    </tbody>
+  </table></div>
+
+  <h2>4 · 미션/작업 필드 (할당 이벤트성) ⚠️ 핵심이자 함정</h2>
+  <p>이 필드들은 <strong>3초 하트비트에 안 실립니다. 작업 할당 <em>이벤트</em> 때만 한 번 실리고, 다음 픽스부턴 빈값</strong>. 그래서 빠진 값을 latch(직전 비-빈값 유지)해야 합니다.</p>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th>필드</th><th>의미 · 관찰</th></tr></thead>
+    <tbody>
+      <tr><td><code>topos1</code></td><td><strong>목적지(다음 핸드오버)</strong> — 블록 베이 또는 크레인. <strong>= 작업 할당 시점 신호.</strong> DS: 크레인(픽업)→블록(드롭), LD: 블록→크레인. 할당 직후엔 아직 100m+ 떨어져 있기도.</td></tr>
+      <tr><td><code>container1</code></td><td>1번 박스. ⚠️ <strong>물리 적재가 아니라 TOS 배정 필드</strong> — 직전 drop 시점에 다음 박스가 미리 배정(c2c). 비-빈→다른값 + 이동≥150m = 진짜 인도.</td></tr>
+      <tr><td><code>container2 / topos2</code></td><td>2번 슬롯 — <strong>트윈/탠덤</strong>일 때 채워짐. c1↔c2 슬롯 스왑이 잦음(집합 동일하면 무시).</td></tr>
+      <tr><td><code>jobtype</code></td><td>LD/DS/MI·MO·LC. <strong>픽업·드롭 방향 결정</strong>. latch.</td></tr>
+      <tr><td><code>cur_loc</code></td><td><strong>현재 위치 라벨</strong>. topos1과 같아지면 도착. (비교적 자주 실림.)</td></tr>
+    </tbody>
+  </table></div>
+  <div class="kc-cal warn"><span class="h">함의 — 단계 감지의 방향</span><p>topos1이 "비었다가 잡히는 전이" = 할당 이벤트이므로, 사이클 단계 경계를 약한 <code>arrival</code>이 아니라 <strong>topos1 전이 + GPS 근접 + PLC</strong>로 잡는 게 더 정확. 상세 <a href="/kc/data/cycle-detection.html">사이클 감지 로직</a>.</p></div>
+
+  <h2>5 · topos2 심층 조사</h2>
+  <ul>
+    <li>키는 매 프레임 존재하지만 값이 차는 건 <strong>1,660 프레임 중 138개 = 8.3%</strong>. topos1처럼 할당 이벤트성.</li>
+    <li>값의 형태: 크레인 코드(<code>C34</code>·<code>M7</code>)와 블록 베이(<code>08Q-21</code>) 둘 다.</li>
+  </ul>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th>jobtype</th><th>topos1</th><th>topos2</th><th>해석</th></tr></thead>
+    <tbody>
+      <tr><td>LD</td><td>02W-41</td><td>08Q-21</td><td>서로 다른 두 블록에서 수령 (트윈 컬렉션)</td></tr>
+      <tr><td>LD</td><td>C34</td><td>C34</td><td>둘 다 같은 크레인 — 두 박스 같은 QC로</td></tr>
+      <tr><td>MO</td><td>04L-15</td><td>04L-03</td><td>야드이동, 인접한 두 베이</td></tr>
+    </tbody>
+  </table></div>
+  <div class="kc-cal tip"><span class="h">결론</span><p><code>topos2</code> = <strong>두 컨테이너를 다루는 작업(트윈/탠덤)의 두 번째 핸드오버 지점.</strong> 단일 컨테이너 작업에선 빈값. 현재 우리는 topos1만 파싱하지만, 트윈 두 번째 leg를 정확히 잡으려면 topos2를 함께 보면 됩니다.</p></div>
+
+  <h2>6 · 도착·체류 — arrival · arr_dtime · lapse</h2>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th>필드</th><th>의미 · 관찰</th></tr></thead>
+    <tbody>
+      <tr><td><code>arrival</code></td><td>목적지 도달 시 <code>"ARRIVED"</code>. ⚠️ <strong>블록에선 신뢰성(정차 트럭 ~78%), 크레인에선 약함(~23%)</strong> — 크레인 레인이 길고 지오펜스가 느슨.</td></tr>
+      <tr><td><code>arr_dtime</code></td><td>도착된 시각.</td></tr>
+      <tr><td><code>lapse</code></td><td><strong>도착 후 경과 분 = 체류 타이머.</strong> <strong>핸드오버 대기시간을 서버가 직접 계산해 보내줌</strong> — QC 대기/체류 분석에 바로 쓸 수 있음.</td></tr>
+    </tbody>
+  </table></div>
+
+  <h2>7 · 보조·미해독 필드 (현재 미사용)</h2>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th>필드</th><th>해석</th></tr></thead>
+    <tbody>
+      <tr><td><code>addr</code></td><td>현재 위치 주소 라벨. <code>cur_loc</code>과 동일하게 옴.</td></tr>
+      <tr><td><code>mds</code> / <code>ins</code></td><td>활성 트럭에서 항상 "Y" / 항상 빈값. 의미 미상 — 추정으로 단정하지 않고 "미해독".</td></tr>
+    </tbody>
+  </table></div>
+
+  <h2>8 · ctab — 크레인 PLC (<code>plc_data</code>, ~1초)</h2>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th>필드</th><th>의미 · 관찰</th></tr></thead>
+    <tbody>
+      <tr><td><code>crane</code></td><td>크레인 ID — GPS device·TOS QC번호와 일치 → 위치/계획 연결고리.</td></tr>
+      <tr><td><code>load</code></td><td>훅 하중. 빈후크 ~0, 적재 ≥1t. <strong>empty→laden 상승엣지 = PICKUP(무브 1건).</strong> 라이브 move/hr·QC대기에 사용.</td></tr>
+      <tr><td><code>lock / land / hpos / tpos</code></td><td>트위스트락 / 안착 / 호이스트 / 트롤리.</td></tr>
+    </tbody>
+  </table></div>
+
+  <h2>9 · 피드 거동 규칙 & 구현 함의</h2>
+  <ol>
+    <li><strong>두 속도</strong>: GPS ~3초/장비, PLC ~1초/크레인. 과거 없음 — 사이클은 우리가 직접 누적·영속화.</li>
+    <li><strong>미션 필드는 할당 이벤트성</strong>: 할당 때만 실리고 평소엔 빔. ⚠️ GPS 스냅샷으로 "배정 수"를 세면 안 됨(한때 160→18 폭락 사고) → 배정은 작업풀(TOS)로 센다.</li>
+    <li>수신부가 매 메시지 상태를 새로 만듦 → 빠진 필드는 None. <strong>latch</strong>가 필수.</li>
+    <li><strong>잡 신호</strong>: 위치/모션(항상), <code>arrival</code>+<code>arr_dtime</code>+<code>lapse</code>, PLC <code>load</code>. 미션 필드는 전이(이벤트)로 해석.</li>
+    <li>age 밴드: ≤15s fresh · ≤120s active · &gt;600s 제거.</li>
+  </ol>
+  <p>이 레퍼런스는 <a href="/kc/data/cycle-detection.html">사이클 감지 로직</a>의 토대입니다 — 어떤 필드가 신뢰할 만하고(위치·PLC·블록 ARRIVED) 어떤 게 함정인지(container1=배정, 크레인 ARRIVED 약함)를 알아야 단계 경계를 옳게 설계할 수 있습니다.</p>
+</main>
+</body>
+</html>
