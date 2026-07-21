@@ -1,8 +1,13 @@
 //! Scenario/emulator assembly — LOCAL ONLY, ZERO Oracle. `build()` produces the scenario +
 //! emulator JSON for a window by slicing the local warehouse:
-//!   scenario  ← move_hist (window) ⨝ container (attrs+ship cell) ⨝ vessel_call (size+berth)
-//!               + yard_snapshot (t=0 background)
+//!   scenario  ← qc_move_log (window; the QC WORK QUEUE — 1 row/move, crane, twin via shared
+//!               (machno,seqno)) ⨝ move_hist (vessel/voyage attribution, 99.5%) ⨝ container
+//!               (attrs+ship cell) ⨝ vessel_call (size+berth) + yard_t0 (as-of-T stack state)
 //!   emulator  ← qc_move_log / rtg_move_log sliced to the window (period-accurate)
+//! qc_move_log is the terminal's authoritative quay-crane move stream (MCH_OPERATION, PK
+//! (machno,contno,seqno)); we use it as the work-list SPINE instead of JOB_ORDER_HISTORY, which
+//! is a status-heartbeat log (JOBSTATUS cycles A→P→Q→C, emitting many rows per physical move).
+//! Twin lifts = qc_move_log rows sharing (machno,seqno) → carried per-move as twin_group/is_twin.
 //! The web service calls build() synchronously for on-demand download; the `assemble` worker
 //! calls it for queued assembly_job rows. Containers not yet enriched come through move-level.
 
@@ -15,38 +20,62 @@ use crate::state;
 
 /// Build (scenario_out, emulator_out, summary) for [ws, we). Pure — no job/run side effects.
 pub async fn build(pool: &PgPool, ws: DateTime<Utc>, we: DateTime<Utc>) -> Result<(Value, Value, Value)> {
-    // ---- SCENARIO vessels: window moves enriched with container attrs + ship cell + vessel_call.
+    // ---- SCENARIO vessels: the QC WORK QUEUE (qc_move_log, window on comp_ts = physical quay
+    // handover) attributed to a vessel via move_hist (99.5%) and enriched with container attrs.
+    // twin_group/is_twin come from qc_move_log rows sharing (machno,seqno); crane_seq is the
+    // crane's move order. Ordered by (crane, crane_seq) so per-crane queues are reconstructable.
     let vessels_txt: Option<String> = sqlx::query_scalar(
-        r#"SELECT coalesce(jsonb_agg(vobj ORDER BY sp NULLS LAST), '[]'::jsonb)::text FROM (
-             SELECT vc.startpos_m AS sp, jsonb_build_object(
-               'vessel_id', cs.vessel, 'voyage', cs.voyage, 'vsl_name', vc.vsl_name,
-               'loa_m', vc.loa_m, 'beam_m', vc.beam_m, 'total_bays', vc.total_bays,
-               'berth', jsonb_build_object('berthno', vc.berthno, 'side', vc.berthside, 'startpos_m', vc.startpos_m),
-               'schedule', jsonb_build_object('berth_ts', vc.actber, 'depart_ts', vc.actdep, 'cutoff_ts', vc.cutoff),
-               'containers', cs.containers
-             ) AS vobj
-             FROM (
-               SELECT m.vessel, m.voyage, jsonb_agg(jsonb_build_object(
-                        'container_id', m.contno,
-                        'move_type', CASE m.jobtype WHEN 'DS' THEN 'discharge' WHEN 'LD' THEN 'load' ELSE m.jobtype END,
-                        'move_ts', m.comp_ts, 'yard_slot', jsonb_build_object('block', m.yard_block),
-                        'iso', c.iso, 'size', c.size, 'height', c.height, 'family', c.family, 'fill', c.fill,
-                        'gross_kg', c.gross_kg, 'reefer_temp', c.reefer_temp, 'imdg', c.imdg, 'un_no', c.un_no, 'oog', c.oog,
-                        'pod', c.pod, 'pol', c.pol, 'operator', c.operator,
-                        'ship_cell', CASE WHEN c.ship_bay IS NOT NULL THEN jsonb_build_object(
-                             'bay', c.ship_bay, 'row', c.ship_row, 'tier', c.ship_tier,
-                             'deck_hold', CASE WHEN c.ship_tier >= 80 THEN 'deck' ELSE 'hold' END) END,
-                        'out_vessel', c.out_vessel, 'out_voyage', c.out_voyage
-                      ) ORDER BY m.comp_ts) AS containers
-                 FROM scenario.move_hist m
-                 LEFT JOIN scenario.container c
-                   ON c.vessel = m.vessel AND c.voyage = m.voyage AND c.contno = m.contno
-                  AND c.disload = CASE m.jobtype WHEN 'DS' THEN 'D' WHEN 'LD' THEN 'L' ELSE m.jobtype END
-                WHERE m.comp_ts >= $1 AND m.comp_ts < $2
-                GROUP BY m.vessel, m.voyage
-             ) cs
-             LEFT JOIN scenario.vessel_call vc ON vc.vessel = cs.vessel AND vc.voyage = cs.voyage
-           ) t"#,
+        r#"
+        WITH q AS (
+          SELECT machno, contno, seqno, jobtype, st_ts, comp_ts, dur_s,
+                 count(*) OVER (PARTITION BY machno, seqno) AS lift_size,
+                 row_number() OVER (PARTITION BY machno ORDER BY comp_ts, seqno) AS crane_seq
+            FROM qc_move_log
+           WHERE comp_ts >= $1 AND comp_ts < $2 AND jobtype IN ('DS','LD')
+        ),
+        vv AS (
+          SELECT DISTINCT ON (contno, jobtype) contno, jobtype, vessel, voyage
+            FROM scenario.move_hist
+           WHERE comp_ts >= $1 - interval '1 day' AND comp_ts < $2 + interval '1 day'
+             AND vessel IS NOT NULL AND voyage IS NOT NULL
+           ORDER BY contno, jobtype, comp_ts
+        ),
+        cont AS (
+          SELECT q.machno, q.crane_seq, vv.vessel, vv.voyage, jsonb_build_object(
+                   'container_id', q.contno,
+                   'move_type', CASE q.jobtype WHEN 'DS' THEN 'discharge' WHEN 'LD' THEN 'load' ELSE q.jobtype END,
+                   'move_ts', q.comp_ts, 'start_ts', q.st_ts, 'service_s', q.dur_s,
+                   'crane', q.machno, 'crane_seq', q.crane_seq,
+                   'twin_group', q.machno || '/' || q.seqno, 'lift_size', q.lift_size, 'is_twin', (q.lift_size > 1),
+                   'iso', c.iso, 'size', c.size, 'height', c.height, 'family', c.family, 'fill', c.fill,
+                   'gross_kg', c.gross_kg, 'reefer_temp', c.reefer_temp, 'imdg', c.imdg, 'un_no', c.un_no, 'oog', c.oog,
+                   'pod', c.pod, 'pol', c.pol, 'operator', c.operator,
+                   'ship_cell', CASE WHEN c.ship_bay IS NOT NULL THEN jsonb_build_object(
+                        'bay', c.ship_bay, 'row', c.ship_row, 'tier', c.ship_tier,
+                        'deck_hold', CASE WHEN c.ship_tier >= 80 THEN 'deck' ELSE 'hold' END) END,
+                   'out_vessel', c.out_vessel, 'out_voyage', c.out_voyage
+                 ) AS cobj
+            FROM q
+            LEFT JOIN vv ON vv.contno = q.contno AND vv.jobtype = q.jobtype
+            LEFT JOIN scenario.container c
+              ON c.vessel = vv.vessel AND c.voyage = vv.voyage AND c.contno = q.contno
+             AND c.disload = CASE q.jobtype WHEN 'DS' THEN 'D' WHEN 'LD' THEN 'L' ELSE q.jobtype END
+        )
+        SELECT coalesce(jsonb_agg(vobj ORDER BY sp NULLS LAST), '[]'::jsonb)::text FROM (
+          SELECT vc.startpos_m AS sp, jsonb_build_object(
+            'vessel_id', cont.vessel, 'voyage', cont.voyage, 'vsl_name', vc.vsl_name,
+            'loa_m', vc.loa_m, 'beam_m', vc.beam_m, 'total_bays', vc.total_bays,
+            'berth', jsonb_build_object('berthno', vc.berthno, 'side', vc.berthside, 'startpos_m', vc.startpos_m),
+            'schedule', jsonb_build_object('berth_ts', vc.actber, 'depart_ts', vc.actdep, 'cutoff_ts', vc.cutoff),
+            'cranes', to_jsonb(array_agg(DISTINCT cont.machno)),
+            'containers', jsonb_agg(cont.cobj ORDER BY cont.machno, cont.crane_seq)
+          ) AS vobj
+          FROM cont
+          LEFT JOIN scenario.vessel_call vc ON vc.vessel = cont.vessel AND vc.voyage = cont.voyage
+          GROUP BY cont.vessel, cont.voyage, vc.startpos_m, vc.vsl_name, vc.loa_m, vc.beam_m,
+                   vc.total_bays, vc.berthno, vc.berthside, vc.actber, vc.actdep, vc.cutoff
+        ) t
+        "#,
     )
     .bind(ws).bind(we)
     .fetch_one(pool)
@@ -123,26 +152,45 @@ pub async fn build(pool: &PgPool, ws: DateTime<Utc>, we: DateTime<Utc>) -> Resul
     let emulator_out = json!({
         "qc_move_s":  { "ds": qc_med("DS"), "ld": qc_med("LD") },
         "yc_service": { "ds": yc_p("DS"), "ld": yc_p("LD") },
-        "hatch_s": Value::Null, "bay_change_s": Value::Null, "twin_ratio": Value::Null, "drive_speed_ms": Value::Null,
+        "hatch_s": Value::Null, "bay_change_s": Value::Null, "drive_speed_ms": Value::Null,
         "_provenance": {
             "window": [ws.to_rfc3339(), we.to_rfc3339()],
             "qc_sample": { "ds": qc_n("DS"), "ld": qc_n("LD") },
             "yc_sample": { "ds": yc_n("DS"), "ld": yc_n("LD") },
-            "note": "qc_move_s/yc_service from local qc_move_log/rtg_move_log sliced to window (capped QC[1,300]s/RTG[0,1800]s); thin on small windows. hatch/bay_change/twin/drive TODO",
+            "note": "qc_move_s/yc_service from local qc_move_log/rtg_move_log sliced to window (capped QC[1,300]s/RTG[0,1800]s); thin on small windows. twin is now per-move in the work list (twin_group/is_twin), not an emulator ratio. hatch/bay_change/drive TODO",
         },
     });
 
-    let (nc, nds, nld, nv, nenr): (i64, i64, i64, i64, i64) = sqlx::query_as(
-        "SELECT count(*), count(*) FILTER (WHERE m.jobtype='DS'), count(*) FILTER (WHERE m.jobtype='LD'),
-                count(DISTINCT m.vessel||'/'||m.voyage), count(c.contno)
-           FROM scenario.move_hist m
-           LEFT JOIN scenario.container c
-             ON c.vessel=m.vessel AND c.voyage=m.voyage AND c.contno=m.contno
-            AND c.disload = CASE m.jobtype WHEN 'DS' THEN 'D' WHEN 'LD' THEN 'L' ELSE m.jobtype END
-          WHERE m.comp_ts >= $1 AND m.comp_ts < $2",
+    // Summary mirrors the vessels spine: qc_move_log (window) ⨝ move_hist (vessel) ⨝ container.
+    let (nc, nds, nld, ncr, ntw, nv, nenr): (i64, i64, i64, i64, i64, i64, i64) = sqlx::query_as(
+        r#"WITH q AS (
+             SELECT machno, contno, seqno, jobtype,
+                    count(*) OVER (PARTITION BY machno, seqno) AS lift_size
+               FROM qc_move_log
+              WHERE comp_ts >= $1 AND comp_ts < $2 AND jobtype IN ('DS','LD')
+           ),
+           vv AS (
+             SELECT DISTINCT ON (contno, jobtype) contno, jobtype, vessel, voyage
+               FROM scenario.move_hist
+              WHERE comp_ts >= $1 - interval '1 day' AND comp_ts < $2 + interval '1 day'
+                AND vessel IS NOT NULL AND voyage IS NOT NULL
+              ORDER BY contno, jobtype, comp_ts
+           )
+           SELECT count(*),
+                  count(*) FILTER (WHERE q.jobtype='DS'),
+                  count(*) FILTER (WHERE q.jobtype='LD'),
+                  count(DISTINCT q.machno),
+                  count(*) FILTER (WHERE q.lift_size > 1),
+                  count(DISTINCT vv.vessel || '/' || vv.voyage),
+                  count(c.contno)
+             FROM q
+             LEFT JOIN vv ON vv.contno = q.contno AND vv.jobtype = q.jobtype
+             LEFT JOIN scenario.container c
+               ON c.vessel = vv.vessel AND c.voyage = vv.voyage AND c.contno = q.contno
+              AND c.disload = CASE q.jobtype WHEN 'DS' THEN 'D' WHEN 'LD' THEN 'L' ELSE q.jobtype END"#,
     ).bind(ws).bind(we).fetch_one(pool).await?;
     let summary = json!({
-        "vessels": nv, "containers": nc, "ds": nds, "ld": nld,
+        "vessels": nv, "containers": nc, "ds": nds, "ld": nld, "cranes": ncr, "twin_moves": ntw,
         "enriched": nenr, "enriched_pct": if nc > 0 { nenr * 100 / nc } else { 0 },
         "qc_sample": qc_n("DS") + qc_n("LD"), "yc_sample": yc_n("DS") + yc_n("LD"),
     });
