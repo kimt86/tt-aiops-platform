@@ -1,9 +1,10 @@
-//! On-demand assembly worker — LOCAL ONLY, ZERO Oracle. Claims pending scenario.assembly_job
-//! rows and slices the local warehouse for the requested window:
+//! Scenario/emulator assembly — LOCAL ONLY, ZERO Oracle. `build()` produces the scenario +
+//! emulator JSON for a window by slicing the local warehouse:
 //!   scenario  ← move_hist (window) ⨝ container (attrs+ship cell) ⨝ vessel_call (size+berth)
 //!               + yard_snapshot (t=0 background)
 //!   emulator  ← qc_move_log / rtg_move_log sliced to the window (period-accurate)
-//! Containers not yet enriched (voyage BAPLIE/MOVINS not pulled) come through move-level (nulls).
+//! The web service calls build() synchronously for on-demand download; the `assemble` worker
+//! calls it for queued assembly_job rows. Containers not yet enriched come through move-level.
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
@@ -12,57 +13,9 @@ use sqlx::PgPool;
 
 use crate::state;
 
-pub async fn run(pool: &PgPool) -> Result<()> {
-    let mut done = 0u32;
-    loop {
-        let claimed: Option<(i64, DateTime<Utc>, DateTime<Utc>)> = sqlx::query_as(
-            "UPDATE scenario.assembly_job SET state='running'
-              WHERE job_id = (
-                    SELECT job_id FROM scenario.assembly_job
-                     WHERE state='pending' ORDER BY requested_at
-                     LIMIT 1 FOR UPDATE SKIP LOCKED)
-             RETURNING job_id, window_start, window_end",
-        )
-        .fetch_optional(pool)
-        .await?;
-
-        let Some((job_id, ws, we)) = claimed else { break };
-        let run_id = state::start_run(pool, "assemble").await?;
-        match assemble_one(pool, run_id, job_id, ws, we).await {
-            Ok(summary) => {
-                state::merge_json(pool, run_id, "collection", summary).await.ok();
-                state::finish_run(pool, run_id, "done", None).await?;
-                done += 1;
-            }
-            Err(e) => {
-                tracing::error!(job_id, error = %e, "assemble failed");
-                let _ = state::finish_run(pool, run_id, "error", Some(&e.to_string())).await;
-                let _ = sqlx::query(
-                    "UPDATE scenario.assembly_job SET state='error', error_text=$2, finished_at=now() WHERE job_id=$1",
-                )
-                .bind(job_id).bind(e.to_string()).execute(pool).await;
-            }
-        }
-    }
-    if done == 0 {
-        tracing::info!("assemble: no pending jobs");
-    } else {
-        tracing::info!(jobs = done, "assemble: done");
-    }
-    Ok(())
-}
-
-async fn assemble_one(
-    pool: &PgPool,
-    run_id: i64,
-    job_id: i64,
-    ws: DateTime<Utc>,
-    we: DateTime<Utc>,
-) -> Result<Value> {
-    state::set_phase(pool, run_id, "assemble").await?;
-
+/// Build (scenario_out, emulator_out, summary) for [ws, we). Pure — no job/run side effects.
+pub async fn build(pool: &PgPool, ws: DateTime<Utc>, we: DateTime<Utc>) -> Result<(Value, Value, Value)> {
     // ---- SCENARIO vessels: window moves enriched with container attrs + ship cell + vessel_call.
-    // Built as JSON in Postgres (fetched as text) to avoid a huge tuple / the sqlx json feature.
     let vessels_txt: Option<String> = sqlx::query_scalar(
         r#"SELECT coalesce(jsonb_agg(vobj ORDER BY sp NULLS LAST), '[]'::jsonb)::text FROM (
              SELECT vc.startpos_m AS sp, jsonb_build_object(
@@ -166,11 +119,9 @@ async fn assemble_one(
         },
     });
 
-    // ---- summary
     let (nc, nds, nld, nv, nenr): (i64, i64, i64, i64, i64) = sqlx::query_as(
         "SELECT count(*), count(*) FILTER (WHERE m.jobtype='DS'), count(*) FILTER (WHERE m.jobtype='LD'),
-                count(DISTINCT m.vessel||'/'||m.voyage),
-                count(c.contno)
+                count(DISTINCT m.vessel||'/'||m.voyage), count(c.contno)
            FROM scenario.move_hist m
            LEFT JOIN scenario.container c
              ON c.vessel=m.vessel AND c.voyage=m.voyage AND c.contno=m.contno
@@ -183,18 +134,44 @@ async fn assemble_one(
         "qc_sample": qc_n("DS") + qc_n("LD"), "yc_sample": yc_n("DS") + yc_n("LD"),
     });
 
-    sqlx::query(
-        "UPDATE scenario.assembly_job
-            SET state='done', scenario_out=$2::jsonb, emulator_out=$3::jsonb, summary=$4::jsonb, finished_at=now()
-          WHERE job_id=$1",
-    )
-    .bind(job_id)
-    .bind(scenario_out.to_string())
-    .bind(emulator_out.to_string())
-    .bind(summary.to_string())
-    .execute(pool)
-    .await?;
+    Ok((scenario_out, emulator_out, summary))
+}
 
-    tracing::info!(job_id, vessels = nv, containers = nc, enriched = nenr, "assembled (full-fidelity)");
-    Ok(summary)
+/// Worker: claim pending assembly_job rows and materialize their output (async path).
+pub async fn run(pool: &PgPool) -> Result<()> {
+    let mut done = 0u32;
+    loop {
+        let claimed: Option<(i64, DateTime<Utc>, DateTime<Utc>)> = sqlx::query_as(
+            "UPDATE scenario.assembly_job SET state='running'
+              WHERE job_id = (SELECT job_id FROM scenario.assembly_job
+                               WHERE state='pending' ORDER BY requested_at LIMIT 1 FOR UPDATE SKIP LOCKED)
+             RETURNING job_id, window_start, window_end",
+        )
+        .fetch_optional(pool)
+        .await?;
+        let Some((job_id, ws, we)) = claimed else { break };
+        let run_id = state::start_run(pool, "assemble").await?;
+        state::set_phase(pool, run_id, "assemble").await.ok();
+        match build(pool, ws, we).await {
+            Ok((scenario_out, emulator_out, summary)) => {
+                sqlx::query(
+                    "UPDATE scenario.assembly_job SET state='done', scenario_out=$2::jsonb,
+                        emulator_out=$3::jsonb, summary=$4::jsonb, finished_at=now() WHERE job_id=$1",
+                )
+                .bind(job_id).bind(scenario_out.to_string()).bind(emulator_out.to_string())
+                .bind(summary.to_string()).execute(pool).await?;
+                state::merge_json(pool, run_id, "collection", summary).await.ok();
+                state::finish_run(pool, run_id, "done", None).await?;
+                done += 1;
+            }
+            Err(e) => {
+                tracing::error!(job_id, error = %e, "assemble failed");
+                let _ = state::finish_run(pool, run_id, "error", Some(&e.to_string())).await;
+                let _ = sqlx::query("UPDATE scenario.assembly_job SET state='error', error_text=$2, finished_at=now() WHERE job_id=$1")
+                    .bind(job_id).bind(e.to_string()).execute(pool).await;
+            }
+        }
+    }
+    tracing::info!(jobs = done, "assemble: done");
+    Ok(())
 }
