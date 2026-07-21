@@ -1,12 +1,9 @@
 //! On-demand assembly worker — LOCAL ONLY, ZERO Oracle. Claims pending scenario.assembly_job
 //! rows and slices the local warehouse for the requested window:
-//!   scenario  ← scenario.move_hist (window moves) + scenario.yard_snapshot (t=0 background)
+//!   scenario  ← move_hist (window) ⨝ container (attrs+ship cell) ⨝ vessel_call (size+berth)
+//!               + yard_snapshot (t=0 background)
 //!   emulator  ← qc_move_log / rtg_move_log sliced to the window (period-accurate)
-//! and writes scenario_out / emulator_out / summary back to the job.
-//!
-//! Container attributes + ship cells (from BAPLIE/MOVINS) and vessel size/berth are added once the
-//! collector captures them — for now the scenario is move-level (contno/type/block/time) and the
-//! emulator carries qc_move_s + yc_service (the two we can already derive locally).
+//! Containers not yet enriched (voyage BAPLIE/MOVINS not pulled) come through move-level (nulls).
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
@@ -17,7 +14,6 @@ use crate::state;
 
 pub async fn run(pool: &PgPool) -> Result<()> {
     let mut done = 0u32;
-    // Claim + process pending jobs one at a time until the queue drains.
     loop {
         let claimed: Option<(i64, DateTime<Utc>, DateTime<Utc>)> = sqlx::query_as(
             "UPDATE scenario.assembly_job SET state='running'
@@ -44,10 +40,7 @@ pub async fn run(pool: &PgPool) -> Result<()> {
                 let _ = sqlx::query(
                     "UPDATE scenario.assembly_job SET state='error', error_text=$2, finished_at=now() WHERE job_id=$1",
                 )
-                .bind(job_id)
-                .bind(e.to_string())
-                .execute(pool)
-                .await;
+                .bind(job_id).bind(e.to_string()).execute(pool).await;
             }
         }
     }
@@ -68,100 +61,79 @@ async fn assemble_one(
 ) -> Result<Value> {
     state::set_phase(pool, run_id, "assemble").await?;
 
-    // ---- SCENARIO: move-level, grouped by vessel/voyage (attrs/cells come later from BAPLIE/MOVINS)
-    let moves: Vec<(DateTime<Utc>, String, String, Option<String>, Option<String>, Option<String>)> =
-        sqlx::query_as(
-            "SELECT comp_ts, contno, jobtype, vessel, voyage, yard_block
-               FROM scenario.move_hist
-              WHERE comp_ts >= $1 AND comp_ts < $2
-              ORDER BY vessel NULLS FIRST, voyage NULLS FIRST, comp_ts",
-        )
-        .bind(ws)
-        .bind(we)
-        .fetch_all(pool)
-        .await?;
+    // ---- SCENARIO vessels: window moves enriched with container attrs + ship cell + vessel_call.
+    // Built as JSON in Postgres (fetched as text) to avoid a huge tuple / the sqlx json feature.
+    let vessels_txt: Option<String> = sqlx::query_scalar(
+        r#"SELECT coalesce(jsonb_agg(vobj ORDER BY sp NULLS LAST), '[]'::jsonb)::text FROM (
+             SELECT vc.startpos_m AS sp, jsonb_build_object(
+               'vessel_id', cs.vessel, 'voyage', cs.voyage, 'vsl_name', vc.vsl_name,
+               'loa_m', vc.loa_m, 'beam_m', vc.beam_m, 'total_bays', vc.total_bays,
+               'berth', jsonb_build_object('berthno', vc.berthno, 'side', vc.berthside, 'startpos_m', vc.startpos_m),
+               'schedule', jsonb_build_object('berth_ts', vc.actber, 'depart_ts', vc.actdep, 'cutoff_ts', vc.cutoff),
+               'containers', cs.containers
+             ) AS vobj
+             FROM (
+               SELECT m.vessel, m.voyage, jsonb_agg(jsonb_build_object(
+                        'container_id', m.contno,
+                        'move_type', CASE m.jobtype WHEN 'DS' THEN 'discharge' WHEN 'LD' THEN 'load' ELSE m.jobtype END,
+                        'move_ts', m.comp_ts, 'yard_slot', jsonb_build_object('block', m.yard_block),
+                        'iso', c.iso, 'size', c.size, 'height', c.height, 'family', c.family, 'fill', c.fill,
+                        'gross_kg', c.gross_kg, 'reefer_temp', c.reefer_temp, 'imdg', c.imdg, 'un_no', c.un_no, 'oog', c.oog,
+                        'pod', c.pod, 'pol', c.pol, 'operator', c.operator,
+                        'ship_cell', CASE WHEN c.ship_bay IS NOT NULL THEN jsonb_build_object(
+                             'bay', c.ship_bay, 'row', c.ship_row, 'tier', c.ship_tier,
+                             'deck_hold', CASE WHEN c.ship_tier >= 80 THEN 'deck' ELSE 'hold' END) END,
+                        'out_vessel', c.out_vessel, 'out_voyage', c.out_voyage
+                      ) ORDER BY m.comp_ts) AS containers
+                 FROM scenario.move_hist m
+                 LEFT JOIN scenario.container c
+                   ON c.vessel = m.vessel AND c.voyage = m.voyage AND c.contno = m.contno
+                  AND c.disload = CASE m.jobtype WHEN 'DS' THEN 'D' WHEN 'LD' THEN 'L' ELSE m.jobtype END
+                WHERE m.comp_ts >= $1 AND m.comp_ts < $2
+                GROUP BY m.vessel, m.voyage
+             ) cs
+             LEFT JOIN scenario.vessel_call vc ON vc.vessel = cs.vessel AND vc.voyage = cs.voyage
+           ) t"#,
+    )
+    .bind(ws).bind(we)
+    .fetch_one(pool)
+    .await?;
+    let vessels: Value = serde_json::from_str(&vessels_txt.unwrap_or_else(|| "[]".into()))?;
 
-    let mut vessels: Vec<Value> = Vec::new();
-    let (mut cur_key, mut cur_conts): (Option<(String, String)>, Vec<Value>) = (None, Vec::new());
-    let (mut n_ds, mut n_ld) = (0u64, 0u64);
-    for (comp_ts, contno, jobtype, vessel, voyage, block) in &moves {
-        match jobtype.as_str() {
-            "DS" => n_ds += 1,
-            "LD" => n_ld += 1,
-            _ => {}
-        }
-        let key = (
-            vessel.clone().unwrap_or_default(),
-            voyage.clone().unwrap_or_default(),
-        );
-        if cur_key.as_ref() != Some(&key) {
-            if let Some((v, vy)) = cur_key.take() {
-                vessels.push(json!({"vessel_id": v, "voyage": vy, "containers": cur_conts}));
-                cur_conts = Vec::new();
-            }
-            cur_key = Some(key);
-        }
-        cur_conts.push(json!({
-            "container_id": contno,
-            "move_type": if jobtype == "DS" { "discharge" } else if jobtype == "LD" { "load" } else { jobtype.as_str() },
-            "yard_slot": { "block": block },
-            "move_ts": comp_ts.to_rfc3339(),
-        }));
-    }
-    if let Some((v, vy)) = cur_key.take() {
-        vessels.push(json!({"vessel_id": v, "voyage": vy, "containers": cur_conts}));
-    }
-
-    // ---- t=0 yard background: nearest snapshot at or before window start (fall back to earliest)
+    // ---- t=0 yard background: nearest snapshot at or before window start (fall back to earliest).
     let snap_ts: Option<DateTime<Utc>> =
         sqlx::query_scalar("SELECT max(snapshot_ts) FROM scenario.yard_snapshot WHERE snapshot_ts <= $1")
-            .bind(ws)
-            .fetch_one(pool)
-            .await?;
+            .bind(ws).fetch_one(pool).await?;
     let snap_ts = match snap_ts {
         Some(t) => Some(t),
-        None => sqlx::query_scalar("SELECT min(snapshot_ts) FROM scenario.yard_snapshot")
-            .fetch_one(pool)
-            .await?,
+        None => sqlx::query_scalar("SELECT min(snapshot_ts) FROM scenario.yard_snapshot").fetch_one(pool).await?,
     };
     let yard_t0 = if let Some(st) = snap_ts {
-        let blocks: Vec<(String, i32, i32, i32, i32, i32)> = sqlx::query_as(
-            "SELECT block, n_total, n_full, n_reefer, n_20ft, n_import
-               FROM scenario.yard_snapshot WHERE snapshot_ts = $1 ORDER BY block",
+        let txt: Option<String> = sqlx::query_scalar(
+            "SELECT jsonb_build_object('snapshot_ts', $1::timestamptz, 'blocks',
+                      coalesce(jsonb_agg(jsonb_build_object('block',block,'n_total',n_total,'n_full',n_full,
+                        'n_empty',n_total-n_full,'n_reefer',n_reefer,'n_20ft',n_20ft,'n_import',n_import) ORDER BY block),'[]'::jsonb))::text
+               FROM scenario.yard_snapshot WHERE snapshot_ts = $1",
         )
-        .bind(st)
-        .fetch_all(pool)
-        .await?;
-        let blocks_json: Vec<Value> = blocks
-            .iter()
-            .map(|(b, tot, full, rf, tw, imp)| {
-                json!({"block": b, "n_total": tot, "n_full": full, "n_empty": tot - full,
-                       "n_reefer": rf, "n_20ft": tw, "n_import": imp})
-            })
-            .collect();
-        json!({"snapshot_ts": st.to_rfc3339(), "exact": st <= ws, "blocks": blocks_json})
+        .bind(st).fetch_one(pool).await?;
+        serde_json::from_str(&txt.unwrap_or_else(|| "null".into())).unwrap_or(Value::Null)
     } else {
         Value::Null
     };
 
     let scenario_out = json!({
-        "meta": { "window": [ws.to_rfc3339(), we.to_rfc3339()], "source": "scenario.move_hist" },
+        "meta": { "window": [ws.to_rfc3339(), we.to_rfc3339()], "home_port": "MYPKG", "source": "scengen" },
         "vessels": vessels,
         "yard_t0": yard_t0,
-        "_note": "move-level; container attrs + ship cells + vessel size/berth added once collector captures BAPLIE/MOVINS/CDV_VESSEL/VSB_VOYAGE",
     });
 
-    // ---- EMULATOR: qc_move_s + yc_service sliced to the window (period-accurate, zero Oracle)
-    // Same sanity caps as the extractor (QC move [1,300]s, RTG service [0,1800]s) to drop
-    // staging/wait outliers that would inflate a small-window median.
+    // ---- EMULATOR: qc_move_s + yc_service sliced to the window (period-accurate, capped).
     let qc: Vec<(String, Option<f64>, i64)> = sqlx::query_as(
         "SELECT jobtype, percentile_cont(0.5) WITHIN GROUP (ORDER BY dur_s), count(*)
            FROM qc_move_log
           WHERE comp_ts >= $1 AND comp_ts < $2 AND dur_s BETWEEN 1 AND 300 AND jobtype IN ('DS','LD')
           GROUP BY jobtype",
-    )
-    .bind(ws).bind(we).fetch_all(pool).await?;
-
+    ).bind(ws).bind(we).fetch_all(pool).await?;
     let yc: Vec<(String, Option<f64>, Option<f64>, Option<f64>, i64)> = sqlx::query_as(
         "SELECT jobtype,
                 percentile_cont(0.1) WITHIN GROUP (ORDER BY dur_s),
@@ -170,16 +142,13 @@ async fn assemble_one(
            FROM rtg_move_log
           WHERE comp_ts >= $1 AND comp_ts < $2 AND dur_s BETWEEN 0 AND 1800 AND jobtype IN ('DS','LD')
           GROUP BY jobtype",
-    )
-    .bind(ws).bind(we).fetch_all(pool).await?;
+    ).bind(ws).bind(we).fetch_all(pool).await?;
 
     let qc_med = |jt: &str| qc.iter().find(|r| r.0 == jt).and_then(|r| r.1).map(|v| v.round() as i64);
     let qc_n = |jt: &str| qc.iter().find(|r| r.0 == jt).map(|r| r.2).unwrap_or(0);
     let yc_p = |jt: &str| -> Value {
         match yc.iter().find(|r| r.0 == jt) {
-            Some((_, p10, p50, p90, _)) => json!([
-                p10.map(|v| v.round() as i64), p50.map(|v| v.round() as i64), p90.map(|v| v.round() as i64)
-            ]),
+            Some((_, p10, p50, p90, _)) => json!([p10.map(|v| v.round() as i64), p50.map(|v| v.round() as i64), p90.map(|v| v.round() as i64)]),
             None => Value::Null,
         }
     };
@@ -188,8 +157,7 @@ async fn assemble_one(
     let emulator_out = json!({
         "qc_move_s":  { "ds": qc_med("DS"), "ld": qc_med("LD") },
         "yc_service": { "ds": yc_p("DS"), "ld": yc_p("LD") },
-        "hatch_s": Value::Null, "bay_change_s": Value::Null,
-        "twin_ratio": Value::Null, "drive_speed_ms": Value::Null,
+        "hatch_s": Value::Null, "bay_change_s": Value::Null, "twin_ratio": Value::Null, "drive_speed_ms": Value::Null,
         "_provenance": {
             "window": [ws.to_rfc3339(), we.to_rfc3339()],
             "qc_sample": { "ds": qc_n("DS"), "ld": qc_n("LD") },
@@ -198,15 +166,26 @@ async fn assemble_one(
         },
     });
 
+    // ---- summary
+    let (nc, nds, nld, nv, nenr): (i64, i64, i64, i64, i64) = sqlx::query_as(
+        "SELECT count(*), count(*) FILTER (WHERE m.jobtype='DS'), count(*) FILTER (WHERE m.jobtype='LD'),
+                count(DISTINCT m.vessel||'/'||m.voyage),
+                count(c.contno)
+           FROM scenario.move_hist m
+           LEFT JOIN scenario.container c
+             ON c.vessel=m.vessel AND c.voyage=m.voyage AND c.contno=m.contno
+            AND c.disload = CASE m.jobtype WHEN 'DS' THEN 'D' WHEN 'LD' THEN 'L' ELSE m.jobtype END
+          WHERE m.comp_ts >= $1 AND m.comp_ts < $2",
+    ).bind(ws).bind(we).fetch_one(pool).await?;
     let summary = json!({
-        "vessels": vessels.len(), "containers": moves.len(), "ds": n_ds, "ld": n_ld,
+        "vessels": nv, "containers": nc, "ds": nds, "ld": nld,
+        "enriched": nenr, "enriched_pct": if nc > 0 { nenr * 100 / nc } else { 0 },
         "qc_sample": qc_n("DS") + qc_n("LD"), "yc_sample": yc_n("DS") + yc_n("LD"),
     });
 
     sqlx::query(
         "UPDATE scenario.assembly_job
-            SET state='done', scenario_out=$2::jsonb, emulator_out=$3::jsonb,
-                summary=$4::jsonb, finished_at=now()
+            SET state='done', scenario_out=$2::jsonb, emulator_out=$3::jsonb, summary=$4::jsonb, finished_at=now()
           WHERE job_id=$1",
     )
     .bind(job_id)
@@ -216,6 +195,6 @@ async fn assemble_one(
     .execute(pool)
     .await?;
 
-    tracing::info!(job_id, vessels = vessels.len(), containers = moves.len(), "assembled");
+    tracing::info!(job_id, vessels = nv, containers = nc, enriched = nenr, "assembled (full-fidelity)");
     Ok(summary)
 }
