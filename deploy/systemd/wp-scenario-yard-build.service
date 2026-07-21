@@ -1,0 +1,9 @@
+[Unit]
+Description=wp-tt scenario yard-state reconstruction (ISOLATED, non-critical, LOCAL only): replay scenario.yard_move -> scenario.yard_cell. No Oracle.
+After=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=%h/projects/wp-tt-dashboard/.env
+ExecStart=%h/projects/wp-tt-dashboard/target/release/scengen yard-build
+Nice=19

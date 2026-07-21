@@ -41,6 +41,8 @@ enum Command {
         #[arg(long, default_value = "oracle-prod")]
         target: String,
     },
+    /// Reconstruct scenario.yard_cell by replaying yard_move (LOCAL only, zero Oracle).
+    YardBuild {},
     /// On-demand assembly worker (local only, zero Oracle): pending jobs -> scenario+emulator JSON.
     Assemble {},
     /// Isolated monitor/control web service (own port): read scenario.* + enqueue jobs / kill switch.
@@ -74,6 +76,7 @@ async fn main() -> Result<()> {
         Command::Snapshot { target } => snapshot::run(&pool, &target).await?,
         Command::Enrich { target } => enrich::run(&pool, &target).await?,
         Command::YardMoves { target } => yard::run(&pool, &target).await?,
+        Command::YardBuild {} => yard::build(&pool).await?,
         Command::Assemble {} => assemble::run(&pool).await?,
         Command::Serve { port } => serve::run(pool, port).await?,
         Command::Backfill { from, to, target } => {

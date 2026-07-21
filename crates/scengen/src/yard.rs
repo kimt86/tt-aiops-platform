@@ -5,6 +5,7 @@
 //! Isolated + kill-switch, like the other collectors.
 
 use anyhow::Result;
+use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
 use sqlx::PgPool;
 use wp_core::parse::parse_rows;
@@ -123,5 +124,106 @@ async fn tick(pool: &PgPool, run_id: i64, target: &str, cfg: &Config) -> Result<
         .await?;
 
     tracing::info!(fetched, inserted, query_ms, capped, "scenario yard moves");
+    Ok(())
+}
+
+// ---- Phase 2: reconstruct scenario.yard_cell by replaying yard_move incrementally (LOCAL, no Oracle).
+
+const BUILD_BATCH: i64 = 20000;
+
+/// Apply new yard_move rows (since the reconstruction watermark) to scenario.yard_cell.
+/// Not gated on the kill switch — it's local processing and should finish even if collection paused.
+pub async fn build(pool: &PgPool) -> Result<()> {
+    let run_id = state::start_run(pool, "yard_build").await?;
+    match do_build(pool, run_id).await {
+        Ok(()) => {
+            state::finish_run(pool, run_id, "done", None).await?;
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "scenario yard-build failed (isolated — others unaffected)");
+            let _ = state::finish_run(pool, run_id, "error", Some(&e.to_string())).await;
+        }
+    }
+    Ok(())
+}
+
+async fn do_build(pool: &PgPool, run_id: i64) -> Result<()> {
+    state::set_phase(pool, run_id, "assemble").await?;
+    let wm = state::get_watermark(pool, "yard_cell").await?; // ISO text of last processed comp_ts
+
+    let moves: Vec<(DateTime<Utc>, String, String, i32, i32, i32, i32)> = sqlx::query_as(
+        "SELECT comp_ts, contno, jobtype, block_id, bay_idx, row_idx, tier
+           FROM scenario.yard_move
+          WHERE ($1::timestamptz IS NULL OR comp_ts > $1::timestamptz)
+          ORDER BY comp_ts, seqno
+          LIMIT $2",
+    )
+    .bind(wm.as_deref())
+    .bind(BUILD_BATCH)
+    .fetch_all(pool)
+    .await?;
+
+    let mut tx = pool.begin().await?;
+    let (mut placed, mut removed, mut seeded, mut skipped) = (0u64, 0u64, 0u64, 0u64);
+    let mut last: Option<DateTime<Utc>> = None;
+    for (ts, contno, jt, b, y, ri, tier) in &moves {
+        match jt.as_str() {
+            // PLACE: container ends occupying this cell (DS/GI discharge/gate-in, RH/AH rehandle, MI 구내이적 입고)
+            "DS" | "GI" | "RH" | "AH" | "MI" => {
+                // relocation: drop this container's previous cell if we tracked it
+                sqlx::query("DELETE FROM scenario.yard_cell WHERE contno=$1")
+                    .bind(contno)
+                    .execute(&mut *tx)
+                    .await?;
+                sqlx::query(
+                    "INSERT INTO scenario.yard_cell (block_id,bay_idx,row_idx,tier,contno,known,updated_ts)
+                     VALUES ($1,$2,$3,$4,$5,true,$6)
+                     ON CONFLICT (block_id,bay_idx,row_idx,tier)
+                     DO UPDATE SET contno=EXCLUDED.contno, known=true, updated_ts=EXCLUDED.updated_ts",
+                )
+                .bind(b).bind(y).bind(ri).bind(tier).bind(contno).bind(ts)
+                .execute(&mut *tx)
+                .await?;
+                // seed "unknown" placeholders on tiers 1..tier-1 (only where currently empty)
+                if *tier > 1 {
+                    let r = sqlx::query(
+                        "INSERT INTO scenario.yard_cell (block_id,bay_idx,row_idx,tier,contno,known,updated_ts)
+                         SELECT $1,$2,$3,g,NULL,false,$4 FROM generate_series(1,$5) g
+                         ON CONFLICT (block_id,bay_idx,row_idx,tier) DO NOTHING",
+                    )
+                    .bind(b).bind(y).bind(ri).bind(ts).bind(tier - 1)
+                    .execute(&mut *tx)
+                    .await?;
+                    seeded += r.rows_affected();
+                }
+                placed += 1;
+            }
+            // REMOVE: container vacates the cell (LD/GO load/gate-out, MO 구내이적 출고). If the cell was an
+            // "unknown", this move's contno reveals what it was — but it's leaving, so just clear it.
+            "LD" | "GO" | "MO" => {
+                sqlx::query(
+                    "DELETE FROM scenario.yard_cell
+                      WHERE contno=$1 OR (block_id=$2 AND bay_idx=$3 AND row_idx=$4 AND tier=$5)",
+                )
+                .bind(contno).bind(b).bind(y).bind(ri).bind(tier)
+                .execute(&mut *tx)
+                .await?;
+                removed += 1;
+            }
+            _ => skipped += 1, // GC/LC etc. — rare, unclassified
+        }
+        last = Some(*ts);
+    }
+    tx.commit().await?;
+
+    if let Some(l) = last {
+        state::set_watermark(pool, "yard_cell", &l.to_rfc3339()).await?;
+    }
+
+    state::merge_json(pool, run_id, "collection", json!({
+        "processed": moves.len(), "placed": placed, "removed": removed,
+        "seeded_unknown": seeded, "skipped": skipped,
+    })).await?;
+    tracing::info!(processed = moves.len(), placed, removed, seeded, skipped, "scenario yard build");
     Ok(())
 }
