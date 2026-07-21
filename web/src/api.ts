@@ -110,23 +110,27 @@ export interface WorkpoolResponse {
 // TT work-cycle history (from the accumulated tt_cycle_log).
 export interface CycleTruckAgg {
   ytno: string; cycles: number; median_s: number | null; avg_s: number | null;
-  laden_km: number | null; p25_s: number | null; p75_s: number | null;
+  drive_km: number | null; p25_s: number | null; p75_s: number | null;
   ds: number; ld: number; other: number; last_drop: string; first_drop: string;
 }
 export interface CycleBucket { t: string; n: number; }
 export interface CycleSummary {
   hours: number; total_cycles: number; trucks: number;
-  fleet_median_s: number | null; fleet_laden_km: number; cycles_per_hr: number;
+  fleet_median_s: number | null; fleet_drive_km: number; cycles_per_hr: number;
   bucket_min: number; buckets: CycleBucket[]; trucks_list: CycleTruckAgg[];
 }
+// One physical trip. Cycle boundaries are TOS-authoritative (tt_move_log); the 7-phase durations are
+// GPS-reconstructed (tt_cycle_recon) and reconcile exactly to cycle_s. gps_covered=false ⇒ no drive
+// segment observed (GPS-silent / aged out of hifreq) — only cycle_s is meaningful, no split.
 export interface CycleRow {
-  dropped_at: string;
-  jobtype: string | null; vessel: string | null; voyage: string | null; container: string | null; qc: string | null;
-  cycle_s: number | null; laden_leg_s: number | null; laden_leg_m: number | null;
-  empty_leg_s: number | null; empty_leg_m: number | null; container_to_container: boolean;
-  // Current 5-event model (null where unobserved / no v2 row): ①배차 → ②픽업도착 → ③픽업떠남 → ④부하도착 → ⑤드롭
-  v2_opened_at: string | null; v2_empty_arrived_at: string | null;
-  v2_pickup_left_at: string | null; v2_laden_arrived_at: string | null;
+  dispatch_ts: string; pickup_ts: string | null; free_ts: string;
+  jobtype: string | null; container: string | null; is_twin: boolean; n_containers: number;
+  cycle_s: number;
+  dispatch_wait_s: number; e_drive_s: number; e_stop_s: number; pickup_dwell_s: number;
+  l_drive_s: number; l_stop_s: number; drop_dwell_s: number;
+  e_drive_m: number; l_drive_m: number;
+  gps_covered: boolean; n_fix: number; long_gap_s: number;
+  pickup_crane: string | null; free_crane: string | null;
 }
 export interface CycleDetail { ytno: string; hours: number; cycles: CycleRow[]; }
 

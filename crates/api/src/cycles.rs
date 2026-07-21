@@ -1,14 +1,14 @@
 //! TT work-cycle history API. Two endpoints power the Cycle History page:
 //!   * `GET /api/tt-cycles/summary?hours=` — fleet overview: KPI totals, a per-bucket
 //!     throughput series, and a per-truck aggregate leaderboard.
-//!   * `GET /api/tt-cycles/detail?ytno=&hours=&limit=` — one truck's recent cycles
-//!     (the timeline rows: phase timestamps, legs, job metadata).
-//! Pure Postgres reads; no Oracle/GPS. Each "cycle" = one delivered container.
+//!   * `GET /api/tt-cycles/detail?ytno=&hours=&limit=` — one truck's recent cycles with the
+//!     GPS-reconstructed phase breakdown.
+//! Pure Postgres reads; no Oracle.
 //!
-//! CYCLE TIME is sourced from `tt_move_log` (dispatch YT_DIS_DT → crane-free, both TOS-authoritative;
-//! validated ±5s vs tt_cycle_v2). The older GPS-mover `tt_cycle_log` undercounts by ~41% (starts its
-//! clock after dispatch + drops the longest ~42% of cycles), so it is NO longer the cycle-time source.
-//! Laden DISTANCE (laden_km) is still read from `tt_cycle_log` — tt_move_log carries no per-leg meters.
+//! CYCLE = one PHYSICAL TRIP, defined by `tt_move_log` (dispatch YT_DIS_DT → last crane-free, both
+//! TOS-authoritative; twins collapsed by (ytno, dispatch_ts)). The per-phase DRIVE/STOP/WAIT split
+//! comes from `tt_cycle_recon` (GPS motion-segmented within the TOS boundaries). The legacy GPS cycle
+//! logs (tt_cycle_log / tt_cycle_v2) are no longer read here.
 
 use axum::extract::{Query, State};
 use axum::Json;
@@ -35,7 +35,7 @@ struct TruckAgg {
     cycles: i64,
     median_s: Option<f64>,
     avg_s: Option<f64>,
-    laden_km: Option<f64>,
+    drive_km: Option<f64>,
     p25_s: Option<f64>,
     p75_s: Option<f64>,
     ds: i64,
@@ -57,7 +57,7 @@ pub struct SummaryResp {
     total_cycles: i64,
     trucks: i64,
     fleet_median_s: Option<f64>,
-    fleet_laden_km: f64,
+    fleet_drive_km: f64,
     cycles_per_hr: f64,
     bucket_min: i64,
     buckets: Vec<TpBucket>,
@@ -77,22 +77,22 @@ pub async fn summary(
         _ => 180,
     };
 
-    // cycle time + counts: tt_move_log (dispatch→free, authoritative). laden km: tt_cycle_log (only
-    // source with per-leg meters) — separate query so the two sources stay independent.
+    // Headline = one row per PHYSICAL TRIP (tt_move_log twin_leg_seq=1), full-history authoritative.
     let (total_cycles, trucks, fleet_median_s): (i64, i64, Option<f64>) = sqlx::query_as(
         "SELECT count(*), count(DISTINCT ytno),
                 percentile_cont(0.5) WITHIN GROUP (ORDER BY cycle_s)
            FROM tt_move_log
-          WHERE free_ts > now() - ($1::int * interval '1 hour')",
+          WHERE twin_leg_seq = 1 AND free_ts > now() - ($1::int * interval '1 hour')",
     )
     .bind(hours)
     .fetch_one(&pool)
     .await?;
 
-    let (fleet_laden_km,): (Option<f64>,) = sqlx::query_as(
-        "SELECT coalesce(sum(laden_leg_m), 0) / 1000.0
-           FROM tt_cycle_log
-          WHERE dropped_at > now() - ($1::int * interval '1 hour')",
+    // Driven distance from the GPS reconstruction (recent window only — hifreq ~1-day retention).
+    let (fleet_drive_km,): (Option<f64>,) = sqlx::query_as(
+        "SELECT (coalesce(sum(e_drive_m + l_drive_m), 0) / 1000.0)::float8
+           FROM tt_cycle_recon
+          WHERE free_ts > now() - ($1::int * interval '1 hour')",
     )
     .bind(hours)
     .fetch_one(&pool)
@@ -102,7 +102,7 @@ pub async fn summary(
         "SELECT date_bin(($2::int * interval '1 minute'), free_ts, timestamptz '2000-01-01') AS t,
                 count(*) AS n
            FROM tt_move_log
-          WHERE free_ts > now() - ($1::int * interval '1 hour')
+          WHERE twin_leg_seq = 1 AND free_ts > now() - ($1::int * interval '1 hour')
           GROUP BY t ORDER BY t",
     )
     .bind(hours)
@@ -110,20 +110,11 @@ pub async fn summary(
     .fetch_all(&pool)
     .await?;
 
-    // per-truck: cycle-time metrics from tt_move_log; laden km left-joined from tt_cycle_log.
+    // per-truck: cycle-time metrics per trip (tt_move_log); driven km left-joined from tt_cycle_recon.
     let trucks_list: Vec<TruckAgg> = sqlx::query_as(
-        "SELECT m.ytno,
-                m.cycles,
-                m.median_s,
-                m.avg_s,
-                coalesce(k.laden_km, 0) AS laden_km,
-                m.p25_s,
-                m.p75_s,
-                m.ds,
-                m.ld,
-                m.other,
-                m.last_drop,
-                m.first_drop
+        "SELECT m.ytno, m.cycles, m.median_s, m.avg_s,
+                coalesce(r.drive_km, 0) AS drive_km,
+                m.p25_s, m.p75_s, m.ds, m.ld, m.other, m.last_drop, m.first_drop
            FROM (
              SELECT ytno,
                     count(*) AS cycles,
@@ -137,15 +128,15 @@ pub async fn summary(
                     max(free_ts) AS last_drop,
                     min(free_ts) AS first_drop
                FROM tt_move_log
-              WHERE free_ts > now() - ($1::int * interval '1 hour')
+              WHERE twin_leg_seq = 1 AND free_ts > now() - ($1::int * interval '1 hour')
               GROUP BY ytno
            ) m
            LEFT JOIN (
-             SELECT ytno, coalesce(sum(laden_leg_m), 0) / 1000.0 AS laden_km
-               FROM tt_cycle_log
-              WHERE dropped_at > now() - ($1::int * interval '1 hour')
+             SELECT ytno, (sum(e_drive_m + l_drive_m) / 1000.0)::float8 AS drive_km
+               FROM tt_cycle_recon
+              WHERE free_ts > now() - ($1::int * interval '1 hour')
               GROUP BY ytno
-           ) k ON k.ytno = m.ytno
+           ) r ON r.ytno = m.ytno
           ORDER BY m.cycles DESC, m.ytno",
     )
     .bind(hours)
@@ -158,7 +149,7 @@ pub async fn summary(
         total_cycles,
         trucks,
         fleet_median_s,
-        fleet_laden_km: fleet_laden_km.unwrap_or(0.0),
+        fleet_drive_km: fleet_drive_km.unwrap_or(0.0),
         cycles_per_hr,
         bucket_min,
         buckets,
@@ -175,28 +166,34 @@ pub struct DetailQ {
     limit: Option<i64>,
 }
 
+// One physical trip with the GPS-reconstructed 7-phase decomposition (durations, seconds) that
+// reconciles exactly to cycle_s: dispatch_wait + e_drive + e_stop + pickup_dwell + l_drive + l_stop
+// + drop_dwell = cycle_s. gps_covered=false ⇒ no drive segment observed (GPS-silent / aged out of
+// hifreq): the split is unavailable and only cycle_s is meaningful.
 #[derive(Serialize, sqlx::FromRow)]
 struct CycleRow {
-    dropped_at: DateTime<Utc>,
+    dispatch_ts: DateTime<Utc>,
+    pickup_ts: Option<DateTime<Utc>>,
+    free_ts: DateTime<Utc>,
     jobtype: Option<String>,
-    vessel: Option<String>,
-    voyage: Option<String>,
     container: Option<String>,
-    qc: Option<String>,
-    cycle_s: Option<i32>,
-    laden_leg_s: Option<i32>,
-    laden_leg_m: Option<f64>,
-    empty_leg_s: Option<i32>,
-    empty_leg_m: Option<f64>,
-    container_to_container: bool,
-    // Current 5-event model (tt_cycle_v2, same ytno+dropped_at). NULL where v2 has no row or the
-    // event was unobserved. dropped_at (⑤) is shared with v1's validated drop above. The retired
-    // v1 4-phase timestamps and the v2 "빈차 출발" event are no longer served.
-    //   ①배차 opened · ②픽업도착 empty_arrived · ③픽업떠남 pickup_left · ④부하도착 laden_arrived · ⑤드롭 dropped
-    v2_opened_at: Option<DateTime<Utc>>,
-    v2_empty_arrived_at: Option<DateTime<Utc>>,
-    v2_pickup_left_at: Option<DateTime<Utc>>,
-    v2_laden_arrived_at: Option<DateTime<Utc>>,
+    is_twin: bool,
+    n_containers: i32,
+    cycle_s: i32,
+    dispatch_wait_s: i32,
+    e_drive_s: i32,
+    e_stop_s: i32,
+    pickup_dwell_s: i32,
+    l_drive_s: i32,
+    l_stop_s: i32,
+    drop_dwell_s: i32,
+    e_drive_m: i32,
+    l_drive_m: i32,
+    gps_covered: bool,
+    n_fix: i32,
+    long_gap_s: i32,
+    pickup_crane: Option<String>,
+    free_crane: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -212,34 +209,31 @@ pub async fn detail(
 ) -> Result<Json<DetailResp>, AppError> {
     let hours = clamp_hours(q.hours);
     let limit = q.limit.unwrap_or(200).clamp(1, 1000);
-    // cycle_s and the leg TIMES come from tt_move_log (dispatch→free, same source as the summary
-    // KPI) so the drill-down matches the headline; leg METERS stay from v1 (tt_move_log has no
-    // meters). Falls back to v1 where tt_move_log has no matching row. empty_s (dispatch→pickup)
-    // includes the pre-pickup wait — consistent with the timeline's 배차(opened)→픽업 span shown here.
     let cycles: Vec<CycleRow> = sqlx::query_as(
-        "SELECT v1.dropped_at, v1.jobtype, v1.vessel, v1.voyage, v1.container, v1.qc,
-                coalesce(m.cycle_s, v1.cycle_s)      AS cycle_s,
-                coalesce(m.laden_s, v1.laden_leg_s)  AS laden_leg_s, v1.laden_leg_m,
-                coalesce(m.empty_s, v1.empty_leg_s)  AS empty_leg_s, v1.empty_leg_m,
-                v1.container_to_container,
-                v2.opened_at        AS v2_opened_at,
-                v2.empty_arrived_at AS v2_empty_arrived_at,
-                v2.pickup_left_at   AS v2_pickup_left_at,
-                v2.laden_arrived_at AS v2_laden_arrived_at
-           FROM tt_cycle_log v1
-           LEFT JOIN tt_cycle_v2 v2 ON v2.ytno = v1.ytno AND v2.dropped_at = v1.dropped_at
+        "SELECT r.dispatch_ts, r.pickup_ts, r.free_ts, r.jobtype, r.contno AS container,
+                coalesce(r.is_twin,false) AS is_twin, coalesce(r.n_containers,1) AS n_containers,
+                coalesce(r.cycle_s,0)         AS cycle_s,
+                coalesce(r.dispatch_wait_s,0) AS dispatch_wait_s,
+                coalesce(r.e_drive_s,0)       AS e_drive_s,
+                coalesce(r.e_stop_s,0)        AS e_stop_s,
+                coalesce(r.pickup_dwell_s,0)  AS pickup_dwell_s,
+                coalesce(r.l_drive_s,0)       AS l_drive_s,
+                coalesce(r.l_stop_s,0)        AS l_stop_s,
+                coalesce(r.drop_dwell_s,0)    AS drop_dwell_s,
+                coalesce(r.e_drive_m,0)       AS e_drive_m,
+                coalesce(r.l_drive_m,0)       AS l_drive_m,
+                coalesce(r.gps_covered,false) AS gps_covered,
+                coalesce(r.n_fix,0)           AS n_fix,
+                coalesce(r.long_gap_s,0)      AS long_gap_s,
+                m.pickup_crane, m.free_crane
+           FROM tt_cycle_recon r
            LEFT JOIN LATERAL (
-             SELECT m.cycle_s, m.empty_s, m.laden_s
-               FROM tt_move_log m
-              WHERE m.ytno = v1.ytno
-                AND m.free_ts >= v1.dropped_at - interval '5 min'
-                AND m.free_ts <  v1.dropped_at + interval '5 min'
-              ORDER BY (m.contno IS DISTINCT FROM v1.container),
-                       abs(EXTRACT(EPOCH FROM (m.free_ts - v1.dropped_at)))
-              LIMIT 1
+             SELECT pickup_crane, free_crane FROM tt_move_log m
+              WHERE m.ytno = r.ytno AND m.dispatch_ts = r.dispatch_ts
+              ORDER BY twin_leg_seq LIMIT 1
            ) m ON true
-          WHERE v1.ytno = $1 AND v1.dropped_at > now() - ($2::int * interval '1 hour')
-          ORDER BY v1.dropped_at DESC
+          WHERE r.ytno = $1 AND r.free_ts > now() - ($2::int * interval '1 hour')
+          ORDER BY r.free_ts DESC
           LIMIT $3",
     )
     .bind(&q.ytno)

@@ -1,0 +1,10 @@
+[Unit]
+Description=wp-tt refresh tt_cycle_recon every 10min (Postgres join; offset after tt_move_log refresh)
+
+[Timer]
+OnBootSec=9min
+OnUnitActiveSec=600s
+AccuracySec=20s
+
+[Install]
+WantedBy=timers.target
