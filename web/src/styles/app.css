@@ -996,7 +996,7 @@ td.mono { font-family: "JetBrains Mono", monospace; color: var(--text); }
 .cyc-lane-meta { display: flex; align-items: center; gap: 6px; min-width: 0; overflow: hidden; }
 .cyc-lane-vsl { font-size: 10px; color: var(--text-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 110px; }
 .cyc-lane-qc { font-size: 10px; font-weight: 700; color: var(--brand); }
-.cyc-lane-cnt { font-size: 9px; color: var(--text-faint); white-space: nowrap; }
+.cyc-lane-cnt { font-size: 9px; color: var(--text-faint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 140px; }
 .cyc-lane-c2c { font-size: 11px; color: var(--purple); font-weight: 700; }
 .cyc-lane-dur { font-size: 11px; font-weight: 700; color: var(--text); text-align: right; font-family: "JetBrains Mono", monospace; }
 .cyc-empty { padding: 24px; text-align: center; color: var(--text-mute); font-size: 12px; }

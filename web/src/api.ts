@@ -124,7 +124,7 @@ export interface CycleSummary {
 // segment observed (GPS-silent / aged out of hifreq) — only cycle_s is meaningful, no split.
 export interface CycleRow {
   dispatch_ts: string; pickup_ts: string | null; free_ts: string;
-  jobtype: string | null; container: string | null; is_twin: boolean; n_containers: number;
+  jobtype: string | null; container: string | null; contnos?: string[]; is_twin: boolean; n_containers: number;
   cycle_s: number;
   dispatch_wait_s: number; e_drive_s: number; e_stop_s: number; pickup_dwell_s: number;
   l_drive_s: number; l_stop_s: number; drop_dwell_s: number;

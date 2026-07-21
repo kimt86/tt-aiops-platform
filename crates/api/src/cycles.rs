@@ -177,6 +177,7 @@ struct CycleRow {
     free_ts: DateTime<Utc>,
     jobtype: Option<String>,
     container: Option<String>,
+    contnos: Vec<String>,
     is_twin: bool,
     n_containers: i32,
     cycle_s: i32,
@@ -211,6 +212,7 @@ pub async fn detail(
     let limit = q.limit.unwrap_or(200).clamp(1, 1000);
     let cycles: Vec<CycleRow> = sqlx::query_as(
         "SELECT r.dispatch_ts, r.pickup_ts, r.free_ts, r.jobtype, r.contno AS container,
+                coalesce(r.contnos, ARRAY[r.contno]) AS contnos,
                 coalesce(r.is_twin,false) AS is_twin, coalesce(r.n_containers,1) AS n_containers,
                 coalesce(r.cycle_s,0)         AS cycle_s,
                 coalesce(r.dispatch_wait_s,0) AS dispatch_wait_s,

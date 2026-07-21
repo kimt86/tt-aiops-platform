@@ -31,7 +31,8 @@ WITH cyc AS (
          max(free_ts)                                               AS free_ts,
          round(EXTRACT(EPOCH FROM max(free_ts) - dispatch_ts))::int AS cycle_s,
          (array_agg(jobtype ORDER BY free_ts))[1]                   AS jobtype,
-         (array_agg(contno  ORDER BY free_ts))[1]                   AS contno,
+         (array_agg(contno  ORDER BY free_ts, contno))[1]           AS contno,
+         array_agg(contno ORDER BY free_ts, contno)                 AS contnos,   -- contno tiebreak = deterministic; contno = contnos[1] always (LD twins share free_ts)
          bool_or(coalesce(is_twin,false))                          AS is_twin,
          count(*)::int                                              AS n_containers,
          (max(free_ts) AT TIME ZONE 'Asia/Kuala_Lumpur')::date     AS business_date,
@@ -87,11 +88,11 @@ span AS (   -- leg fix boundaries for the edge-wait split
   FROM fx GROUP BY 1,2
 )
 INSERT INTO tt_cycle_recon
-  (ytno, dispatch_ts, contno, jobtype, is_twin, n_containers, pickup_ts, free_ts, cycle_s,
+  (ytno, dispatch_ts, contno, contnos, jobtype, is_twin, n_containers, pickup_ts, free_ts, cycle_s,
    e_drive_s, e_stop_s, e_drive_m, l_drive_s, l_stop_s, l_drive_m,
    edge_wait_s, dispatch_wait_s, pickup_dwell_s, drop_dwell_s,
    gps_covered, n_fix, long_gap_s, business_date, shift)
-SELECT c.ytno, c.dispatch_ts, c.contno, c.jobtype, c.is_twin, c.n_containers, c.pickup_ts, c.free_ts, c.cycle_s,
+SELECT c.ytno, c.dispatch_ts, c.contno, c.contnos, c.jobtype, c.is_twin, c.n_containers, c.pickup_ts, c.free_ts, c.cycle_s,
    coalesce(a.e_drive_s,0), coalesce(a.e_stop_s,0), coalesce(a.e_drive_m,0),
    coalesce(a.l_drive_s,0), coalesce(a.l_stop_s,0), coalesce(a.l_drive_m,0),
    c.cycle_s - coalesce(a.e_drive_s + a.e_stop_s + a.l_drive_s + a.l_stop_s, 0)               AS edge_wait_s,
@@ -104,4 +105,29 @@ SELECT c.ytno, c.dispatch_ts, c.contno, c.jobtype, c.is_twin, c.n_containers, c.
 FROM cyc c
 LEFT JOIN agg  a USING (ytno, dispatch_ts)
 LEFT JOIN span s USING (ytno, dispatch_ts)
+-- Freshest-GPS-wins: the INSERT NEVER overwrites an existing row's GPS decomposition. New trips insert;
+-- existing rows are left untouched here.
 ON CONFLICT (ytno, dispatch_ts) DO NOTHING;
+
+-- Container-identity refresh (GPS-INDEPENDENT, windowed). Backfills pre-0099 contnos, absorbs late-completed
+-- twins (2nd drop after the first run), and picks up tt_move_log leg-set corrections (relabel/cancel).
+-- Touches ONLY contno/contnos/n_containers/is_twin — never any GPS/timing/decomposition column — so it can
+-- never clobber a good decomposition. Idempotent: only rows whose stored identity differs are updated (no churn).
+-- Note: a late twin's cycle_s/GPS split stay frozen at first-drop (pre-existing DO-NOTHING behavior); only the
+-- displayed container IDs/count become complete. Invariants hold: array_length(contnos)=n_containers, contno=contnos[1].
+WITH ident AS (
+  SELECT ytno, dispatch_ts,
+         array_agg(contno ORDER BY free_ts, contno)      AS contnos,
+         (array_agg(contno ORDER BY free_ts, contno))[1] AS contno,
+         count(*)::int                                   AS n_containers,
+         bool_or(coalesce(is_twin,false))                AS is_twin
+  FROM tt_move_log
+  WHERE dispatch_ts >= now() - make_interval(days => :days)   -- window on the GROUP-SHARED key: a trip's legs
+  GROUP BY ytno, dispatch_ts                                   -- share dispatch_ts, so a twin is fully in or fully
+)                                                              -- out — the boundary can never bisect it (else the
+                                                               -- surviving leg would shrink the row 2→1 forever).
+UPDATE tt_cycle_recon r SET
+  contnos = i.contnos, contno = i.contno, n_containers = i.n_containers, is_twin = i.is_twin
+FROM ident i
+WHERE r.ytno = i.ytno AND r.dispatch_ts = i.dispatch_ts
+  AND (r.contnos IS DISTINCT FROM i.contnos OR r.n_containers <> i.n_containers OR r.is_twin <> i.is_twin);

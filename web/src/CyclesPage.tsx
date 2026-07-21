@@ -101,6 +101,10 @@ function TruckRow({ t, max, sel, onSel, lang }: { t: CycleTruckAgg; max: number;
 // renders a single muted "no GPS detail" bar (only cycle_s is known).
 function CycleLane({ c, scale, lang }: { c: CycleRow; scale: number; lang: Lang }) {
   const segs = tripPhases(c);
+  // contnos is the single source of truth for BOTH the ×N badge count and the listed IDs, so they can never
+  // disagree. Fallback to the single representative container only if contnos is absent (defensive).
+  const boxes = c.contnos && c.contnos.length ? c.contnos : (c.container ? [c.container] : []);
+  const nb = boxes.length;
   return (
     <div className="cyc-lane">
       <span className="cyc-lane-time mono">{hhmm(c.free_ts)}</span>
@@ -124,9 +128,9 @@ function CycleLane({ c, scale, lang }: { c: CycleRow; scale: number; lang: Lang 
       </span>
       <span className="cyc-lane-meta">
         {c.jobtype && <span className="cyc-lane-job" style={{ borderColor: jobColor(c.jobtype), color: jobColor(c.jobtype) }}>{c.jobtype.toUpperCase()}</span>}
-        {c.is_twin && <span className="cyc-lane-qc mono" title={ko(lang) ? `트윈 (${c.n_containers}컨테이너 1트립)` : `twin (${c.n_containers} boxes / 1 trip)`}>×{c.n_containers}</span>}
+        {nb > 1 && <span className="cyc-lane-qc mono" title={ko(lang) ? `트윈 (${nb}컨테이너 1트립): ${boxes.join(", ")}` : `twin (${nb} boxes / 1 trip): ${boxes.join(", ")}`}>×{nb}</span>}
         {c.free_crane && <span className="cyc-lane-qc mono">{c.free_crane}</span>}
-        {c.container && <span className="cyc-lane-cnt mono">{c.container}</span>}
+        {nb > 0 && <span className="cyc-lane-cnt mono" title={nb > 1 ? boxes.join(", ") : undefined}>{boxes.join(" + ")}</span>}
         {segs && driveKm(c) > 0 && <span className="cyc-lane-vsl mono" title={ko(lang) ? "주행 거리" : "driven distance"}>{driveKm(c).toFixed(1)}km</span>}
       </span>
       <span className="cyc-lane-dur mono">{mmss(c.cycle_s)}</span>
