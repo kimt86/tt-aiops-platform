@@ -7,7 +7,7 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
-use scengen::{assemble, collect, db, snapshot};
+use scengen::{assemble, collect, db, serve, snapshot};
 
 #[derive(Parser)]
 #[command(
@@ -33,6 +33,11 @@ enum Command {
     },
     /// On-demand assembly worker (local only, zero Oracle): pending jobs -> scenario+emulator JSON.
     Assemble {},
+    /// Isolated monitor/control web service (own port): read scenario.* + enqueue jobs / kill switch.
+    Serve {
+        #[arg(long, default_value_t = 8899)]
+        port: u16,
+    },
     /// Backfill a past window into scenario.move_hist (bounded, throttled).
     Backfill {
         #[arg(long)]
@@ -58,6 +63,7 @@ async fn main() -> Result<()> {
         Command::Collect { target } => collect::run(&pool, &target).await?,
         Command::Snapshot { target } => snapshot::run(&pool, &target).await?,
         Command::Assemble {} => assemble::run(&pool).await?,
+        Command::Serve { port } => serve::run(pool, port).await?,
         Command::Backfill { from, to, target } => {
             tracing::info!(%from, %to, %target, "backfill: skeleton stub — not yet implemented");
         }

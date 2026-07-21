@@ -1,0 +1,13 @@
+[Unit]
+Description=wp-tt scenario monitor/control web (ISOLATED, non-critical). Own port; reads scenario.* + enqueues jobs / kill switch. Never mounted on the dashboard API.
+After=network-online.target
+
+[Service]
+EnvironmentFile=%h/projects/wp-tt-dashboard/.env
+ExecStart=%h/projects/wp-tt-dashboard/target/release/scengen serve --port 8899
+Restart=on-failure
+RestartSec=5
+Nice=15
+
+[Install]
+WantedBy=multi-user.target
