@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>웹소켓 신호 품질·커버리지 실증 감사 — WP-TT 지식센터</title>
+  <meta name="description" content="GPS/PLC 웹소켓 피드의 케이던스·블랙아웃·크레인 근처 신호소실·함대 가시성·정확도·PLC 비대칭을 실측하고, 이 데이터로 무엇이 가능하고 무엇이 구조적으로 불가능한지 판정한 감사.">
+  <link rel="stylesheet" href="/kc/assets/kc.css">
+  <script defer src="/kc/assets/kc.js"></script>
+</head>
+<body>
+<main class="kc-article" data-page="data/websocket-coverage" data-source="실증 조사 2026-07-20 (postgres 실측·적대검증)">
+  <h1>웹소켓 신호 품질·커버리지 실증 감사</h1>
+  <p class="kc-lede">우리가 받는 실시간 GPS/PLC 피드가 <strong>실제로 얼마나 촘촘하고·믿을 만하고·어디서 끊기는지</strong>를 데이터로 측정하고, 이 신호로 <strong>무엇이 가능하고 무엇이 구조적으로 불가능한지</strong>를 판정한 감사입니다. 특히 "크레인 근처로 가면 GPS가 사라진다"는 현장 관찰을 정면으로 검증했습니다.</p>
+  <div class="kc-meta"><span class="kc-badge kind">데이터 · 감사</span><span class="kc-badge living">실측 2026-07-20 · 적대검증</span></div>
+  <div class="kc-cal note"><span class="h">근거·범위</span><p>모든 수치는 복구 후 클린 구간(2026-07-20 06:00~23:41 UTC, ~1.0M TT GPS fix)의 Postgres 실측입니다(<code>truck_pos_hifreq</code>·<code>rtg_pos_hist</code>·<code>mm_arrival_shadow</code>·<code>qc_handover_edge</code>·<code>tt_cycle_v2</code>). 6개 차원 측정 후 핵심 주장 4건을 <strong>적대적으로 재검증</strong>했습니다(2건 CONFIRMED, 2건 부분수정). TOS Oracle은 건드리지 않았습니다. 한계: 단일 하루(요일·주간 변동 미포함).</p></div>
+
+  <h2>결론 한 줄</h2>
+  <div class="kc-cal tip"><span class="h">Bottom line</span><p>피드는 <strong>움직이는 트럭을 추적하는 데는 넉넉히 우수</strong>합니다(중앙 3초 케이던스·정확도 ~5.5m). 그러나 <strong>단 하나의 근본 한계</strong> — GPS 단말이 <strong>움직일 때만 보고하고 멈추면 침묵</strong> — 때문에, <strong>"멈춘 트럭"을 봐야 하는 모든 것</strong>(유휴·큐 대기·곧-유휴 리드타임·정밀 도착)은 GPS만으로 구조적으로 불가능합니다. 크레인 "신호 소실"도 크레인 구조물이 막는 게 아니라 <strong>트럭이 크레인에서 멈춰 침묵</strong>하는 것입니다.</p></div>
+
+  <h2>1. 가능·제한·불가 매트릭스</h2>
+  <p>이 데이터로 하려는 것들을, 측정된 신호 품질에 근거해 판정하면:</p>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th>하려는 것</th><th>판정</th><th>데이터 근거 (한 줄)</th></tr></thead>
+    <tbody>
+      <tr><td>실시간 처리량 / MPH</td><td><strong>✅ 가능</strong></td><td>피드 건강(~1,000건/분·리커넥트 희소)·엔진ON 트럭은 120초 내 ~97% 보고 — 가동 함대 카운트는 완전</td></tr>
+      <tr><td>OD 이동시간 모델 (주행 구간)</td><td><strong>✅ 가능</strong></td><td>주행 중 케이던스 p50 3.0s/p90 30s·안벽 에이프런이 가장 깨끗한 GPS 환경 — 순수주행 라벨 잘 표집됨</td></tr>
+      <tr><td>레이아웃 / 도로망 학습</td><td><strong>✅ 가능</strong></td><td>수백만 개 깨끗한 주행 fix·물리적 속도(p50 20.7km/h)·진짜 텔레포트 ~0.05%뿐</td></tr>
+      <tr><td>QC(적하 LD) 핸드오버 타이밍</td><td><strong>✅ 가능</strong></td><td>안벽크레인 ~1초 PLC 엣지가 라이브: LD 드롭이 27.9% 직접 매칭·트럭거리 ~22m — 진짜 "곧 빔" 신호</td></tr>
+      <tr><td>사이클 감지</td><td><strong>🟡 제한적</strong></td><td>leg·픽업은 GPS로 구조화되나 <strong>완료 시각은 78%(LD)/87%(DS)가 TOS 유래</strong>·GPS 도착 포착 ~0~0.5%. 작동하되 완료는 TOS 앵커</td></tr>
+      <tr><td>야드 크레인(RTG) 베이 위치 (함대 라이브)</td><td><strong>🟡 제한적</strong></td><td>RTG 케이던스 p50 60초(TT의 20배)·p90 ~1,000~1,337s·순간 ~10%만 2분 내 신선. "어느 블록"은 되나 함대 베이 위치는 불가</td></tr>
+      <tr><td>양하(DS) 곧-유휴 / 리드타임 (트럭별)</td><td><strong>❌ 불가</strong></td><td>RTG는 GPS만·PLC 전무·정지 시 침묵. 핸드오버 엣지에 DS = 0건. 모델/TOS 추정만 가능</td></tr>
+      <tr><td>실시간 "멈춘 트럭" 상태 (유휴 onset·큐 대기·크레인 dwell)</td><td><strong>❌ 불가 (GPS 단독)</strong></td><td>움직임 트리거 텔레메트리 — 60초 초과 침묵의 73%가 &lt;1.0m/s(정지). 관심 순간에 센서가 꺼짐</td></tr>
+    </tbody>
+  </table></div>
+
+  <h2>2. 근본 한계 — "멈추면 침묵"</h2>
+  <p><strong>GPS 단말은 움직임에 반응해 보고하고, 트럭이 멈추면 신호를 끊습니다.</strong> 이건 단말 펌웨어의 상류 동작이라 우리 쪽 수집·래칭·가공으로는 애초에 안 보낸 fix를 복구할 수 없습니다.</p>
+  <div class="kc-cal warn"><span class="h">결정적 증거 — 순 이동거리가 아니라 '함의 속도'로 증명</span><p>단순히 "긴 공백 전후 위치가 같은가"(순 이동거리)로는 약합니다 — 긴 공백의 34.9%만 30m 이내에서 끝납니다(공백 후 첫 fix가 이미 기어 나가는 트럭을 잡기 때문). <strong>지속시간으로 정규화한 함의 속도</strong>가 결정적: 공백 길이별 함의 속도가 <strong>~40배 붕괴</strong>합니다 — 정상(≤10초) <strong>6.63 m/s</strong> → 60~120초 0.41 → <strong>600초 초과 0.17 m/s(~0.6 km/h = 정지)</strong>. 60초 초과 공백 전체의 <strong>73%가 &lt;1.0 m/s</strong>(정지/기어감), 진짜 이동은 ~14%뿐.</p></div>
+  <p><strong>배차 상태로도 확인</strong>: 움직이는 상태는 침묵이 짧고(공차이동 4.1%·배달중 7.0%가 60초 초과 공백), 기다리는 상태는 길다(<code>wait_rtg</code> 14.0%·곧유휴 11.6%·staging 11.2%·idle 11.1%, <code>wait_rtg</code> 공백 p90 = 210초). <strong>정확히 트럭이 멈춰 크레인/RTG를 기다리는 순간에 신호가 사라집니다.</strong></p>
+  <div class="kc-cal note"><span class="h">파급</span><p>멈춤을 관측해야 하는 모든 GPS 지표(유휴시간·RTG/QC 큐 대기·곧-유휴 리드타임·정밀 도착 dwell)는 <strong>구조적으로 과소집계</strong>됩니다. 이는 우리 상류라 더 나은 수집으로 못 고치고, <strong>래칭·지오펜스·PLC/TOS 앵커</strong>로 메워야 합니다(<a href="/kc/dispatch/leadtime-adr.html">리드타임 ADR</a>). 반대로 <strong>주행 구간은 잘 표집</strong>돼 이동시간·OD 모델은 견고합니다.</p></div>
+
+  <h2>3. 케이던스 &amp; 블랙아웃</h2>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th>지표 (연속 fix 간격)</th><th>TT (<code>truck_pos_hifreq</code>)</th><th>RTG (<code>rtg_pos_hist</code>)</th></tr></thead>
+    <tbody>
+      <tr><td>중앙 (p50)</td><td><strong>3.0s</strong></td><td><strong>60s</strong> (20배 거침)</td></tr>
+      <tr><td>p90 / p99</td><td>30s / 669s</td><td>1,029s / 3,999s</td></tr>
+      <tr><td>최대 공백</td><td>11.7시간 (교대 주차)</td><td>8.0시간</td></tr>
+      <tr><td>5초 이내 비율</td><td>67.8%</td><td>1.6%</td></tr>
+      <tr><td>60초 초과 비율</td><td>6.06%</td><td>49.7% (절반)</td></tr>
+      <tr><td>300초 초과 비율</td><td>2.07%</td><td>27.9%</td></tr>
+    </tbody>
+  </table></div>
+  <p><strong>TT는 이중분포</strong>: 89.9%가 30초 이내(3초 기저 케이던스)이고, 300초 초과 꼬리(2%)는 거의 다 <strong>다중시간 교대 주차</strong>(운영 침묵 아님). 운영상 "멈춤 침묵"은 60~300초 대역(~4%)에 있습니다. 디바이스당 ~18시간에 60초 초과 블랙아웃 중앙 119회지만, 활성 디바이스는 전부 3초 기저 케이던스를 유지합니다. 시간대 패턴: 기저 3초는 종일 안정하나 <strong>블랙아웃 비율은 활동과 반비례</strong>(새벽 04~06시 MYT 7.7~8.6% vs 주간 피크 3.5%) — 밤에 노는 트럭이 많아 침묵이 늘어납니다.</p>
+  <div class="kc-cal warn"><span class="h">RTG는 근본적으로 거친 피드</span><p>RTG는 중앙 60초·절반이 60초 초과·5초 이내는 1.6%뿐이라 <strong>핸드오버 타이밍엔 부적합</strong>합니다. "활성 RTG가 어느 블록 위인가"(60초 케이던스 + ~5m 정확도)는 되지만, 함대 전체 실시간 베이 위치는 안 됩니다. 크레인-트럭 상호작용 타이밍엔 RTG GPS 대신 PLC 엣지(<code>qc_handover_edge</code>)를 쓰세요.</p></div>
+
+  <h2>4. ★ 크레인 근처 신호 소실 — 정면 검증</h2>
+  <p>사용자 관찰: "트럭이 크레인 근처로 가면 GPS가 사라진다." 두 가지 설명을 데이터로 갈랐습니다: <strong>(a) 크레인 구조물이 GPS를 막는가</strong> vs <strong>(b) 트럭이 크레인에서 멈춰 침묵하는가</strong>.</p>
+  <div class="kc-cal danger"><span class="h">판정: (a) 구조적 차폐 아님 — (b) 멈춤 침묵</span><p><strong>결정적</strong>: <strong>움직이는 트럭</strong>(속도 &gt;2 m/s)이 크레인 30m 이내를 지날 때 케이던스가 <strong>터미널 어디보다 가장 깨끗</strong>합니다 — p50 3s·p90 6s·60초 초과 <strong>1.25%뿐</strong>(개활 야드는 p90 21s·3.33%). GPS 멀티패스/차폐라면 크레인 옆에서 신호가 나빠져야 하는데 <strong>오히려 최고</strong>입니다. 안벽 에이프런은 개활 하늘의 도로라, 그곳 트럭은 빠르게 지나가며(중앙 8.57 m/s ~31 km/h) fix가 풍부합니다.</p></div>
+  <p>그럼 왜 "크레인行 도착 포착률"이 낮을까요(52.2% vs 블록 68.1%)? <strong>도착 감지의 결손이지 케이던스의 결손이 아닙니다</strong>: leg당 GPS 공백 크기는 크레인·블록이 사실상 동일(p50 74s vs 72s). 도착 못 잡은 크레인行은 작업지점 <strong>~119m 앞에서 멈춰 침묵</strong>(맵매처가 도착을 못 봄). 즉 크레인 근처 소실 = 근본 한계 "멈춤 침묵"의 한 사례입니다.</p>
+  <div class="kc-cal note"><span class="h">좌표 부정확 착시는 반대로 뒤집힘</span><p>흔한 오해와 달리 <strong>크레인 좌표가 가장 정밀</strong>합니다: 학습된 크레인 작업지점 퍼짐이 61대 전부 <strong>15m</strong>(안벽선 PCA 투영, <a href="/kc/learn/qc-workpoint.html">QC 작업지점</a>)인 반면 블록은 평균 115m·중앙 76m. 그러니 크레인 도착 포착이 낮은 건 <strong>좌표 부정확 탓이 아닙니다</strong>. (옛 순진한 centroid의 ~185m 뭉갬은 PCA 모델이 이미 해결했습니다.) 유일한 좌표성 효과는 트럭이 레인에 ~15~25m 오프셋으로 서는 기하 — 부정확이 아니라 구조입니다.</p></div>
+
+  <h2>5. 함대 가시성 — "57% 소실"은 장애가 아니다</h2>
+  <p>순간순간 디바이스의 큰 비율이 "lost"(2분 넘게 미보고)로 보입니다. 하지만:</p>
+  <div class="kc-cal note"><span class="h">엔진ON 트럭은 ~97%가 120초 내 보고</span><p>깨끗한 동시 표본에서 엔진ON 트럭의 라이브 GPS 120초 내 커버리지 = <strong>134/138 ≈ 97%</strong>. 즉 "62% lost"는 <strong>커버리지·하드웨어 장애가 아니라 분모 아티팩트</strong>입니다. "총 디바이스"(453~622)는 최근 알려진 모든 장비를 세지만 실제 엔진ON은 ~138대뿐. 나머지는 엔진OFF·교대 밖·주차 장비가 분모를 채운 것 + 활성이나 잠깐 멈춘 트럭입니다.</p></div>
+  <p>소실 디바이스 중 배차 <code>idle</code> 상태는 ~14%뿐이고, 나머지는 배달중(63% 소실)·staging(77%)·곧유휴(71%)처럼 <strong>일하다 크레인/큐에서 멈춘 트럭</strong>입니다 — 정확히 멈춤 침묵. "lost %"는 분모에 따라 <strong>~41%(health 총계)~74%(6h 알려진 함대)</strong>로 움직이므로 고정 상수가 아니라 범위로 봐야 합니다.</p>
+  <div class="kc-cal warn"><span class="h">함정 — <code>truck_pos_hist</code>는 신선도 분석에 쓰지 말 것</span><p><code>truck_pos_hist</code>는 raw GPS가 아니라 <strong>30초 배치 스냅샷</strong>(현재 배차 트럭의 마지막/보간 위치 + 상태)이라 ts 신선도가 합성이며 라이브 커버리지를 과대표시합니다(동일 순간 hist "fresh 159" vs raw hifreq 62). 신선도·소실 분석은 반드시 <code>truck_pos_hifreq</code>/<code>rtg_pos_hist</code>(raw fix)에서, <code>truck_pos_hist</code>는 배차 <strong>상태</strong> 용도로만.</p></div>
+
+  <h2>6. 정확도 &amp; 노이즈</h2>
+  <ul>
+    <li><strong>정확도 필드는 저장 안 됨</strong> — 유일한 신호는 라이브 집계 <code>avg_accuracy_m</code> ~5.4~5.5m뿐. 어떤 GPS 테이블에도 accuracy/HDOP 컬럼이 없어 과거 per-fix 정확도는 복원 불가(수집 스키마에 추가해야 per-fix 게이팅 가능).</li>
+    <li><strong>자주 보고할 땐(공백 &lt;30초) 노이즈 바닥이 타이트</strong> — leg 최대 점프 p50 6~7m·p90 96~115m, 라이브 5.5m와 일치. 큰 점프는 공백이 커질 때만 나타나며 대부분 <strong>침묵 중 실제 주행</strong>(노이즈 아님).</li>
+    <li><strong>함의 속도 대부분 물리적</strong> — p50 20.7 km/h·p99 48 km/h. 진짜 텔레포트(&gt;100m 그리고 &gt;60km/h)는 ~0.03~0.08%뿐. 권장 필터: 속도 단독이 아니라 <strong>거리&gt;100m 그리고 속도&gt;60km/h</strong>인 스텝만 버림(속도 단독은 정상 단거리 이동 0.56%를 버림).</li>
+    <li><strong>크레인/블록 근처 점프는 약간 더 큼</strong>(강철 구조 멀티패스): 짧은 공백에서 크레인 &gt;300m 점프율 0.29% vs 블록 0.15%(~2배). 단 여전히 2차적 효과.</li>
+  </ul>
+
+  <h2>7. PLC &amp; 적하/양하 관측 비대칭</h2>
+  <p>이것이 "곧-유휴가 LD는 되고 DS는 안 되는" 구조적 이유입니다.</p>
+  <div class="kc-flow">
+    <div class="node accent">적하(LD) 완료 = 안벽 QC<span class="sub">PLC ~1초 엣지 있음 → 관측</span></div>
+    <div class="arw">vs</div>
+    <div class="node">양하(DS) 완료 = 야드 RTG<span class="sub">PLC 전무 + GPS 정지 시 침묵 → 맹점</span></div>
+  </div>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th>측정</th><th>적하 LD (QC 완료)</th><th>양하 DS (RTG 완료)</th></tr></thead>
+    <tbody>
+      <tr><td>완료 이벤트가 PLC 엣지와 매칭</td><td><strong>27.9%</strong> (직접, 접근 엣지 포함 더 높음)</td><td><strong>4.1%</strong> (실제는 0 — 다음 사이클 QC 픽업이 새 들어온 상한)</td></tr>
+      <tr><td>핸드오버 엣지에 잡히는 jobtype</td><td>LD만 (57,842건)</td><td><strong>DS = 0건</strong></td></tr>
+      <tr><td>GPS-네이티브 도착 포착</td><td>0.04%</td><td>0.49% (둘 다 ~0 → TOS 폴백)</td></tr>
+    </tbody>
+  </table></div>
+  <p>안벽 PLC(<code>qc_handover_edge</code>)는 라이브·광범위합니다 — 42~54대 크레인·<strong>~15,000 엣지/일</strong>·트럭거리 ~22m. 하지만 <strong>적재 컨테이너가 크레인에 도착하는(LD) 순간만</strong> 발화하고 DS는 결코 라벨하지 않습니다. RTG는 PLC가 아예 없습니다(GPS만·정지 시 침묵). <strong>→ LD 트럭의 "곧 빔"은 실시간 센싱 가능, DS 트럭은 모델/TOS 추정만.</strong> 배차 로직은 적하·양하의 실시간 관측 대칭을 가정하면 안 됩니다.</p>
+
+  <h2>8. 가능성 / 완화책</h2>
+  <ul>
+    <li><strong>PLC 신호(가장 강한 지렛대)</strong> — <code>qc_handover_edge</code>를 LD 도착 권위 앵커로. <code>tt_cycle_v2.arr_src</code>가 크레인 leg에서 GPS보다 PLC를 우선하게(현재 'plc' 값 자체가 없음).</li>
+    <li><strong>TOS 융합</strong> — 완료 시각은 이미 TOS에 기댐. <code>tt_move_log</code>·<code>tos_handover_label</code>이 GPS/PLC가 못 보는 DS 도착의 올바른 앵커.</li>
+    <li><strong>래칭 + 지오펜스 dwell 추론</strong> — 정지 중엔 침묵 직전 마지막 fix를 래치(트럭이 작업지점 ~25m까지 접근 후 어두워짐).</li>
+    <li><strong>맵매칭</strong> — 잘 표집된 주행 구간으로 접근 경로 복원. 빠진 건 최종 도착 순간뿐(LD는 PLC가 공급).</li>
+    <li><strong>단말 재설정(유일한 진짜 해결)</strong> — 펌웨어를 <strong>정지 중에도 주기 보고</strong>하게 바꾸면 GPS 기반 유휴/큐/dwell이 열림. 단 우리 상류라 현재 통제 밖.</li>
+    <li><strong>RTG측 PLC 피드</strong> — DS 맹점을 닫을 유일한 길이나 오늘 존재하지 않음. 없으면 DS 곧-유휴는 모델 전용.</li>
+  </ul>
+
+  <h2>정직한 한계</h2>
+  <ul>
+    <li>단일 하루(2026-07-20, 복구 후 ~17.7시간)라 요일·주간 변동 미포함.</li>
+    <li>per-fix 정확도·엔진ON은 라이브 집계/health API만(과거 재구성 불가). 노이즈는 점프·함의속도로 간접 추정.</li>
+    <li>"멈춤 침묵"은 fix의 <strong>부재</strong>로 추론 — 침묵 중 위치는 직접 관측 불가, 경계조건(공백 전 속도·공백 전후 이동)으로 읽음. 엔진OFF와 임계 이하 서행은 동일한 침묵을 낳아 구분 불가.</li>
+    <li>DS PLC 4.1%는 상한(실제 RTG-PLC 커버리지는 정확히 0), LD 27.9%는 하한(실제 관측성은 더 높음). 비율(~6.8배)은 창 크기와 무관하게 안정.</li>
+  </ul>
+
+  <hr>
+  <p><strong>관련:</strong> <a href="/kc/data/websocket-data.html">실시간 websocket 데이터</a> · <a href="/kc/data/websocket-fields.html">websocket 필드</a> · <a href="/kc/data/feed-semantics.html">피드 의미론</a> · <a href="/kc/dispatch/leadtime-adr.html">유휴 리드타임 ADR</a> · <a href="/kc/learn/soon-idle-tos.html">곧 유휴 감지</a> · <a href="/kc/learn/qc-workpoint.html">QC 작업지점</a> · <a href="/kc/learn/travel-time.html">이동시간 모델</a></p>
+</main>
+</body>
+</html>

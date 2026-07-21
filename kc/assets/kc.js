@@ -25,6 +25,7 @@ const NAV = [
     { page: "data/tos-verification",   title: "TOS 가정 검증", group: "TOS" },
     { page: "data/websocket-data",     title: "실시간 피드 & 활용", group: "실시간 피드" },
     { page: "data/websocket-fields",   title: "websocket 필드 레퍼런스", group: "실시간 피드" },
+    { page: "data/websocket-coverage", title: "신호 품질·커버리지 감사", group: "실시간 피드" },
     { page: "data/feed-semantics",     title: "피드 의미론 실측", group: "실시간 피드" },
     { page: "data/kpi-computation",    title: "KPI 산출", group: "KPI · 사이클" },
     { page: "data/kpi-accuracy",       title: "websocket로 KPI 정확도", group: "KPI · 사이클" },
