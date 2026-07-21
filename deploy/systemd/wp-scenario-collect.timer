@@ -1,0 +1,10 @@
+[Unit]
+Description=wp-tt scenario collector every 10min (isolated; honors kill switch scenario.config.enabled)
+
+[Timer]
+OnBootSec=6min
+OnUnitActiveSec=600s
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target
