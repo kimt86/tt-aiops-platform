@@ -1,0 +1,10 @@
+[Unit]
+Description=wp-tt scenario per-voyage enrichment every 15min (isolated; rate-limited to a few voyages/tick; honors kill switch)
+
+[Timer]
+OnBootSec=12min
+OnUnitActiveSec=15min
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

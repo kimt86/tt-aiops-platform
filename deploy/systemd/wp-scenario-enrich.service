@@ -1,0 +1,9 @@
+[Unit]
+Description=wp-tt scenario per-voyage enrichment (ISOLATED, non-critical): BAPLIE/MOVINS/vessel/berth -> scenario.vessel_call + .container. Fault here never affects dispatch/dashboard extraction.
+After=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=%h/projects/wp-tt-dashboard/.env
+ExecStart=%h/projects/wp-tt-dashboard/target/release/scengen enrich --target oracle-prod
+Nice=19

@@ -10,7 +10,6 @@
 use std::time::Instant;
 
 use anyhow::Result;
-use chrono::{DateTime, FixedOffset, NaiveDateTime, Utc};
 use serde::Deserialize;
 use serde_json::json;
 use sqlx::PgPool;
@@ -18,6 +17,7 @@ use wp_core::parse::parse_rows;
 
 use crate::state::{self, Config};
 use crate::toolbox::Toolbox;
+use crate::util::{parse_block, parse_myt};
 
 const FETCH_CAP: u32 = 5000; // hard cap per tick; a 10-min DS/LD window is ~2k, so rarely binds
 const INITIAL_LOOKBACK_MIN: i64 = 10; // first-ever tick: narrow window (low-load first touch)
@@ -153,18 +153,4 @@ async fn tick(pool: &PgPool, run_id: i64, target: &str, cfg: &Config) -> Result<
 
     tracing::info!(fetched, inserted, ds, ld, query_ms, capped, "scenario move_hist tick");
     Ok(())
-}
-
-/// MYT "YYYYMMDDHHMMSS[...]" → UTC. Terminal is UTC+8; we store canonical UTC in move_hist.
-fn parse_myt(s: &str) -> Option<DateTime<Utc>> {
-    let base = s.trim().get(..14)?;
-    let naive = NaiveDateTime::parse_from_str(base, "%Y%m%d%H%M%S").ok()?;
-    let myt = FixedOffset::east_opt(8 * 3600)?;
-    Some(naive.and_local_timezone(myt).single()?.with_timezone(&Utc))
-}
-
-/// yard block = first token of YT_TOPOS ("04U-0809" → "04U").
-fn parse_block(topos: &str) -> Option<String> {
-    let b = topos.trim().split('-').next().unwrap_or("").trim();
-    (!b.is_empty()).then(|| b.to_string())
 }

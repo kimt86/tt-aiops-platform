@@ -15,7 +15,9 @@
 pub mod assemble;
 pub mod collect;
 pub mod db;
+pub mod enrich;
 pub mod serve;
 pub mod snapshot;
 pub mod state;
 pub mod toolbox;
+pub mod util;
