@@ -1,0 +1,9 @@
+[Unit]
+Description=wp-tt scenario yard-crane move stream (ISOLATED, non-critical): MCH_OPERATION RTG moves + decoded stack position -> scenario.yard_move. Fault here never affects dispatch/dashboard extraction.
+After=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=%h/projects/wp-tt-dashboard/.env
+ExecStart=%h/projects/wp-tt-dashboard/target/release/scengen yard-moves --target oracle-prod
+Nice=19

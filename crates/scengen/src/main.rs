@@ -7,7 +7,7 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
-use scengen::{assemble, collect, db, enrich, serve, snapshot};
+use scengen::{assemble, collect, db, enrich, serve, snapshot, yard};
 
 #[derive(Parser)]
 #[command(
@@ -33,6 +33,11 @@ enum Command {
     },
     /// Per-voyage enrichment (BAPLIE/MOVINS/vessel/berth) -> scenario.vessel_call + .container.
     Enrich {
+        #[arg(long, default_value = "oracle-prod")]
+        target: String,
+    },
+    /// Yard-crane (RTG) move stream with decoded stack position -> scenario.yard_move.
+    YardMoves {
         #[arg(long, default_value = "oracle-prod")]
         target: String,
     },
@@ -68,6 +73,7 @@ async fn main() -> Result<()> {
         Command::Collect { target } => collect::run(&pool, &target).await?,
         Command::Snapshot { target } => snapshot::run(&pool, &target).await?,
         Command::Enrich { target } => enrich::run(&pool, &target).await?,
+        Command::YardMoves { target } => yard::run(&pool, &target).await?,
         Command::Assemble {} => assemble::run(&pool).await?,
         Command::Serve { port } => serve::run(pool, port).await?,
         Command::Backfill { from, to, target } => {
