@@ -227,3 +227,50 @@ async fn do_build(pool: &PgPool, run_id: i64) -> Result<()> {
     tracing::info!(processed = moves.len(), placed, removed, seeded, skipped, "scenario yard build");
     Ok(())
 }
+
+/// One reconstructed cell: (block_id, bay_idx, row_idx, tier, contno-or-none, known).
+pub type Cell = (i32, i32, i32, i32, Option<String>, bool);
+
+/// Reconstruct the yard state AS OF `at` by replaying scenario.yard_move up to that instant
+/// (in-memory, LOCAL, zero Oracle). Used for a scenario's t=0 background — the state at the
+/// window START, not "now". Same place/remove/seed rules as the live yard-build. Coverage grows
+/// with collection (containers not yet observed aren't included until they move).
+pub async fn state_as_of(pool: &PgPool, at: DateTime<Utc>) -> Result<Vec<Cell>> {
+    use std::collections::HashMap;
+    let moves: Vec<(String, String, i32, i32, i32, i32)> = sqlx::query_as(
+        "SELECT contno, jobtype, block_id, bay_idx, row_idx, tier
+           FROM scenario.yard_move WHERE comp_ts <= $1 ORDER BY comp_ts, seqno",
+    )
+    .bind(at)
+    .fetch_all(pool)
+    .await?;
+
+    let mut cells: HashMap<(i32, i32, i32, i32), (Option<String>, bool)> = HashMap::new();
+    let mut where_is: HashMap<String, (i32, i32, i32, i32)> = HashMap::new();
+    for (contno, jt, b, y, ri, tier) in moves {
+        match jt.as_str() {
+            "DS" | "GI" | "RH" | "AH" | "MI" => {
+                if let Some(old) = where_is.remove(&contno) {
+                    cells.remove(&old);
+                }
+                let key = (b, y, ri, tier);
+                cells.insert(key, (Some(contno.clone()), true));
+                where_is.insert(contno, key);
+                for t in 1..tier {
+                    cells.entry((b, y, ri, t)).or_insert((None, false));
+                }
+            }
+            "LD" | "GO" | "MO" => {
+                if let Some(old) = where_is.remove(&contno) {
+                    cells.remove(&old);
+                }
+                cells.remove(&(b, y, ri, tier));
+            }
+            _ => {}
+        }
+    }
+    Ok(cells
+        .into_iter()
+        .map(|((b, y, ri, t), (c, k))| (b, y, ri, t, c, k))
+        .collect())
+}

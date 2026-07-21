@@ -62,6 +62,15 @@ pub fn parse_num(s: Option<&str>) -> Option<i32> {
     t.parse::<f64>().ok().map(|v| v.round() as i32)
 }
 
+/// Row index (0-based) -> row letter ("A".."Z"); falls back to the number beyond Z.
+pub fn row_name(idx: i32) -> String {
+    if (0..=25).contains(&idx) {
+        ((b'A' + idx as u8) as char).to_string()
+    } else {
+        idx.to_string()
+    }
+}
+
 /// Extract a JSON field as Option<String>, accepting either a string or a number (the
 /// remote-toolbox serializer emits numeric-looking values as JSON numbers).
 pub fn jstr(row: &serde_json::Value, key: &str) -> Option<String> {

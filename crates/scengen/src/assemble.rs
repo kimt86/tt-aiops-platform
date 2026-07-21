@@ -53,26 +53,39 @@ pub async fn build(pool: &PgPool, ws: DateTime<Utc>, we: DateTime<Utc>) -> Resul
     .await?;
     let vessels: Value = serde_json::from_str(&vessels_txt.unwrap_or_else(|| "[]".into()))?;
 
-    // ---- t=0 yard background: nearest snapshot at or before window start (fall back to earliest).
-    let snap_ts: Option<DateTime<Utc>> =
-        sqlx::query_scalar("SELECT max(snapshot_ts) FROM scenario.yard_snapshot WHERE snapshot_ts <= $1")
-            .bind(ws).fetch_one(pool).await?;
-    let snap_ts = match snap_ts {
-        Some(t) => Some(t),
-        None => sqlx::query_scalar("SELECT min(snapshot_ts) FROM scenario.yard_snapshot").fetch_one(pool).await?,
-    };
-    let yard_t0 = if let Some(st) = snap_ts {
-        let txt: Option<String> = sqlx::query_scalar(
-            "SELECT jsonb_build_object('snapshot_ts', $1::timestamptz, 'blocks',
-                      coalesce(jsonb_agg(jsonb_build_object('block',block,'n_total',n_total,'n_full',n_full,
-                        'n_empty',n_total-n_full,'n_reefer',n_reefer,'n_20ft',n_20ft,'n_import',n_import) ORDER BY block),'[]'::jsonb))::text
-               FROM scenario.yard_snapshot WHERE snapshot_ts = $1",
-        )
-        .bind(st).fetch_one(pool).await?;
-        serde_json::from_str(&txt.unwrap_or_else(|| "null".into())).unwrap_or(Value::Null)
-    } else {
-        Value::Null
-    };
+    // ---- t=0 yard background: per-container stack state reconstructed AS OF the window start `ws`
+    // (replay scenario.yard_move up to ws — the yard as it was at the scenario START, not "now").
+    // RH/AH/MI/MO are used here (yard-state only) but are NOT in the work list. Converging: covers
+    // containers observed since collection began; the rest fill in as they move (~a month).
+    let cells = crate::yard::state_as_of(pool, ws).await?;
+    let blkmap: std::collections::HashMap<i32, String> =
+        sqlx::query_as::<_, (i32, String)>("SELECT block_id, block FROM scenario.yard_block")
+            .fetch_all(pool)
+            .await?
+            .into_iter()
+            .collect();
+    let mut summ: std::collections::HashMap<i32, (i64, i64)> = std::collections::HashMap::new();
+    let mut cells_json: Vec<Value> = Vec::with_capacity(cells.len());
+    for (b, y, ri, t, cont, known) in &cells {
+        let e = summ.entry(*b).or_insert((0, 0));
+        if *known { e.0 += 1 } else { e.1 += 1 }
+        cells_json.push(json!({
+            "block": blkmap.get(b), "bay_idx": y, "row": crate::util::row_name(*ri), "tier": t,
+            "contno": cont, "known": known,
+        }));
+    }
+    let mut summ_vec: Vec<(i32, (i64, i64))> = summ.into_iter().collect();
+    summ_vec.sort_by(|a, b| blkmap.get(&a.0).cmp(&blkmap.get(&b.0)));
+    let blocks_summary: Vec<Value> = summ_vec.iter().map(|(b, (k, u))| json!({
+        "block": blkmap.get(b), "block_id": b, "n_total": k + u, "n_known": k, "n_unknown": u,
+    })).collect();
+    let yard_t0 = json!({
+        "as_of": ws.to_rfc3339(),
+        "note": "per-container stack state reconstructed from yard_move up to window start (converging; covers observed containers). unknown=inferred-occupied.",
+        "cells_total": cells.len(),
+        "blocks": blocks_summary,
+        "cells": cells_json,
+    });
 
     let scenario_out = json!({
         "meta": { "window": [ws.to_rfc3339(), we.to_rfc3339()], "home_port": "MYPKG", "source": "scengen" },

@@ -22,6 +22,7 @@ use crate::toolbox::Toolbox;
 #[serde(rename_all = "UPPERCASE")]
 struct YardRow {
     block: Option<String>,
+    block_id: Option<i64>,
     n_total: Option<i64>,
     n_full: Option<i64>,
     n_reefer: Option<i64>,
@@ -57,6 +58,7 @@ async fn take(pool: &PgPool, run_id: i64, target: &str, cfg: &Config) -> Result<
     // Block-level occupancy aggregate over the current yard inventory. block = first token of
     // CLOCATION (e.g. "09M-1819-E-1" -> "09M"). One aggregate; returns ~285 rows.
     let sql = "SELECT SUBSTR(CYY_CONT_CLOCATION,1,INSTR(CYY_CONT_CLOCATION,'-')-1) AS block, \
+                      MAX(TO_NUMBER(CRNT_PSN_IDX_NO1 DEFAULT NULL ON CONVERSION ERROR)) AS block_id, \
                       COUNT(*) AS n_total, \
                       SUM(CASE WHEN CYY_CONT_STATUS='F' THEN 1 ELSE 0 END) AS n_full, \
                       SUM(CASE WHEN CYY_CONT_CONTTYPE='RE' THEN 1 ELSE 0 END) AS n_reefer, \
@@ -97,6 +99,17 @@ async fn take(pool: &PgPool, run_id: i64, target: &str, cfg: &Config) -> Result<
         .bind(r.n_import.unwrap_or(0) as i32)
         .execute(&mut *tx)
         .await?;
+        // block_id -> name map (for labelling reconstructed yard cells)
+        if let Some(bid) = r.block_id {
+            sqlx::query(
+                "INSERT INTO scenario.yard_block (block_id, block, updated_at) VALUES ($1,$2,now())
+                 ON CONFLICT (block_id) DO UPDATE SET block=EXCLUDED.block, updated_at=now()",
+            )
+            .bind(bid as i32)
+            .bind(block)
+            .execute(&mut *tx)
+            .await?;
+        }
     }
     tx.commit().await?;
 
