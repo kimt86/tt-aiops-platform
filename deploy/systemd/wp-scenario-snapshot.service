@@ -1,0 +1,9 @@
+[Unit]
+Description=wp-tt scenario as-of yard snapshot (ISOLATED, non-critical) -> scenario.yard_snapshot. Fault here never affects dispatch/dashboard extraction.
+After=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=%h/projects/wp-tt-dashboard/.env
+ExecStart=%h/projects/wp-tt-dashboard/target/release/scengen snapshot --target oracle-prod
+Nice=19

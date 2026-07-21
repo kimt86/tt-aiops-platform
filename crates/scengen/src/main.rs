@@ -7,7 +7,7 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
-use scengen::{assemble, collect, db};
+use scengen::{assemble, collect, db, snapshot};
 
 #[derive(Parser)]
 #[command(
@@ -23,6 +23,11 @@ struct Cli {
 enum Command {
     /// Continuous incremental collector tick. Honors the kill switch + off-peak window.
     Collect {
+        #[arg(long, default_value = "oracle-prod")]
+        target: String,
+    },
+    /// Periodic as-of yard-occupancy snapshot (shift cadence) -> scenario.yard_snapshot.
+    Snapshot {
         #[arg(long, default_value = "oracle-prod")]
         target: String,
     },
@@ -51,6 +56,7 @@ async fn main() -> Result<()> {
     let pool = db::pool().await?;
     match cli.command {
         Command::Collect { target } => collect::run(&pool, &target).await?,
+        Command::Snapshot { target } => snapshot::run(&pool, &target).await?,
         Command::Assemble {} => assemble::run(&pool).await?,
         Command::Backfill { from, to, target } => {
             tracing::info!(%from, %to, %target, "backfill: skeleton stub — not yet implemented");
