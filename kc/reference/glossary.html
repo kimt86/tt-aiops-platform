@@ -72,7 +72,8 @@
     <dt id="extractor">extractor · 추출기</dt><dd>운영 Oracle을 읽는 <strong>유일한</strong> 컴포넌트. 타이머로 정해진 주기에만 조회해 Postgres에 멱등 적재(작업 풀 틱 ~90초). API 크레이트엔 Oracle 클라이언트 없음(<a href="#faq-oracle">FAQ</a>).</dd>
     <dt id="live-workpool">live_workpool / live_assigned_tt</dt><dd>작업 풀 스냅샷(~90초 틱). 원천 = <a href="#job-queue-schedule">JOB_QUEUE_SCHEDULE</a> + <a href="#job-order-list">JOB_ORDER_LIST</a>.</dd>
     <dt id="util-tt-sample">util_tt_sample</dt><dd>60초 주기로 TT별 배정 상태를 기록. 시간 기반 <a href="#utilization">가동률</a> 평균의 원천.</dd>
-    <dt id="tt-cycle-log">tt_cycle_log</dt><dd>검증된 사이클 1건 = 1행(작업 메타 + 단계 타임스탬프 + leg 거리/시간). UNIQUE(ytno, dropped_at) 30초 멱등 flush. CYCLES 페이지가 읽음.</dd>
+    <dt id="tt-cycle-log">tt_cycle_log</dt><dd>검증된 사이클 1건 = 1행(작업 메타 + 단계 타임스탬프 + leg 거리/시간). UNIQUE(ytno, dropped_at) 30초 멱등 flush. <strong>학습 파이프라인 상류로 존치</strong>(과거 CYCLES 페이지 소스였으나 현행은 <a href="#tt-cycle-recon">tt_cycle_recon</a>).</dd>
+    <dt id="tt-cycle-recon">tt_cycle_recon</dt><dd><strong>현행 싸이클 정의</strong> — 경계는 TOS(<code>tt_move_log</code>: 작업할당→픽업완료→드롭완료), GPS는 그 안의 주행/대기 분해만. 물리 트립 1행(트윈 collapse·3지점 중간경유). CYCLES 페이지가 읽음. 신뢰 기준 = 위치 점 ≥10개. → <a href="/kc/data/cycle-gps-quality.html">해석 품질·한계</a>.</dd>
     <dt id="etw-gateway">tos_etw_gateway / wp-etw-bridge</dt><dd>정확 <a href="#etw">ETW</a> 공급 — Azure FastAPI가 TOS RPC를 폴링, SSH 터널로 받아 <code>tos_etw_cntr</code>에 upsert(TTL 30분).</dd>
     <dt id="road-route-eval">road_route_eval</dt><dd>실측 빈 트립마다 <strong>실제 구간시간 vs 도로망 경로시간 vs 맨해튼</strong>을 나란히 쌓는 표(10분·21일 백필). ① 상시 게이트, ② 2단계 비용의 두 실측 곡선 원천.</dd>
     <dt id="road-graph">road_node / road_edge</dt><dd>GPS 궤적에서 매시 추론한 방향 도로망(2026-07-02 재구축: 7,189노드·작업지점 5,888 커넥터·방향 도로 단위 다수결). Rust 방향 Dijkstra가 <strong>배차 2단계 이동비용을 계산</strong>(성공률 96.7%). 첫 판(264노드·스냅 30%)은 게이트 탈락 → 재구축 후 채택.</dd>

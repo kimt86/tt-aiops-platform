@@ -195,6 +195,12 @@ struct CycleRow {
     long_gap_s: i32,
     pickup_crane: Option<String>,
     free_crane: Option<String>,
+    // Twin intermediate waypoints (A→B→C): non-final drops (free_ts < the trip's last free) and
+    // non-first pickups (pickup_ts > the trip's first pickup). Empty for single-container trips.
+    // Parallel arrays aligned by time (sqlx has no json feature; this codebase passes arrays/text).
+    waypoint_ts: Vec<DateTime<Utc>>,
+    waypoint_crane: Vec<Option<String>>,
+    waypoint_kind: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -227,13 +233,43 @@ pub async fn detail(
                 coalesce(r.gps_covered,false) AS gps_covered,
                 coalesce(r.n_fix,0)           AS n_fix,
                 coalesce(r.long_gap_s,0)      AS long_gap_s,
-                m.pickup_crane, m.free_crane
+                m.pickup_crane, m.free_crane,
+                coalesce(wp.ts,    '{}'::timestamptz[]) AS waypoint_ts,
+                coalesce(wp.crane, '{}'::text[])        AS waypoint_crane,
+                coalesce(wp.kind,  '{}'::text[])        AS waypoint_kind
            FROM tt_cycle_recon r
            LEFT JOIN LATERAL (
-             SELECT pickup_crane, free_crane FROM tt_move_log m
-              WHERE m.ytno = r.ytno AND m.dispatch_ts = r.dispatch_ts
-              ORDER BY twin_leg_seq LIMIT 1
+             -- main pickup = FIRST pickup (matches recon pickup_ts=min); main drop = LAST drop (free_ts=max),
+             -- so a twin reads A(pickup)→…waypoints…→C(final drop) consistently.
+             SELECT (SELECT p.pickup_crane FROM tt_move_log p
+                      WHERE p.ytno = r.ytno AND p.dispatch_ts = r.dispatch_ts ORDER BY p.pickup_ts ASC  LIMIT 1) AS pickup_crane,
+                    (SELECT f.free_crane   FROM tt_move_log f
+                      WHERE f.ytno = r.ytno AND f.dispatch_ts = r.dispatch_ts ORDER BY f.free_ts   DESC LIMIT 1) AS free_crane
            ) m ON true
+           LEFT JOIN LATERAL (
+             SELECT array_agg(w.ts ORDER BY w.ts)    AS ts,
+                    array_agg(w.crane ORDER BY w.ts) AS crane,
+                    array_agg(w.kind ORDER BY w.ts)  AS kind
+               FROM (
+                 -- intermediate DROP at a different block than the final drop (true extra destination)
+                 SELECT tl.free_ts AS ts, tl.free_crane AS crane, 'drop'::text AS kind
+                   FROM tt_move_log tl
+                  WHERE tl.ytno = r.ytno AND tl.dispatch_ts = r.dispatch_ts
+                    AND tl.free_ts < r.free_ts
+                    AND tl.free_crane IS DISTINCT FROM
+                        (SELECT f.free_crane FROM tt_move_log f
+                          WHERE f.ytno = r.ytno AND f.dispatch_ts = r.dispatch_ts ORDER BY f.free_ts DESC LIMIT 1)
+                 UNION ALL
+                 -- intermediate PICKUP at a different block than the first pickup (skips same-crane staggered lifts)
+                 SELECT tl.pickup_ts, tl.pickup_crane, 'pickup'::text
+                   FROM tt_move_log tl
+                  WHERE tl.ytno = r.ytno AND tl.dispatch_ts = r.dispatch_ts
+                    AND tl.pickup_ts > r.pickup_ts
+                    AND tl.pickup_crane IS DISTINCT FROM
+                        (SELECT p.pickup_crane FROM tt_move_log p
+                          WHERE p.ytno = r.ytno AND p.dispatch_ts = r.dispatch_ts ORDER BY p.pickup_ts ASC LIMIT 1)
+               ) w
+           ) wp ON true
           WHERE r.ytno = $1 AND r.free_ts > now() - ($2::int * interval '1 hour')
           ORDER BY r.free_ts DESC
           LIMIT $3",

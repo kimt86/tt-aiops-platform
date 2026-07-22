@@ -131,6 +131,8 @@ export interface CycleRow {
   e_drive_m: number; l_drive_m: number;
   gps_covered: boolean; n_fix: number; long_gap_s: number;
   pickup_crane: string | null; free_crane: string | null;
+  // twin intermediate waypoints (A→B→C), parallel arrays aligned by time; empty for singles
+  waypoint_ts: string[]; waypoint_crane: (string | null)[]; waypoint_kind: string[];
 }
 export interface CycleDetail { ytno: string; hours: number; cycles: CycleRow[]; }
 

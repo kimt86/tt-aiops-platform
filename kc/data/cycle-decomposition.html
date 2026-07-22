@@ -13,6 +13,7 @@
   <h1>TT 사이클 분해 — 현행 5단계 모델</h1>
   <p class="kc-lede">트럭 한 바퀴(사이클)를 지금 우리가 어떻게 5단계로 쪼개는지 정리한 현행 레퍼런스. 이 분해(<code>tt_cycle_v2</code>)는 <strong>운영 진단·트럭별 분석·배차 학습 데이터</strong>의 토대이며, 배차 2단계의 <strong>공차 주행 비용</strong>이 여기서 나옵니다.</p>
   <div class="kc-meta"><span class="kc-badge kind">아키텍처</span><span class="kc-badge living">리빙 문서</span></div>
+  <div class="kc-cal warn"><span class="h">★2026-07 갱신 — 현행 싸이클 정의는 tt_cycle_recon</span><p>이 문서가 설명하는 <code>tt_cycle_v2</code> GPS 감지는 <strong>학습 파이프라인(이동시간 라벨·곧-유휴·데드라인)</strong>의 상류로 여전히 돌지만, <strong>싸이클 정의와 화면 표출은 이제 <code>tt_cycle_recon</code></strong>으로 옮겼습니다: 경계를 <strong>TOS(<code>tt_move_log</code>)</strong>로 고정(작업할당→픽업완료→드롭완료)하고, GPS는 그 안의 <strong>주행/대기만</strong> 결합합니다. 그 해석이 어디까지 믿을 만한지(정상 41%·대기 중심·주행 토막·트윈 3지점)는 → <a href="/kc/data/cycle-gps-quality.html">GPS 싸이클 해석 품질·한계</a>.</p></div>
 
   <h2>0. 왜 어려운가</h2>
   <p>GPS의 <code>container1</code>은 <strong>"물리적으로 실린 박스"가 아니라 "TOS가 배정한 박스"</strong>입니다. 빈 차로 픽업하러 가는 동안에도 채워져 있어 <code>container1</code>만으론 구간을 못 나눕니다. 그래서 <strong>물리적 증거 = GPS 움직임</strong>으로 감지하고 <strong>레그(leg)</strong> 단위로 쪼갭니다.</p>

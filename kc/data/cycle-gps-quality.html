@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>GPS로 싸이클 해석하기 — 품질과 한계 — WP-TT 지식센터</title>
+  <meta name="description" content="한 트럭의 작업 한 바퀴(싸이클)를 우리가 어떻게 읽는지, 그리고 그 해석이 어디까지 믿을 만한지. 싸이클 경계는 TOS에서 정확히 오고 GPS는 그 안을 주행/대기로만 쪼개는데, 트럭이 대부분 서 있어(정지=GPS 침묵) 깔끔히 잡히는 싸이클은 절반이 안 됩니다.">
+  <link rel="stylesheet" href="/kc/assets/kc.css">
+  <script defer src="/kc/assets/kc.js"></script>
+</head>
+<body>
+<main class="kc-article" data-page="data/cycle-gps-quality" data-source="실증 조사 2026-07-22 (postgres 실측·적대검증 워크플로)">
+  <h1>GPS로 싸이클 해석하기 — 품질과 한계</h1>
+  <p class="kc-lede">한 트럭의 작업 한 바퀴(<strong>싸이클</strong>)를 우리가 어떻게 읽는지, 그리고 그 해석이 <strong>어디까지 믿을 만한지</strong>를 데이터로 정리한 문서입니다. 핵심 한 줄: 싸이클의 <strong>뼈대(경계)는 TOS에서 100% 정확히</strong> 오고, GPS는 그 안을 <strong>"달렸다 / 섰다"로만</strong> 쪼갭니다. 그런데 그 쪼개기가 실제로 믿을 만한 싸이클은 <strong>절반이 안 됩니다</strong>.</p>
+  <div class="kc-meta"><span class="kc-badge kind">데이터 · 사이클</span><span class="kc-badge living">실측 2026-07-22 · 적대검증</span></div>
+  <div class="kc-cal tip"><span class="h">Bottom line</span><p>싸이클 경계 3개(<strong>작업할당·픽업완료·드롭완료</strong>)는 TOS 권위라 전부 정확합니다. GPS는 그 사이를 <strong>주행/대기</strong>로 나누는데, 이 터미널 트럭은 한 바퀴의 대부분을 <strong>서서 기다리고</strong>(정지하면 GPS가 침묵) 있어서, 주행/대기가 <strong>깔끔히 나뉘는 싸이클은 ~41%뿐</strong>입니다. 나머지는 위치 점이 너무 적어 못 나눕니다. <strong>못 나누는 건 버그가 아니라, 트럭이 실제로 그만큼 서 있었다는 뜻</strong>입니다.</p></div>
+
+  <h2>1. 우리가 싸이클을 읽는 방법 — 3개 이벤트 + 2개 주행 구간</h2>
+  <p>싸이클을 5단계로 봅니다. <strong>3개는 순간(이벤트)이고, 2개는 구간(주행)</strong>입니다:</p>
+  <div class="kc-flow">
+    <div class="node accent">작업할당<span class="sub">배차 시각 (TOS)</span></div>
+    <div class="arw">공차 주행</div>
+    <div class="node accent">픽업완료<span class="sub">픽업 크레인 핸드오버 (TOS)</span></div>
+    <div class="arw">부하 주행</div>
+    <div class="node accent">드롭완료<span class="sub">드롭 크레인 핸드오버 (TOS)</span></div>
+  </div>
+  <ul>
+    <li><strong>이벤트 3개(점)</strong> — 작업할당 → 픽업완료 → 드롭완료. 셋 다 TOS가 기록하는 <strong>크레인 핸드오버 완료 시각</strong>이라 정확합니다(픽업·드롭이 실제 트럭 정차와 ±30~44초로 실측 검증됨 — 아래 7절).</li>
+    <li><strong>주행 구간 2개(선)</strong> — <strong>공차 주행</strong>(작업할당→픽업, 빈 차로 픽업하러 감)과 <strong>부하 주행</strong>(픽업→드롭, 짐 싣고 내리러 감). 이 두 구간의 "실제 움직인 시간"만 <strong>GPS로</strong> 잽니다.</li>
+    <li><strong>나머지 = 대기</strong> — 각 구간에서 움직이지 않은 시간 전부(크레인 큐 대기 등). GPS는 <strong>움직임/정지만</strong> 판단하고, "언제 픽업/드롭했나"는 TOS 경계에 결합합니다.</li>
+  </ul>
+  <div class="kc-cal note"><span class="h">왜 이렇게 나눴나</span><p>싸이클의 <strong>시작·끝·중간 전환점</strong>은 GPS로 잡으면 부정확하고 자주 놓칩니다(정지 시 침묵). 그래서 이 세 지점은 <strong>TOS 권위 시각</strong>으로 고정하고, GPS는 그 사이를 채우는 <strong>주행 세부</strong>에만 씁니다. 이게 "GPS로는 이동/정지만, 경계는 TOS로"라는 설계입니다.</p></div>
+
+  <h2>2. 품질을 가르는 단 하나의 신호 — 위치 점(fix) 개수</h2>
+  <p><strong>fix = GPS가 찍은 위치 점 하나</strong>(트럭이 "지금 여기 있음"이라고 보고한 한 건). GPS 단말은 <strong>움직일 때 약 3초마다 찍고, 서 있으면 침묵</strong>합니다. 그래서 한 싸이클의 위치 점 개수는 곧 <strong>그 트럭이 얼마나 움직였나</strong>를 말해줍니다.</p>
+  <ul>
+    <li>많이 달린 싸이클 → 점이 <strong>수십~수백 개</strong> → 어디서 달리고 어디서 섰는지 다 보임 → 주행/대기 분해 <strong>신뢰 가능</strong>.</li>
+    <li>대부분 서 있던 싸이클 → 점이 <strong>몇 개뿐</strong> → 두 점 사이에 달렸는지 섰는지 <strong>알 수 없음</strong>.</li>
+  </ul>
+  <div class="kc-cal note"><span class="h">그래서 "믿을 만함"의 기준을 점 개수로 강화</span><p>예전엔 주행이 1초라도 잡히면 "GPS 있음"으로 쳤습니다. 그러면 점 3~4개짜리 싸이클도 <strong>정밀한 척</strong> 그려졌습니다. 이제 <strong>위치 점 10개 이상 + 주행 감지</strong>일 때만 "믿을 만함"으로 봅니다. 신뢰 가능한 싸이클은 평균 <strong>~100개</strong>, 걸러진 희소 싸이클은 평균 <strong>3개</strong>로 깔끔히 갈립니다.</p></div>
+
+  <h2>3. 실제로 얼마나 깔끔히 잡히나 — 묶음 분포</h2>
+  <p>최근 20시간 싸이클을 "GPS가 주행을 얼마나 잡았나"로 묶으면:</p>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th>묶음</th><th>비중</th><th>평균 위치 점</th><th>뜻</th></tr></thead>
+    <tbody>
+      <tr><td><strong>정상 (양쪽 다 주행 잡힘)</strong></td><td><strong>41%</strong></td><td>~101</td><td>공차·부하 둘 다 깔끔히 분해 — 신뢰 가능</td></tr>
+      <tr><td>부분 (한쪽만 잡힘)</td><td>23%</td><td>~50</td><td>주로 부하만 잡힘(공차 구간은 대부분 대기라 침묵)</td></tr>
+      <tr><td>희소/없음 (빗금)</td><td><strong>37%</strong></td><td><strong>~3</strong></td><td>점이 너무 적어 못 나눔 — 경계만 확실</td></tr>
+    </tbody>
+  </table></div>
+  <p>즉 <strong>깔끔한 정상 싸이클은 41%</strong>, 신뢰 가능한 분해(정상+부분)는 64%, 정직한 빗금이 37%입니다. 이유는 <strong>두 겹</strong>입니다:</p>
+  <ol>
+    <li><strong>GPS 근본 한계</strong> — 단말이 <strong>움직일 때만 보고·정지 시 침묵</strong>(<a href="/kc/data/websocket-coverage.html">신호 품질 감사</a>). 트럭이 서 있으면 점이 없습니다.</li>
+    <li><strong>대기 중심 운영</strong> — 이 터미널은 트럭이 한 싸이클의 <strong>대부분을 크레인 큐에서</strong> 기다립니다(아래 4절). 대기가 길수록 점이 적고, 분해가 비게 됩니다.</li>
+  </ol>
+
+  <h2>4. 이 터미널은 대기 중심 — 주행이 과반인 싸이클은 11%뿐</h2>
+  <p>믿을 만한 싸이클만 봐도, 한 바퀴에서 실제로 <strong>달린 시간의 비율</strong>은:</p>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th>주행 비율 (달린 시간 ÷ 싸이클)</th><th>값</th></tr></thead>
+    <tbody>
+      <tr><td>중위</td><td><strong>26%</strong> (= 74%가 대기)</td></tr>
+      <tr><td>상위 25% (p75)</td><td>38%</td></tr>
+      <tr><td>상위 10% (p90)</td><td>51%</td></tr>
+      <tr><td><strong>주행이 과반(&gt;50%)인 싸이클</strong></td><td><strong>11%</strong></td></tr>
+      <tr><td>최대</td><td>92% (큐 대기 거의 없이 쭉 달린 트립)</td></tr>
+    </tbody>
+  </table></div>
+  <div class="kc-cal tip"><span class="h">"회색(대기) 위주" 바는 틀린 게 아니라 진실</span><p>싸이클 화면에서 대기(회색)가 많은 바를 보고 "이상하다"고 느끼기 쉽지만, 트럭이 <strong>실제로 대부분 기다린 것</strong>입니다. 주행이 대기보다 많은 싸이클은 상위 <strong>11%</strong>뿐이고, 이들이 사실상 <strong>"이상적 싸이클"</strong>(큐만 줄이면 도달 가능한 상한)입니다.</p></div>
+
+  <h2>5. 한 싸이클은 2번이 아니라 여러 번 달린다 — 주행 토막</h2>
+  <p>모델은 한 구간의 주행을 <strong>총합 하나</strong>로 보여주지만, 실제 트럭은 한 leg 안에서도 <strong>달리다-서다-달리다</strong>를 여러 번 반복합니다(교차로·양보·크레인 접근·큐 크리프). 믿을 만한 싸이클에서 <strong>주행 토막</strong> 수:</p>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th>싸이클당 주행 토막 수</th><th>값</th></tr></thead>
+    <tbody>
+      <tr><td>중위</td><td><strong>5개</strong></td></tr>
+      <tr><td>3개 이상</td><td>74%</td></tr>
+      <tr><td>5개 이상</td><td>52%</td></tr>
+      <tr><td>최대</td><td>35개</td></tr>
+    </tbody>
+  </table></div>
+  <p>그래서 화면의 <strong>"대기"는 하나의 연속 대기가 아니라</strong> = (토막 사이 짧은 정지들의 합) + (지배적인 크레인 큐 대기)입니다. 원본 신호엔 이 토막이 다 있지만, 화면은 leg당 <strong>총합으로 요약</strong>한 것입니다.</p>
+
+  <h2>6. 트윈 — 3지점 트립 (A→B→C)</h2>
+  <p>보통 싸이클은 <strong>A(픽업)→B(드롭) 두 곳</strong>이면 끝입니다. 그런데 <strong>트윈</strong>(1트럭 2컨테이너 1배차)은 <strong>세 곳</strong>을 들르기도 합니다:</p>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th>종류</th><th>3지점 비율</th><th>경로</th></tr></thead>
+    <tbody>
+      <tr><td>단일 (1컨)</td><td>0%</td><td>A(픽업) → B(드롭). 항상 2지점.</td></tr>
+      <tr><td><strong>적하(LD) 트윈</strong></td><td><strong>34%</strong> (흔함)</td><td>블록1(픽업1) → <strong>블록2(픽업2)</strong> → QC(둘 드롭)</td></tr>
+      <tr><td>양하(DS) 트윈</td><td>4% (드묾)</td><td>QC(둘 픽업) → <strong>블록1(드롭1)</strong> → 블록2(드롭2)</td></tr>
+    </tbody>
+  </table></div>
+  <p>물리적으로 타당합니다 — <strong>적하는 배에 실을 두 박스가 서로 다른 야드 블록에 흩어져</strong> 있어 2곳을 들르는 게 흔하고, <strong>양하는 배에서 내린 두 박스를 보통 같은 블록에 모아 쌓아서</strong> 3지점이 드뭅니다. 3지점 트립은 대부분 적하입니다. 싸이클 화면은 이 <strong>중간 경유</strong>를 별도 눈금으로 표시합니다(같은 블록에 순차 처리한 경우는 "이동"이 아니므로 제외).</p>
+
+  <h2>7. 경계는 얼마나 정확한가 — 픽업/드롭 시각 검증</h2>
+  <p>싸이클의 세 이벤트 중 픽업완료·드롭완료가 <strong>실제 트럭의 정차 순간</strong>에 앉는지 GPS로 확인했습니다(정지 시 GPS가 침묵하므로, 그 시각 근처의 큰 침묵 = 진짜 크레인 정차):</p>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th></th><th>픽업 시각의 정차(침묵) 중위</th><th>드롭 시각의 정차 중위</th></tr></thead>
+    <tbody>
+      <tr><td>양하(DS)</td><td>96초 (67%에서 명확)</td><td>126초 (63%)</td></tr>
+      <tr><td>적하(LD)</td><td>252초 (85%·RTG 큐)</td><td>89초 (62%)</td></tr>
+    </tbody>
+  </table></div>
+  <p>대다수 싸이클에서 픽업·드롭 시각에 <strong>분 단위 정차</strong>가 실측됩니다 → 경계가 실제 작업 순간에 앉습니다. <strong>드롭완료(자유) 시각</strong>은 특히 견고해(물리 대비 ±27~44초), <strong>트럭 관점의 싸이클 완료 시점</strong>으로 타당합니다. 드롭완료 이전은 아직 이 컨테이너 작업 중(싸이클 內), 이후는 다음 일까지 <strong>유휴</strong>(싸이클 外)로 깔끔히 갈립니다.</p>
+  <div class="kc-cal note"><span class="h">작업 간 유휴 — 절반은 바로 다음 일로</span><p>같은 트럭의 드롭완료 → 다음 배차 사이 간격(순수 유휴)은 <strong>중위 22초</strong>이고 <strong>52%가 ±30초 안에</strong> 재배차됩니다(사실상 쉬지 않음). 진짜 유휴는 ~30%(5~60분 대기)에 몰려 있고 상위 10%는 ~29분입니다. 이 간격은 <strong>TOS 시각으로만</strong> 계산해 GPS 침묵과 무관하게 신뢰도가 높습니다 — 배차/곧-유휴 최적화의 핵심 지표입니다.</p></div>
+
+  <h2>8. 무엇이 튼튼하고 무엇이 약한가</h2>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th></th><th>신뢰</th><th>근거</th></tr></thead>
+    <tbody>
+      <tr><td>싸이클 경계·완료 시각</td><td><strong>높음</strong></td><td>TOS 권위 앵커 + 물리 GPS로 ±30~44초 검증. 100% 커버.</td></tr>
+      <tr><td>트윈 구조(3지점·컨테이너)</td><td><strong>높음</strong></td><td>TOS 레그 기반. 중간 경유는 서로 다른 크레인일 때만.</td></tr>
+      <tr><td>주행/대기 세부 분해</td><td><strong>싸이클마다 다름</strong></td><td>정상 41%만 신뢰. 대기 많은 싸이클은 점이 적어 못 나눔.</td></tr>
+      <tr><td>정지 시간의 내부 구조</td><td><strong>낮음</strong></td><td>정지=GPS 침묵이라, 큐 대기·하차 대기·접근을 더 못 쪼갬.</td></tr>
+    </tbody>
+  </table></div>
+
+  <h2>정직한 한계</h2>
+  <ul>
+    <li>주행/대기 세부는 <strong>대기 많은 싸이클(=이 터미널의 다수)에서 구조적으로 약함</strong>. 정지 시 GPS 침묵은 우리 상류(단말 펌웨어)라 수집으로 못 고칩니다.</li>
+    <li>"대기"는 관측된 정지 + 침묵을 합친 잔차라, <strong>침묵 중 실제로 무슨 일이었는지</strong>(접근·큐·하차)는 GPS만으로 더 못 쪼갭니다.</li>
+    <li>픽업·드롭 시각은 <strong>크레인 완료</strong>지 트럭 물리 이벤트가 아니라 ±30~44초 오프셋이 있습니다(대기가 이를 흡수).</li>
+    <li>수치는 복구 후 최근 창(1~2일)의 Postgres 실측이라 요일·주간 변동은 미포함입니다.</li>
+  </ul>
+
+  <hr>
+  <p><strong>관련:</strong> <a href="/kc/data/websocket-coverage.html">웹소켓 신호 품질·커버리지 감사</a> · <a href="/kc/data/cycle-decomposition.html">사이클 분해</a> · <a href="/kc/data/cycle-detection.html">사이클 감지 로직</a> · <a href="/kc/dashboard/cycle.html">Cycle 페이지 해설</a> · <a href="/kc/data/feed-semantics.html">피드 의미론</a> · <a href="/kc/learn/travel-time.html">이동시간 모델</a></p>
+</main>
+</body>
+</html>

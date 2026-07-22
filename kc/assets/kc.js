@@ -30,6 +30,7 @@ const NAV = [
     { page: "data/kpi-computation",    title: "KPI 산출", group: "KPI · 사이클" },
     { page: "data/kpi-accuracy",       title: "websocket로 KPI 정확도", group: "KPI · 사이클" },
     { page: "data/cycle-decomposition", title: "사이클 분해 (현행)", group: "KPI · 사이클" },
+    { page: "data/cycle-gps-quality",  title: "GPS 싸이클 해석 품질·한계", group: "KPI · 사이클" },
     { page: "data/cycle-detection",    title: "사이클 감지 로직", group: "KPI · 사이클" },
     { page: "data/dispatch-pools",     title: "차량풀 · 작업풀 갱신", group: "KPI · 사이클" },
   ]},

@@ -100,7 +100,7 @@ SELECT c.ytno, c.dispatch_ts, c.contno, c.contnos, c.jobtype, c.is_twin, c.n_con
    CASE WHEN s.e_last IS NOT NULL AND s.l_first IS NOT NULL
         THEN round(EXTRACT(EPOCH FROM s.l_first - s.e_last))::int ELSE 0 END                    AS pickup_dwell_s,
    round(EXTRACT(EPOCH FROM c.free_ts - coalesce(s.l_last, s.e_last, c.free_ts)))::int          AS drop_dwell_s,
-   (coalesce(a.e_drive_s,0) + coalesce(a.l_drive_s,0) > 0)                                      AS gps_covered,
+   (coalesce(s.n_fix,0) >= 10 AND coalesce(a.e_drive_s,0) + coalesce(a.l_drive_s,0) > 0)         AS gps_covered,   -- covered = drive seen AND enough fixes to trust the split (sparse GPS ⇒ not covered)
    coalesce(s.n_fix,0), coalesce(a.long_gap_s,0), c.business_date, c.shift
 FROM cyc c
 LEFT JOIN agg  a USING (ytno, dispatch_ts)

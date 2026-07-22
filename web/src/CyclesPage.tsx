@@ -1,7 +1,7 @@
 // TT work-cycle history. Reads tt_cycle_recon (via /api/tt-cycles/*).
-// A "cycle" = one PHYSICAL TRIP: boundaries are TOS-authoritative (tt_move_log dispatch→last free,
-// twins collapsed), and each trip is split by GPS into 7 phases that reconcile exactly to cycle_s:
-//   배차대기 → 공차주행 → 공차정지 → 픽업대기 → 부하주행 → 부하정지(큐) → 드롭대기.
+// A "cycle" = one PHYSICAL TRIP with 3 TOS event points (tt_move_log): 작업할당(dispatch_ts) →
+// 픽업완료(pickup_ts) → drop-off완료(free_ts). Between them the websocket (GPS) splits each span into
+// 주행(moving) vs 대기(the rest): 공차주행 | 부하주행. Twins collapsed; empty+laden = cycle_s.
 // Left: fleet overview + truck leaderboard. Right: the selected truck's cycles as phase bars.
 import { useEffect, useMemo, useRef, useState } from "react";
 import { type Lang } from "./i18n";
@@ -20,34 +20,37 @@ const JOB: Record<string, { c: string; ko: string; en: string }> = {
 };
 const jobColor = (j: string | null | undefined) => JOB[(j ?? "").toUpperCase()]?.c ?? "#64748b";
 
-// 3 semantic families (bar colours + legend); the 7 phases map onto them by kind.
-const FAM = { drive: "#0ea5e9", stop: "#f59e0b", wait: "#64748b" } as const;
-const FAM_LABEL = [
-  { k: "drive", c: FAM.drive, ko: "주행", en: "Driving" },
-  { k: "stop", c: FAM.stop, ko: "정지·큐", en: "Stop/queue" },
-  { k: "wait", c: FAM.wait, ko: "대기", en: "Wait" },
-] as const;
-// the 7 phases, in trip order. `f` = the CycleRow field (seconds); `fam` = colour family.
-const PHASES = [
-  { field: "dispatch_wait_s", fam: "wait", ko: "배차 대기", en: "Dispatch wait" },
-  { field: "e_drive_s", fam: "drive", ko: "공차 주행", en: "Empty drive" },
-  { field: "e_stop_s", fam: "stop", ko: "공차 정지", en: "Empty stop" },
-  { field: "pickup_dwell_s", fam: "wait", ko: "픽업 대기", en: "Pickup dwell" },
-  { field: "l_drive_s", fam: "drive", ko: "부하 주행", en: "Laden drive" },
-  { field: "l_stop_s", fam: "stop", ko: "부하 정지(큐)", en: "Laden queue" },
-  { field: "drop_dwell_s", fam: "wait", ko: "드롭 대기", en: "Drop dwell" },
+// segment colours: two drive shades (empty vs laden) + one wait tone. Non-driving time in a span = 대기.
+const SEG = { eDrive: "#38bdf8", lDrive: "#0369a1", wait: "#475569" } as const;
+const LEGEND = [
+  { c: SEG.eDrive, ko: "공차 주행", en: "Empty drive" },
+  { c: SEG.lDrive, ko: "부하 주행", en: "Laden drive" },
+  { c: SEG.wait, ko: "대기", en: "Wait" },
 ] as const;
 
-// Build the sequential phase segments (durations) for one trip. Returns null when GPS did not observe
-// a drive segment (gps_covered=false) — the split is unavailable, only cycle_s is meaningful.
-function tripPhases(c: CycleRow): { key: string; sec: number; fam: string; label: (l: Lang) => string }[] | null {
-  if (!c.gps_covered) return null;
-  return PHASES.map((p) => ({
-    key: p.field,
-    sec: (c[p.field] as number) ?? 0,
-    fam: p.fam,
-    label: (l: Lang) => (ko(l) ? p.ko : p.en),
-  })).filter((s) => s.sec > 0);
+const secBetween = (a?: string | null, b?: string | null): number =>
+  a && b ? Math.max(0, (new Date(b).getTime() - new Date(a).getTime()) / 1000) : 0;
+
+type Seg = { key: string; sec: number; color: string; label: (l: Lang) => string };
+
+// 5-stage model: 작업할당(dispatch_ts) ─[공차주행 + 공차대기]─ 픽업완료(pickup_ts) ─[부하주행 + 부하대기]─
+// drop-off완료(free_ts). The two drive spans are websocket-derived (e_drive_s / l_drive_s); the remainder of
+// each TOS span is 대기. Geometry is always returned; segs=null when GPS didn't observe the split (gps_covered=false).
+function tripSegs(c: CycleRow): { segs: Seg[] | null; total: number; pickupFrac: number | null } {
+  const emptyS = secBetween(c.dispatch_ts, c.pickup_ts);
+  const ladenS = secBetween(c.pickup_ts, c.free_ts);
+  const total = emptyS + ladenS || (c.cycle_s ?? 1);
+  const pickupFrac = c.pickup_ts && total > 0 ? emptyS / total : null;
+  if (!c.gps_covered || !c.pickup_ts) return { segs: null, total, pickupFrac };
+  const eDrive = Math.min(c.e_drive_s ?? 0, emptyS);
+  const lDrive = Math.min(c.l_drive_s ?? 0, ladenS);
+  const segs: Seg[] = [
+    { key: "e_drive", sec: eDrive, color: SEG.eDrive, label: (l: Lang) => (ko(l) ? "공차 주행" : "Empty drive") },
+    { key: "e_wait", sec: emptyS - eDrive, color: SEG.wait, label: (l: Lang) => (ko(l) ? "공차 대기" : "Empty wait") },
+    { key: "l_drive", sec: lDrive, color: SEG.lDrive, label: (l: Lang) => (ko(l) ? "부하 주행" : "Laden drive") },
+    { key: "l_wait", sec: ladenS - lDrive, color: SEG.wait, label: (l: Lang) => (ko(l) ? "부하 대기" : "Laden wait") },
+  ].filter((s) => s.sec > 0.5);
+  return { segs, total, pickupFrac };
 }
 const driveKm = (c: CycleRow) => (c.e_drive_m + c.l_drive_m) / 1000;
 
@@ -100,38 +103,59 @@ function TruckRow({ t, max, sel, onSel, lang }: { t: CycleTruckAgg; max: number;
 // one trip as a sequential phase bar (durations ∝ width, shared scale across trips). gps_covered=false
 // renders a single muted "no GPS detail" bar (only cycle_s is known).
 function CycleLane({ c, scale, lang }: { c: CycleRow; scale: number; lang: Lang }) {
-  const segs = tripPhases(c);
+  const trip = tripSegs(c);
   // contnos is the single source of truth for BOTH the ×N badge count and the listed IDs, so they can never
   // disagree. Fallback to the single representative container only if contnos is absent (defensive).
   const boxes = c.contnos && c.contnos.length ? c.contnos : (c.container ? [c.container] : []);
   const nb = boxes.length;
+  const barW = scale > 0 ? (trip.total / scale) * 100 : 100;
+  // twin intermediate crane events (A→B→C): render each as a tick along the bar (empty for singles)
+  const wps = (c.waypoint_ts ?? []).map((ts, i) => ({
+    ts, crane: c.waypoint_crane?.[i] ?? null, kind: c.waypoint_kind?.[i] ?? "drop",
+    frac: trip.total > 0 ? secBetween(c.dispatch_ts, ts) / trip.total : 0,
+  })).filter((w) => w.frac > 0.002 && w.frac < 0.998);
   return (
     <div className="cyc-lane">
       <span className="cyc-lane-time mono">{hhmm(c.free_ts)}</span>
       <span className="cyc-lane-track" style={{ position: "relative", display: "block" }}>
-        {segs ? (
-          <span style={{ display: "flex", width: `${scale > 0 ? ((c.cycle_s ?? 0) / scale) * 100 : 100}%`, height: "100%" }}>
-            {segs.map((s, i) => (
-              <span
-                key={s.key + i}
-                style={{ flex: `0 0 ${(c.cycle_s ?? 1) > 0 ? (s.sec / (c.cycle_s ?? 1)) * 100 : 0}%`, background: FAM[s.fam as keyof typeof FAM], height: "100%" }}
-                title={`${s.label(lang)} · ${mmss(s.sec)}`}
-              />
-            ))}
-          </span>
-        ) : (
-          <span
-            style={{ display: "block", width: `${scale > 0 ? ((c.cycle_s ?? 0) / scale) * 100 : 100}%`, height: "100%", background: "repeating-linear-gradient(45deg,#334155,#334155 5px,#1e293b 5px,#1e293b 10px)", opacity: 0.6 }}
-            title={ko(lang) ? "GPS 상세 없음 (정지·침묵/보존만료)" : "no GPS detail (silent / aged out)"}
-          />
-        )}
+        <span style={{ position: "relative", display: "block", width: `${barW}%`, height: "100%" }}>
+          {trip.segs ? (
+            <span style={{ display: "flex", width: "100%", height: "100%" }}>
+              {trip.segs.map((s, i) => (
+                <span
+                  key={s.key + i}
+                  style={{ flex: `0 0 ${trip.total > 0 ? (s.sec / trip.total) * 100 : 0}%`, background: s.color, height: "100%" }}
+                  title={`${s.label(lang)} · ${mmss(s.sec)}`}
+                />
+              ))}
+            </span>
+          ) : (
+            <span
+              style={{ display: "block", width: "100%", height: "100%", background: "repeating-linear-gradient(45deg,#334155,#334155 5px,#1e293b 5px,#1e293b 10px)", opacity: 0.6 }}
+              title={ko(lang) ? "GPS 상세 없음 (정지·침묵/보존만료)" : "no GPS detail (silent / aged out)"}
+            />
+          )}
+          {trip.pickupFrac != null && (
+            <span
+              style={{ position: "absolute", top: 0, bottom: 0, left: `${trip.pickupFrac * 100}%`, width: 2, background: "#e2e8f0", transform: "translateX(-1px)", pointerEvents: "none" }}
+              title={ko(lang) ? `픽업 완료 ${hhmm(c.pickup_ts)}` : `Pickup ${hhmm(c.pickup_ts)}`}
+            />
+          )}
+          {wps.map((w, i) => (
+            <span
+              key={"wp" + i}
+              style={{ position: "absolute", top: 0, bottom: 0, left: `${w.frac * 100}%`, width: 2, background: "#f59e0b", transform: "translateX(-1px)", pointerEvents: "none" }}
+              title={`${w.kind === "pickup" ? (ko(lang) ? "중간 픽업" : "pickup") : (ko(lang) ? "중간 드롭" : "drop")}${w.crane ? " " + w.crane : ""} · ${hhmm(w.ts)}`}
+            />
+          ))}
+        </span>
       </span>
       <span className="cyc-lane-meta">
         {c.jobtype && <span className="cyc-lane-job" style={{ borderColor: jobColor(c.jobtype), color: jobColor(c.jobtype) }}>{c.jobtype.toUpperCase()}</span>}
         {nb > 1 && <span className="cyc-lane-qc mono" title={ko(lang) ? `트윈 (${nb}컨테이너 1트립): ${boxes.join(", ")}` : `twin (${nb} boxes / 1 trip): ${boxes.join(", ")}`}>×{nb}</span>}
         {c.free_crane && <span className="cyc-lane-qc mono">{c.free_crane}</span>}
         {nb > 0 && <span className="cyc-lane-cnt mono" title={nb > 1 ? boxes.join(", ") : undefined}>{boxes.join(" + ")}</span>}
-        {segs && driveKm(c) > 0 && <span className="cyc-lane-vsl mono" title={ko(lang) ? "주행 거리" : "driven distance"}>{driveKm(c).toFixed(1)}km</span>}
+        {trip.segs && driveKm(c) > 0 && <span className="cyc-lane-vsl mono" title={ko(lang) ? "주행 거리" : "driven distance"}>{driveKm(c).toFixed(1)}km</span>}
       </span>
       <span className="cyc-lane-dur mono">{mmss(c.cycle_s)}</span>
     </div>
@@ -198,13 +222,25 @@ function TruckDetail({ ytno, hours, lang }: { ytno: string; hours: number; lang:
       <div className="cyc-phase-h">
         <span className="cyc-sec-h">{ko(lang) ? "트립 단계별 (최신순)" : "Trips by phase (latest first)"}</span>
         <span className="cyc-phase-legend">
-          {FAM_LABEL.map((p) => (
-            <span key={p.k}><span className="cyc-dot" style={{ background: p.c }} />{ko(lang) ? p.ko : p.en}</span>
+          {LEGEND.map((p) => (
+            <span key={p.en}><span className="cyc-dot" style={{ background: p.c }} />{ko(lang) ? p.ko : p.en}</span>
           ))}
         </span>
       </div>
-      <div className="cyc-sec-h" style={{ fontWeight: 400, opacity: 0.7, marginTop: -2 }}>
-        {ko(lang) ? "배차대기 → 공차주행 → 공차정지 → 픽업대기 → 부하주행 → 부하정지(큐) → 드롭대기 · 빗금 = GPS 상세 없음" : "dispatch → empty drive → empty stop → pickup → laden drive → laden queue → drop · hatched = no GPS detail"}
+      <div className="cyc-sec-h" style={{ fontWeight: 400, opacity: 0.7, marginTop: -2, display: "flex", flexWrap: "wrap", alignItems: "center", gap: "4px 16px" }}>
+        <span>{ko(lang) ? "작업할당 → 공차주행 → 픽업완료 → 부하주행 → drop-off완료" : "dispatch → empty drive → pickup → laden drive → drop"}</span>
+        <span style={{ display: "inline-flex", alignItems: "center", gap: 5 }}>
+          <span style={{ display: "inline-block", width: 2, height: 11, background: "#e2e8f0", flex: "none" }} />
+          {ko(lang) ? "픽업 시점" : "pickup"}
+        </span>
+        <span style={{ display: "inline-flex", alignItems: "center", gap: 5 }}>
+          <span style={{ display: "inline-block", width: 2, height: 11, background: "#f59e0b", flex: "none" }} />
+          {ko(lang) ? "트윈 중간 경유" : "twin waypoint"}
+        </span>
+        <span style={{ display: "inline-flex", alignItems: "center", gap: 5 }}>
+          <span style={{ display: "inline-block", width: 13, height: 11, flex: "none", background: "repeating-linear-gradient(45deg,#334155,#334155 3px,#1e293b 3px,#1e293b 6px)" }} />
+          {ko(lang) ? "GPS 상세 없음" : "no GPS detail"}
+        </span>
       </div>
       <div className="cyc-lanes">
         {loading && <div className="cyc-empty">{ko(lang) ? "불러오는 중…" : "loading…"}</div>}
@@ -248,7 +284,7 @@ export default function CyclesPage({ lang }: { lang: Lang }) {
       <div className="cyc-head">
         <div className="cyc-title">
           <h2>{ko(lang) ? "TT 작업 사이클 이력" : "TT Work-Cycle History"}</h2>
-          <span className="cyc-title-sub">{ko(lang) ? "물리 트립 단위 · TOS 경계(tt_move_log) + GPS 주행/정지 분해" : "per physical trip · TOS boundaries + GPS drive/stop split"}</span>
+          <span className="cyc-title-sub">{ko(lang) ? "물리 트립 단위 · TOS 이벤트 3점(할당·픽업·드롭) + GPS 주행/대기 분해" : "per physical trip · 3 TOS events (assign·pickup·drop) + GPS drive/wait split"}</span>
         </div>
         <div className="cyc-range">
           {RANGES.map((r) => (
