@@ -1,9 +1,15 @@
-//! Periodic as-of yard-occupancy snapshot. Runs as its OWN systemd oneshot (separate cadence
-//! from `collect` — a few times/day, not every 10 min). Captures block-level fill from the
-//! CURRENT yard inventory (CYY_CONTAINER) so any past period start has a t=0 yard background;
-//! CYY is overwritten each ETL, so this history can only be built going forward.
+//! ON-DEMAND yard block-map refresh — NOT scheduled any more (the 4h timer was retired). One
+//! aggregate over the current yard inventory (CYY_CONTAINER) producing (a) `scenario.yard_block`,
+//! the block_id -> block-name map used to LABEL reconstructed yard cells, and (b) a block-level
+//! occupancy row set `scenario.yard_snapshot`.
 //!
-//! One small aggregate query (~115k-row table -> ~285 block rows) — low load, off-peak-friendly.
+//! Its original job — supplying the scenario's t=0 yard background — is GONE: yard_t0 is now
+//! reconstructed per-container as-of-T by replaying scenario.yard_move (see yard::state_as_of).
+//! Nothing reads yard_snapshot functionally any more, and the block map is physical infrastructure
+//! that essentially never changes (302 blocks mapped, 0 unresolved). Re-scanning a ~115k-row hot
+//! table every 4h to refresh a static 302-row map was pure waste, so it is now manual: run it only
+//! when the admin page reports unresolved block_ids ("야드 블록맵 ⚠미해석").
+//!
 //! Isolated + honors the kill switch, like `collect`.
 
 use std::time::Instant;

@@ -52,8 +52,13 @@ async fn status(State(pool): State<PgPool>) -> Result<Response, AppErr> {
              'watermark', (SELECT cursor_evt FROM scenario.watermark WHERE source='move_hist'),
              'move_hist', (SELECT jsonb_build_object('rows',count(*),'min',min(comp_ts),'max',max(comp_ts))
                              FROM scenario.move_hist),
-             'yard_snapshots', (SELECT jsonb_build_object('count',count(DISTINCT snapshot_ts),'latest',max(snapshot_ts))
-                             FROM scenario.yard_snapshot),
+             'yard_map', jsonb_build_object(
+                        'blocks', (SELECT count(*) FROM scenario.yard_block),
+                        'unresolved', (SELECT count(*) FROM (
+                              SELECT DISTINCT m.block_id FROM scenario.yard_move m
+                               WHERE m.comp_ts > now() - interval '1 day'
+                                 AND NOT EXISTS (SELECT 1 FROM scenario.yard_block b
+                                                  WHERE b.block_id = m.block_id)) u)),
              'enrichment', (SELECT jsonb_build_object(
                         'vessel_calls', (SELECT count(*) FROM scenario.vessel_call),
                         'containers',   (SELECT count(*) FROM scenario.container))),
@@ -221,7 +226,7 @@ async function load(){
   const s=await j('/api/scenario/status');
   $('#kill').checked=!!s.enabled;
   $('#ksl').textContent=s.enabled?'수집 ON':'수집 OFF';
-  const mh=s.move_hist||{},ys=s.yard_snapshots||{},en=s.enrichment||{};
+  const mh=s.move_hist||{},ym=s.yard_map||{},en=s.enrichment||{};
   COV={min:mh.min,max:mh.max};
   $('#avail').innerHTML=mh.min
     ?`다운로드 가능 기간: <b>${fmt(mh.min)}</b> ~ <b>${fmt(mh.max)}</b> · 이동 ${mh.rows}건 · enrich 선박 ${H(en.vessel_calls)}·컨 ${H(en.containers)}`
@@ -229,7 +234,8 @@ async function load(){
   if(first&&mh.min){preset('cov');first=false}
   $('#stat').innerHTML=[
     ['이동 데이터',H(mh.rows)+'건'],['watermark',H(s.watermark)],
-    ['야드 스냅샷',H(ys.count)+'개'],['enrich 선박·컨',H(en.vessel_calls)+' · '+H(en.containers)],
+    ['야드 블록맵',H(ym.blocks)+'개'+(ym.unresolved>0?' <b style="color:#f87171">⚠미해석 '+ym.unresolved+'</b>':'')],
+    ['enrich 선박·컨',H(en.vessel_calls)+' · '+H(en.containers)],
   ].map(([k,v])=>`<div class=kv><b>${k}</b><span>${v}</span></div>`).join('');
   $('#runs').innerHTML=table(s.latest_runs||[],['kind','state','load','수집','시각'],r=>[
     r.kind,pill(r.state),cell(r.load_stats),cell(r.collection),fmt(r.updated_at)]);
