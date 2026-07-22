@@ -16,6 +16,8 @@ use crate::util::{jstr, parse_myt};
 
 const STREAM: &str = "yard_move";
 const FETCH_CAP: u32 = 8000;
+/// Watermark safety lag (s) — covers TOS out-of-order row visibility. See util::wm_minus_secs.
+const LAG_S: i64 = 120;
 
 pub async fn run(pool: &PgPool, target: &str) -> Result<()> {
     let cfg = state::load_config(pool).await?;
@@ -40,9 +42,16 @@ pub async fn run(pool: &PgPool, target: &str) -> Result<()> {
 async fn tick(pool: &PgPool, run_id: i64, target: &str, cfg: &Config) -> Result<()> {
     state::set_phase(pool, run_id, "extract").await?;
 
+    // Seek from (watermark − LAG_S), not from the watermark itself — see util::wm_minus_secs.
+    // Re-reading ~2 min of tail (~90 RTG+ES rows) is free and ON CONFLICT dedups it. This cannot
+    // stall: 2 min of moves is orders of magnitude under FETCH_CAP.
+    // NOTE: deleting the scenario.watermark row makes this fall back to a day-start seek (bounded
+    // by the cap and self-catching-up, but a needless rescan) — don't delete it.
     let day = wp_core::shift::terminal_now().format("%Y%m%d").to_string();
     let wm = state::get_watermark(pool, STREAM)
         .await?
+        .as_deref()
+        .and_then(|w| crate::util::wm_minus_secs(w, LAG_S))
         .unwrap_or_else(|| format!("{day}000000"));
 
     // SEEK, not rescan (mirrors extractor::rtg_moves). MCH_OPER_SEQNO ("YYYYMMDDHHMMSS", globally
@@ -114,8 +123,9 @@ async fn tick(pool: &PgPool, run_id: i64, target: &str, cfg: &Config) -> Result<
         .execute(&mut *tx)
         .await?;
         inserted += res.rows_affected();
-        // Watermark advances on SEQNO (the seek key), not comp — they are not the same ordering.
-        if max_seq.as_deref().is_none_or(|m| seqno.as_str() > m) {
+        // Watermark advances on SEQNO (the seek key), not comp — they are not the same ordering —
+        // and ONLY on well-formed keys, so a malformed SEQNO can never jump or stall it.
+        if crate::util::is_wm_key(&seqno) && max_seq.as_deref().is_none_or(|m| seqno.as_str() > m) {
             max_seq = Some(seqno);
         }
     }

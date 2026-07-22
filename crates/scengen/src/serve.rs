@@ -52,6 +52,10 @@ async fn status(State(pool): State<PgPool>) -> Result<Response, AppErr> {
              'watermark', (SELECT cursor_evt FROM scenario.watermark WHERE source='move_hist'),
              'move_hist', (SELECT jsonb_build_object('rows',count(*),'min',min(comp_ts),'max',max(comp_ts))
                              FROM scenario.move_hist),
+             'watermarks', (SELECT coalesce(jsonb_agg(jsonb_build_object(
+                        'source', source,
+                        'age_s', round(EXTRACT(epoch FROM (now()-updated_at)))::int)
+                        ORDER BY source), '[]'::jsonb) FROM scenario.watermark),
              'yard_map', jsonb_build_object(
                         'blocks', (SELECT count(*) FROM scenario.yard_block),
                         'unresolved', (SELECT count(*) FROM (
@@ -236,9 +240,28 @@ async function load(){
     ['이동 데이터',H(mh.rows)+'건'],['watermark',H(s.watermark)],
     ['야드 블록맵',H(ym.blocks)+'개'+(ym.unresolved>0?' <b style="color:#f87171">⚠미해석 '+ym.unresolved+'</b>':'')],
     ['enrich 선박·컨',H(en.vessel_calls)+' · '+H(en.containers)],
+    ['수집기 침묵',silence(s.watermarks||[])],
   ].map(([k,v])=>`<div class=kv><b>${k}</b><span>${v}</span></div>`).join('');
-  $('#runs').innerHTML=table(s.latest_runs||[],['kind','state','load','수집','시각'],r=>[
-    r.kind,pill(r.state),cell(r.load_stats),cell(r.collection),fmt(r.updated_at)]);
+  $('#runs').innerHTML=table(s.latest_runs||[],['kind','state','건강','load','수집','시각'],r=>[
+    r.kind,pill(r.state),health(r),cell(r.load_stats),cell(r.collection),fmt(r.updated_at)]);
+}
+// Data silence: the worst watermark age. A watermark only advances when new rows arrive, so a long
+// age means the feed stopped even though the timer may still be firing (fetched=0 every tick).
+function silence(wms){
+  if(!wms.length)return'<span class=mut>–</span>';
+  const w=wms.reduce((a,b)=>(b.age_s||0)>(a.age_s||0)?b:a);
+  const m=Math.round((w.age_s||0)/60);
+  return m>30?`<b style="color:#f87171">⚠ ${w.source} ${m}분 무진행</b>`:`최대 ${m}분 (${w.source})`;
+}
+// Early warning that the PK/INDEX seek stopped working: there is no Oracle-side statement timeout,
+// so a plan flip to a full scan just shows up as a slow poll repeating quietly. Baseline toolbox
+// round-trip is ~0.8s, so >5s means the query itself is doing real work again.
+function health(r){
+  const ms=+((r.load_stats||{}).query_ms||0), w=[];
+  const age=(Date.now()-new Date(r.updated_at))/1000;
+  if(ms>5000)w.push('⚠느림 '+ms+'ms');
+  if(age>3600&&!['snapshot','assemble'].includes(r.kind))w.push('⚠정지 '+Math.round(age/60)+'분');
+  return w.length?`<b style="color:#f87171">${w.join(' · ')}</b>`:'<span class=mut>OK</span>';
 }
 function cell(o){if(!o||!Object.keys(o).length)return'<span class=mut>–</span>';return'<span class=tag>'+Object.entries(o).filter(([k])=>!k.startsWith('_')).map(([k,v])=>`${k}:${typeof v=='object'?JSON.stringify(v):v}`).join(' · ')+'</span>'}
 function table(rows,cols,fn){if(!rows.length)return'<span class=mut>없음</span>';

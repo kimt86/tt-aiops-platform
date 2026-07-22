@@ -62,6 +62,29 @@ pub fn parse_num(s: Option<&str>) -> Option<i32> {
     t.parse::<f64>().ok().map(|v| v.round() as i32)
 }
 
+/// True iff `s` is a well-formed watermark key: all digits and at least 14 of them
+/// ("YYYYMMDDHHMMSS", optionally with a millisecond tail). Watermarks may ONLY advance on these —
+/// a malformed key sorts lexicographically out of order and could either jump the watermark far
+/// ahead (silently skipping rows) or stall it. Refusing to advance is the safe failure direction.
+pub fn is_wm_key(s: &str) -> bool {
+    s.len() >= 14 && s.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// Watermark minus a safety lag, as a 14-digit "YYYYMMDDHHMMSS" seek bound.
+///
+/// TOS makes rows visible slightly out of key order (measured ~1 in 866k, up to 3s), so seeking
+/// from exactly the stored watermark can step over a row that only became visible after we had
+/// already read past its key. Seeking from (wm − lag) re-reads the recent tail so ON CONFLICT can
+/// dedup it, which makes skipping provably zero. A 14-digit bound is also a correct lower bound
+/// for longer keys, since a 17-digit key sharing a later 14-prefix still sorts after it.
+pub fn wm_minus_secs(s: &str, secs: i64) -> Option<String> {
+    if !is_wm_key(s) {
+        return None;
+    }
+    let naive = NaiveDateTime::parse_from_str(s.get(..14)?, "%Y%m%d%H%M%S").ok()?;
+    Some((naive - chrono::Duration::seconds(secs)).format("%Y%m%d%H%M%S").to_string())
+}
+
 /// Row index (0-based) -> row letter ("A".."Z"); falls back to the number beyond Z.
 pub fn row_name(idx: i32) -> String {
     if (0..=25).contains(&idx) {

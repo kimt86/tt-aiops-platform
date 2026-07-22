@@ -17,10 +17,12 @@ use wp_core::parse::parse_rows;
 
 use crate::state::{self, Config};
 use crate::toolbox::Toolbox;
-use crate::util::{parse_block, parse_myt};
+use crate::util::{is_wm_key, parse_block, parse_myt, wm_minus_secs};
 
 const FETCH_CAP: u32 = 5000; // hard cap per tick; a 10-min DS/LD window is ~2k, so rarely binds
 const INITIAL_LOOKBACK_MIN: i64 = 10; // first-ever tick: narrow window (low-load first touch)
+/// Watermark safety lag (s) — covers TOS out-of-order row visibility. See util::wm_minus_secs.
+const LAG_S: i64 = 120;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "UPPERCASE")]
@@ -58,12 +60,18 @@ pub async fn run(pool: &PgPool, target: &str) -> Result<()> {
 async fn tick(pool: &PgPool, run_id: i64, target: &str, cfg: &Config) -> Result<()> {
     state::set_phase(pool, run_id, "extract").await?;
 
-    let wm = match state::get_watermark(pool, "move_hist").await? {
-        Some(w) => w,
-        None => (wp_core::shift::terminal_now() - chrono::Duration::minutes(INITIAL_LOOKBACK_MIN))
-            .format("%Y%m%d%H%M%S")
-            .to_string(),
-    };
+    // Seek from (watermark − LAG_S) so rows that become visible out of key order can't be skipped;
+    // ON CONFLICT dedups the re-read tail. A 14-digit bound correctly bounds these 17-digit
+    // (millisecond) keys. Don't delete the watermark row — that forces a wider re-read.
+    let wm = state::get_watermark(pool, "move_hist")
+        .await?
+        .as_deref()
+        .and_then(|w| wm_minus_secs(w, LAG_S))
+        .unwrap_or_else(|| {
+            (wp_core::shift::terminal_now() - chrono::Duration::minutes(INITIAL_LOOKBACK_MIN))
+                .format("%Y%m%d%H%M%S")
+                .to_string()
+        });
     let now_evt = wp_core::shift::terminal_now().format("%Y%m%d%H%M%S").to_string();
 
     // Index-supported range scan on the PK (JOB_HIST_DATE, JOB_HIST_TIME). Completed DS/LD only.
@@ -120,7 +128,9 @@ async fn tick(pool: &PgPool, run_id: i64, target: &str, cfg: &Config) -> Result<
             "LD" => ld += 1,
             _ => {}
         }
-        if max_evt.as_deref().is_none_or(|m| evt > m) {
+        // Advance ONLY on well-formed keys: a malformed one sorts out of order and could jump the
+        // watermark ahead (skipping rows) or stall it.
+        if is_wm_key(evt) && max_evt.as_deref().is_none_or(|m| evt > m) {
             max_evt = Some(evt.to_string());
         }
     }
