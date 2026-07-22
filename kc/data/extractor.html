@@ -1,0 +1,165 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>추출기(Extractor) 아키텍처 — WP-TT 지식센터</title>
+  <meta name="description" content="TOS 프로덕션 Oracle에서 데이터를 긁어 Postgres에 적재하는 유일한 컴포넌트 = 추출기(wp-extractor). 서브커맨드·증분 스트림·KPI 롤업·live 스냅샷·스케줄링·데이터 흐름·Oracle 안전 원칙을 한곳에 정리한 아키텍처 레퍼런스.">
+  <link rel="stylesheet" href="/kc/assets/kc.css">
+  <script defer src="/kc/assets/kc.js"></script>
+</head>
+<body>
+<main class="kc-article" data-page="data/extractor" data-source="코드 감사 2026-07-22 (crates/extractor·systemd·sql 전수 매핑)">
+  <h1>추출기(Extractor) 아키텍처</h1>
+  <p class="kc-lede"><code>wp-extractor</code>(바이너리 <code>extractor</code>)는 <strong>TOS 프로덕션 Oracle을 건드리는 유일한 컴포넌트</strong>이자, TOS→Postgres 적재의 심장입니다. 이 문서는 그 <strong>구조·역할·서비스에서의 위치</strong>를 한곳에 정리한 아키텍처 레퍼런스입니다. "무엇을 긁는가"(추출 지점 전수)는 → <a href="/kc/data/tos-extraction.html">TOS 데이터 추출 전수</a>, 여기는 <strong>"어떻게 도는가"(엔진)</strong>.</p>
+  <div class="kc-meta"><span class="kc-badge kind">데이터 · 아키텍처</span><span class="kc-badge living">전수 매핑 2026-07-22</span></div>
+  <div class="kc-cal tip"><span class="h">Bottom line</span><p>추출기는 <strong>두 갈래</strong>입니다: ① <strong>증분 스트림</strong>(qc-moves·rtg-moves·handover·workpool — 60~90초, 근실시간 이벤트 로그) ② <strong>KPI 롤업</strong>(tick·nightly — 하루/시프트 집계). 모든 Oracle 접근은 <strong>단일 게이트(<code>remote-toolbox-sql</code>)</strong>로 <strong>읽기전용·인덱스안전·캡·직렬</strong>. 흐름은 <strong>Oracle → 추출기 → Postgres(L0/L1/L2·이벤트로그·live) → API/대시보드</strong>. 무게(부하)에 따라 주기를 다르게 둡니다(값싼 MCH 스트림은 자주, 무거운 JOB_HISTORY 집계는 드물게·야간).</p></div>
+
+  <h2>1. 큰 그림 — 데이터 흐름</h2>
+  <div class="kc-flow">
+    <div class="node">TOS Oracle<span class="sub">MCH_OPERATION · JOB_ORDER_HISTORY · JOB_ORDER_LIST · VSB_VOYAGE …</span></div>
+    <div class="arw">추출기 (유일한 Oracle 클라이언트)</div>
+    <div class="node accent">Postgres<span class="sub">이벤트로그 · raw_k_* (L0) · live_* · kpi_daily(L1) · kpi_baseline(L2)</span></div>
+    <div class="arw">읽기</div>
+    <div class="node">API / 대시보드<span class="sub">라이브맵 · 배차 · KPI · 러닝센터 · soon-idle</span></div>
+  </div>
+  <ul>
+    <li><strong>증분 이벤트 스트림</strong>(~60~90초): 워터마크로 "새 꼬리만" 긁어 이벤트 로그에 적재 → 근실시간.</li>
+    <li><strong>KPI 롤업</strong>: 하루치(야간 권위)·시프트누적(LIVE)·오늘잠정(tick)을 <code>raw_k_*</code>(L0)에 긁고, Postgres 전용 <code>transform</code>이 <code>kpi_daily</code>(L1)로 굴리고, <code>baseline</code>이 <code>kpi_baseline</code>(L2)을 계산.</li>
+    <li><strong>파생 조인</strong>(Oracle 무접촉·psql): <code>tos_handover_label ⋈ qc_move_log → tt_move_log</code>, <code>tt_move_log ⋈ truck_pos_hifreq → tt_cycle_recon</code>.</li>
+  </ul>
+
+  <h2>2. Oracle 접속 메커니즘 &amp; 안전 (가장 중요)</h2>
+  <p>TOS는 <strong>실운영 프로덕션 DB</strong>라 부하가 곧 현장 리스크입니다. 그래서 안전이 <strong>구조적으로</strong> 강제됩니다:</p>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th>원칙</th><th>구현</th></tr></thead>
+    <tbody>
+      <tr><td><strong>단일 게이트</strong></td><td><code>runner.rs</code>의 <code>Toolbox</code>만 Oracle에 닿음 — <code>remote-toolbox-sql</code> 스킬 스크립트를 통해. 다른 어떤 모듈도 직접 Oracle 접근 안 함.</td></tr>
+      <tr><td><strong>직렬화</strong></td><td>프로세스 전역 <code>static ORACLE_LOCK: Mutex</code> — <code>run_sql</code>이 먼저 락을 잡아 <strong>두 쿼리가 동시에 Oracle에 못 감</strong>.</td></tr>
+      <tr><td><strong>읽기전용</strong></td><td>스킬이 SELECT만 허용(읽기전용 툴박스). 손상 불가.</td></tr>
+      <tr><td><strong>인덱스 안전</strong></td><td>모든 술어가 인덱스 타는 형태(날짜 등가/범위·PK seek). <code>params.rs</code>가 문자열 리터럴로만 렌더(바인드·Oracle 날짜연산 없음).</td></tr>
+      <tr><td><strong>캡</strong></td><td>모든 쿼리에 <code>FETCH FIRST n ROWS ONLY</code>. 90초 타임아웃. SQL은 argv 아닌 <strong>임시 파일</strong>로 전달(셸 이스케이프 손상 방지).</td></tr>
+    </tbody>
+  </table></div>
+  <div class="kc-cal warn"><span class="h">⚠ 알려진 함정</span><p>① 툴박스는 SQL에 <strong>단독 <code>&gt;</code></strong>가 있으면 HTTP 400(부등호는 <code>&gt;=</code>/<code>BETWEEN</code> 사용). ② <code>ORACLE_LOCK</code>은 <strong>프로세스 내</strong>만 직렬화 — qc/rtg/handover는 <strong>독립 서비스</strong>라 매분 겹칠 수 있음(정상 seek 속도라 무해하나, 회귀 시 배가). ③ 딕셔너리(<code>all_ind_columns</code> 등)로 인덱스 먼저 확인 후 본 테이블 조회.</p></div>
+
+  <h2>3. 서브커맨드 (CLI)</h2>
+  <p><code>extractor &lt;subcommand&gt; [--flags]</code>. 두 종류 — KPI 배치(run·tick·backfill·transform)와 라이브 스트림(나머지):</p>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th>서브커맨드</th><th>역할</th><th>Oracle</th><th>주기</th></tr></thead>
+    <tbody>
+      <tr><td><code>run --kpi all</code></td><td>어제 하루 <strong>권위</strong> 전수 추출 → transform + baseline 체인</td><td>MCH·JOB_HIST·MCH_WORKTIME</td><td>야간 01:30</td></tr>
+      <tr><td><code>tick --tier t1/t2</code></td><td>오늘 <strong>잠정</strong> 갱신(t1=값싼 MPH계열·t2=무거운 JOB_HIST)</td><td>MCH / JOB_HIST</td><td>t1 5분·t2 20분</td></tr>
+      <tr><td><code>tick --shift --tier</code></td><td><strong>시프트 누적</strong> KPI(LIVE 탭·vessel 패널)</td><td>MCH / JOB_HIST</td><td>t1 3분·t2 15분</td></tr>
+      <tr><td><code>backfill --from --to</code></td><td>이력 시딩(하루씩 run·<code>--sleep</code> 3s로 부드럽게)</td><td>run과 동일</td><td>온디맨드</td></tr>
+      <tr><td><code>transform</code></td><td>L0→L1→L2 재계산 (<strong>Oracle 무접촉</strong>·순수 Postgres·멱등)</td><td>—</td><td>온디맨드</td></tr>
+      <tr><td><code>qc-moves</code> / <code>rtg-moves</code></td><td>안벽/야드 크레인 무브 이벤트 로그(증분)</td><td>MCH_OPERATION</td><td><strong>60초</strong></td></tr>
+      <tr><td><code>handover</code></td><td>완료(JOBSTATUS='C') 핸드오버 = "트럭 자유" 권위 라벨(증분)</td><td>JOB_ORDER_HISTORY</td><td><strong>60초</strong></td></tr>
+      <tr><td><code>workpool</code></td><td>live 작업풀 스냅샷(QC 큐·수요·선박 스케줄)</td><td>JOB_ORDER_LIST·JOB_QUEUE_SCHEDULE·VSB_VOYAGE</td><td>90초</td></tr>
+      <tr><td><code>weather</code> / <code>weather-live</code></td><td>날씨(이동시간 피처)·<strong>Oracle 아님</strong>(Open-Meteo·Tomorrow.io)</td><td>— (HTTP)</td><td>1시간 / 3분</td></tr>
+    </tbody>
+  </table></div>
+  <div class="kc-cal note"><span class="h">실패 의미론 (PARTIAL)</span><p><code>run --kpi all</code>과 각 tick 티어는 <strong>개별 KPI 실패를 로깅하고 건너뛰며 계속</strong>합니다(전체 중단 아님 = PARTIAL). 단일 KPI 지정 시엔 에러를 그대로 전파. <code>run_kpi</code>가 <strong>값싼 소스를 먼저</strong> 정렬(util·mph·qc → 무거운 JOB_HIST 스캔).</p></div>
+
+  <h2>4. 증분 스트림 — 근실시간 이벤트 피드</h2>
+  <p>워터마크로 <strong>새 꼬리만 seek</strong>해 이벤트 로그에 적재. 셋 다 Phase-2 <strong>지상 진실(ground truth)</strong> — 웹소켓 추정 싸이클을 교정/백필합니다.</p>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th>스트림</th><th>소스 → 타깃</th><th>워터마크 seek</th><th>다운스트림</th></tr></thead>
+    <tbody>
+      <tr><td><strong>qc-moves</strong></td><td>MCH_OPERATION[C/M/Z] → <code>qc_move_log</code></td><td><strong>SEQNO PK-seek</strong>(SEQNO=완료 순서·PK 선두)</td><td>DS 픽업·LD 드롭 핸드오버 진실</td></tr>
+      <tr><td><strong>rtg-moves</strong></td><td>MCH_OPERATION[RTG/ES] → <code>rtg_move_log</code></td><td>SEQNO PK-seek(동일)</td><td>RTG 전 작업믹스 = 대기예측 피처</td></tr>
+      <tr><td><strong>handover</strong></td><td>JOB_ORDER_HISTORY[C] → <code>tos_handover_label</code></td><td><strong>concat FBI seek</strong>(<code>DATE‖TIME</code> 함수기반인덱스)</td><td>soon-idle 정답 + <code>tt_move_log</code> 앵커</td></tr>
+    </tbody>
+  </table></div>
+  <div class="kc-cal note"><span class="h">★워터마크 = "재스캔"이 아니라 "seek" (핵심 설계)</span><p>증분 폴은 <strong>정렬된 인덱스 선두 컬럼</strong>에 워터마크를 걸어 "지난 지점부터"만 읽어야 합니다. MCH_OPERATION은 <code>SEQNO</code>(PK 선두·전역 시간 시퀀스)로, JOB_ORDER_HISTORY는 <code>DATE‖TIME</code> concat에 <strong>독립 함수기반인덱스</strong>가 있어 그 concat으로 seek. 둘 다 <strong>폴 비용이 주기와 무관</strong>(~0.8s seek)해 60초 주기가 안전합니다. <em>계산식(concat) 술어를 인덱스 없이 쓰면 매 폴이 오늘치를 재스캔</em>하므로 금물 — 이게 이 설계의 요점.</p></div>
+  <p><strong>무손실 가드</strong>(qc/rtg): ① 워터마크에서 <strong>120초 안전랙</strong>을 빼고 seek → 늦게/역순으로 보이는 행도 재읽고 <code>ON CONFLICT</code> dedup. ② <code>&gt;=</code>(동초 비유일 skip 방지). ③ 워터마크 전진은 <strong>14자리 숫자 SEQNO</strong>에만(오정렬 stall 방지). handover는 <code>&gt;=</code>+<code>ON CONFLICT</code>로 경계 갭 방지.</p>
+
+  <h2>5. 집계 KPI (11개)</h2>
+  <p>각 KPI는 자기 SQL 템플릿(<code>sql/*.sql</code>)·행 타입·upsert를 소유. 하루에 <strong>인덱스 날짜 바운드</strong>(<code>COMPDATE=day</code> / <code>JOB_HIST_DATE=day</code>) 집계 1회.</p>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th>KPI</th><th>의미</th><th>소스 → raw 타깃</th><th>부하</th></tr></thead>
+    <tbody>
+      <tr><td>k_mph_realtime</td><td>QC별 실시간 생산성(무브·MPH·트럭수)</td><td>MCH → raw_k_mph_realtime</td><td>LOW</td></tr>
+      <tr><td>k_mph_voyage</td><td>항차별 공식 크레인 생산성(TEU·MPH·BP)</td><td>VSS_STATISTICS → raw_k_mph_voyage</td><td>TRIVIAL</td></tr>
+      <tr><td>k_crane_q_daily</td><td>크레인 큐 시간(배차→크레인 활성 = 크레인이 트럭 기다린 초)</td><td>JOB_HIST → raw_k_crane_q_daily</td><td>MEDIUM</td></tr>
+      <tr><td>k_crane_q_hour</td><td>시간대(00–23)별 크레인 큐 분포</td><td>JOB_HIST → raw_k_crane_q_hour</td><td>MEDIUM</td></tr>
+      <tr><td>k_qc_q</td><td>QC 무브없음 유휴 갭 + 동일-bay 트럭대기 subset</td><td>MCH → raw_k_qc_q</td><td>LOW</td></tr>
+      <tr><td>k_cycle</td><td>컨테이너 처리 span(잡 첫~끝 이벤트)</td><td>JOB_HIST → raw_k_cycle</td><td>—</td></tr>
+      <tr><td><strong>k_tt_cycle</strong></td><td><strong>실제 야드트럭 수송 싸이클</strong>(연속 완료 QC 무브 갭·DS/LD 분리)</td><td>MCH → raw_k_tt_cycle</td><td>LOW</td></tr>
+      <tr><td>k_empty</td><td>공차운행 비율(공차거리/총거리)·jobtype×시프트</td><td>JOB_HIST → raw_k_empty</td><td>MEDIUM</td></tr>
+      <tr><td>k_util_crane</td><td>QC/RTG 가동률(24h·구간병합 active/86400)</td><td>MCH → raw_k_util_crane</td><td>LOW-MED</td></tr>
+      <tr><td>k_util_tt</td><td>야드트랙터 가동률(로그인/워크타임 세션)</td><td>MCH_WORKTIME → raw_k_util_tt</td><td>LOW</td></tr>
+      <tr><td>qc_move_time</td><td>크레인×jobtype×시프트 중위 무브간격 → 배차 ETA</td><td>MCH(3일) → <code>learn_qc_move_time</code></td><td>—</td></tr>
+    </tbody>
+  </table></div>
+  <p><strong>파라미터화(<code>params.rs</code>)</strong>: <strong>Type-A</strong>(MCH/JOB_HIST)는 <code>{{DAY_STR}}</code> 등가 + <code>{{TIME_PREDICATE}}</code> — DAY 경로는 빈 문자열(검증본과 바이트동일), SHIFT 경로는 <code>AND (concat) BETWEEN start AND end</code> 추가. <strong>Type-B</strong>(가동률)는 <code>{{START_TS}}/{{END_TS}}/{{ELAPSED_DENOM}}</code>. 전부 <strong>문자열 리터럴</strong>(인덱스 안전). <code>k_util</code>은 하루 분모라 <strong>오늘잠정 tick에서 제외</strong>.</p>
+  <div class="kc-cal note"><span class="h">L0 → L1 → L2 파이프라인</span><p>KPI 추출은 <code>raw_k_*</code>(L0·멱등 upsert)에 적재만. 순수 Postgres <code>transform</code>이 <code>raw_k_*</code>를 <code>kpi_daily</code>(L1·헤드라인 K_UTIL/K_EMPTY/K_CYCLE/K_RTG_Q/K_MPH…)로 굴리고, <code>baseline</code>이 4주 기준·Welch 유의검정으로 <code>kpi_baseline</code>(L2). <strong>tick=오늘잠정</strong>(<code>is_provisional</code>)·<strong>nightly=최종</strong>(잠정이 최종을 덮지 않음).</p></div>
+
+  <h2>6. Live / 스냅샷 스트림</h2>
+  <p>"지금 상태"를 잡는 것들 — 워터마크 없이 <strong>전체 DELETE+재삽입</strong>, 상태+최근 <code>CRE_DT</code>/<code>UPD_DT</code> 창으로 바운드. <code>workpool</code> 서브커맨드(90초)가 한 틱에 여럿을 순차 실행:</p>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th>스트림</th><th>역할 → 타깃</th><th>바운드</th></tr></thead>
+    <tbody>
+      <tr><td>workpool</td><td>배차용 작업풀(A=진행중 카드·Q=미배정 수요) → <code>live_workpool</code>·<code>live_candidate</code></td><td>COMPDATE NULL·상태 A/Q·CRE_DT ≥ SYSDATE-2</td></tr>
+      <tr><td>workqueue</td><td>QC별 작업 큐 계획 → <code>live_workqueue</code></td><td>미완 큐 + 최근 6h 완료</td></tr>
+      <tr><td>vessel_schedule</td><td><strong>선박 스케줄 = 데드라인 소스</strong>(ETD·컷오프) → <code>live_vessel_schedule</code></td><td>ESTDEP ∈ [SYSDATE-2, +10]</td></tr>
+      <tr><td>assigned_tt</td><td>과제 보유 TT(순수 TOS 가동률) → <code>live_assigned_tt</code></td><td>상태 A/B/Q·YTNO 있음</td></tr>
+      <tr><td>voyage_plan</td><td>계획 항차 크기(VAN·진행바 분모) → <code>raw_voyage_plan</code></td><td>최근 3일 MAX(VAN)</td></tr>
+      <tr><td>ETW</td><td>컨테이너별 ETW 강화·<strong>Oracle 아님</strong>(Azure 게이트웨이 curl) → <code>tos_etw_cntr</code></td><td>live_workpool에 있는 것만</td></tr>
+    </tbody>
+  </table></div>
+  <p><strong>순수 Postgres 변환</strong>(Oracle 무접촉): <code>baseline</code>(kpi_daily→kpi_baseline·Welch), <code>shift</code>(시프트 SQL 렌더→<code>kpi_shift</code>/<code>kpi_shift_history</code>+vessel 패널·<code>rollup_today_from_shifts</code>로 추가 스캔 0).</p>
+
+  <h2>7. 스케줄링 (systemd)</h2>
+  <p>모두 <code>Type=oneshot</code> + 타이머. <strong>주기는 소스 무게에 맞춤</strong>, <code>Nice</code>는 무게에 비례(야간=10·스트림=15·shift-t2=18). 파생 psql 유닛은 <code>OnBootSec</code>로 <strong>상류 뒤에</strong> 엇갈림.</p>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th>유닛</th><th>ExecStart</th><th>주기</th><th>Oracle</th></tr></thead>
+    <tbody>
+      <tr><td>wp-qc-moves</td><td><code>extractor qc-moves</code></td><td>60초</td><td>✅</td></tr>
+      <tr><td>wp-rtg-moves</td><td><code>extractor rtg-moves</code></td><td>60초</td><td>✅</td></tr>
+      <tr><td>wp-handover</td><td><code>extractor handover</code></td><td>60초</td><td>✅</td></tr>
+      <tr><td>wp-workpool</td><td><code>extractor workpool</code></td><td>90초</td><td>✅</td></tr>
+      <tr><td>wp-shift-t1</td><td><code>tick --shift --tier t1</code></td><td>3분</td><td>✅ MCH</td></tr>
+      <tr><td>wp-weather-live</td><td><code>extractor weather-live</code></td><td>3분</td><td>—</td></tr>
+      <tr><td>wp-tick-t1</td><td><code>tick --tier t1</code></td><td>5분</td><td>✅ MCH</td></tr>
+      <tr><td>wp-shift-t2</td><td><code>tick --shift --tier t2</code></td><td>15분</td><td>✅ JOB_HIST</td></tr>
+      <tr><td>wp-tick-t2</td><td><code>tick --tier t2</code></td><td>20분</td><td>✅ JOB_HIST</td></tr>
+      <tr><td>wp-weather</td><td><code>extractor weather</code></td><td>1시간</td><td>—</td></tr>
+      <tr><td>wp-nightly</td><td><code>run --kpi all</code></td><td>01:30 매일</td><td>✅ 전부</td></tr>
+      <tr><td>wp-tt-move-log</td><td><code>psql populate_tt_move_log.sql</code></td><td>5분</td><td>— (psql)</td></tr>
+      <tr><td>wp-tt-cycle-recon</td><td><code>psql populate_tt_cycle_recon.sql</code></td><td>10분</td><td>— (psql)</td></tr>
+    </tbody>
+  </table></div>
+  <div class="kc-cal note"><span class="h">추출기 유닛이 아닌 것</span><p><code>wp-ws-bridge</code>(GPS 웹소켓 SSH 터널)·<code>wp-scenario-*</code>(별 바이너리 <code>scengen</code>·격리된 시나리오 서브시스템)는 추출기가 아닙니다. <code>tt-move-log</code>·<code>tt-cycle-recon</code>은 추출기 바이너리가 아니라 <strong>psql</strong>로 Postgres 조인만(Oracle 무접촉).</p></div>
+
+  <h2>8. 데이터 흐름 &amp; 소비자</h2>
+  <p>어느 Postgres 테이블이 어느 API 기능을 먹이는가(<code>crates/api/src</code> 실측):</p>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th>Postgres 테이블</th><th>소비자 (API)</th></tr></thead>
+    <tbody>
+      <tr><td><code>qc_move_log</code>·<code>rtg_move_log</code></td><td>livemap.rs (라이브맵·싸이클 교정)</td></tr>
+      <tr><td><code>tos_handover_label</code></td><td>learn.rs·livemap.rs (soon-idle) + <code>tt_move_log</code></td></tr>
+      <tr><td><code>tt_move_log</code>·<code>tt_cycle_recon</code></td><td>cycles.rs (싸이클타임·<a href="/kc/data/cycle-gps-quality.html">GPS 해석</a>)</td></tr>
+      <tr><td><code>live_workpool</code>·<code>live_*</code></td><td>workpool.rs·livemap.rs (배차·live 뷰)</td></tr>
+      <tr><td><code>kpi_daily</code>·<code>kpi_shift</code></td><td>agg.rs·routes.rs·live.rs (KPI 대시보드)</td></tr>
+      <tr><td><code>kpi_baseline</code></td><td>learn.rs·models.rs (기준·유의성)</td></tr>
+      <tr><td><code>weather_hourly</code>·<code>weather_1min</code></td><td>learn.rs(이동시간)·livemap.rs(날씨칩)</td></tr>
+    </tbody>
+  </table></div>
+
+  <h2>9. 설계 원칙 (요약)</h2>
+  <ul>
+    <li><strong>Oracle은 추출기만</strong> — 단일 게이트·직렬·읽기전용·인덱스안전·캡. 부하가 곧 현장 리스크.</li>
+    <li><strong>증분은 seek, 집계는 바운드</strong> — 증분 폴은 인덱스 선두 컬럼 워터마크로 seek(주기 무관); 집계는 인덱스 날짜 등가로 바운드.</li>
+    <li><strong>무게별 주기</strong> — 값싼 MCH 스트림 자주(60초), 무거운 JOB_HIST 집계 드물게/야간.</li>
+    <li><strong>PARTIAL</strong> — 개별 KPI 실패는 건너뛰고 계속(전 스트림 <code>run_logged</code>가 <code>etl_run_log</code>+<code>data_freshness</code>에 기록).</li>
+    <li><strong>L0→L1→L2</strong> — 추출(raw)·변환(kpi_daily)·기준(baseline) 분리; 변환/기준은 Postgres 전용.</li>
+    <li><strong>MYT(UTC+8)</strong> 전역 — <code>parse_etw</code>로 <code>YYYYMMDDHH24MISS[mmm]</code> → UTC.</li>
+  </ul>
+  <div class="kc-cal warn"><span class="h">문서 드리프트 주의</span><p><code>qc/rtg-moves</code> 타이머 <em>설명</em>과 <code>main.rs</code> docstring은 아직 "every 5min"이라 되어 있으나, 실제 <code>OnUnitActiveSec</code>는 <strong>60초</strong>로 조여졌습니다(2026-07-22, SEQNO seek 재작성과 함께). 코드 주석 갱신은 후속 정리 대상.</p></div>
+
+  <hr>
+  <p><strong>관련:</strong> <a href="/kc/data/tos-extraction.html">TOS 데이터 추출 전수(무엇을)</a> · <a href="/kc/data/tos-db-reference.html">TOS DB 레퍼런스</a> · <a href="/kc/data/cycle-gps-quality.html">GPS 싸이클 해석</a> · <a href="/kc/data/kpi-computation.html">KPI 산출</a> · <a href="/kc/dispatch/index.html">배차 로직</a></p>
+</main>
+</body>
+</html>

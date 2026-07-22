@@ -21,6 +21,7 @@ const NAV = [
   ]},
   { id: "data", label: "데이터 & 지표", items: [
     { page: "data/tos-extraction",     title: "TOS 데이터 추출 전수", group: "TOS" },
+    { page: "data/extractor",          title: "추출기(Extractor) 아키텍처", group: "TOS" },
     { page: "data/tos-db-reference",   title: "TOS DB 레퍼런스", group: "TOS" },
     { page: "data/tos-verification",   title: "TOS 가정 검증", group: "TOS" },
     { page: "data/websocket-data",     title: "실시간 피드 & 활용", group: "실시간 피드" },
