@@ -1,10 +1,10 @@
 [Unit]
-Description=wp-tt yard-crane move stream every 5min (incremental MCH_OPERATION RTG/ES)
+Description=wp-tt yard-crane move stream every 1min (incremental MCH_OPERATION RTG/ES; SEQNO PK-seek watermark)
 
 [Timer]
-OnBootSec=3min
-OnUnitActiveSec=300s
-AccuracySec=20s
+OnBootSec=75s
+OnUnitActiveSec=60s
+AccuracySec=5s
 
 [Install]
 WantedBy=timers.target

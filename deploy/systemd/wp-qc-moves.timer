@@ -1,10 +1,10 @@
 [Unit]
-Description=wp-tt quay-crane move stream every 5min (incremental MCH_OPERATION C/M/Z; offset ~90s from rtg)
+Description=wp-tt quay-crane move stream every 1min (incremental MCH_OPERATION C/M/Z; SEQNO PK-seek watermark)
 
 [Timer]
-OnBootSec=4min30s
-OnUnitActiveSec=300s
-AccuracySec=20s
+OnBootSec=90s
+OnUnitActiveSec=60s
+AccuracySec=5s
 
 [Install]
 WantedBy=timers.target

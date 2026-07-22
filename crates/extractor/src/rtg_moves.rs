@@ -7,7 +7,7 @@
 //! See research/rtg-work-cycle.
 
 use anyhow::{Context, Result};
-use chrono::NaiveDate;
+use chrono::{NaiveDate, NaiveDateTime};
 use serde::Deserialize;
 use sqlx::PgPool;
 use wp_core::parse::parse_rows;
@@ -38,8 +38,8 @@ pub async fn tick_rtg_moves(pool: &PgPool, target: &str) -> Result<()> {
     let day = today.format("%Y%m%d").to_string();
     let run_date = today.date_naive();
     run_logged(pool, "RTG_MOVE", run_date, |_| async move {
-        // watermark = last move comp seen (text "YYYYMMDDHHMMSS"). First run: start of today so
-        // we self-backfill today (FETCH_CAP per poll, ORDER BY comp ASC → catches up over polls).
+        // watermark = last SEQNO seen (text "YYYYMMDDHHMMSS", = global completion order). First run:
+        // start of today so we self-backfill today (FETCH_CAP per poll, ORDER BY SEQNO ASC → catches up).
         let wm: Option<String> = sqlx::query_scalar(
             "SELECT max(last_completed_at) FROM etl_watermark WHERE stream = $1",
         )
@@ -47,27 +47,37 @@ pub async fn tick_rtg_moves(pool: &PgPool, target: &str) -> Result<()> {
         .fetch_one(pool)
         .await?;
         let wm = wm.unwrap_or_else(|| format!("{day}000000"));
+        // Safety-lag: seek from wm minus 120s so a late-/out-of-order-visible row whose SEQNO sits just below
+        // the advancing high-water is still re-read (ON CONFLICT dedups the tiny overlap — same cheap PK seek).
+        // Closes the silent-skip hole without re-introducing a full re-scan.
+        let seek_from = NaiveDateTime::parse_from_str(&wm, "%Y%m%d%H%M%S")
+            .map(|t| (t - chrono::Duration::seconds(120)).format("%Y%m%d%H%M%S").to_string())
+            .unwrap_or_else(|_| wm.clone());
 
-        // COMPDATE='today' uses IDX_MCH_OPERATION_COMPDATE; comp>wm + REGEXP(RTG|ES) post-filter.
-        // Same scan profile as the 5-min MPH extractor. Excludes QC (already in MPH) and trucks.
+        // Watermark on MCH_OPER_SEQNO (global-monotonic "YYYYMMDDHHMMSS" = completion order, and the
+        // LEADING column of PK MCH_PK_OPERATION). `SEQNO >= wm` SEEKS via the PK (INDEX hint pins it) and
+        // reads only the new tail — NO re-scan of today's rows — so poll cost is independent of frequency
+        // (verified: seek ~0.8s vs a full scan ~45s). `>=` (not `>`) re-reads the watermark second so the
+        // non-unique SEQNO can't skip same-second rows; ON CONFLICT dedups the tiny overlap. REGEXP/LENGTH
+        // are post-filters on the small tail. Yard cranes only (RTG/ES); excludes QC and trucks.
         let sql = format!(
-            "SELECT MCH_OPER_MACHNO AS machno, SUBSTR(MCH_OPER_CONTNO,1,11) AS contno,
+            "SELECT /*+ INDEX(MCH_OPERATION MCH_PK_OPERATION) */
+                    MCH_OPER_MACHNO AS machno, SUBSTR(MCH_OPER_CONTNO,1,11) AS contno,
                     MCH_OPER_SEQNO AS seqno, MCH_OPER_JOBTYPE AS jobtype, TRK_ID AS trk_id,
                     ST_DT AS st_dt, MCH_OPER_COMPDATE||MCH_OPER_COMPTIME AS comp_dt,
                     MCH_OPER_STATUS AS status
                FROM TOSADM.MCH_OPERATION
-              WHERE MCH_OPER_COMPDATE = '{day}'
-                AND MCH_OPER_COMPDATE||MCH_OPER_COMPTIME > '{wm}'
+              WHERE MCH_OPER_SEQNO >= '{seek_from}'
                 AND REGEXP_LIKE(MCH_OPER_MACHNO, '^(RTG|ES)')
                 AND LENGTH(MCH_OPER_COMPTIME) >= 6
-              ORDER BY MCH_OPER_COMPDATE||MCH_OPER_COMPTIME
+              ORDER BY MCH_OPER_SEQNO
               FETCH FIRST {FETCH_CAP} ROWS ONLY"
         );
         let raw = Toolbox::from_env(target)?.run_sql(&sql).await?;
         let rows: Vec<MoveRow> = parse_rows(&raw).context("parsing rtg move rows")?;
 
         let mut tx = pool.begin().await?;
-        let mut max_comp: Option<String> = None;
+        let mut max_seqno: Option<String> = None;
         let mut inserted = 0u64;
         for r in &rows {
             let (Some(machno), Some(contno), Some(seqno), Some(comp_dt)) =
@@ -99,11 +109,16 @@ pub async fn tick_rtg_moves(pool: &PgPool, target: &str) -> Result<()> {
             .await
             .context("insert rtg_move_log")?;
             inserted += res.rows_affected();
-            if max_comp.as_deref().is_none_or(|m| comp_dt > m) {
-                max_comp = Some(comp_dt.to_string());
+            // advance the high-water only on a well-formed 14-digit SEQNO — a malformed one would misorder the
+            // lexicographic watermark and could skip/stall the stream (the row itself is still inserted above).
+            let sq = seqno.trim();
+            if sq.len() == 14 && sq.bytes().all(|b| b.is_ascii_digit())
+                && max_seqno.as_deref().is_none_or(|m| sq > m)
+            {
+                max_seqno = Some(sq.to_string());
             }
         }
-        if let Some(mx) = max_comp {
+        if let Some(mx) = max_seqno {
             sqlx::query(
                 "INSERT INTO etl_watermark (stream, snapshot_date, last_completed_at, updated_at)
                  VALUES ($1, $2, $3, now())
