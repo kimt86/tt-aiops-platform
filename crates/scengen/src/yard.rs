@@ -170,10 +170,16 @@ async fn do_build(pool: &PgPool, run_id: i64) -> Result<()> {
     state::set_phase(pool, run_id, "assemble").await?;
     let wm = state::get_watermark(pool, "yard_cell").await?; // ISO text of last processed comp_ts
 
+    // `>=`, NOT `>`: comp_ts is non-unique (up to ~6 moves share one second), so if LIMIT truncates
+    // mid-second a strict `>` would permanently skip that second's remaining rows on the next run —
+    // the same defect we fixed on the Oracle side. It only bites during catch-up (after downtime or
+    // a backfill), and a lost move corrupts the stack state forever. Re-applying the boundary row is
+    // harmless because replay is idempotent: PLACE = delete-by-contno then upsert the cell, and
+    // REMOVE = delete. Cannot livelock (one second's rows are far under LIMIT).
     let moves: Vec<(DateTime<Utc>, String, String, i32, i32, i32, i32)> = sqlx::query_as(
         "SELECT comp_ts, contno, jobtype, block_id, bay_idx, row_idx, tier
            FROM scenario.yard_move
-          WHERE ($1::timestamptz IS NULL OR comp_ts > $1::timestamptz)
+          WHERE ($1::timestamptz IS NULL OR comp_ts >= $1::timestamptz)
           ORDER BY comp_ts, seqno
           LIMIT $2",
     )
@@ -254,7 +260,19 @@ pub type Cell = (i32, i32, i32, i32, Option<String>, bool);
 /// (in-memory, LOCAL, zero Oracle). Used for a scenario's t=0 background — the state at the
 /// window START, not "now". Same place/remove/seed rules as the live yard-build. Coverage grows
 /// with collection (containers not yet observed aren't included until they move).
-pub async fn state_as_of(pool: &PgPool, at: DateTime<Utc>) -> Result<Vec<Cell>> {
+///
+/// Returns (cells, moves_replayed).
+///
+/// ⚠ COST GROWS WITHOUT BOUND. This replays the ENTIRE history up to `at` on every call, and every
+/// download calls it synchronously. At ~35k moves/day a month of accumulation is ~1M rows replayed
+/// per request. The fix is a periodic cell CHECKPOINT so only the delta since the checkpoint is
+/// replayed — not done here because it needs its own design. `moves_replayed` is surfaced in the
+/// scenario JSON and warned on so this degrades visibly rather than silently.
+///
+/// ⚠ Also note this derives state ONLY from yard_move, while the live `yard_cell` accumulates
+/// persistently. If yard_move is ever pruned (scenario.config.retention_days), the two silently
+/// diverge: past-window yard_t0 goes wrong while the live cell state stays right.
+pub async fn state_as_of(pool: &PgPool, at: DateTime<Utc>) -> Result<(Vec<Cell>, usize)> {
     use std::collections::HashMap;
     let moves: Vec<(String, String, i32, i32, i32, i32)> = sqlx::query_as(
         "SELECT contno, jobtype, block_id, bay_idx, row_idx, tier
@@ -264,6 +282,10 @@ pub async fn state_as_of(pool: &PgPool, at: DateTime<Utc>) -> Result<Vec<Cell>> 
     .fetch_all(pool)
     .await?;
 
+    let replayed = moves.len();
+    if replayed > 250_000 {
+        tracing::warn!(replayed, "state_as_of replay is large — needs a cell checkpoint");
+    }
     let mut cells: HashMap<(i32, i32, i32, i32), (Option<String>, bool)> = HashMap::new();
     let mut where_is: HashMap<String, (i32, i32, i32, i32)> = HashMap::new();
     for (contno, jt, b, y, ri, tier) in moves {
@@ -288,8 +310,11 @@ pub async fn state_as_of(pool: &PgPool, at: DateTime<Utc>) -> Result<Vec<Cell>> 
             _ => {}
         }
     }
-    Ok(cells
-        .into_iter()
-        .map(|((b, y, ri, t), (c, k))| (b, y, ri, t, c, k))
-        .collect())
+    Ok((
+        cells
+            .into_iter()
+            .map(|((b, y, ri, t), (c, k))| (b, y, ri, t, c, k))
+            .collect(),
+        replayed,
+    ))
 }

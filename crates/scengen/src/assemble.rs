@@ -86,7 +86,7 @@ pub async fn build(pool: &PgPool, ws: DateTime<Utc>, we: DateTime<Utc>) -> Resul
     // (replay scenario.yard_move up to ws — the yard as it was at the scenario START, not "now").
     // RH/AH/MI/MO are used here (yard-state only) but are NOT in the work list. Converging: covers
     // containers observed since collection began; the rest fill in as they move (~a month).
-    let cells = crate::yard::state_as_of(pool, ws).await?;
+    let (cells, moves_replayed) = crate::yard::state_as_of(pool, ws).await?;
     let blkmap: std::collections::HashMap<i32, String> =
         sqlx::query_as::<_, (i32, String)>("SELECT block_id, block FROM scenario.yard_block")
             .fetch_all(pool)
@@ -112,6 +112,7 @@ pub async fn build(pool: &PgPool, ws: DateTime<Utc>, we: DateTime<Utc>) -> Resul
         "as_of": ws.to_rfc3339(),
         "note": "per-container stack state reconstructed from yard_move up to window start (converging; covers observed containers). unknown=inferred-occupied.",
         "cells_total": cells.len(),
+        "moves_replayed": moves_replayed, // grows with history — see yard::state_as_of cost note
         "blocks": blocks_summary,
         "cells": cells_json,
     });

@@ -1,9 +1,18 @@
 //! Isolated Oracle gateway (mirrors `extractor::runner::Toolbox`). scengen keeps its OWN
-//! copy so it shares ZERO Rust code with the critical extractor — the only shared thing is
-//! the `remote-toolbox-sql` script, which serializes Oracle access ACROSS processes.
+//! copy so it shares ZERO Rust code with the critical extractor.
 //!
 //! The default timeout is SHORTER than the critical path (45s vs 90s): scenario work must
-//! never hold the shared Oracle lock for long. All calls are also serialized in-process.
+//! never hold Oracle for long.
+//!
+//! SERIALIZATION — what is and is not guaranteed (this used to be documented incorrectly):
+//!  * in-process `ORACLE_LOCK` covers concurrent calls inside ONE scengen process;
+//!  * scengen's collectors run as SEPARATE systemd oneshot processes (collect/yard/enrich), whose
+//!    timers overlap, so the in-process mutex alone does NOT serialize them — hence the `flock(1)`
+//!    wrapper below, which does;
+//!  * the `remote-toolbox-sql` script itself does NOT lock (verified: no flock/lockfile in it), so
+//!    scengen is NOT yet serialized against the critical extractor. Closing that would require the
+//!    extractor to take the same lock file — a critical-path change deliberately not made here.
+//!    Impact is small while every query is an index seek, but do not assume mutual exclusion.
 
 use anyhow::{bail, Context, Result};
 use std::path::PathBuf;
@@ -50,7 +59,19 @@ impl Toolbox {
             .await
             .with_context(|| format!("writing temp SQL to {}", path.display()))?;
 
-        let out = tokio::process::Command::new(self.script())
+        // Cross-PROCESS serialization: scengen's collectors are separate processes with overlapping
+        // timers, so run the script under flock(1) on a shared lock file. Waiting a little longer
+        // than our own query timeout lets an in-flight sibling finish rather than failing early; if
+        // the wait elapses flock exits non-zero and the tick is recorded as failed (isolated).
+        let lock_file = std::env::var("ORACLE_LOCK_FILE")
+            .unwrap_or_else(|_| "/tmp/wp-oracle-toolbox.lock".to_string());
+        let lock_wait = self.timeout_secs + 15;
+
+        let out = tokio::process::Command::new("flock")
+            .arg("-w")
+            .arg(lock_wait.to_string())
+            .arg(&lock_file)
+            .arg(self.script())
             .arg(&self.target)
             .arg("--file")
             .arg(&path)
@@ -58,7 +79,7 @@ impl Toolbox {
             .arg(self.timeout_secs.to_string())
             .output()
             .await
-            .context("spawning remote-toolbox-sql")?;
+            .context("spawning remote-toolbox-sql under flock")?;
 
         let _ = tokio::fs::remove_file(&path).await;
 

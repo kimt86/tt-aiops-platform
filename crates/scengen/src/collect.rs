@@ -63,15 +63,21 @@ async fn tick(pool: &PgPool, run_id: i64, target: &str, cfg: &Config) -> Result<
     // Seek from (watermark − LAG_S) so rows that become visible out of key order can't be skipped;
     // ON CONFLICT dedups the re-read tail. A 14-digit bound correctly bounds these 17-digit
     // (millisecond) keys. Don't delete the watermark row — that forces a wider re-read.
-    let wm = state::get_watermark(pool, "move_hist")
-        .await?
-        .as_deref()
-        .and_then(|w| wm_minus_secs(w, LAG_S))
-        .unwrap_or_else(|| {
-            (wp_core::shift::terminal_now() - chrono::Duration::minutes(INITIAL_LOOKBACK_MIN))
-                .format("%Y%m%d%H%M%S")
-                .to_string()
-        });
+    //
+    // The two fallbacks differ ON PURPOSE, and the distinction matters: no watermark at all means
+    // this is the first-ever tick, where a narrow lookback is right (low-load first touch). But a
+    // watermark that EXISTS and is unparseable must fall BACKWARD to day start — falling back to
+    // "now − 10 min" there would silently skip everything in between, and this stream is what
+    // attributes containers to vessels.
+    let wm = match state::get_watermark(pool, "move_hist").await?.as_deref() {
+        None => (wp_core::shift::terminal_now() - chrono::Duration::minutes(INITIAL_LOOKBACK_MIN))
+            .format("%Y%m%d%H%M%S")
+            .to_string(),
+        Some(w) => wm_minus_secs(w, LAG_S).unwrap_or_else(|| {
+            tracing::warn!(watermark = w, "malformed watermark — falling back to day start");
+            format!("{}000000", wp_core::shift::terminal_now().format("%Y%m%d"))
+        }),
+    };
     let now_evt = wp_core::shift::terminal_now().format("%Y%m%d%H%M%S").to_string();
 
     // Index-supported range scan on the PK (JOB_HIST_DATE, JOB_HIST_TIME). Completed DS/LD only.

@@ -13,6 +13,9 @@ use chrono::DateTime;
 use serde::Deserialize;
 use sqlx::PgPool;
 
+/// Largest window a single on-demand download may assemble (see `download`).
+const MAX_WINDOW_DAYS: i64 = 7;
+
 struct AppErr(anyhow::Error);
 impl IntoResponse for AppErr {
     fn into_response(self) -> Response {
@@ -104,6 +107,19 @@ async fn download(
 ) -> Result<Response, AppErr> {
     let ws = DateTime::from_timestamp(r.start, 0).ok_or_else(|| anyhow::anyhow!("bad start"))?;
     let we = DateTime::from_timestamp(r.end, 0).ok_or_else(|| anyhow::anyhow!("bad end"))?;
+    // Bound the request. build() runs synchronously and materializes the whole scenario in memory,
+    // so an unbounded window from a stray (or hostile) query string could hang or OOM this service.
+    // Real scenarios are a few shifts; a week is already generous.
+    if we <= ws {
+        return Ok((StatusCode::BAD_REQUEST, "end must be after start").into_response());
+    }
+    if (we - ws).num_days() > MAX_WINDOW_DAYS {
+        return Ok((
+            StatusCode::BAD_REQUEST,
+            format!("window too large (max {MAX_WINDOW_DAYS} days)"),
+        )
+            .into_response());
+    }
     let (scenario, emulator, _summary) = crate::assemble::build(&pool, ws, we).await?;
     let (val, fname) = match kind.as_str() {
         "scenario" => (scenario, format!("scenario-{}.json", r.start)),
