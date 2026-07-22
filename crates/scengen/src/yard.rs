@@ -149,6 +149,11 @@ async fn tick(pool: &PgPool, run_id: i64, target: &str, cfg: &Config) -> Result<
 // ---- Phase 2: reconstruct scenario.yard_cell by replaying yard_move incrementally (LOCAL, no Oracle).
 
 const BUILD_BATCH: i64 = 20000;
+/// How often to snapshot the reconstructed state (bounds state_as_of's delta replay).
+const CHECKPOINT_EVERY_H: i64 = 6;
+/// How far back checkpoints are retained. Past-window downloads older than this fall back to a
+/// full replay (correct, just slower), so this trades storage for worst-case download latency.
+const CHECKPOINT_KEEP_DAYS: i32 = 45;
 
 /// Apply new yard_move rows (since the reconstruction watermark) to scenario.yard_cell.
 /// Not gated on the kill switch — it's local processing and should finish even if collection paused.
@@ -245,11 +250,45 @@ async fn do_build(pool: &PgPool, run_id: i64) -> Result<()> {
         state::set_watermark(pool, "yard_cell", &l.to_rfc3339()).await?;
     }
 
+    // Checkpoint the reconstructed state so state_as_of() doesn't have to replay all history.
+    // ONLY when the batch was not truncated: if LIMIT capped us, yard_cell does not yet reflect
+    // every move up to `last`, and a checkpoint claiming that instant would be silently wrong.
+    let truncated = moves.len() as i64 >= BUILD_BATCH;
+    let mut checkpointed = false;
+    if let (Some(l), false) = (last, truncated) {
+        let newest: Option<DateTime<Utc>> =
+            sqlx::query_scalar("SELECT max(checkpoint_ts) FROM scenario.yard_checkpoint")
+                .fetch_one(pool)
+                .await?;
+        if newest.is_none_or(|n| l - n >= chrono::Duration::hours(CHECKPOINT_EVERY_H)) {
+            sqlx::query(
+                "INSERT INTO scenario.yard_checkpoint
+                   (checkpoint_ts, block_id, bay_idx, row_idx, tier, contno, known)
+                 SELECT $1, block_id, bay_idx, row_idx, tier, contno, known FROM scenario.yard_cell
+                 ON CONFLICT DO NOTHING",
+            )
+            .bind(l)
+            .execute(pool)
+            .await?;
+            // Retention: keep a bounded window of checkpoints. Never prune the newest.
+            sqlx::query(
+                "DELETE FROM scenario.yard_checkpoint
+                  WHERE checkpoint_ts < $1::timestamptz - make_interval(days => $2::int)",
+            )
+            .bind(l)
+            .bind(CHECKPOINT_KEEP_DAYS)
+            .execute(pool)
+            .await?;
+            checkpointed = true;
+        }
+    }
+
     state::merge_json(pool, run_id, "collection", json!({
         "processed": moves.len(), "placed": placed, "removed": removed,
-        "seeded_unknown": seeded, "skipped": skipped,
+        "seeded_unknown": seeded, "skipped": skipped, "checkpointed": checkpointed,
     })).await?;
-    tracing::info!(processed = moves.len(), placed, removed, seeded, skipped, "scenario yard build");
+    tracing::info!(processed = moves.len(), placed, removed, seeded, skipped, checkpointed,
+                   "scenario yard build");
     Ok(())
 }
 
@@ -263,31 +302,59 @@ pub type Cell = (i32, i32, i32, i32, Option<String>, bool);
 ///
 /// Returns (cells, moves_replayed).
 ///
-/// ⚠ COST GROWS WITHOUT BOUND. This replays the ENTIRE history up to `at` on every call, and every
-/// download calls it synchronously. At ~35k moves/day a month of accumulation is ~1M rows replayed
-/// per request. The fix is a periodic cell CHECKPOINT so only the delta since the checkpoint is
-/// replayed — not done here because it needs its own design. `moves_replayed` is surfaced in the
-/// scenario JSON and warned on so this degrades visibly rather than silently.
+/// Cost is bounded by seeding from the newest `scenario.yard_checkpoint` at or before `at` and
+/// replaying only the moves after it — so the replay spans at most CHECKPOINT_EVERY_H, not all of
+/// history. With no usable checkpoint (a T older than retention, or before the first one) it falls
+/// back to a full replay, which is still correct, just slower. `moves_replayed` is surfaced in the
+/// scenario JSON so the delta size stays visible.
 ///
-/// ⚠ Also note this derives state ONLY from yard_move, while the live `yard_cell` accumulates
-/// persistently. If yard_move is ever pruned (scenario.config.retention_days), the two silently
-/// diverge: past-window yard_t0 goes wrong while the live cell state stays right.
+/// Because the seed comes from a checkpoint rather than from the moves alone, pruning
+/// scenario.yard_move stays safe for any T at or after a surviving checkpoint — but pruning must
+/// never remove moves NEWER than the newest checkpoint, or the delta would be incomplete.
 pub async fn state_as_of(pool: &PgPool, at: DateTime<Utc>) -> Result<(Vec<Cell>, usize)> {
     use std::collections::HashMap;
-    let moves: Vec<(String, String, i32, i32, i32, i32)> = sqlx::query_as(
-        "SELECT contno, jobtype, block_id, bay_idx, row_idx, tier
-           FROM scenario.yard_move WHERE comp_ts <= $1 ORDER BY comp_ts, seqno",
+    let mut cells: HashMap<(i32, i32, i32, i32), (Option<String>, bool)> = HashMap::new();
+    let mut where_is: HashMap<String, (i32, i32, i32, i32)> = HashMap::new();
+
+    // Seed from the newest checkpoint <= at (if any), then replay only what came after it.
+    let ckpt: Option<DateTime<Utc>> = sqlx::query_scalar(
+        "SELECT max(checkpoint_ts) FROM scenario.yard_checkpoint WHERE checkpoint_ts <= $1",
     )
     .bind(at)
+    .fetch_one(pool)
+    .await?;
+    if let Some(c) = ckpt {
+        let seed: Vec<(i32, i32, i32, i32, Option<String>, bool)> = sqlx::query_as(
+            "SELECT block_id, bay_idx, row_idx, tier, contno, known
+               FROM scenario.yard_checkpoint WHERE checkpoint_ts = $1",
+        )
+        .bind(c)
+        .fetch_all(pool)
+        .await?;
+        for (b, y, ri, t, contno, known) in seed {
+            let key = (b, y, ri, t);
+            if let Some(cn) = &contno {
+                where_is.insert(cn.clone(), key);
+            }
+            cells.insert(key, (contno, known));
+        }
+    }
+
+    let moves: Vec<(String, String, i32, i32, i32, i32)> = sqlx::query_as(
+        "SELECT contno, jobtype, block_id, bay_idx, row_idx, tier
+           FROM scenario.yard_move
+          WHERE comp_ts <= $1 AND ($2::timestamptz IS NULL OR comp_ts > $2::timestamptz)
+          ORDER BY comp_ts, seqno",
+    )
+    .bind(at)
+    .bind(ckpt)
     .fetch_all(pool)
     .await?;
 
     let replayed = moves.len();
-    if replayed > 250_000 {
-        tracing::warn!(replayed, "state_as_of replay is large — needs a cell checkpoint");
+    if ckpt.is_none() && replayed > 250_000 {
+        tracing::warn!(replayed, "state_as_of full replay (no checkpoint <= T) is large");
     }
-    let mut cells: HashMap<(i32, i32, i32, i32), (Option<String>, bool)> = HashMap::new();
-    let mut where_is: HashMap<String, (i32, i32, i32, i32)> = HashMap::new();
     for (contno, jt, b, y, ri, tier) in moves {
         match jt.as_str() {
             "DS" | "GI" | "RH" | "AH" | "MI" => {

@@ -59,6 +59,10 @@ async fn status(State(pool): State<PgPool>) -> Result<Response, AppErr> {
                         'source', source,
                         'age_s', round(EXTRACT(epoch FROM (now()-updated_at)))::int)
                         ORDER BY source), '[]'::jsonb) FROM scenario.watermark),
+             'checkpoint', (SELECT jsonb_build_object(
+                        'count', count(DISTINCT checkpoint_ts),
+                        'age_h', round(EXTRACT(epoch FROM (now()-max(checkpoint_ts)))/3600.0, 1))
+                        FROM scenario.yard_checkpoint),
              'yard_map', jsonb_build_object(
                         'blocks', (SELECT count(*) FROM scenario.yard_block),
                         'unresolved', (SELECT count(*) FROM (
@@ -257,9 +261,16 @@ async function load(){
     ['야드 블록맵',H(ym.blocks)+'개'+(ym.unresolved>0?' <b style="color:#f87171">⚠미해석 '+ym.unresolved+'</b>':'')],
     ['enrich 선박·컨',H(en.vessel_calls)+' · '+H(en.containers)],
     ['수집기 침묵',silence(s.watermarks||[])],
+    ['야드 체크포인트',ckpt(s.checkpoint||{})],
   ].map(([k,v])=>`<div class=kv><b>${k}</b><span>${v}</span></div>`).join('');
   $('#runs').innerHTML=table(s.latest_runs||[],['kind','state','건강','load','수집','시각'],r=>[
     r.kind,pill(r.state),health(r),cell(r.load_stats),cell(r.collection),fmt(r.updated_at)]);
+}
+// Checkpoints are what keep a download's yard replay bounded. If they stop being written the
+// downloads still return correct data, just progressively slower — so surface staleness here.
+function ckpt(c){
+  if(!c.count)return'<b style="color:#f87171">⚠ 없음 (다운로드가 전체 재생)</b>';
+  return c.age_h>12?`<b style="color:#f87171">⚠ ${c.count}개 · ${c.age_h}h 정체</b>`:`${c.count}개 · ${c.age_h}h 전`;
 }
 // Data silence: the worst watermark age. A watermark only advances when new rows arrive, so a long
 // age means the feed stopped even though the timer may still be firing (fetched=0 every tick).
