@@ -1,6 +1,6 @@
-//! Yard-crane (RTG) move stream WITH decoded stack position -> scenario.yard_move. The event
-//! source for the incremental yard-state model. Watermark-incremental over MCH_OPERATION (RTG
-//! machines). CRNT_PSN_IDX decode (verified vs CYY.CLOCATION):
+//! Yard-crane (RTG + ES) move stream WITH decoded stack position -> scenario.yard_move. The event
+//! source for the incremental yard-state model. Watermark-incremental over MCH_OPERATION, SEEKing
+//! the PK on MCH_OPER_SEQNO (see the query comment). CRNT_PSN_IDX decode (verified vs CYY.CLOCATION):
 //!   block_id=NO1 · bay_idx=NO2 · row_idx=NO3(A=0) · tier=NO4+1
 //! Isolated + kill-switch, like the other collectors.
 
@@ -45,20 +45,28 @@ async fn tick(pool: &PgPool, run_id: i64, target: &str, cfg: &Config) -> Result<
         .await?
         .unwrap_or_else(|| format!("{day}000000"));
 
-    // Index-supported (IDX_MCH_OPERATION_COMPDATE): today's RTG moves since the watermark.
+    // SEEK, not rescan (mirrors extractor::rtg_moves). MCH_OPER_SEQNO ("YYYYMMDDHHMMSS", globally
+    // monotonic completion order) is the LEADING column of PK MCH_PK_OPERATION, so `SEQNO >= wm`
+    // seeks via the PK — the INDEX hint pins it, ORDER BY SEQNO is then free, and FETCH stops early
+    // (so backlog catch-up is safe too). The previous form (COMPDATE = today AND the concatenated
+    // COMPDATE||COMPTIME > wm) could only range-scan the whole elapsed day and filter, and it lost
+    // rows two ways: `>` skipped same-second rows whenever the cap truncated (same second holds up
+    // to 6 moves here), and `COMPDATE = today` dropped the pre-midnight tail every night. `>=` plus
+    // ON CONFLICT dedups the tiny re-read losslessly. REGEXP '^(RTG|ES)' covers BOTH yard-crane
+    // families — the old LIKE 'RTG%' silently missed all 18 ES machines.
     let sql = format!(
-        "SELECT MCH_OPER_MACHNO AS machno, SUBSTR(MCH_OPER_CONTNO,1,11) AS contno,
+        "SELECT /*+ INDEX(MCH_OPERATION MCH_PK_OPERATION) */
+                MCH_OPER_MACHNO AS machno, SUBSTR(MCH_OPER_CONTNO,1,11) AS contno,
                 MCH_OPER_SEQNO AS seqno, MCH_OPER_JOBTYPE AS jt,
                 MCH_OPER_COMPDATE||MCH_OPER_COMPTIME AS comp,
                 CRNT_PSN_IDX_NO1 AS b, CRNT_PSN_IDX_NO2 AS y,
                 CRNT_PSN_IDX_NO3 AS rr, CRNT_PSN_IDX_NO4 AS tt
            FROM TOSADM.MCH_OPERATION
-          WHERE MCH_OPER_COMPDATE = '{day}'
-            AND MCH_OPER_COMPDATE||MCH_OPER_COMPTIME > '{wm}'
-            AND MCH_OPER_MACHNO LIKE 'RTG%'
+          WHERE MCH_OPER_SEQNO >= '{wm}'
+            AND REGEXP_LIKE(MCH_OPER_MACHNO, '^(RTG|ES)')
             AND CRNT_PSN_IDX_NO1 IS NOT NULL
             AND LENGTH(MCH_OPER_COMPTIME) >= 6
-          ORDER BY MCH_OPER_COMPDATE||MCH_OPER_COMPTIME
+          ORDER BY MCH_OPER_SEQNO
           FETCH FIRST {FETCH_CAP} ROWS ONLY"
     );
 
@@ -73,7 +81,7 @@ async fn tick(pool: &PgPool, run_id: i64, target: &str, cfg: &Config) -> Result<
     let num = |r: &Value, k: &str| jstr(r, k).and_then(|s| s.parse::<i32>().ok());
 
     let mut tx = pool.begin().await?;
-    let mut max_comp: Option<String> = None;
+    let mut max_seq: Option<String> = None;
     let mut inserted = 0u64;
     for r in &rows {
         let (Some(machno), Some(contno), Some(seqno), Some(comp)) =
@@ -106,13 +114,14 @@ async fn tick(pool: &PgPool, run_id: i64, target: &str, cfg: &Config) -> Result<
         .execute(&mut *tx)
         .await?;
         inserted += res.rows_affected();
-        if max_comp.as_deref().is_none_or(|m| comp.as_str() > m) {
-            max_comp = Some(comp);
+        // Watermark advances on SEQNO (the seek key), not comp — they are not the same ordering.
+        if max_seq.as_deref().is_none_or(|m| seqno.as_str() > m) {
+            max_seq = Some(seqno);
         }
     }
     tx.commit().await?;
 
-    if let Some(mx) = &max_comp {
+    if let Some(mx) = &max_seq {
         state::set_watermark(pool, STREAM, mx).await?;
     }
 
