@@ -24,6 +24,7 @@ const NAV = [
     { page: "data/extractor",          title: "추출기(Extractor) 아키텍처", group: "TOS" },
     { page: "data/tos-db-reference",   title: "TOS DB 레퍼런스", group: "TOS" },
     { page: "data/tos-verification",   title: "TOS 가정 검증", group: "TOS" },
+    { page: "data/equipment-deployment", title: "장비 투입 계획 수집·도출", group: "TOS" },
     { page: "data/websocket-data",     title: "실시간 피드 & 활용", group: "실시간 피드" },
     { page: "data/websocket-fields",   title: "websocket 필드 레퍼런스", group: "실시간 피드" },
     { page: "data/websocket-coverage", title: "신호 품질·커버리지 감사", group: "실시간 피드" },
