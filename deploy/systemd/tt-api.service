@@ -1,0 +1,16 @@
+[Unit]
+Description=TT AiOps Platform API (axum) — serves web/dist + reads Postgres + live-map GPS ingest
+After=network-online.target wp-ws-bridge.service
+Wants=network-online.target
+
+[Service]
+WorkingDirectory=%h/projects/tt-aiops-platform
+Environment=DATABASE_URL=postgresql://wp:wp@127.0.0.1:5433/wp_tt
+Environment=API_ADDR=0.0.0.0:8080
+Environment=RUST_LOG=info,tt_api=info
+ExecStart=%h/projects/tt-aiops-platform/target/release/api
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=default.target
