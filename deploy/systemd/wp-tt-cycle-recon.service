@@ -1,12 +1,12 @@
 [Unit]
-Description=wp-tt-dashboard refresh tt_cycle_recon (attach GPS move/stop split to tt_move_log cycles; Postgres-only, no Oracle)
+Description=tt-aiops-platform refresh tt_cycle_recon (attach GPS move/stop split to tt_move_log cycles; Postgres-only, no Oracle)
 After=network-online.target
 
 [Service]
 Type=oneshot
-EnvironmentFile=%h/projects/wp-tt-dashboard/.env
+EnvironmentFile=%h/projects/tt-aiops-platform/.env
 # Re-scan a 2-day window and insert (ON CONFLICT DO NOTHING) so each cycle is computed once while its
 # raw fixes are still in truck_pos_hifreq (~1-day retention). Depends on tt_move_log (cycle boundaries)
 # + truck_pos_hifreq (positions) being fresh → runs offset after the move-log refresh.
-ExecStart=/usr/bin/psql "${DATABASE_URL}" -v days=2 -f %h/projects/wp-tt-dashboard/scripts/populate_tt_cycle_recon.sql
+ExecStart=/usr/bin/psql "${DATABASE_URL}" -v days=2 -f %h/projects/tt-aiops-platform/scripts/populate_tt_cycle_recon.sql
 Nice=15

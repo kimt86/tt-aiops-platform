@@ -53,7 +53,7 @@ async fn today_contrib(pool: &PgPool, date: NaiveDate) -> Result<HashMap<String,
 }
 
 pub async fn aggregate(pool: &PgPool, from: NaiveDate, to: NaiveDate) -> Result<Agg> {
-    let today = wp_core::shift::terminal_now().date_naive();
+    let today = tt_core::shift::terminal_now().date_naive();
     let raw_to = to.min(today - Duration::days(1)); // raw_* owns everything before today
     let include_today = from <= today && today <= to;
 

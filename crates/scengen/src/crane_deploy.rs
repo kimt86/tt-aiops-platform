@@ -11,7 +11,7 @@ use std::time::Instant;
 use anyhow::Result;
 use serde_json::json;
 use sqlx::PgPool;
-use wp_core::parse::parse_rows;
+use tt_core::parse::parse_rows;
 
 use crate::state::{self, Config};
 use crate::toolbox::Toolbox;
@@ -49,7 +49,7 @@ async fn tick(pool: &PgPool, run_id: i64, target: &str, cfg: &Config) -> Result<
         .as_deref()
         .and_then(|w| w.get(..8).map(str::to_string))
         .unwrap_or_else(|| {
-            (wp_core::shift::terminal_now() - chrono::Duration::days(1))
+            (tt_core::shift::terminal_now() - chrono::Duration::days(1))
                 .format("%Y%m%d")
                 .to_string()
         });

@@ -14,7 +14,7 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, NaiveDateTime, Utc};
 use serde::Deserialize;
 use sqlx::PgPool;
-use wp_core::parse::parse_rows;
+use tt_core::parse::parse_rows;
 
 use crate::kpis::common::run_logged;
 use crate::runner::Toolbox;
@@ -86,13 +86,13 @@ pub fn parse_etw(raw: &str) -> Option<DateTime<Utc>> {
         return None;
     }
     let naive = NaiveDateTime::parse_from_str(&s[..14], "%Y%m%d%H%M%S").ok()?;
-    Some(wp_core::shift::terminal_to_utc(naive))
+    Some(tt_core::shift::terminal_to_utc(naive))
 }
 
 /// Run one work-pool tick: refresh both snapshot tables. Each source is logged and a
 /// failure in one does not abort the other.
 pub async fn tick_workpool(pool: &PgPool, target: &str) -> Result<()> {
-    let date = wp_core::shift::terminal_now().date_naive();
+    let date = tt_core::shift::terminal_now().date_naive();
     let as_of = Utc::now();
 
     macro_rules! step {

@@ -8,7 +8,7 @@ warnings.filterwarnings("ignore")
 import numpy as np, pandas as pd, psycopg2
 from lightgbm import LGBMRegressor
 
-ROOT = "/home/tkadmin/projects/wp-tt-dashboard"
+ROOT = "/home/tkadmin/projects/tt-aiops-platform"
 ART  = os.path.join(ROOT, "data")
 MODEL_F = os.path.join(ART, "travel_gbm.pkl")     # {booster, baseline, glob, cutoff, trained_at}
 CONN = dict(host="127.0.0.1", port=5433, user="wp", password=os.environ.get("PGPASSWORD", "wp"), dbname="wp_tt")

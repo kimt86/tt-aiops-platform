@@ -1,9 +1,9 @@
 [Unit]
-Description=wp-tt-dashboard yard-crane (RTG/ES) move stream MCH_OPERATION -> rtg_move_log
+Description=tt-aiops-platform yard-crane (RTG/ES) move stream MCH_OPERATION -> rtg_move_log
 After=network-online.target
 
 [Service]
 Type=oneshot
-EnvironmentFile=%h/projects/wp-tt-dashboard/.env
-ExecStart=%h/projects/wp-tt-dashboard/target/release/extractor rtg-moves --target oracle-prod
+EnvironmentFile=%h/projects/tt-aiops-platform/.env
+ExecStart=%h/projects/tt-aiops-platform/target/release/extractor rtg-moves --target oracle-prod
 Nice=15

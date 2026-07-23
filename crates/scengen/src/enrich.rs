@@ -12,7 +12,7 @@ use std::time::Instant;
 use anyhow::Result;
 use serde_json::{json, Value};
 use sqlx::PgPool;
-use wp_core::parse::parse_rows;
+use tt_core::parse::parse_rows;
 
 use crate::state::{self, Config};
 use crate::toolbox::Toolbox;

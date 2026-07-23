@@ -9,7 +9,7 @@ use axum::{
 use chrono::NaiveDate;
 use serde::Deserialize;
 use sqlx::PgPool;
-use wp_core::kpi::KpiKey;
+use tt_core::kpi::KpiKey;
 
 use crate::db;
 use crate::models::*;
@@ -114,7 +114,7 @@ pub async fn kpis(
     // server clock (KST, UTC+9). Using server-local date flips "today"/"yesterday"
     // an hour early (KST midnight = terminal 23:00), showing a blank "today" for the
     // last operating hour. Same rule as the LIVE shift detection.
-    let today = wp_core::shift::terminal_now().date_naive();
+    let today = tt_core::shift::terminal_now().date_naive();
     let r = periods::resolve(q.period.as_deref().unwrap_or("yesterday"), today);
     let cur = agg::aggregate(&pool, r.cur.from, r.cur.to).await?;
     let prev = agg::aggregate(&pool, r.prev.from, r.prev.to).await?;
@@ -129,7 +129,7 @@ pub async fn kpis(
 
         let cs = agg::daily_series(&pool, key, r.cur.from, r.cur.to).await?;
         let ps = agg::daily_series(&pool, key, r.prev.from, r.prev.to).await?;
-        let test = wp_core::stats::welch_t_test(&cs, &ps);
+        let test = tt_core::stats::welch_t_test(&cs, &ps);
 
         let (delta_abs, delta_pct) = match (value, base) {
             (Some(v), Some(b)) if b != 0.0 => (Some(v - b), Some((v - b) / b * 100.0)),
@@ -264,7 +264,7 @@ pub async fn kpi_history(
     State(pool): State<PgPool>,
     Query(q): Query<HistoryQuery>,
 ) -> Result<Json<HistoryResponse>, AppError> {
-    let today = wp_core::shift::terminal_now().date_naive();
+    let today = tt_core::shift::terminal_now().date_naive();
     let gran = match q.gran.as_deref().unwrap_or("day") {
         "week" => "week",
         "month" => "month",
@@ -376,7 +376,7 @@ pub async fn breakdown_qc(
     // Past days come from raw_*; the terminal-today day folds in MPH from the live
     // vessel_qc_shift rows (same as the headline). Today's per-QC wait isn't captured
     // per-crane, so the wait column reflects the period's past days.
-    let today = wp_core::shift::terminal_now().date_naive();
+    let today = tt_core::shift::terminal_now().date_naive();
     let r = periods::resolve(q.period.as_deref().unwrap_or("yesterday"), today);
     let (from, to) = (r.cur.from, r.cur.to);
     let raw_to = to.min(today - chrono::Duration::days(1));

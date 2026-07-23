@@ -1,9 +1,9 @@
 [Unit]
-Description=wp-tt-dashboard LIVE work-pool snapshot (JOB_QUEUE_SCHEDULE + JOB_ORDER_LIST -> Postgres)
+Description=tt-aiops-platform LIVE work-pool snapshot (JOB_QUEUE_SCHEDULE + JOB_ORDER_LIST -> Postgres)
 After=network-online.target
 
 [Service]
 Type=oneshot
-EnvironmentFile=%h/projects/wp-tt-dashboard/.env
-ExecStart=%h/projects/wp-tt-dashboard/target/release/extractor workpool --target oracle-prod
+EnvironmentFile=%h/projects/tt-aiops-platform/.env
+ExecStart=%h/projects/tt-aiops-platform/target/release/extractor workpool --target oracle-prod
 Nice=15

@@ -3,7 +3,7 @@
 //! headline kpi_daily values, then cleans up. Skipped unless DATABASE_URL is set.
 
 use chrono::NaiveDate;
-use wp_extractor::transform;
+use tt_extractor::transform;
 
 const SENTINEL: &str = "2001-02-03";
 

@@ -1,18 +1,18 @@
-//! wp-tt-dashboard extractor — the ONLY component that touches the production
+//! tt-aiops-platform extractor — the ONLY component that touches the production
 //! Oracle (via `remote-toolbox-sql`). Subcommands:
 //!   run      — authoritative full-day extract for a date (nightly)
 //!   tick     — intra-day incremental extract (T1/T2 tiers)
 //!   backfill — loop run over a date range to seed history
 //!   transform— recompute L1/L2 from L0 (no Oracle access)
 
-use wp_extractor::{baseline, db, kpis, transform};
+use tt_extractor::{baseline, db, kpis, transform};
 
 use anyhow::{Context, Result};
 use chrono::{Local, NaiveDate};
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "extractor", about = "wp-tt-dashboard KPI extractor")]
+#[command(name = "extractor", about = "tt-aiops-platform KPI extractor")]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -128,7 +128,7 @@ async fn main() -> Result<()> {
         Command::Tick { tier, target, shift } => {
             if shift {
                 let pool = db::pool().await?;
-                wp_extractor::shift::tick_shift(&pool, &target, &tier).await?;
+                tt_extractor::shift::tick_shift(&pool, &target, &tier).await?;
                 return Ok(());
             }
             let today = Local::now().date_naive();
@@ -182,27 +182,27 @@ async fn main() -> Result<()> {
         }
         Command::Workpool { target } => {
             let pool = db::pool().await?;
-            wp_extractor::workpool::tick_workpool(&pool, &target).await?;
+            tt_extractor::workpool::tick_workpool(&pool, &target).await?;
         }
         Command::Handover { target } => {
             let pool = db::pool().await?;
-            wp_extractor::handover::tick_handover(&pool, &target).await?;
+            tt_extractor::handover::tick_handover(&pool, &target).await?;
         }
         Command::RtgMoves { target } => {
             let pool = db::pool().await?;
-            wp_extractor::rtg_moves::tick_rtg_moves(&pool, &target).await?;
+            tt_extractor::rtg_moves::tick_rtg_moves(&pool, &target).await?;
         }
         Command::QcMoves { target } => {
             let pool = db::pool().await?;
-            wp_extractor::qc_moves::tick_qc_moves(&pool, &target).await?;
+            tt_extractor::qc_moves::tick_qc_moves(&pool, &target).await?;
         }
         Command::Weather {} => {
             let pool = db::pool().await?;
-            wp_extractor::weather::tick_weather(&pool).await?;
+            tt_extractor::weather::tick_weather(&pool).await?;
         }
         Command::WeatherLive {} => {
             let pool = db::pool().await?;
-            wp_extractor::weather::tick_weather_live(&pool).await?;
+            tt_extractor::weather::tick_weather_live(&pool).await?;
         }
     }
     Ok(())

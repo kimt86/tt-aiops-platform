@@ -4,6 +4,6 @@ After=network-online.target
 
 [Service]
 Type=oneshot
-EnvironmentFile=%h/projects/wp-tt-dashboard/.env
-ExecStart=%h/projects/wp-tt-dashboard/target/release/scengen snapshot --target oracle-prod
+EnvironmentFile=%h/projects/tt-aiops-platform/.env
+ExecStart=%h/projects/tt-aiops-platform/target/release/scengen snapshot --target oracle-prod
 Nice=19

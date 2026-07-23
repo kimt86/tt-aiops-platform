@@ -7,7 +7,7 @@
 use anyhow::{Context, Result};
 use chrono::{NaiveDate, NaiveDateTime};
 use sqlx::PgPool;
-use wp_core::shift::{self, Shift};
+use tt_core::shift::{self, Shift};
 
 use crate::kpis::common::run_logged;
 use crate::params::{self, TimeCol};
@@ -90,8 +90,8 @@ async fn upsert_shift(
     start: NaiveDateTime,
     end: NaiveDateTime,
 ) -> Result<()> {
-    let as_of = wp_core::shift::terminal_to_utc(end);
-    let win_start = wp_core::shift::terminal_to_utc(start);
+    let as_of = tt_core::shift::terminal_to_utc(end);
+    let win_start = tt_core::shift::terminal_to_utc(start);
     let elapsed_min = (end - start).num_minutes().max(0) as i32;
     let n = sample_n.map(|v| v as i32);
 
@@ -120,7 +120,7 @@ async fn fetch<T: serde::de::DeserializeOwned>(
     target: &str, sql: &str,
 ) -> Result<Vec<T>> {
     let raw = Toolbox::from_env(target)?.run_sql(sql).await?;
-    Ok(wp_core::parse::parse_rows(&raw)?)
+    Ok(tt_core::parse::parse_rows(&raw)?)
 }
 
 // ---- per-source extract+fold (mirrors transform.rs headline formulas) ----

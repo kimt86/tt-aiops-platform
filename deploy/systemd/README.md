@@ -18,7 +18,7 @@ The `wp-shift-*` timers feed the **LIVE tab** (`/api/live`), which reads `kpi_sh
 
 ```bash
 # build the release binary the units reference
-cd ~/projects/wp-tt-dashboard && cargo build --release -p wp-extractor
+cd ~/projects/tt-aiops-platform && cargo build --release -p wp-extractor
 
 # install user units
 mkdir -p ~/.config/systemd/user

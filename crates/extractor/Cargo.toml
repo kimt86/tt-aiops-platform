@@ -1,5 +1,5 @@
 [package]
-name = "wp-extractor"
+name = "tt-extractor"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -9,7 +9,7 @@ name = "extractor"
 path = "src/main.rs"
 
 [dependencies]
-wp-core = { workspace = true }
+tt-core = { workspace = true }
 anyhow = { workspace = true }
 clap = { workspace = true }
 chrono = { workspace = true }

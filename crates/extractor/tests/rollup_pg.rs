@@ -5,7 +5,7 @@
 //! authoritative (non-provisional) row is never clobbered. Skipped without DATABASE_URL.
 
 use chrono::NaiveDate;
-use wp_extractor::transform;
+use tt_extractor::transform;
 
 const SENTINEL: &str = "2001-02-04";
 

@@ -1,6 +1,6 @@
 [Unit]
 Description=WP-TT GPS websocket SSH tunnel (127.0.0.1:9986 -> azure-wp-poc -> 172.21.30.72:9986)
-Documentation=https://internal/wp-tt-dashboard livemap
+Documentation=https://internal/tt-aiops-platform livemap
 After=network-online.target tailscaled.service
 Wants=network-online.target
 

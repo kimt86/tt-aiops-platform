@@ -10,8 +10,8 @@
 use anyhow::{Context, Result};
 use chrono::{Duration, NaiveDate};
 use sqlx::PgPool;
-use wp_core::kpi::KpiKey;
-use wp_core::stats::welch_t_test;
+use tt_core::kpi::KpiKey;
+use tt_core::stats::welch_t_test;
 
 const BASELINE_DAYS: i64 = 28;
 const RECENT_DAYS: i64 = 7;

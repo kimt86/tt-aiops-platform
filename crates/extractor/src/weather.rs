@@ -14,7 +14,7 @@ const LON: f64 = 101.2927;
 
 /// One hourly poll: fetch the recent + near-term hourly weather and upsert it. Idempotent (PK ts).
 pub async fn tick_weather(pool: &PgPool) -> Result<()> {
-    let run_date = wp_core::shift::terminal_now().date_naive();
+    let run_date = tt_core::shift::terminal_now().date_naive();
     run_logged(pool, "WEATHER", run_date, |_| async move {
         let url = format!(
             "https://api.open-meteo.com/v1/forecast?latitude={LAT}&longitude={LON}\
@@ -78,7 +78,7 @@ pub async fn tick_weather(pool: &PgPool) -> Result<()> {
 /// value for the live map. Targets intermittent squalls that hourly/15-min averages miss. Needs
 /// env TOMORROW_API_KEY. Model nowcast (not a gauge). Idempotent upsert. See research/travel-time.
 pub async fn tick_weather_live(pool: &PgPool) -> Result<()> {
-    let run_date = wp_core::shift::terminal_now().date_naive();
+    let run_date = tt_core::shift::terminal_now().date_naive();
     run_logged(pool, "WEATHER_1MIN", run_date, |_| async move {
         let key = std::env::var("TOMORROW_API_KEY").context("TOMORROW_API_KEY not set")?;
         let url = format!("https://api.tomorrow.io/v4/timelines?apikey={key}");

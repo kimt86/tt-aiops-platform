@@ -1,10 +1,10 @@
 [Unit]
-Description=wp-tt-dashboard nightly authoritative KPI extract (yesterday, all KPIs)
+Description=tt-aiops-platform nightly authoritative KPI extract (yesterday, all KPIs)
 After=network-online.target
 
 [Service]
 Type=oneshot
-EnvironmentFile=%h/projects/wp-tt-dashboard/.env
+EnvironmentFile=%h/projects/tt-aiops-platform/.env
 # runs all 8 extracts for yesterday + transform (final) + baseline
-ExecStart=%h/projects/wp-tt-dashboard/target/release/extractor run --kpi all --target oracle-prod
+ExecStart=%h/projects/tt-aiops-platform/target/release/extractor run --kpi all --target oracle-prod
 Nice=10

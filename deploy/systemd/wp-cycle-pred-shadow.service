@@ -1,9 +1,9 @@
 [Unit]
-Description=wp-tt-dashboard cycle_pred_shadow (candidate completion-time predictor SHADOW; log prediction at pickup, backfill actual free; Postgres-only, no Oracle, no dispatch impact)
+Description=tt-aiops-platform cycle_pred_shadow (candidate completion-time predictor SHADOW; log prediction at pickup, backfill actual free; Postgres-only, no Oracle, no dispatch impact)
 After=network-online.target
 
 [Service]
 Type=oneshot
-EnvironmentFile=%h/projects/wp-tt-dashboard/.env
-ExecStart=/usr/bin/psql "${DATABASE_URL}" -v mins=90 -f %h/projects/wp-tt-dashboard/scripts/populate_cycle_pred_shadow.sql
+EnvironmentFile=%h/projects/tt-aiops-platform/.env
+ExecStart=/usr/bin/psql "${DATABASE_URL}" -v mins=90 -f %h/projects/tt-aiops-platform/scripts/populate_cycle_pred_shadow.sql
 Nice=15

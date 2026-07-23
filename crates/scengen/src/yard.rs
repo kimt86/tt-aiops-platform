@@ -8,7 +8,7 @@ use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
 use sqlx::PgPool;
-use wp_core::parse::parse_rows;
+use tt_core::parse::parse_rows;
 
 use crate::state::{self, Config};
 use crate::toolbox::Toolbox;
@@ -47,7 +47,7 @@ async fn tick(pool: &PgPool, run_id: i64, target: &str, cfg: &Config) -> Result<
     // stall: 2 min of moves is orders of magnitude under FETCH_CAP.
     // NOTE: deleting the scenario.watermark row makes this fall back to a day-start seek (bounded
     // by the cap and self-catching-up, but a needless rescan) — don't delete it.
-    let day = wp_core::shift::terminal_now().format("%Y%m%d").to_string();
+    let day = tt_core::shift::terminal_now().format("%Y%m%d").to_string();
     let wm = state::get_watermark(pool, STREAM)
         .await?
         .as_deref()

@@ -13,7 +13,7 @@ use anyhow::Result;
 use serde::Deserialize;
 use serde_json::json;
 use sqlx::PgPool;
-use wp_core::parse::parse_rows;
+use tt_core::parse::parse_rows;
 
 use crate::state::{self, Config};
 use crate::toolbox::Toolbox;
@@ -70,15 +70,15 @@ async fn tick(pool: &PgPool, run_id: i64, target: &str, cfg: &Config) -> Result<
     // "now − 10 min" there would silently skip everything in between, and this stream is what
     // attributes containers to vessels.
     let wm = match state::get_watermark(pool, "move_hist").await?.as_deref() {
-        None => (wp_core::shift::terminal_now() - chrono::Duration::minutes(INITIAL_LOOKBACK_MIN))
+        None => (tt_core::shift::terminal_now() - chrono::Duration::minutes(INITIAL_LOOKBACK_MIN))
             .format("%Y%m%d%H%M%S")
             .to_string(),
         Some(w) => wm_minus_secs(w, LAG_S).unwrap_or_else(|| {
             tracing::warn!(watermark = w, "malformed watermark — falling back to day start");
-            format!("{}000000", wp_core::shift::terminal_now().format("%Y%m%d"))
+            format!("{}000000", tt_core::shift::terminal_now().format("%Y%m%d"))
         }),
     };
-    let now_evt = wp_core::shift::terminal_now().format("%Y%m%d%H%M%S").to_string();
+    let now_evt = tt_core::shift::terminal_now().format("%Y%m%d%H%M%S").to_string();
 
     // Index-supported range scan on the PK (JOB_HIST_DATE, JOB_HIST_TIME). Completed DS/LD only.
     let sql = format!(

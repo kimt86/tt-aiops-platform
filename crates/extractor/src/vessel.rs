@@ -7,7 +7,7 @@ use chrono::NaiveDate;
 use serde::Deserialize;
 use sqlx::PgPool;
 use std::collections::BTreeMap;
-use wp_core::shift::Shift;
+use tt_core::shift::Shift;
 
 use crate::kpis::common::run_logged;
 use crate::kpis::k_mph_realtime::Row as MphRow;
@@ -62,7 +62,7 @@ pub async fn write_vessel_shift(
         if let Some(l) = &r.last_move { if e.last.as_ref().map_or(true, |x| l > x) { e.last = Some(l.clone()); } }
     }
 
-    let as_of = wp_core::shift::terminal_to_utc(end);
+    let as_of = tt_core::shift::terminal_to_utc(end);
     let mut tx = pool.begin().await?;
     sqlx::query("DELETE FROM vessel_shift WHERE business_date=$1 AND shift=$2")
         .bind(date).bind(sh.label()).execute(&mut *tx).await?;
@@ -115,7 +115,7 @@ pub async fn extract_voyage_plan(pool: &PgPool, target: &str, date: NaiveDate) -
     run_logged(pool, "VOYAGE_PLAN", date, |run_id| async move {
         let sql = params::render_window(SQL_VOYAGE_PLAN, date, 3)?; // last 3 days
         let raw = Toolbox::from_env(target)?.run_sql(&sql).await?;
-        let rows: Vec<PlanRow> = wp_core::parse::parse_rows(&raw)?;
+        let rows: Vec<PlanRow> = tt_core::parse::parse_rows(&raw)?;
         let mut tx = pool.begin().await?;
         for r in &rows {
             sqlx::query(

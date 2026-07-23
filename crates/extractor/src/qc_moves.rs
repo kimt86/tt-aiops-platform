@@ -9,7 +9,7 @@ use anyhow::{Context, Result};
 use chrono::{NaiveDate, NaiveDateTime};
 use serde::Deserialize;
 use sqlx::PgPool;
-use wp_core::parse::parse_rows;
+use tt_core::parse::parse_rows;
 
 use crate::kpis::common::run_logged;
 use crate::runner::Toolbox;
@@ -33,7 +33,7 @@ struct MoveRow {
 
 /// One incremental poll: upsert quay-crane moves completed since the watermark, advance it.
 pub async fn tick_qc_moves(pool: &PgPool, target: &str) -> Result<()> {
-    let today = wp_core::shift::terminal_now();
+    let today = tt_core::shift::terminal_now();
     let day = today.format("%Y%m%d").to_string();
     let run_date = today.date_naive();
     run_logged(pool, "QC_MOVE", run_date, |_| async move {

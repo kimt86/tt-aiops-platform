@@ -3,8 +3,8 @@ Description=wp-tt scenario monitor/control web (ISOLATED, non-critical). Own por
 After=network-online.target
 
 [Service]
-EnvironmentFile=%h/projects/wp-tt-dashboard/.env
-ExecStart=%h/projects/wp-tt-dashboard/target/release/scengen serve --port 8899
+EnvironmentFile=%h/projects/tt-aiops-platform/.env
+ExecStart=%h/projects/tt-aiops-platform/target/release/scengen serve --port 8899
 Restart=on-failure
 RestartSec=5
 Nice=15

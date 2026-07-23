@@ -4,7 +4,7 @@
 # publish to the live map, and store ROAD-NETWORK congestion (congestion_edge). Denser as 3s grows.
 # Run hourly. Writes web/{public,dist}/livemap-roadgraph.geojson + congestion_edge + stats line.
 set -euo pipefail
-cd /home/tkadmin/projects/wp-tt-dashboard
+cd /home/tkadmin/projects/tt-aiops-platform
 export PGPASSWORD=wp
 PY=.venv-geo/bin/python
 P="-h 127.0.0.1 -p 5433 -U wp -d wp_tt"

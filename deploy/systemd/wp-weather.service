@@ -1,9 +1,9 @@
 [Unit]
-Description=wp-tt-dashboard hourly terminal weather (Open-Meteo) -> weather_hourly
+Description=tt-aiops-platform hourly terminal weather (Open-Meteo) -> weather_hourly
 After=network-online.target
 
 [Service]
 Type=oneshot
-EnvironmentFile=%h/projects/wp-tt-dashboard/.env
-ExecStart=%h/projects/wp-tt-dashboard/target/release/extractor weather
+EnvironmentFile=%h/projects/tt-aiops-platform/.env
+ExecStart=%h/projects/tt-aiops-platform/target/release/extractor weather
 Nice=15

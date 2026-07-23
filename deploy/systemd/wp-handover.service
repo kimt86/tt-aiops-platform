@@ -1,9 +1,9 @@
 [Unit]
-Description=wp-tt-dashboard authoritative soon-idle labels (JOB_ORDER_HISTORY completions -> Postgres)
+Description=tt-aiops-platform authoritative soon-idle labels (JOB_ORDER_HISTORY completions -> Postgres)
 After=network-online.target
 
 [Service]
 Type=oneshot
-EnvironmentFile=%h/projects/wp-tt-dashboard/.env
-ExecStart=%h/projects/wp-tt-dashboard/target/release/extractor handover --target oracle-prod
+EnvironmentFile=%h/projects/tt-aiops-platform/.env
+ExecStart=%h/projects/tt-aiops-platform/target/release/extractor handover --target oracle-prod
 Nice=15

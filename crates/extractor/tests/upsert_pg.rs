@@ -4,7 +4,7 @@
 //! snapshot_date and cleans up after itself.
 
 use chrono::NaiveDate;
-use wp_extractor::{db, kpis::k_util_tt};
+use tt_extractor::{db, kpis::k_util_tt};
 
 const SENTINEL: &str = "2000-01-01";
 

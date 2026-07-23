@@ -9,7 +9,7 @@
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use sqlx::PgPool;
-use wp_core::parse::parse_rows;
+use tt_core::parse::parse_rows;
 
 use crate::kpis::common::run_logged;
 use crate::runner::Toolbox;
@@ -36,7 +36,7 @@ struct HistRow {
 /// One incremental poll: upsert completed (C) DS/LD handovers since the watermark as
 /// authoritative labels, then advance the watermark. Logged to etl_run_log.
 pub async fn tick_handover(pool: &PgPool, target: &str) -> Result<()> {
-    let date = wp_core::shift::terminal_now().date_naive();
+    let date = tt_core::shift::terminal_now().date_naive();
     run_logged(pool, "HANDOVER_LABEL", date, |_| async move {
         // Watermark = last completion event seen (text "YYYYMMDDHHMMSS[mmm]", chronological by
         // lexicographic order). First run: start ~10 min back so we don't backfill 15 days.
@@ -47,7 +47,7 @@ pub async fn tick_handover(pool: &PgPool, target: &str) -> Result<()> {
         .fetch_one(pool)
         .await?;
         let wm = wm.unwrap_or_else(|| {
-            (wp_core::shift::terminal_now() - chrono::Duration::minutes(10))
+            (tt_core::shift::terminal_now() - chrono::Duration::minutes(10))
                 .format("%Y%m%d%H%M%S")
                 .to_string()
         });

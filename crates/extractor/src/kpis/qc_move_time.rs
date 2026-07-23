@@ -5,7 +5,7 @@ use anyhow::{Context, Result};
 use chrono::NaiveDate;
 use serde::Deserialize;
 use sqlx::PgPool;
-use wp_core::parse::parse_rows;
+use tt_core::parse::parse_rows;
 
 use crate::kpis::common::run_logged;
 use crate::runner::Toolbox;

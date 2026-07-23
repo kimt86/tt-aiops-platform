@@ -19,7 +19,7 @@ use chrono::Utc;
 use serde::Deserialize;
 use serde_json::json;
 use sqlx::PgPool;
-use wp_core::parse::parse_rows;
+use tt_core::parse::parse_rows;
 
 use crate::state::{self, Config};
 use crate::toolbox::Toolbox;

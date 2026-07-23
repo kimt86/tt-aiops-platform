@@ -1,4 +1,4 @@
-//! wp-tt-dashboard read-only API (axum). Reads ONLY PostgreSQL (L1/L2) and, for the
+//! tt-aiops-platform read-only API (axum). Reads ONLY PostgreSQL (L1/L2) and, for the
 //! live map, subscribes to the WP-TT GPS websocket via the local SSH tunnel. This crate
 //! has NO Oracle/SSH access — it cannot reach production Oracle.
 

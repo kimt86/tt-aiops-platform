@@ -1,4 +1,4 @@
-//! Shared types and logic for the wp-tt-dashboard backend.
+//! Shared types and logic for the tt-aiops-platform backend.
 //!
 //! - [`parse`]  — double-parse of the `remote-toolbox-sql` response.
 //! - [`stats`]  — paired t-test and Cohen's d for KPI baselines.

@@ -6,13 +6,13 @@ license.workspace = true
 
 # ISOLATED from the critical `extractor` binary on purpose: a compile/deploy fault in the
 # (non-critical) scenario subsystem must never block the dispatch/dashboard extraction.
-# Shares only wp-core types + the remote-toolbox-sql script (which serializes Oracle access).
+# Shares only tt-core types + the remote-toolbox-sql script (which serializes Oracle access).
 [[bin]]
 name = "scengen"
 path = "src/main.rs"
 
 [dependencies]
-wp-core = { workspace = true }
+tt-core = { workspace = true }
 anyhow = { workspace = true }
 clap = { workspace = true }
 chrono = { workspace = true }

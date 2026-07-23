@@ -1,5 +1,5 @@
 [package]
-name = "wp-api"
+name = "tt-api"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -9,7 +9,7 @@ name = "api"
 path = "src/main.rs"
 
 [dependencies]
-wp-core = { workspace = true }
+tt-core = { workspace = true }
 anyhow = { workspace = true }
 axum = { workspace = true }
 tokio = { workspace = true }

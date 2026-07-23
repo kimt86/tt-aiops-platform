@@ -33,4 +33,4 @@ utoipa = { version = "5", features = ["axum_extras", "chrono"] }
 # stats
 statrs = "0.18"
 # internal
-wp-core = { path = "crates/core" }
+tt-core = { path = "crates/core" }

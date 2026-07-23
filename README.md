@@ -1,4 +1,4 @@
-# wp-tt-dashboard
+# tt-aiops-platform
 
 Operations KPI dashboard for the WP terminal, built on the `tos-db-research` findings.
 Six KPIs (TT utilization, empty-travel distance & ratio, TT cycle time, crane wait,

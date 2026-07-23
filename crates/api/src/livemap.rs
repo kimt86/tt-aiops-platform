@@ -1218,7 +1218,7 @@ pub async fn positions(State(lm): State<Arc<LiveMap>>, State(pool): State<PgPool
         .then(|| (active_n as f64 / deployed_n as f64 * 100.0).round() as i64);
     let tt_engaged_live: Option<i64> = None; // GPS moving-fraction retired (unreliable)
     // shift-to-date TIME-BASED utilization: mean of the 60s assignment samples this shift.
-    let (bd_cur, sh_cur) = wp_core::shift::current(wp_core::shift::terminal_now().naive_local());
+    let (bd_cur, sh_cur) = tt_core::shift::current(tt_core::shift::terminal_now().naive_local());
     let tt_util_shift_avg: Option<i64> = sqlx::query_scalar::<_, Option<f64>>(
         "SELECT round(avg(100.0*assigned/nullif(on_duty,0)))::float8
            FROM util_tt_sample WHERE business_date=$1 AND shift=$2",
@@ -1492,7 +1492,7 @@ pub fn spawn_util_sampler(_lm: Arc<LiveMap>, pool: PgPool) {
             if on_duty < 20 {
                 continue;
             }
-            let (bd, sh) = wp_core::shift::current(wp_core::shift::terminal_now().naive_local());
+            let (bd, sh) = tt_core::shift::current(tt_core::shift::terminal_now().naive_local());
             if let Err(e) = sqlx::query(
                 "INSERT INTO util_tt_sample (business_date, shift, assigned, on_duty) VALUES ($1,$2,$3,$4)",
             )
@@ -1645,7 +1645,7 @@ pub fn spawn_soon_idle_logger(lm: Arc<LiveMap>, pool: PgPool) {
             if to_insert.is_empty() && nm_insert.is_empty() {
                 continue;
             }
-            let (bd, sh) = wp_core::shift::current(wp_core::shift::terminal_now().naive_local());
+            let (bd, sh) = tt_core::shift::current(tt_core::shift::terminal_now().naive_local());
             for r in &nm_insert {
                 let _ = sqlx::query(
                     "INSERT INTO tt_soon_idle_nearmiss
@@ -2530,7 +2530,7 @@ pub fn spawn_qc_wait_logger(lm: Arc<LiveMap>, pool: PgPool) {
 pub fn spawn_qc_wait_kpi(pool: PgPool) {
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(Duration::from_secs(300));
-        let off = wp_core::shift::terminal_offset();
+        let off = tt_core::shift::terminal_offset();
         loop {
             ticker.tick().await;
             let rows: Vec<(DateTime<Utc>, i32)> = sqlx::query_as(
@@ -2542,11 +2542,11 @@ pub fn spawn_qc_wait_kpi(pool: PgPool) {
             if rows.is_empty() {
                 continue;
             }
-            let today = wp_core::shift::current(wp_core::shift::terminal_now().naive_local()).0;
+            let today = tt_core::shift::current(tt_core::shift::terminal_now().naive_local()).0;
             let mut daily: HashMap<chrono::NaiveDate, (i64, i64)> = HashMap::new(); // bd → (sum, n)
             let mut byshift: HashMap<(chrono::NaiveDate, &'static str), (i64, i64)> = HashMap::new();
             for (ts, sr) in &rows {
-                let (bd, sh) = wp_core::shift::current(ts.with_timezone(&off).naive_local());
+                let (bd, sh) = tt_core::shift::current(ts.with_timezone(&off).naive_local());
                 let d = daily.entry(bd).or_insert((0, 0));
                 d.0 += *sr as i64;
                 d.1 += 1;
@@ -2571,8 +2571,8 @@ pub fn spawn_qc_wait_kpi(pool: PgPool) {
             }
             for ((bd, sh_label), (sum, n)) in &byshift {
                 let avg = *sum as f64 / *n as f64;
-                let Some(sh) = wp_core::shift::Shift::from_label(sh_label) else { continue };
-                let window_start = wp_core::shift::terminal_to_utc(wp_core::shift::window(*bd, sh).0);
+                let Some(sh) = tt_core::shift::Shift::from_label(sh_label) else { continue };
+                let window_start = tt_core::shift::terminal_to_utc(tt_core::shift::window(*bd, sh).0);
                 let _ = sqlx::query(
                     "INSERT INTO kpi_shift (business_date, shift, kpi_key, value, sample_n, unit, as_of_ts, window_start, computed_at)
                      VALUES ($1, $2, 'K_QC_TT_WAIT_GPS', $3, $4, 'QC', now(), $5, now())
@@ -2831,7 +2831,7 @@ pub fn spawn_cycle_flusher(lm: Arc<LiveMap>, pool: PgPool) {
             if batch.is_empty() {
                 continue;
             }
-            let (bd, sh) = wp_core::shift::current(wp_core::shift::terminal_now().naive_local());
+            let (bd, sh) = tt_core::shift::current(tt_core::shift::terminal_now().naive_local());
             let mut written = 0u32;
             for c in &batch {
                 let dropped = match to_ts(c.dropped_at_ms) { Some(t) => t, None => continue };
@@ -4033,7 +4033,7 @@ pub fn spawn_qc_handover_logger(lm: Arc<LiveMap>, pool: PgPool) {
             if edges.is_empty() {
                 continue;
             }
-            let (bd, sh) = wp_core::shift::current(wp_core::shift::terminal_now().naive_local());
+            let (bd, sh) = tt_core::shift::current(tt_core::shift::terminal_now().naive_local());
             for ed in &edges {
                 last_edge.insert(ed.crane.clone(), ed.ts.max(*last_edge.get(&ed.crane).unwrap_or(&0)));
                 let _ = sqlx::query(
@@ -4108,7 +4108,7 @@ pub fn spawn_wp_arrival_logger(lm: Arc<LiveMap>, pool: PgPool) {
             // release ended trips so a truck's next trip can log again
             open.retain(|k| cur_trip.contains(k));
             if arrivals.is_empty() { continue; }
-            let (bd, sh) = wp_core::shift::current(wp_core::shift::terminal_now().naive_local());
+            let (bd, sh) = tt_core::shift::current(tt_core::shift::terminal_now().naive_local());
             for a in &arrivals {
                 open.insert((a.ytno.clone(), a.container.clone()));
                 let _ = sqlx::query(
