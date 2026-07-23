@@ -1,4 +1,4 @@
-//! Transform L0 (raw_* snapshots) -> L1 (kpi_daily, kpi_breakdown_qc).
+//! Transform L0 (raw_* snapshots) -> L1 (kpi_daily).
 //! Pure PostgreSQL aggregation — no Oracle access. Idempotent per date.
 //!
 //! Headline aggregation rules per KPI (plan §2.2). Each is an INSERT..SELECT with
@@ -17,7 +17,6 @@ pub async fn run(pool: &PgPool, date: NaiveDate) -> Result<()> {
 /// Recompute L1 rollups, marking them provisional (intra-day "today so far") or not.
 pub async fn run_marked(pool: &PgPool, date: NaiveDate, provisional: bool) -> Result<()> {
     kpi_daily(pool, date, provisional).await?;
-    breakdown_qc(pool, date).await?;
     tracing::info!(%date, provisional, "transform L0->L1 done");
     Ok(())
 }
@@ -186,29 +185,5 @@ pub async fn rollup_today_from_shifts(pool: &PgPool, date: NaiveDate) -> Result<
     .context("rollup_today_from_shifts")?
     .rows_affected();
     tracing::info!(%date, kpis = n, "kpi_daily today rollup from shifts (no Oracle)");
-    Ok(())
-}
-
-/// Per-QC breakdown. Phase 1: MPH is real per-QC; empty/crane-wait stay NULL until
-/// per-QC source SQL exists. Status left NULL until targets are signed off.
-async fn breakdown_qc(pool: &PgPool, date: NaiveDate) -> Result<()> {
-    sqlx::query(
-        "INSERT INTO kpi_breakdown_qc
-           (snapshot_date, qc_machno, jobtype, mph, empty_km, crane_wait_sec, qc_wait_sec, status, computed_at)
-         SELECT m.snapshot_date, m.qc_machno, NULL,
-                round(sum(m.k_mph_per_active_hour*m.active_hours)/nullif(sum(m.active_hours),0), 2),
-                NULL, NULL, q.qc_wait, NULL, now()
-           FROM raw_k_mph_realtime m
-           LEFT JOIN (SELECT qc, avg_idle_sec AS qc_wait FROM raw_k_qc_q WHERE snapshot_date = $1) q
-                  ON q.qc = m.qc_machno
-          WHERE m.snapshot_date = $1
-          GROUP BY m.snapshot_date, m.qc_machno, q.qc_wait
-         ON CONFLICT (snapshot_date, qc_machno) DO UPDATE SET
-           mph=EXCLUDED.mph, qc_wait_sec=EXCLUDED.qc_wait_sec, computed_at=now()",
-    )
-    .bind(date)
-    .execute(pool)
-    .await
-    .context("kpi_breakdown_qc upsert")?;
     Ok(())
 }

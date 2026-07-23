@@ -16,7 +16,6 @@ GRANT USAGE ON SCHEMA public TO wp_ro;
 -- exactly the tables the API reads
 GRANT SELECT ON
   kpi_daily,
-  kpi_breakdown_qc,
   kpi_heatmap_empty,
   kpi_baseline,
   kpi_target,

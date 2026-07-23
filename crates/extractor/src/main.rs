@@ -72,13 +72,13 @@ enum Command {
         target: String,
     },
     /// Yard-crane (RTG/ES) move stream from MCH_OPERATION → rtg_move_log (full work mix,
-    /// not just DS). Incremental via etl_watermark. Run ~every 5min.
+    /// not just DS). Incremental via etl_watermark. Run ~every 60s.
     RtgMoves {
         #[arg(long, default_value = "oracle-prod")]
         target: String,
     },
     /// Quay-crane (C/M/Z) move stream from MCH_OPERATION → qc_move_log (DS pickup + LD drop
-    /// handovers; TRK_ID always present). Incremental via etl_watermark. Run ~every 5min.
+    /// handovers; TRK_ID always present). Incremental via etl_watermark. Run ~every 60s.
     QcMoves {
         #[arg(long, default_value = "oracle-prod")]
         target: String,
@@ -233,7 +233,6 @@ async fn run_kpi(pool: &sqlx::PgPool, kpi: &str, date: NaiveDate, target: &str) 
         "k_qc_q" => step!("k_qc_q", kpis::k_qc_q::extract(pool, date, target)),
         "qc_move_time" => step!("qc_move_time", kpis::qc_move_time::extract(pool, date, target)),
         "k_tt_cycle" => step!("k_tt_cycle", kpis::k_tt_cycle::extract(pool, date, target)),
-        "k_mph_voyage" => step!("k_mph_voyage", kpis::k_mph_voyage::extract(pool, date, target)),
         "k_empty" => step!("k_empty", kpis::k_empty::extract(pool, date, target)),
         "k_cycle" => step!("k_cycle", kpis::k_cycle::extract(pool, date, target)),
         "k_crane_q" => step!("k_crane_q", kpis::k_crane_q_daily::extract(pool, date, target)),
@@ -246,7 +245,6 @@ async fn run_kpi(pool: &sqlx::PgPool, kpi: &str, date: NaiveDate, target: &str) 
             step!("k_qc_q", kpis::k_qc_q::extract(pool, date, target));
             step!("qc_move_time", kpis::qc_move_time::extract(pool, date, target));
             step!("k_tt_cycle", kpis::k_tt_cycle::extract(pool, date, target));
-            step!("k_mph_voyage", kpis::k_mph_voyage::extract(pool, date, target));
             // heavier JOB_ORDER_HISTORY range scans
             step!("k_empty", kpis::k_empty::extract(pool, date, target));
             step!("k_cycle", kpis::k_cycle::extract(pool, date, target));
@@ -255,7 +253,7 @@ async fn run_kpi(pool: &sqlx::PgPool, kpi: &str, date: NaiveDate, target: &str) 
         }
         other => anyhow::bail!(
             "unknown --kpi '{other}' (have: all, k_util_tt, k_util_crane, k_mph_realtime, \
-             k_mph_voyage, k_empty, k_cycle, k_crane_q, k_crane_q_hour)"
+             k_empty, k_cycle, k_crane_q, k_crane_q_hour)"
         ),
     }
     Ok(())
