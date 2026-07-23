@@ -1,9 +1,0 @@
-[Unit]
-Description=wp-tt tick T1 every 5 min (load-conscious)
-
-[Timer]
-OnBootSec=2min
-OnUnitActiveSec=5min
-# only during operating hours; widen/remove if 24h coverage is wanted
-[Install]
-WantedBy=timers.target

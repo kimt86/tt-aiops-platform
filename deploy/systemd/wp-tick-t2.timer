@@ -1,9 +1,0 @@
-[Unit]
-Description=wp-tt tick T2 every 20 min (load-conscious; heavier source)
-
-[Timer]
-OnBootSec=5min
-OnUnitActiveSec=20min
-
-[Install]
-WantedBy=timers.target

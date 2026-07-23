@@ -1,8 +1,0 @@
-[Unit]
-Description=wp-tt-dashboard intra-day tick T1 (cheap: MPH, today provisional)
-
-[Service]
-Type=oneshot
-EnvironmentFile=%h/projects/wp-tt-dashboard/.env
-ExecStart=%h/projects/wp-tt-dashboard/target/release/extractor tick --tier t1 --target oracle-prod
-Nice=15
