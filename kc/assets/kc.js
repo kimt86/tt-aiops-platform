@@ -1,4 +1,4 @@
-/* WP-TT 지식센터 — 공용 셸(사이드바·토프바·TOC·검색·이전/다음).
+/* TT AIOps 지식센터 — 공용 셸(사이드바·토프바·TOC·검색·이전/다음).
    각 페이지는 <main class="kc-article" data-page="section/slug"> 만 담고, 이 스크립트가 셸을 주입한다.
    홈은 <body data-home><div class="kc-home">…</div>. 나브·제목의 단일 출처는 아래 NAV. */
 

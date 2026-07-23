@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>TT 작업 사이클 감지 로직 — WP-TT 지식센터</title>
+  <title>TT 작업 사이클 감지 로직 — TT AIOps 지식센터</title>
   <meta name="description" content="websocket GPS 피드에서 트럭 작업 사이클을 끊김 없이 감지하고 검증된 사이클을 분해·적재하는 내부 메커니즘.">
   <link rel="stylesheet" href="/kc/assets/kc.css">
   <script defer src="/kc/assets/kc.js"></script>
@@ -17,7 +17,7 @@
   <div class="kc-cal warn"><span class="h">현행 상태</span><p>이 문서의 <strong>이동필터 완료 판정</strong>(30초↑ 보유 + 150m↑ 주행)은 <strong>여전히 사이클 완료의 권위 기준</strong>입니다. 다만 <strong>4단계 leg 분해는 현행 5이벤트 모델(<a href="/kc/data/cycle-decomposition.html">사이클 분해</a>)로 대체</strong>됐고, 별도 leg 모션 분해(<code>learn_leg_decomp</code>)는 retire(mig 0081)됐습니다. 아래 4단계 서술은 초기 v1 메커니즘 기록으로 읽으세요.</p></div>
 
   <h2>1. 왜 내부적으로 사이클을 감지하는가</h2>
-  <p>출발점은 운영 화면의 이상 — "지금 유휴" 트럭이 비정상적으로 많았습니다. WP-TT GPS는 <strong>이벤트 드리븐</strong>이라 빠진 작업 필드가 비어 버리고, 순간 필드가 빈 트럭을 그대로 분류하면 <strong>배정받아 일하던 트럭이 유휴로 둔갑</strong>합니다.</p>
+  <p>출발점은 운영 화면의 이상 — "지금 유휴" 트럭이 비정상적으로 많았습니다. TT AIOps GPS는 <strong>이벤트 드리븐</strong>이라 빠진 작업 필드가 비어 버리고, 순간 필드가 빈 트럭을 그대로 분류하면 <strong>배정받아 일하던 트럭이 유휴로 둔갑</strong>합니다.</p>
   <div class="kc-cal note"><span class="h">실측 (2026-06-10)</span><p>dispatch=idle로 분류된 102대 중 <strong>51대(50%)가 TOS 작업풀에 실제 배정(A)</strong>. 진짜 미배정은 약 21대. → 세 목표: ① 끊김 없는 추적(latch+작업풀 교차참조), ② 사이클 축적(<code>tt_cycle_log</code>), ③ 라이브 교정(배정됐는데 대기=staging).</p></div>
 
   <h2>2. 데이터의 진실 — container1은 '배정' 필드다</h2>
