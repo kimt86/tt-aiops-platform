@@ -1,0 +1,10 @@
+[Unit]
+Description=wp-tt refresh learn_cycle_remaining every 30min (Postgres aggregate; slow-moving predictor)
+
+[Timer]
+OnBootSec=12min
+OnUnitActiveSec=1800s
+AccuracySec=60s
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,12 @@
+[Unit]
+Description=wp-tt-dashboard refresh learn_cycle_remaining (candidate-vehicle pickup->free time predictor; Postgres-only, no Oracle)
+After=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=%h/projects/wp-tt-dashboard/.env
+# Re-aggregate a 14-day rolling window of tt_move_log trips into the (jobtype, n_containers)
+# median/p90 pickup->free time. Full-population label (GPS-independent), so unbiased for the
+# GPS-silent trucks the move-log selector catches. Slow-moving → 30-min refresh is ample.
+ExecStart=/usr/bin/psql "${DATABASE_URL}" -v days=14 -f %h/projects/wp-tt-dashboard/scripts/populate_learn_cycle_remaining.sql
+Nice=15

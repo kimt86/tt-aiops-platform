@@ -1,0 +1,10 @@
+[Unit]
+Description=wp-tt cycle_pred_shadow every 2min (log candidate completion prediction + backfill actual)
+
+[Timer]
+OnBootSec=13min
+OnUnitActiveSec=120s
+AccuracySec=15s
+
+[Install]
+WantedBy=timers.target
