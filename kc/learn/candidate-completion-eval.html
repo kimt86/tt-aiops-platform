@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>후보 차량 완료시간 예측 — 검정(정확도) 결과 — TT AIOps 지식센터</title>
+  <meta name="description" content="곧 자유가 될 '후보 차량'이 지금 하는 작업을 언제 끝낼지(남은 시간)를 예측하는 기능의 라이브 그림자 검정 결과. 예비 결과(단일 13시간 창, n=7343): 전형 트럭 오차 약 5분, 절반이 5분 이내, 77%가 10분 이내. 쉬운 말로 정리한 living 문서.">
+  <link rel="stylesheet" href="/kc/assets/kc.css">
+  <script defer src="/kc/assets/kc.js"></script>
+</head>
+<body>
+<main class="kc-article" data-page="learn/candidate-completion-eval" data-source="be-dispatch 라이브 그림자 검정 (예측기 learn_cycle_remaining·롤링 14일) · 검정 창 2026-07-22 22:56→07-23 11:57 UTC · n=7343">
+  <h1>후보 차량 완료시간 예측 — 검정(정확도) 결과</h1>
+  <p class="kc-lede">곧 자유가 될 <strong>후보 차량</strong>(지금 작업 중이지만 머잖아 다음 일을 받을 수 있는 트럭)이 <strong>지금 하는 작업을 언제 끝낼지 = 남은 시간</strong>을 예측하는 기능이 있습니다. 지금은 배차에 관여하지 않고 <strong>"그림자"로만</strong> 돌며 정확도를 재고 있습니다. 이 문서는 그 <strong>첫 라이브 채점 결과</strong>를 쉬운 말로 정리합니다.</p>
+  <div class="kc-meta"><span class="kc-badge kind">러닝 · 검정</span><span class="kc-badge living">예비 결과 · 13시간 창 2026-07-23</span></div>
+
+  <div class="kc-cal tip"><span class="h">Bottom line</span><p><strong>전형적인 후보 차량은 남은 시간을 약 5분 오차로 맞힙니다</strong>(중앙값 절대오차 5.0분). <strong>절반이 5분 이내</strong>(49.6%), <strong>10대 중 8대 가까이가 10분 이내</strong>(77.1%)입니다. 전형 트럭은 거의 정확하고(부호오차 중앙 +41초), 평균 오차가 그보다 큰 건 <strong>크레인 대기 때문에 예측보다 훨씬 늦게 끝나는 소수 트럭</strong>(긴 꼬리) 탓입니다. ⚠ 단, 이번은 <strong>단일 13시간 창의 예비 결과</strong>이고, 아직 <strong>가장 단순한 예측기</strong>만 잰 것입니다(아래 한계).</p></div>
+
+  <div class="kc-cal warn"><span class="h">먼저 — 이건 "예비 결과"입니다</span><p>수치는 <strong>딱 한 번의 13시간 관측</strong>에서 나온 것이라 시간대·요일 쏠림이 있을 수 있습니다. <strong>여러 날을 누적</strong>해야 확정된 정확도라 할 수 있습니다. 또한 이번에 잰 것은 <strong>작업 종류와 컨테이너 개수만 보는 가장 단순한(기준선) 예측기</strong>이며, 더 똑똑한 신호는 아직 얹지 않았습니다(§7).</p></div>
+
+  <h2>1. 이 기능이 하는 일 — 그리고 "그림자"란?</h2>
+  <p>후보 차량이 <strong>작업을 시작(픽업)하는 순간</strong>, "이 트럭은 지금부터 <strong>약 몇 분 뒤</strong>에 자유가 될 것"이라고 <strong>남은 시간을 예측</strong>합니다. 나중에 그 트럭이 <strong>실제로 자유가 된 시각</strong>이 확인되면, 예측과 실제를 나란히 놓고 <strong>얼마나 빗나갔는지</strong>를 잽니다.</p>
+  <div class="kc-flow">
+    <div class="node accent">픽업 순간<span class="sub">"남은 시간 N분" 예측을 적어둠</span></div>
+    <div class="arw">작업 진행</div>
+    <div class="node">실제 자유<span class="sub">TOS가 완료를 기록</span></div>
+    <div class="arw">대조</div>
+    <div class="node accent">오차 = |예측 − 실제|<span class="sub">채점</span></div>
+  </div>
+  <div class="kc-cal note"><span class="h">쉬운 용어 풀이</span>
+    <p><strong>그림자(shadow)</strong> = 예측을 실제 배차에 <strong>쓰지 않고</strong>, 조용히 적어만 뒀다가 나중에 정답과 대조하는 방식. 틀려도 현장에 <strong>피해가 없습니다</strong> — 채점만 합니다.</p>
+    <p><strong>검정</strong> = 예측이 실제와 얼마나 맞았는지 대조해 점수를 매기는 것. <strong>절대오차</strong> = 예측과 실제의 차이를 <strong>부호 빼고 크기만</strong>("몇 분 빗나갔나"). <strong>중앙값</strong> = 줄 세웠을 때 한가운데 값(= 전형적인 경우). <strong>평균</strong>은 극단값에 잘 흔들립니다.</p>
+  </div>
+
+  <h2>2. 무엇을·얼마나 봤나 (검정 창·표본)</h2>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th>항목</th><th>값</th></tr></thead>
+    <tbody>
+      <tr><td>검정 창</td><td>2026-07-22 22:56 → 07-23 11:57 <strong>(약 13시간·UTC)</strong></td></tr>
+      <tr><td>예측 표본</td><td><strong>n = 7,343</strong>건 (픽업 순간마다 1건)</td></tr>
+      <tr><td>실제 자유까지 확인된 것</td><td><strong>6,598건 (89.9%)</strong> — 나머지는 창 종료 시점에 아직 진행 중이라 채점 보류</td></tr>
+    </tbody>
+  </table></div>
+  <p>아래 정확도 수치는 모두 <strong>실제 자유시각이 확인된 6,598건</strong>으로 계산했습니다.</p>
+
+  <h2>3. 핵심 정확도</h2>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th>지표</th><th>값</th><th>쉬운 뜻</th></tr></thead>
+    <tbody>
+      <tr><td><strong>중앙값 절대오차</strong></td><td><strong>약 5.0분</strong> (302초)</td><td>전형적인 트럭은 약 5분 빗나감</td></tr>
+      <tr><td>평균 절대오차 (MAE)</td><td>8.6분 (519초)</td><td>평균은 8.6분 — 긴 꼬리에 끌려 더 큼</td></tr>
+      <tr><td>p90 절대오차</td><td>19.7분 (1,181초)</td><td>10대 중 9대는 20분 이내 (나쁜 10%만 이보다 큼)</td></tr>
+      <tr><td>5분 이내 비율</td><td><strong>49.6%</strong></td><td>절반이 5분 이내로 맞음</td></tr>
+      <tr><td>10분 이내 비율</td><td><strong>77.1%</strong></td><td>4대 중 3대꼴로 10분 이내</td></tr>
+    </tbody>
+  </table></div>
+  <div class="kc-cal note"><span class="h">MAE·p90이 뭔가요</span><p><strong>MAE</strong>(평균 절대오차) = 모든 트럭의 "빗나간 정도"를 평균낸 값. <strong>p90</strong> = 오차를 작은 순서로 줄 세웠을 때 <strong>90%가 이 값 안</strong>에 든다는 뜻 — "웬만한 경우의 최악은 이 정도, 그보다 나쁜 건 10%뿐". 중앙값(5분)보다 MAE(8.6분)·p90(19.7분)이 큰 건 <strong>일부 트럭이 아주 많이 늦게</strong> 끝나기 때문입니다(다음 절).</p></div>
+
+  <h2>4. 오차 분포 — 대부분 몰려 있고, 소수만 크게 빗나감</h2>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th>절대오차 구간</th><th>비중</th><th>건수</th></tr></thead>
+    <tbody>
+      <tr><td>2분 미만</td><td>19.7%</td><td>1,297</td></tr>
+      <tr><td>2 ~ 5분</td><td>29.9%</td><td>1,971</td></tr>
+      <tr><td>5 ~ 10분</td><td>27.6%</td><td>1,822</td></tr>
+      <tr><td>10분 초과</td><td>22.9%</td><td>1,508</td></tr>
+      <tr><td><strong>(누적) 5분 이내</strong></td><td><strong>49.6%</strong></td><td>3,268</td></tr>
+      <tr><td><strong>(누적) 10분 이내</strong></td><td><strong>77.1%</strong></td><td>5,090</td></tr>
+    </tbody>
+  </table></div>
+  <p>절반은 5분 안에 정확히 맞고, 약 <strong>4분의 1(22.9%)은 10분 넘게</strong> 빗나갑니다. 이 <strong>10분 초과 구간</strong>이 평균(MAE)과 p90을 끌어올리는 주범입니다.</p>
+
+  <h2>5. 중앙은 잘 맞고, 평균은 "긴 꼬리"가 끈다</h2>
+  <p>예측이 <strong>이르게(과대) vs 늦게(과소)</strong> 치우쳤는지를 보면:</p>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th>지표</th><th>값</th><th>해석</th></tr></thead>
+    <tbody>
+      <tr><td>부호오차 <strong>중앙값</strong></td><td><strong>+41초</strong></td><td>전형적인 트럭은 <strong>거의 0</strong> — 아주 잘 맞힘</td></tr>
+      <tr><td>부호오차 <strong>평균</strong>(편향)</td><td><strong>−224초 (−3.7분)</strong></td><td>평균은 <strong>과소</strong>(실제가 예측보다 늦게 자유)</td></tr>
+      <tr><td>과소 : 과대 건수</td><td>46.5% : 53.5%</td><td><strong>거의 반반</strong> → 한쪽으로 쏠린 습관적 편향 아님</td></tr>
+    </tbody>
+  </table></div>
+  <div class="kc-cal tip"><span class="h">핵심 — 편향이 아니라 '긴 꼬리' 효과</span><p><strong>편향(bias)</strong>이란 예측이 늘 한쪽으로(항상 이르거나 항상 늦게) 치우치는 습관을 말합니다. 여기선 <strong>늦게 끝난 트럭과 일찍 끝난 트럭 수가 거의 반반</strong>(46.5% : 53.5%)이라 그런 습관이 <strong>아닙니다</strong>. 다만 <strong>크레인 대기로 예측보다 훨씬 늦게 자유되는 소수 트럭</strong>이 평균을 −3.7분 쪽으로 끌어당깁니다. 그래서 <strong>전형 트럭(중앙 +41초)은 정확</strong>하지만 <strong>평균은 마이너스</strong>로 보이는 것입니다.</p></div>
+
+  <h2>6. 작업 종류별 — 적하가 양하보다 소폭 정확</h2>
+  <p>두 방향의 작업을 나눠 보면(방향 뜻은 <a href="/kc/dashboard/index.html">대시보드 완전 해설</a> 참고):</p>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th>작업 종류</th><th>중앙값 절대오차</th></tr></thead>
+    <tbody>
+      <tr><td><strong>LD · 적하</strong> (야드 → 배)</td><td><strong>4.75분</strong></td></tr>
+      <tr><td><strong>DS · 양하</strong> (배 → 야드)</td><td>5.6분</td></tr>
+    </tbody>
+  </table></div>
+  <p>적하(LD)가 양하(DS)보다 <strong>조금 더 정확</strong>합니다. 차이는 크지 않습니다.</p>
+
+  <h2>7. 예측기 내부는 무엇을 알고 있나 (참고)</h2>
+  <p>예측기는 <strong>지난 14일치</strong> 실제 사이클을 계속 굴려 "이런 작업은 보통 얼마나 걸린다"는 <strong>남은 시간 중앙값 표</strong>를 갖고 있습니다(갱신 2026-07-23 11:49 UTC). <strong>트윈</strong> = 한 트럭이 <strong>컨테이너 2개를 한 번에</strong> 처리하는 배차(더 오래 걸림):</p>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th>작업</th><th>표본 n</th><th>남은 시간 중앙값</th></tr></thead>
+    <tbody>
+      <tr><td>DS 양하 · 단일(1컨)</td><td>64,749</td><td>12.8분 (767초)</td></tr>
+      <tr><td>DS 양하 · 트윈(2컨)</td><td>18,882</td><td>19.7분 (1,180초)</td></tr>
+      <tr><td>LD 적하 · 단일(1컨)</td><td>80,637</td><td>10.4분 (623초)</td></tr>
+      <tr><td>LD 적하 · 트윈(2컨)</td><td>15,618</td><td>20.4분 (1,226초)</td></tr>
+    </tbody>
+  </table></div>
+  <p>그림자 검정 표본에서 <strong>트윈이 차지한 비중은 양하(DS) 27%·적하(LD) 25%</strong>로, 위 학습 데이터의 분포와 잘 맞습니다(검정 표본이 현실을 대표한다는 뜻).</p>
+
+  <h2>8. ★ 반드시 알아둘 한계 (정직하게)</h2>
+  <div class="kc-cal warn"><span class="h">이 결과를 어디까지 믿을까</span>
+    <p><strong>① 아직 "가장 단순한" 예측기만 잰 것.</strong> 이번 예측기는 <strong>작업 종류와 컨테이너 개수만</strong> 봅니다. 설계상 <strong>약 16% 더 정확</strong>하게 해줄 것으로 본 핵심 신호 — <strong>적하(LD) 트럭이 향하는 안벽 크레인이 지금 얼마나 밀렸는지(진행 중 작업량)</strong> — 는 <strong>아직 예측기에 얹지 않았습니다</strong>. 이게 다음 개선 지렛대입니다.</p>
+    <p><strong>② 단일 13시간 창이라 "예비 결과".</strong> 하루 안의 특정 시간대만 본 것이라, <strong>여러 날을 누적</strong>해야 확정된 수치가 됩니다.</p>
+  </div>
+
+  <h2>9. 한 줄 정리</h2>
+  <div class="kc-cal note"><span class="h">요약</span><p>가장 단순한 예측기만으로도 <strong>전형 트럭은 약 5분 오차, 절반이 5분 이내</strong>로 남은 시간을 맞힙니다. 남은 과제는 <strong>더 여러 날 누적으로 확정</strong>하고, <strong>도착지 크레인 혼잡 신호</strong>를 얹어 긴 꼬리(늦게 끝나는 트럭)를 줄이는 것입니다. 지금은 <strong>배차에 관여하지 않는 그림자</strong>라, 틀려도 현장에는 안전합니다.</p></div>
+
+  <hr>
+  <p><strong>관련:</strong> <a href="/kc/learn/tt-prediction.html">2단계 예측 모형</a> · <a href="/kc/learn/soon-idle-tos.html">곧-유휴 감지 (TOS)</a> · <a href="/kc/dispatch/leadtime-adr.html">ADR — 유휴 리드타임은 예측하지 않는다</a> · <a href="/kc/dashboard/learning.html">러닝 센터 해설</a> · <a href="/kc/data/cycle-gps-quality.html">GPS 싸이클 해석 품질</a></p>
+</main>
+</body>
+</html>

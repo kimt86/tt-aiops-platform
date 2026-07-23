@@ -52,6 +52,7 @@ const NAV = [
     { page: "learn/learning-center",   title: "학습 센터 기획" },
     { page: "learn/travel-time",       title: "이동시간 모델 (명세 + 이력)" },
     { page: "learn/tt-prediction",     title: "2단계 예측 모형" },
+    { page: "learn/candidate-completion-eval", title: "후보 차량 예측 — 검정 결과" },
     { page: "learn/tt-dispatch-problem", title: "스마트 TT 배차 (문제 정의)" },
     { page: "learn/soon-idle-tos",     title: "곧-유휴 감지 (TOS)" },
     { page: "learn/qc-workpoint",      title: "QC 작업지점" },
