@@ -124,12 +124,22 @@ async fn download(
         )
             .into_response());
     }
-    let (scenario, emulator, _summary) = crate::assemble::build(&pool, ws, we).await?;
-    let (val, fname) = match kind.as_str() {
-        "scenario" => (scenario, format!("scenario-{}.json", r.start)),
-        "emulator" => (emulator, format!("emulator-{}.json", r.start)),
+    // Validate `kind` BEFORE assembling. build() is synchronous and materializes the whole window
+    // in memory, so answering an unknown kind only AFTER that work would let a stray path burn a
+    // full assembly (and one of the pool's two connections) to then return 404.
+    let fname = match kind.as_str() {
+        "scenario" => format!("scenario-{}.json", r.start),
+        "emulator" => format!("emulator-{}.json", r.start),
         _ => return Ok((StatusCode::NOT_FOUND, "unknown kind (scenario|emulator)").into_response()),
     };
+    let (mut scenario, emulator, summary) = crate::assemble::build(&pool, ws, we).await?;
+    // Ship the quality/provenance summary INSIDE the file. Dropping it made a download from an
+    // empty warehouse look identical to a good one — vessels all NULL-attributed into one bucket,
+    // containers unenriched — with nothing in the file to say so.
+    if let Some(m) = scenario.get_mut("meta").and_then(serde_json::Value::as_object_mut) {
+        m.insert("summary".into(), summary);
+    }
+    let val = if kind == "scenario" { scenario } else { emulator };
     let body = serde_json::to_string_pretty(&val)?;
     Ok((
         [

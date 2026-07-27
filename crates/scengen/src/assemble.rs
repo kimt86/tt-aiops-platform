@@ -3,6 +3,8 @@
 //!   scenario  ← qc_move_log (window; the QC WORK QUEUE — 1 row/move, crane, twin via shared
 //!               (machno,seqno)) ⨝ move_hist (vessel/voyage attribution, 99.5%) ⨝ container
 //!               (attrs+ship cell) ⨝ vessel_call (size+berth) + yard_t0 (as-of-T stack state)
+//!             + landside ← rtg_move_log GI/GO (the ROAD side: external trucks in/out, with the
+//!               external plate in trk_id) ⨝ yard_move for the decoded stack slot
 //!   emulator  ← qc_move_log / rtg_move_log sliced to the window (period-accurate)
 //! qc_move_log is the terminal's authoritative quay-crane move stream (MCH_OPERATION, PK
 //! (machno,contno,seqno)); we use it as the work-list SPINE instead of JOB_ORDER_HISTORY, which
@@ -117,9 +119,66 @@ pub async fn build(pool: &PgPool, ws: DateTime<Utc>, we: DateTime<Utc>) -> Resul
         "cells": cells_json,
     });
 
+    // ---- LANDSIDE (gate) work list: the ROAD side of the terminal — external trucks delivering
+    // (GI) or collecting (GO) boxes. Spine is the LOCAL rtg_move_log (yard-crane move stream, one
+    // row per physical move, PK (machno,contno,seqno)); for GI/GO its trk_id is the EXTERNAL road
+    // truck's plate (yard tractors "TT####" only show up on DS/LD). The decoded stack slot comes
+    // from scenario.yard_move — the SAME MCH_OPERATION row, joined on (machno,contno,seqno) — so a
+    // gate move also says where the box landed / came from. Zero Oracle, like the rest of build().
+    //
+    // Two honest limits, both reported rather than hidden: `yard_slot` is null for windows older
+    // than the yard collector's history (slot_known counts how many resolved), and WHICH physical
+    // gate/lane a truck used is NOT recoverable — TOS records LANEID as the constant 'GATE00'.
+    // RH/AH/MI/MO (rehandle, internal transfer) stay OUT of the work list by design: they are
+    // yard-state only, the same rule vessels[].containers[] follows.
+    let landside_txt: Option<String> = sqlx::query_scalar(
+        r#"
+        WITH g AS (
+          SELECT machno, contno, seqno, jobtype, trk_id, st_ts, comp_ts, dur_s, status
+            FROM rtg_move_log
+           WHERE comp_ts >= $1 AND comp_ts < $2 AND jobtype IN ('GI','GO')
+        ),
+        m AS (
+          SELECT g.*, yb.block, y.bay_idx, y.row_idx, y.tier
+            FROM g
+            LEFT JOIN scenario.yard_move y
+              ON y.machno = g.machno AND y.contno = g.contno AND y.seqno = g.seqno
+            LEFT JOIN scenario.yard_block yb ON yb.block_id = y.block_id
+        )
+        SELECT jsonb_build_object(
+          'note', 'gate work list from rtg_move_log GI/GO (trk_id = external road truck). yard_slot joined from yard_move where reconstructed; physical gate/lane is not recorded by TOS.',
+          'moves_total',   count(*),
+          'gate_in',       count(*) FILTER (WHERE jobtype = 'GI'),
+          'gate_out',      count(*) FILTER (WHERE jobtype = 'GO'),
+          'trucks_unique', count(DISTINCT trk_id),
+          'slot_known',    count(tier),
+          'moves', coalesce(jsonb_agg(jsonb_build_object(
+              'container_id', contno,
+              'move_type', CASE jobtype WHEN 'GI' THEN 'gate_in' ELSE 'gate_out' END,
+              'move_ts', comp_ts, 'start_ts', st_ts, 'service_s', dur_s,
+              'yard_crane', machno, 'truck', trk_id,
+              'fill', CASE status WHEN 'F' THEN 'full' WHEN 'M' THEN 'empty' END,
+              'yard_slot', CASE WHEN tier IS NOT NULL THEN jsonb_build_object(
+                   'block', block, 'bay_idx', bay_idx,
+                   'row', CASE WHEN row_idx BETWEEN 0 AND 25 THEN chr(65 + row_idx) ELSE row_idx::text END,
+                   'tier', tier) END
+            ) ORDER BY comp_ts), '[]'::jsonb)
+        )::text
+        FROM m
+        "#,
+    )
+    .bind(ws).bind(we)
+    .fetch_one(pool)
+    .await?;
+    let landside: Value = serde_json::from_str(&landside_txt.unwrap_or_else(|| "{}".into()))?;
+    let lnd = |k: &str| landside.get(k).and_then(Value::as_i64).unwrap_or(0);
+    let (gate_in, gate_out, gate_trucks, gate_slots) =
+        (lnd("gate_in"), lnd("gate_out"), lnd("trucks_unique"), lnd("slot_known"));
+
     let scenario_out = json!({
         "meta": { "window": [ws.to_rfc3339(), we.to_rfc3339()], "home_port": "MYPKG", "source": "scengen" },
         "vessels": vessels,
+        "landside": landside,
         "yard_t0": yard_t0,
     });
 
@@ -194,6 +253,10 @@ pub async fn build(pool: &PgPool, ws: DateTime<Utc>, we: DateTime<Utc>) -> Resul
         "vessels": nv, "containers": nc, "ds": nds, "ld": nld, "cranes": ncr, "twin_moves": ntw,
         "enriched": nenr, "enriched_pct": if nc > 0 { nenr * 100 / nc } else { 0 },
         "qc_sample": qc_n("DS") + qc_n("LD"), "yc_sample": yc_n("DS") + yc_n("LD"),
+        // Landside (gate) — mirrors scenario_out.landside so the UI can show quay vs road at a
+        // glance. slot_pct is the share of gate moves whose yard slot could be reconstructed.
+        "gate_in": gate_in, "gate_out": gate_out, "gate_trucks": gate_trucks,
+        "gate_slot_pct": if gate_in + gate_out > 0 { gate_slots * 100 / (gate_in + gate_out) } else { 0 },
     });
 
     Ok((scenario_out, emulator_out, summary))
