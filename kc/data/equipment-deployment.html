@@ -29,42 +29,38 @@
   <div class="kc-tablewrap"><table>
     <thead><tr><th>장비</th><th>알고 싶은 것</th><th>얻는 방식</th><th>출처</th></tr></thead>
     <tbody>
-      <tr><td><strong>QC · 안벽 크레인</strong></td><td>어느 크레인이 어느 배에 언제 붙었나</td><td><strong>수집</strong>(새 소스)</td><td>TOS <code>JOB_CRANE_HISTORY</code></td></tr>
+      <tr><td><strong>QC · 안벽 크레인</strong></td><td>어느 크레인이 어느 배에 언제 붙었나</td><td><strong>도출</strong>(계산)</td><td>안벽 크레인 무브 이력에서</td></tr>
       <tr><td><strong>RTG · 야드 크레인</strong></td><td>어느 크레인이 어느 블록을 맡았나</td><td><strong>도출</strong>(계산)</td><td>야드 무브 이력에서</td></tr>
-      <tr><td><strong>TT · 야드 트럭</strong></td><td>몇 대가 돌았나</td><td><strong>도출</strong>(계산)</td><td>무브 로그에서</td></tr>
-      <tr><td><strong>게이트(육측)</strong></td><td>외부 트럭이 언제 무엇을 싣고 드나들었나</td><td><strong>수집</strong>(새 소스)</td><td>TOS <code>CYC_HISTORY</code></td></tr>
+      <tr><td><strong>TT · 야드 트럭</strong></td><td>몇 대가 돌았나</td><td><strong>도출</strong>(계산)</td><td>트럭 작업 사이클 기록에서</td></tr>
+      <tr><td><strong>게이트(육측)</strong></td><td>외부 트럭이 언제 무엇을 싣고 드나들었나</td><td><strong>도출</strong>(계산)</td><td>야드 크레인 무브 이력에서</td></tr>
     </tbody>
   </table></div>
-  <div class="kc-cal note"><span class="h">왜 둘로 나뉘나</span><p>야드 크레인·트럭의 움직임은 <strong>이미 다른 목적으로 무브 이력을 모으고</strong> 있어서, "누가 어디 있었나"를 그 이력에서 <strong>되짚어 계산</strong>할 수 있습니다. 반면 안벽 크레인의 <strong>배 배정</strong>과 게이트의 <strong>외부 트럭 정보</strong>는 그 무브 이력에 담기지 않아, <strong>새로 긁어와야</strong> 합니다.</p></div>
+  <div class="kc-cal tip"><span class="h">네 가지 모두 "이미 있는 기록에서 계산"입니다</span><p>처음에는 안벽 크레인 배정과 게이트만은 <strong>TOS에서 새로 긁어와야 한다</strong>고 봤습니다. 실제로 데이터를 확인해 보니 둘 다 <strong>이미 모으고 있는 이동 기록 안에</strong> 답이 있었습니다. 그래서 장비 투입 때문에 <strong>TOS를 새로 조회하는 일은 없습니다</strong>. 아래 2번과 5번이 그 이야기입니다.</p></div>
 
-  <h2>2. QC 안벽 크레인 투입 — TOS에서 직접 수집</h2>
-  <p><strong>안벽 크레인</strong>(배와 부두 사이에서 컨테이너를 드는 큰 팔)이 <strong>어느 배에 언제 배정됐는지</strong>는 TOS의 크레인 이력 표에서 가져옵니다.</p>
-  <div class="kc-tablewrap"><table>
-    <thead><tr><th>항목</th><th>내용</th></tr></thead>
-    <tbody>
-      <tr><td>소스 표</td><td>TOS <code>JOB_CRANE_HISTORY</code> — 1행 = 크레인 배정 기록 한 건</td></tr>
-      <tr><td>담긴 값</td><td>크레인 번호 · 배(vessel) · 항차(voyage) · 날짜+시각 · 기록 종류</td></tr>
-      <tr><td>대상</td><td><strong>안벽 크레인만</strong>(번호 C##/M##/Z##). 야드 크레인은 이 표에 <strong>없음</strong>.</td></tr>
-      <tr><td>저장 위치</td><td>시나리오 저장소의 크레인 투입 표(<code>scenario.crane_deploy</code>)</td></tr>
-    </tbody>
-  </table></div>
-
-  <h3>함정 하나 — "언제부터 언제까지"가 표에 없다</h3>
-  <p>이 표에는 원래 <strong>시작·끝 시각 칸</strong>이 있지만, 실제로는 <strong>거의 항상 비어(NULL) 있습니다</strong>. 그래서 "크레인 C51이 이 배에 <em>몇 시부터 몇 시까지</em> 붙어 있었나"를 표에서 바로 읽을 수 없습니다. 대신 <strong>배정(assign) 사건 하나하나</strong>는 시각과 함께 남아 있습니다.</p>
-  <div class="kc-cal note"><span class="h">해법 — 사건을 이어 붙여 '구간'을 만든다</span><p>그래서 우리는 <strong>배정 사건만 그대로 저장</strong>해 두고, 나중에 <strong>조립 단계</strong>(흩어진 조각을 하나의 시뮬레이션 입력으로 맞추는 과정)에서 <strong>같은 (크레인·배)의 연속된 사건을 짝지어</strong> "이 사건 시각 ~ 다음 사건 시각"을 하나의 <strong>투입 구간</strong>으로 만듭니다.</p></div>
-  <div class="kc-flow">
-    <div class="node accent">배정 사건 A<span class="sub">C51 · 배 X · 10:00</span></div>
-    <div class="arw">다음 사건까지 = 투입 구간</div>
-    <div class="node accent">배정 사건 B<span class="sub">C51 · 배 X · 14:00</span></div>
-  </div>
-  <p>→ "C51이 배 X에 <strong>10:00~14:00</strong> 투입" 이라는 구간이 만들어집니다. 이렇게 <strong>점(사건)을 선(구간)으로</strong> 바꾸는 셈입니다.</p>
-
-  <h3>수집은 왜 가볍나</h3>
+  <h2>2. QC 안벽 크레인 투입 — 실제로 친 기록에서 도출</h2>
+  <p><strong>안벽 크레인</strong>(배와 부두 사이에서 컨테이너를 드는 큰 팔)이 <strong>어느 배에 언제 붙어 있었는지</strong>는, 그 크레인이 <strong>실제로 컨테이너를 든 기록</strong>을 시간순으로 이어서 만듭니다.</p>
   <ul>
-    <li>이 표는 <strong>전체가 아주 작습니다</strong>(대략 8천 행 정도). 그래서 부담이 거의 없습니다.</li>
-    <li>표가 <strong>날짜 순서로 정렬</strong>돼 있어, "마지막으로 읽은 지점"부터 그날치를 다시 읽어도 <strong>값쌉니다</strong>. 늦게 도착해 보이는 행도 이 재읽기로 자연히 딸려 오고, <strong>중복은 자동으로 무시</strong>합니다.</li>
-    <li>실행은 <code>scengen crane-deploy</code> 명령 하나로 이뤄집니다.</li>
+    <li>안벽 크레인 무브 이력에는 <strong>어느 크레인이 언제 어떤 컨테이너를 들었는지</strong>가 한 줄씩 남습니다. 그 컨테이너가 어느 배 것인지는 작업목록과 <strong>같은 방법</strong>으로 붙입니다.</li>
+    <li>한 크레인이 <strong>같은 배</strong>를 계속 치고 있으면 그게 곧 하나의 <strong>투입 구간</strong>입니다. 배가 바뀌거나, 한동안 아무것도 안 들면 거기서 구간을 끊습니다.</li>
+    <li>새 TOS 조회가 <strong>필요 없습니다</strong>. 조립 단계에서 계산만 합니다.</li>
   </ul>
+  <div class="kc-cal note"><span class="h">구간을 끊는 기준은 60분 — 데이터로 정했습니다</span><p>같은 크레인이 연속으로 컨테이너를 드는 <strong>간격은 대부분 8분 안쪽</strong>이고, 30분 넘게 비는 경우는 전체의 <strong>0.6%</strong>뿐입니다. 그래서 <strong>60분</strong>을 기준으로 하면 교대 인수인계처럼 잠깐 쉬는 구간은 <strong>끊지 않으면서</strong>, 진짜로 손을 뗀 구간만 분리됩니다.</p></div>
+
+  <h3>원래는 TOS의 '배정 계획표'를 쓰려고 했습니다 — 그런데 맞지 않았습니다</h3>
+  <p>TOS에는 <strong>어느 크레인을 어느 배에 붙일지 적어 둔 표</strong>가 따로 있습니다. 처음에는 그걸 그대로 쓰려고 했습니다. 표가 작아서 가볍고, 배 이름이 이미 적혀 있으니까요.</p>
+  <p>실제로 맞는지 <strong>채점</strong>해 봤습니다. 같은 시간대에 대해 "계획표가 말하는 배"와 "그 크레인이 실제로 친 배"를 하나하나 맞춰 봤더니:</p>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th>확인한 것</th><th>결과</th></tr></thead>
+    <tbody>
+      <tr><td>계획표로 배를 붙인 안벽 작업</td><td>약 34시간 동안 24,681건</td></tr>
+      <tr><td>그중 <strong>실제와 다른 배</strong>에 붙은 것</td><td><strong>6,569건 (약 27%)</strong></td></tr>
+      <tr><td>틀린 방식</td><td>항차만 어긋난 경우는 <strong>0건</strong> — 전부 <strong>배 자체가 다름</strong></td></tr>
+      <tr><td>틀리는 모양</td><td>한 크레인의 한 교대 <strong>전체가 통째로</strong> 다른 배에 붙음</td></tr>
+    </tbody>
+  </table></div>
+  <p>즉 <strong>조금 부정확한 게 아니라, 네 건 중 한 건꼴로 완전히 다른 배</strong>였습니다. 계획은 현장에서 자주 바뀌는데 표가 그걸 따라가지 못하기 때문입니다.</p>
+  <div class="kc-cal tip"><span class="h">그래서 원칙이 하나로 정리됐습니다</span><p><strong>계획이 아니라 실제로 일어난 일에서 만든다.</strong> 작업목록도 같은 이유로 '작업 지시 기록'이 아니라 '실제 무브 기록'으로 바꿨습니다. 장비 투입도 같은 원칙을 따릅니다.</p></div>
+  <p>계획표 수집기(<code>scengen crane-deploy</code>)는 <strong>지우지 않고 남겨</strong> 뒀습니다. 다만 시나리오를 만드는 데는 쓰지 않고, <strong>"계획이 실제와 얼마나 달랐나"를 비교하는 용도</strong>로만 씁니다. 그래서 자동 실행 예약도 일부러 걸지 않았습니다.</p>
 
   <h2>3. RTG 야드 크레인 투입 — 무브 이력에서 도출</h2>
   <p><strong>야드 크레인</strong>(야적장에서 컨테이너를 쌓고 내리는 크레인)은 <strong>배 배정 같은 별도 기록이 없습니다</strong>. 대신 "이 크레인이 <strong>어느 블록을</strong> 시간대별로 맡았나"를, 우리가 <strong>이미 모으고 있는 야드 크레인 무브(이동) 이력</strong>에서 되짚어 계산합니다.</p>
@@ -74,38 +70,39 @@
     <li>새 TOS 조회가 <strong>필요 없습니다</strong>. 조립 단계에서 계산만 합니다.</li>
   </ul>
 
-  <h2>4. TT 트럭 대수 — 무브 로그에서 도출</h2>
-  <p>그날 <strong>트럭이 몇 대나 돌았는지</strong>도 별도 소스가 필요 없습니다. <strong>무브 로그</strong>(트럭·컨테이너의 작업 이동 기록)에 등장한 <strong>서로 다른 트럭 번호를 세면</strong> 됩니다. 시간대별로 세면 "그 시간에 몇 대가 활동했나"가 나옵니다.</p>
-  <div class="kc-cal note"><span class="h">한 줄</span><p>RTG·TT는 <strong>"이미 있는 이동 기록에서 계산"</strong>이라, 시뮬레이션에 필요한 만큼 조립 시점에 뽑아내면 됩니다. 새로 긁어올 것이 없습니다.</p></div>
+  <h2>4. TT 트럭 대수 — 작업 사이클 기록에서 도출</h2>
+  <p>그날 <strong>트럭이 몇 대나 돌았는지</strong>도 별도 소스가 필요 없습니다. 트럭의 <strong>작업 사이클 기록</strong>(배차 시각 ~ 작업 완료 시각)을 <strong>30분 단위로 잘라</strong>, 각 구간에 걸쳐 있는 트럭이 몇 대인지 세면 됩니다. 그러면 "그 시간에 몇 대가 실제로 일하고 있었나"가 시간대별 곡선으로 나옵니다.</p>
+  <div class="kc-cal note"><span class="h">확인한 것 — 트럭 번호가 정말 '차량'을 가리키나</span><p>기록에 붙은 번호가 차량이 아니라 <strong>운행 건마다 새로 붙는 번호</strong>일 수 있다는 의심이 있었습니다(그러면 대수를 세는 의미가 없어집니다). 확인해 보니 <strong>차량이 맞습니다</strong>: 최근 3시간 동안 안벽 작업에 나온 번호 443개 중 <strong>432개가 GPS 위치 신호에도 그대로</strong> 나타났고, 시간당 대수도 TOS의 사이클 기록과 거의 같았습니다(414~431 대 400~427).</p></div>
+  <div class="kc-cal warn"><span class="h">⚠ GPS로는 과거를 못 봅니다</span><p>차량 위치 신호는 <strong>최근 이틀치만</strong> 보관합니다. 그래서 <strong>지난 날짜의 시나리오</strong>를 만들 때는 GPS를 쓸 수 없고, 더 길게 남는 <strong>작업 기록</strong>으로 대수를 세야 합니다.</p></div>
 
-  <h2>5. 게이트(육측) 상세 — TOS에서 직접 수집</h2>
-  <p>야드 안 이동(야드 크레인이 쌓고 꺼내기)만으로는 <strong>외부에서 온 도로 트럭</strong> 쪽 이야기가 빠집니다. 게이트로 <strong>언제·어떤 컨테이너가·어느 외부 트럭에 실려</strong> 드나들었는지는 TOS의 사이클 이력에서 채웁니다.</p>
+  <h2>5. 게이트(육측) — 이미 들어오는 기록에 다 있었습니다</h2>
+  <p>야드 안 이동만 보면 <strong>외부에서 온 도로 트럭</strong> 쪽 이야기가 빠집니다. 이것도 TOS를 새로 조회해야 한다고 봤는데, 확인해 보니 <strong>이미 모으고 있는 야드 크레인 무브 이력 안에</strong> 들어 있었습니다.</p>
   <div class="kc-tablewrap"><table>
-    <thead><tr><th>항목</th><th>내용</th></tr></thead>
+    <thead><tr><th>필요한 것</th><th>어디에 있나</th></tr></thead>
     <tbody>
-      <tr><td>소스 표</td><td>TOS <code>CYC_HISTORY</code> 중 <strong>게이트 상황</strong> 기록</td></tr>
-      <tr><td>게이트 상황 종류</td><td><strong>GIY</strong> 게이트로 들어와 야드로 · <strong>OYG</strong> 야드에서 꺼내 게이트로(반출 픽업) · <strong>GOY</strong> 게이트에서 나감</td></tr>
-      <tr><td>야드 이력에 없어서 채우는 값</td><td><strong>외부 도로 트럭 차량번호</strong> · <strong>진짜 게이트 처리 시각</strong>(컨테이너 기준)</td></tr>
-      <tr><td>수집 방식(설계)</td><td>야드 이력에 이미 잡힌 <strong>반입·반출 컨테이너</strong>를 골라, <strong>컨테이너 번호로</strong> 사이클 이력을 조회</td></tr>
-      <tr><td>저장 위치</td><td>시나리오 저장소의 게이트 사건 표(<code>scenario.gate_event</code>)</td></tr>
+      <tr><td>반입·반출이 <strong>언제·어떤 컨테이너</strong>로 일어났나</td><td>야드 크레인 무브 이력의 반입(GI)·반출(GO) 기록</td></tr>
+      <tr><td><strong>외부 도로 트럭 차량번호</strong></td><td>같은 기록의 트럭 칸 — <strong>100% 채워져 있음</strong>(야드 트랙터는 양하·적하에만 나오므로 섞이지 않음)</td></tr>
+      <tr><td>실은 컨테이너가 <strong>비었나 찼나</strong></td><td>같은 기록의 상태 칸</td></tr>
+      <tr><td>야드 <strong>어느 자리</strong>에 놓았나/꺼냈나</td><td>야드 적치 위치 기록과 이어 붙임 — <strong>99.9%</strong> 연결됨</td></tr>
     </tbody>
   </table></div>
+  <p>규모도 작지 않습니다. 지금까지 쌓인 것만 <strong>반입 174,300건 · 반출 162,515건</strong>, 외부 트럭 약 <strong>7,500대</strong>분이고, <strong>TOS를 한 번도 더 조회하지 않고</strong> 시나리오에 실립니다.</p>
+  <div class="kc-cal note"><span class="h">아직 없는 것 — 게이트 창구에서의 처리 시각</span><p>지금 담기는 시각은 <strong>야드에서 크레인이 작업한 시각</strong>입니다. "트럭이 게이트 창구에 도착해 수속을 밟은 시각"과 거기서의 <strong>대기</strong>는 TOS의 사이클 이력(<code>CYC_HISTORY</code>)에만 있고, 아직 가져오지 않습니다. 게이트 혼잡을 시뮬레이션해야 할 때 <strong>2단계로</strong> 붙일 계획입니다(그릇인 <code>scenario.gate_event</code> 표는 이미 만들어 둠).</p></div>
   <div class="kc-cal warn"><span class="h">⚠ 함정 — 물리적 게이트·레인은 알 수 없다</span><p>"몇 번 게이트, 몇 번 레인으로 들어왔나"는 <strong>TOS가 기록하지 않습니다.</strong> 관련 값(레인 식별자)이 <strong>항상 같은 상수</strong>('GATE00')로만 채워져 있어, 게이트·레인 번호는 데이터로 구분할 수 없습니다. 그래서 시뮬레이션에서도 <strong>게이트를 하나로</strong> 보거나, 필요하면 별도 가정을 둬야 합니다.</p></div>
 
   <h2>6. 현재 상태 — 지금 되는 것 vs 아직인 것 (정직하게)</h2>
-  <p>이 주제는 <strong>일부만 배선</strong>돼 있습니다. 오해 없도록 완성/미완성을 명확히 구분합니다.</p>
   <div class="kc-tablewrap"><table>
     <thead><tr><th>조각</th><th>상태</th><th>설명</th></tr></thead>
     <tbody>
-      <tr><td>QC 크레인 투입 <strong>수집기</strong></td><td><strong>✅ 됨</strong></td><td>크레인 이력에서 배정 사건을 긁어 저장하는 코드 완성(<code>scengen crane-deploy</code>).</td></tr>
-      <tr><td>두 표 <strong>스키마</strong>(크레인 투입·게이트 사건)</td><td><strong>✅ 됨</strong></td><td>저장 구조는 둘 다 정의됨.</td></tr>
-      <tr><td>RTG·TT <strong>도출 경로</strong></td><td><strong>✅ 설계 확정</strong></td><td>야드 무브·무브 로그에서 계산하기로 확정(새 소스 불필요).</td></tr>
-      <tr><td>QC 수집기 <strong>상시 자동 실행(타이머)</strong></td><td><strong>⏳ 아직</strong></td><td>정해진 주기로 자동 도는 예약(systemd)이 <strong>없음</strong> — 지금은 수동 실행만. (다른 시나리오 수집기 몇 개는 이미 타이머가 있음.)</td></tr>
-      <tr><td>조립 단계 <strong>구간 짝짓기 + 장비 목록 출력</strong></td><td><strong>⏳ 아직</strong></td><td>모은 배정 사건을 시작~끝 <strong>구간으로 짝짓고</strong> 최종 <strong>장비 목록으로 내보내는</strong> 연결이 아직 안 됨.</td></tr>
-      <tr><td>게이트 사건 <strong>수집기</strong></td><td><strong>⏳ 아직</strong></td><td><strong>표(저장 구조)만</strong> 있고, 실제로 사이클 이력을 긁어 채우는 코드는 미구현.</td></tr>
+      <tr><td>QC 크레인 <strong>투입 구간</strong></td><td><strong>✅ 됨</strong></td><td>안벽 무브 이력에서 (크레인·배)별 구간으로 나옴. 시나리오의 장비 항목에 실림.</td></tr>
+      <tr><td>RTG 야드 크레인 <strong>블록 체류 구간</strong></td><td><strong>✅ 됨</strong></td><td>야드 무브 이력에서 (장비·블록)별 구간으로 나옴. 야드 이력이 복원된 기간까지만.</td></tr>
+      <tr><td>TT 트럭 <strong>시간대별 대수</strong></td><td><strong>✅ 됨</strong></td><td>작업 사이클을 30분 단위로 세어 곡선 + 최대 동시 대수까지.</td></tr>
+      <tr><td>게이트 <strong>반입·반출 작업목록</strong></td><td><strong>✅ 됨</strong></td><td>외부 차량번호·컨테이너 상태·적치 위치까지 포함해 시나리오에 실림.</td></tr>
+      <tr><td>게이트 <strong>창구 처리 시각·대기</strong></td><td><strong>⏳ 아직</strong></td><td>표(<code>scenario.gate_event</code>)만 있고 사이클 이력을 긁는 코드는 미구현. 게이트 혼잡을 다룰 때 착수.</td></tr>
+      <tr><td>배정 계획표 <strong>수집기</strong></td><td><strong>✅ 됨 (비교 전용)</strong></td><td><code>scengen crane-deploy</code>. 시나리오에는 쓰지 않으므로 자동 실행 예약은 <strong>일부러 걸지 않음</strong>.</td></tr>
     </tbody>
   </table></div>
-  <div class="kc-cal tip"><span class="h">한 줄 요약</span><p><strong>"어느 안벽 크레인이 어느 배에" 를 모으는 첫 조각과, 담을 그릇(표)은 완성</strong>됐습니다. 남은 일은 <strong>자동 실행(타이머)</strong>, <strong>사건을 구간으로 조립해 장비 목록으로 출력</strong>, <strong>게이트 수집기 구현</strong> 세 가지입니다.</p></div>
+  <div class="kc-cal tip"><span class="h">한 줄 요약</span><p>네 가지 장비 투입이 <strong>모두 시나리오 출력에 들어갑니다</strong>. 전부 <strong>이미 모으고 있는 실제 기록에서 계산</strong>하므로 장비 때문에 TOS를 새로 조회하지 않습니다. 남은 것은 <strong>게이트 창구에서의 처리 시각·대기</strong> 하나입니다.</p></div>
 
   <hr>
   <p><strong>관련:</strong> <a href="/kc/data/tos-extraction.html">TOS 데이터 추출 전수(무엇을)</a> · <a href="/kc/data/extractor.html">추출기 아키텍처(어떻게 도나·안전 원칙)</a> · <a href="/kc/data/tos-db-reference.html">TOS DB 레퍼런스</a> · <a href="/kc/dispatch/simulator-spec.html">배차 시뮬레이터 명세</a> · <a href="/kc/learn/rtg-work-cycle.html">RTG 작업 사이클</a></p>

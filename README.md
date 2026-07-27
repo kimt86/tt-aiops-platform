@@ -5,9 +5,10 @@ Six KPIs (TT utilization, empty-travel distance & ratio, TT cycle time, crane wa
 QC moves/hour) are extracted from the **live production Oracle TOS DB**, served from
 PostgreSQL, and shown in a bilingual (KO/EN) React dashboard.
 
-> **Hard rule:** the source Oracle is live production. Only the **extractor** ever
-> touches it — read-only, capped, index-range queries via `remote-toolbox-sql`. The
-> API and web app read **only PostgreSQL**.
+> **Hard rule:** the source Oracle is live production. Only two binaries ever touch it —
+> the **extractor** (critical path) and **scengen** (scenario collection, non-critical and
+> individually killable) — both read-only, capped, index-range queries via `remote-toolbox-sql`.
+> The API and web app read **only PostgreSQL**.
 
 ## Architecture
 
@@ -24,13 +25,20 @@ Oracle TOSADM ──(extractor, Rust)──> PostgreSQL ──(axum API, Rust)�
 
 ## Crates / dirs
 
+Package names are `tt-*` (`tt-core`, `tt-extractor`, `tt-api`); `scengen` keeps its own name.
+
 - `crates/core` — double-parse of toolbox output, stats (paired/Welch t-test), KPI metadata.
-- `crates/extractor` — the only Oracle-touching binary. `run` / `tick` / `backfill` / `transform`.
+- `crates/extractor` — the critical Oracle-touching binary. `run` / `tick` / `backfill` / `transform`.
 - `crates/api` — read-only axum API over L1/L2.
+- `crates/scengen` — simulation scenario + emulator generator. Isolated on purpose: its own
+  binary, its own `scenario` schema (never `public`), its own port (`:8899`), its own kill
+  switch. Collects from Oracle on a slow cadence and assembles a chosen window locally.
 - `web/` — React + Vite + Chart.js dashboard.
+- `kc/` — knowledge centre (static HTML), served at `/kc/`.
 - `db/` — migrations, seed, read-only `grants.sql`.
-- `deploy/` — `dev-db.sh` (rootless podman Postgres), `systemd/` timers.
-- `scripts/` — `dev.sh` (full local stack), `snapshot-report.sh` (static HTML report).
+- `deploy/` — `dev-db.sh` (rootless podman Postgres), `systemd/` units.
+- `scripts/` — `dev.sh` (full local stack), `snapshot-report.sh`, and the `psql` batches the
+  local-derivation timers run.
 
 ## Run locally
 
@@ -42,9 +50,9 @@ DATABASE_URL=postgresql://wp:wp@127.0.0.1:5433/wp_tt ./db/apply.sh
 # 2. extract real data (read-only against prod Oracle)
 export DATABASE_URL=postgresql://wp:wp@127.0.0.1:5433/wp_tt
 export SKILL_DIR=/home/aiadmin/.codex/skills/yard-db-ops
-cargo run -p wp-extractor -- run --kpi all --date 2026-06-04 --target oracle-prod
+cargo run -p tt-extractor -- run --kpi all --date 2026-06-04 --target oracle-prod
 # optional history for trends/baseline:
-cargo run -p wp-extractor -- backfill --from 2026-05-01 --to 2026-06-04
+cargo run -p tt-extractor -- backfill --from 2026-05-01 --to 2026-06-04
 
 # 3. full stack (API + web)
 ./scripts/dev.sh           # → http://127.0.0.1:5173
@@ -59,8 +67,24 @@ cargo run -p wp-extractor -- backfill --from 2026-05-01 --to 2026-06-04
 | `backfill --from --to` | seed history, one day at a time, throttled | N days × above |
 | `transform --date D` | recompute L1/L2 from L0 (no Oracle) | none |
 
-Scheduling: see [deploy/systemd/README.md](deploy/systemd/README.md). Default cadence is
-deliberately conservative (nightly 01:30, T1 5 min, T2 20 min) to spare the source DB.
+Scheduling: see [deploy/systemd/README.md](deploy/systemd/README.md). Cadence is deliberately
+conservative to spare the source DB.
+
+## Scenario generator (`scengen`)
+
+Produces the two JSON inputs a terminal simulator needs for a chosen period: the **scenario**
+(what happened — vessel work lists, landside gate moves, equipment deployment, the yard as it
+stood at t=0) and the **emulator** spec (measured equipment timings). Collection runs on slow
+timers; assembly is local and touches Oracle not at all.
+
+```bash
+cargo run -p scengen -- collect --target oracle-prod   # one incremental tick
+cargo run -p scengen -- yard-build                     # local replay, no Oracle
+cargo run -p scengen -- serve --port 8899              # monitor + download page
+```
+
+Pick a period on the page and download; nothing is generated in advance. Stop everything with
+`UPDATE scenario.config SET enabled=false`.
 
 ## Tests
 

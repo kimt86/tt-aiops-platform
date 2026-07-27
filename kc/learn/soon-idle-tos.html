@@ -75,7 +75,7 @@
   <ol>
     <li><strong>✅ 라이브 수집</strong>: 90초 <code>workpool.sql</code>에 <code>JOB_ODR_ACTV_DT</code> 추가 → <code>live_workpool.actv_ts</code>(Oracle 추가쿼리 0, mig 0029). DS 활성 103건 전부 actv_ts+ytno+armgc 보유.</li>
     <li><strong>✅ 분류 보정</strong>: <code>classify_tt()</code> DS 분기에 TOS 보정 훅 — GPS RTG 미근접(&gt;30m)이어도 TOS ACTV면 soon_idle 보정(웹소켓 ∪ TOS). <strong>DS 곧유휴 GPS단독 4 → 22로 ~5.5배.</strong> <code>적재 N분</code> 배지 노출.</li>
-    <li><strong>✅ 라벨 수집</strong>: <code>wp-handover.timer</code>(60초)가 완료(<code>JOBSTATUS='C'</code>)를 <code>IDX_JOBHIST_DATETIME</code> 워터마크로 증분 폴링 → <code>tos_handover_label</code>(mig 0030). 권위 호라이즌(DS): ACTV→실제유휴 중앙 ~10.2분·블록대기 ~12.3분.</li>
+    <li><strong>✅ 라벨 수집</strong>: <code>tt-handover.timer</code>(60초)가 완료(<code>JOBSTATUS='C'</code>)를 <code>IDX_JOBHIST_DATETIME</code> 워터마크로 증분 폴링 → <code>tos_handover_label</code>(mig 0030). 권위 호라이즌(DS): ACTV→실제유휴 중앙 ~10.2분·블록대기 ~12.3분.</li>
     <li><strong>✅ 정확도 하니스</strong>: <code>spawn_soon_idle_logger</code>(30초)가 트립당 첫 진입을 <code>tt_soon_idle_pred</code>(mig 0031)에 적재 — source·<code>gps_would_fire</code>(반사실) 동반. 정답 = GPS 우선(<code>tt_cycle_v2.dropped_at</code>), 공백 시 TOS 폴백. 학습센터 ④ 섹션 노출. 예측 60건 중 DS 38의 34가 tos_only(GPS단독이면 89% 놓침).</li>
   </ol>
   <div class="kc-cal warn"><span class="h">리스크 (구조적)</span><p>DS 물리 순간 부재(RTG PLC 없음) → "정확히 언제 비었나"는 GPS dwell/ACTV_DT 근사만. 보존 한계: <code>JOB_ORDER_HISTORY</code> ~15일·<code>MCH_OPERATION</code> ~35일. 개별 리드타임 예측 불가 결론 → <a href="/kc/dispatch/leadtime-adr.html">리드타임 ADR</a>.</p></div>

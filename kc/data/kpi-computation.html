@@ -86,9 +86,9 @@ K_EMPTY_R = round(Σtotal_empty_m / Σ(empty_m+laden_m) * 100, 4)        sample_
   <div class="kc-tablewrap"><table>
     <thead><tr><th>작업</th><th>주기 · 내용</th><th>Oracle 부하</th></tr></thead>
     <tbody>
-      <tr><td><strong>야간</strong> wp-nightly</td><td>01:30 MYT — 어제 <strong>권위</strong> 전체 추출 + transform(L1) + baseline(L2). 1회 풀스캔(~32s).</td><td>1회/일</td></tr>
-      <tr><td><strong>교대 틱 T1</strong> wp-shift-t1</td><td>~3분 — MPH·QC대기·가동률 + 선박 패널. MCH_OPERATION 1회.</td><td>LOW</td></tr>
-      <tr><td><strong>교대 틱 T2</strong> wp-shift-t2</td><td>~15분 — 공차·사이클·크레인대기. JOB_ORDER_HISTORY.</td><td>MEDIUM</td></tr>
+      <tr><td><strong>야간</strong> tt-nightly</td><td>01:30 MYT — 어제 <strong>권위</strong> 전체 추출 + transform(L1) + baseline(L2). 1회 풀스캔(~32s).</td><td>1회/일</td></tr>
+      <tr><td><strong>교대 틱 T1</strong> tt-shift-t1</td><td>~3분 — MPH·QC대기·가동률 + 선박 패널. MCH_OPERATION 1회.</td><td>LOW</td></tr>
+      <tr><td><strong>교대 틱 T2</strong> tt-shift-t2</td><td>~15분 — 공차·사이클·크레인대기. JOB_ORDER_HISTORY.</td><td>MEDIUM</td></tr>
     </tbody>
   </table></div>
   <div class="kc-cal tip"><span class="h">잠정 → 권위</span><p>낮 동안 "오늘"은 교대 틱이 채운 <strong>잠정</strong> 값(provisional 배지). 밤 01:30 야간 런이 어제를 권위 값으로 확정·기준선 갱신. 한 번 권위 확정된 날은 다시 스캔하지 않아 이력은 "추출 시작 시점부터 앞으로" 영구 누적(보존 한계 → <a href="/kc/data/tos-db-reference.html">TOS 레퍼런스</a>).</p></div>

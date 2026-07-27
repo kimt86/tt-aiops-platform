@@ -1,5 +1,11 @@
 # 06. 중앙 데이터 게이트웨이 조사팀 인계 요약
 
+> **⚠ 이 문서는 2026-07-22 시점의 스냅샷입니다.** 이후 두 가지가 바뀌어 일부 서술이 실제와 다릅니다:
+> ① 프로젝트 개명(`wp-tt-dashboard` → `tt-aiops-platform`)으로 **systemd 유닛이 전부 `wp-*` → `tt-*`**, 크레이트가 `tt-*`가 됐습니다.
+> ② 시나리오 서브시스템(`scengen`)이 재설계돼 출력 구조·수집 경로가 달라졌습니다.
+> 현재 상태는 `deploy/systemd/README.md`, 루트 `README.md`, `/kc/data/equipment-deployment.html`을 기준으로 보세요.
+
+
 ## 1. 목적·범위·조사 기준
 
 이 문서는 Westports **Service 2 — TT Assignment**가 현재 실제로 소비·산출하는 데이터를 중앙 데이터 게이트웨이 조사팀에 인계하기 위한 요약이다. 다루는 것은 (a) Service 2가 필요로 하는 입력 Event/Snapshot, (b) 신선도·지연 요구, (c) 현재 TOS/Oracle 직접 연결 현황, (d) 게이트웨이 전환 시 위험과 미결 사항이다. Service 2 내부 매칭 로직·가중치, 일정·비용, Service 1·3·4는 범위 밖이다.

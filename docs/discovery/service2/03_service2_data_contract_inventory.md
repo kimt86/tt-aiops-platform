@@ -1,5 +1,11 @@
 # 03. Service 2 데이터 계약 인벤토리
 
+> **⚠ 이 문서는 2026-07-22 시점의 스냅샷입니다.** 이후 두 가지가 바뀌어 일부 서술이 실제와 다릅니다:
+> ① 프로젝트 개명(`wp-tt-dashboard` → `tt-aiops-platform`)으로 **systemd 유닛이 전부 `wp-*` → `tt-*`**, 크레이트가 `tt-*`가 됐습니다.
+> ② 시나리오 서브시스템(`scengen`)이 재설계돼 출력 구조·수집 경로가 달라졌습니다.
+> 현재 상태는 `deploy/systemd/README.md`, 루트 `README.md`, `/kc/data/equipment-deployment.html`을 기준으로 보세요.
+
+
 ## 1. 문서 정보
 
 | 항목 | 내용 |

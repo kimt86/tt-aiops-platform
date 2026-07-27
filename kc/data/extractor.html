@@ -4,14 +4,14 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>추출기(Extractor) 아키텍처 — TT AIOps 지식센터</title>
-  <meta name="description" content="TOS 프로덕션 Oracle에서 데이터를 긁어 Postgres에 적재하는 유일한 컴포넌트 = 추출기(wp-extractor). 서브커맨드·증분 스트림·KPI 롤업·live 스냅샷·스케줄링·데이터 흐름·Oracle 안전 원칙을 한곳에 정리한 아키텍처 레퍼런스.">
+  <meta name="description" content="TOS 프로덕션 Oracle에서 데이터를 긁어 Postgres에 적재하는 유일한 컴포넌트 = 추출기(tt-extractor). 서브커맨드·증분 스트림·KPI 롤업·live 스냅샷·스케줄링·데이터 흐름·Oracle 안전 원칙을 한곳에 정리한 아키텍처 레퍼런스.">
   <link rel="stylesheet" href="/kc/assets/kc.css">
   <script defer src="/kc/assets/kc.js"></script>
 </head>
 <body>
 <main class="kc-article" data-page="data/extractor" data-source="코드 감사 2026-07-22 (crates/extractor·systemd·sql 전수 매핑)">
   <h1>추출기(Extractor) 아키텍처</h1>
-  <p class="kc-lede"><code>wp-extractor</code>(바이너리 <code>extractor</code>)는 <strong>TOS 프로덕션 Oracle을 건드리는 유일한 컴포넌트</strong>이자, TOS→Postgres 적재의 심장입니다. 이 문서는 그 <strong>구조·역할·서비스에서의 위치</strong>를 한곳에 정리한 아키텍처 레퍼런스입니다. "무엇을 긁는가"(추출 지점 전수)는 → <a href="/kc/data/tos-extraction.html">TOS 데이터 추출 전수</a>, 여기는 <strong>"어떻게 도는가"(엔진)</strong>.</p>
+  <p class="kc-lede"><code>tt-extractor</code>(바이너리 <code>extractor</code>)는 <strong>TOS 프로덕션 Oracle을 건드리는 유일한 컴포넌트</strong>이자, TOS→Postgres 적재의 심장입니다. 이 문서는 그 <strong>구조·역할·서비스에서의 위치</strong>를 한곳에 정리한 아키텍처 레퍼런스입니다. "무엇을 긁는가"(추출 지점 전수)는 → <a href="/kc/data/tos-extraction.html">TOS 데이터 추출 전수</a>, 여기는 <strong>"어떻게 도는가"(엔진)</strong>.</p>
   <div class="kc-meta"><span class="kc-badge kind">데이터 · 아키텍처</span><span class="kc-badge living">전수 매핑 2026-07-22 · 정리 mig0101</span></div>
   <div class="kc-cal tip"><span class="h">Bottom line</span><p>추출기는 <strong>두 갈래</strong>입니다: ① <strong>증분 스트림</strong>(qc-moves·rtg-moves·handover·workpool — 60~90초, 근실시간 이벤트 로그) ② <strong>KPI 롤업</strong>(tick·nightly — 하루/시프트 집계). 모든 Oracle 접근은 <strong>단일 게이트(<code>remote-toolbox-sql</code>)</strong>로 <strong>읽기전용·인덱스안전·캡·직렬</strong>. 흐름은 <strong>Oracle → 추출기 → Postgres(L0/L1/L2·이벤트로그·live) → API/대시보드</strong>. 무게(부하)에 따라 주기를 다르게 둡니다(값싼 MCH 스트림은 자주, 무거운 JOB_HISTORY 집계는 드물게·야간).</p></div>
 
@@ -114,20 +114,20 @@
   <div class="kc-tablewrap"><table>
     <thead><tr><th>유닛</th><th>ExecStart</th><th>주기</th><th>Oracle</th></tr></thead>
     <tbody>
-      <tr><td>wp-qc-moves</td><td><code>extractor qc-moves</code></td><td>60초</td><td>✅</td></tr>
-      <tr><td>wp-rtg-moves</td><td><code>extractor rtg-moves</code></td><td>60초</td><td>✅</td></tr>
-      <tr><td>wp-handover</td><td><code>extractor handover</code></td><td>60초</td><td>✅</td></tr>
-      <tr><td>wp-workpool</td><td><code>extractor workpool</code></td><td>90초</td><td>✅</td></tr>
-      <tr><td>wp-shift-t1</td><td><code>tick --shift --tier t1</code></td><td>3분</td><td>✅ MCH</td></tr>
-      <tr><td>wp-weather-live</td><td><code>extractor weather-live</code></td><td>3분</td><td>—</td></tr>
-      <tr><td>wp-shift-t2</td><td><code>tick --shift --tier t2</code></td><td>15분</td><td>✅ JOB_HIST</td></tr>
-      <tr><td>wp-weather</td><td><code>extractor weather</code></td><td>1시간</td><td>—</td></tr>
-      <tr><td>wp-nightly</td><td><code>run --kpi all</code></td><td>01:30 매일</td><td>✅ 전부</td></tr>
-      <tr><td>wp-tt-move-log</td><td><code>psql populate_tt_move_log.sql</code></td><td>5분</td><td>— (psql)</td></tr>
-      <tr><td>wp-tt-cycle-recon</td><td><code>psql populate_tt_cycle_recon.sql</code></td><td>10분</td><td>— (psql)</td></tr>
+      <tr><td>tt-qc-moves</td><td><code>extractor qc-moves</code></td><td>60초</td><td>✅</td></tr>
+      <tr><td>tt-rtg-moves</td><td><code>extractor rtg-moves</code></td><td>60초</td><td>✅</td></tr>
+      <tr><td>tt-handover</td><td><code>extractor handover</code></td><td>60초</td><td>✅</td></tr>
+      <tr><td>tt-workpool</td><td><code>extractor workpool</code></td><td>90초</td><td>✅</td></tr>
+      <tr><td>tt-shift-t1</td><td><code>tick --shift --tier t1</code></td><td>3분</td><td>✅ MCH</td></tr>
+      <tr><td>tt-weather-live</td><td><code>extractor weather-live</code></td><td>3분</td><td>—</td></tr>
+      <tr><td>tt-shift-t2</td><td><code>tick --shift --tier t2</code></td><td>15분</td><td>✅ JOB_HIST</td></tr>
+      <tr><td>tt-weather</td><td><code>extractor weather</code></td><td>1시간</td><td>—</td></tr>
+      <tr><td>tt-nightly</td><td><code>run --kpi all</code></td><td>01:30 매일</td><td>✅ 전부</td></tr>
+      <tr><td>tt-move-log</td><td><code>psql populate_tt_move_log.sql</code></td><td>5분</td><td>— (psql)</td></tr>
+      <tr><td>tt-cycle-recon</td><td><code>psql populate_tt_cycle_recon.sql</code></td><td>10분</td><td>— (psql)</td></tr>
     </tbody>
   </table></div>
-  <div class="kc-cal note"><span class="h">추출기 유닛이 아닌 것</span><p><code>wp-ws-bridge</code>(GPS 웹소켓 SSH 터널)·<code>wp-scenario-*</code>(별 바이너리 <code>scengen</code>·격리된 시나리오 서브시스템)는 추출기가 아닙니다. <code>tt-move-log</code>·<code>tt-cycle-recon</code>은 추출기 바이너리가 아니라 <strong>psql</strong>로 Postgres 조인만(Oracle 무접촉).</p></div>
+  <div class="kc-cal note"><span class="h">추출기 유닛이 아닌 것</span><p><code>tt-ws-bridge</code>(GPS 웹소켓 SSH 터널)·<code>tt-scenario-*</code>(별 바이너리 <code>scengen</code>·격리된 시나리오 서브시스템)는 추출기가 아닙니다. <code>tt-move-log</code>·<code>tt-cycle-recon</code>은 추출기 바이너리가 아니라 <strong>psql</strong>로 Postgres 조인만(Oracle 무접촉).</p></div>
 
   <h2>8. 데이터 흐름 &amp; 소비자</h2>
   <p>어느 Postgres 테이블이 어느 API 기능을 먹이는가(<code>crates/api/src</code> 실측):</p>
@@ -153,7 +153,7 @@
     <li><strong>L0→L1→L2</strong> — 추출(raw)·변환(kpi_daily)·기준(baseline) 분리; 변환/기준은 Postgres 전용.</li>
     <li><strong>MYT(UTC+8)</strong> 전역 — <code>parse_etw</code>로 <code>YYYYMMDDHH24MISS[mmm]</code> → UTC.</li>
   </ul>
-  <div class="kc-cal note"><span class="h">2026-07-22 정리 — dead 추출 은퇴 (mig0101)</span><p>소비자 전수 감사에서 <strong>어디서도 읽지 않는</strong> 2건을 제거했습니다: ① <code>raw_k_mph_voyage</code>(항차별 MPH) — 야간 <code>run --kpi all</code>이 <strong>Oracle 30일 쿼리</strong>를 계속 돌렸으나 소비자 0 → KPI 모듈·<code>c06</code> SQL·<code>main.rs</code> arm·테이블까지 삭제(유일한 실비용 절감). ② <code>kpi_breakdown_qc</code> 테이블 + <code>transform.breakdown_qc()</code> writer — <code>FROM kpi_breakdown_qc</code>가 코드 어디에도 없음 → writer·테이블 삭제. <strong>유지</strong>: <code>/api/breakdown/qc</code> 엔드포인트는 <code>raw_*</code>에서 재계산하므로 <em>살아있고</em>, <code>k_crane_q_hour</code>는 수동 스냅샷 리포트가 씀. 동시에 <strong>고아 유닛</strong> <code>wp-tick-t1/t2</code>(미설치·비-shift)를 배포에서 삭제 — 인트라데이 갱신은 <code>wp-shift-t1/t2</code>(<code>--shift</code> 경로)가 단독 담당합니다. 아울러 <code>qc/rtg-moves</code>의 <code>main.rs</code> docstring "every 5min"을 실제와 같은 <strong>60초</strong>로 정정.</p></div>
+  <div class="kc-cal note"><span class="h">2026-07-22 정리 — dead 추출 은퇴 (mig0101)</span><p>소비자 전수 감사에서 <strong>어디서도 읽지 않는</strong> 2건을 제거했습니다: ① <code>raw_k_mph_voyage</code>(항차별 MPH) — 야간 <code>run --kpi all</code>이 <strong>Oracle 30일 쿼리</strong>를 계속 돌렸으나 소비자 0 → KPI 모듈·<code>c06</code> SQL·<code>main.rs</code> arm·테이블까지 삭제(유일한 실비용 절감). ② <code>kpi_breakdown_qc</code> 테이블 + <code>transform.breakdown_qc()</code> writer — <code>FROM kpi_breakdown_qc</code>가 코드 어디에도 없음 → writer·테이블 삭제. <strong>유지</strong>: <code>/api/breakdown/qc</code> 엔드포인트는 <code>raw_*</code>에서 재계산하므로 <em>살아있고</em>, <code>k_crane_q_hour</code>는 수동 스냅샷 리포트가 씀. 동시에 <strong>고아 유닛</strong> <code>wp-tick-t1/t2</code>(미설치·비-shift)를 배포에서 삭제 — 인트라데이 갱신은 <code>tt-shift-t1/t2</code>(<code>--shift</code> 경로)가 단독 담당합니다. 아울러 <code>qc/rtg-moves</code>의 <code>main.rs</code> docstring "every 5min"을 실제와 같은 <strong>60초</strong>로 정정.</p></div>
 
   <hr>
   <p><strong>관련:</strong> <a href="/kc/data/tos-extraction.html">TOS 데이터 추출 전수(무엇을)</a> · <a href="/kc/data/tos-db-reference.html">TOS DB 레퍼런스</a> · <a href="/kc/data/cycle-gps-quality.html">GPS 싸이클 해석</a> · <a href="/kc/data/kpi-computation.html">KPI 산출</a> · <a href="/kc/dispatch/index.html">배차 로직</a></p>
