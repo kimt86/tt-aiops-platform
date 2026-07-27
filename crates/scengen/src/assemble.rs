@@ -7,7 +7,9 @@
 //!               external plate in trk_id) ⨝ yard_move for the decoded stack slot
 //!             + equipment ← deployment spans derived from the same real move streams
 //!               (qc_move_log / yard_move / tt_move_log), never from the TOS assignment plan
-//!   emulator  ← qc_move_log / rtg_move_log sliced to the window (period-accurate)
+//!   emulator  ← learn_qc_move_time (crane move time; a snapshot, NOT window-sliced) + rtg_move_log
+//!               sliced to the window (yard-crane service) + documented constants for what our
+//!               move logs cannot separate (hatch cover, bay change, drive speed)
 //! qc_move_log is the terminal's authoritative quay-crane move stream (MCH_OPERATION, PK
 //! (machno,contno,seqno)); we use it as the work-list SPINE instead of JOB_ORDER_HISTORY, which
 //! is a status-heartbeat log (JOBSTATUS cycles A→P→Q→C, emitting many rows per physical move).
@@ -28,6 +30,22 @@ use crate::state;
 const SPAN_GAP_MIN: i64 = 60;
 /// Bucket width for the truck-fleet curve.
 const FLEET_BUCKET_MIN: i64 = 30;
+
+/// Yard-crane service cap used when estimating the emulator distribution. Matches the published
+/// methodology (scripts/estimate_equipment_specs.sh): below 5s is not a service, above 600s is a
+/// stall bleeding into the measurement. NOT the extractor's storage cap — a different job.
+const YC_CAP_S: (i64, i64) = (5, 600);
+/// Deck<->hold hatch-cover swap, once per bay. Measured in the research log; our move logs cannot
+/// separate it, so it travels as a documented constant instead of as null.
+const HATCH_S_DS: i64 = 428;
+const HATCH_S_LD: i64 = 496;
+/// Gantry move to a different bay.
+const BAY_CHANGE_S: i64 = 180;
+/// Pure driving speed from the GPS motion split (22.8 km/h with stopped segments excluded).
+/// Stop overhead is modelled by the emulator itself (handover, queueing, stall), not by this.
+const DRIVE_SPEED_MS: f64 = 6.33;
+/// Used only when the learner has no row for a job type yet.
+const QC_MOVE_S_FALLBACK: (i64, i64) = (90, 110);
 
 /// Build (scenario_out, emulator_out, summary) for [ws, we). Pure — no job/run side effects.
 pub async fn build(pool: &PgPool, ws: DateTime<Utc>, we: DateTime<Utc>) -> Result<(Value, Value, Value)> {
@@ -300,42 +318,84 @@ pub async fn build(pool: &PgPool, ws: DateTime<Utc>, we: DateTime<Utc>) -> Resul
         "yard_t0": yard_t0,
     });
 
-    // ---- EMULATOR: qc_move_s + yc_service sliced to the window (period-accurate, capped).
-    let qc: Vec<(String, Option<f64>, i64)> = sqlx::query_as(
-        "SELECT jobtype, percentile_cont(0.5) WITHIN GROUP (ORDER BY dur_s), count(*)
-           FROM qc_move_log
-          WHERE comp_ts >= $1 AND comp_ts < $2 AND dur_s BETWEEN 1 AND 300 AND jobtype IN ('DS','LD')
-          GROUP BY jobtype",
-    ).bind(ws).bind(we).fetch_all(pool).await?;
+    // ---- EMULATOR (the MeasuredModel the simulator is initialised with).
+    //
+    // qc_move_s comes from the LEARNED table, not from qc_move_log.dur_s. dur_s is COMP−ST, which
+    // the equipment study explicitly rejected: it does not capture the lift cycle. Measured here,
+    // the old wiring was worse than "imprecise" — capping dur_s to [1,300]s admitted 34% of
+    // discharge moves but only 0.91% of load moves (whose median is 1396s), so the published
+    // "load move time" was the median of a 0.9% selection-biased tail. learn_qc_move_time holds
+    // per-crane medians of the effective one-container time (shift='ALL' is the combined row).
+    //
+    // yc_service stays window-sliced from rtg_move_log (that IS period-accurate) but now uses the
+    // study's cap, and carries the rehandle/gate job types the yard crane also serves.
+    //
+    // hatch_s / bay_change_s / drive_speed_ms cannot be separated out of our move logs at all, so
+    // they ship as documented constants rather than as null — a simulator cannot start without
+    // them, and null silently forced every consumer to invent its own number.
+    let qcl: Vec<(String, Option<f64>, i64, i64, Option<DateTime<Utc>>)> = sqlx::query_as(
+        "SELECT jobtype, avg(med_sec)::float8, count(DISTINCT qc), coalesce(sum(n),0)::bigint,
+                max(as_of_ts)
+           FROM learn_qc_move_time WHERE shift = 'ALL' GROUP BY jobtype",
+    ).fetch_all(pool).await?;
     let yc: Vec<(String, Option<f64>, Option<f64>, Option<f64>, i64)> = sqlx::query_as(
         "SELECT jobtype,
                 percentile_cont(0.1) WITHIN GROUP (ORDER BY dur_s),
                 percentile_cont(0.5) WITHIN GROUP (ORDER BY dur_s),
                 percentile_cont(0.9) WITHIN GROUP (ORDER BY dur_s), count(*)
            FROM rtg_move_log
-          WHERE comp_ts >= $1 AND comp_ts < $2 AND dur_s BETWEEN 0 AND 1800 AND jobtype IN ('DS','LD')
+          WHERE comp_ts >= $1 AND comp_ts < $2 AND dur_s BETWEEN $3 AND $4
+            AND jobtype IN ('DS','LD','RH','AH','GI','GO')
           GROUP BY jobtype",
-    ).bind(ws).bind(we).fetch_all(pool).await?;
+    ).bind(ws).bind(we).bind(YC_CAP_S.0 as i32).bind(YC_CAP_S.1 as i32).fetch_all(pool).await?;
 
-    let qc_med = |jt: &str| qc.iter().find(|r| r.0 == jt).and_then(|r| r.1).map(|v| v.round() as i64);
-    let qc_n = |jt: &str| qc.iter().find(|r| r.0 == jt).map(|r| r.2).unwrap_or(0);
-    let yc_p = |jt: &str| -> Value {
-        match yc.iter().find(|r| r.0 == jt) {
-            Some((_, p10, p50, p90, _)) => json!([p10.map(|v| v.round() as i64), p50.map(|v| v.round() as i64), p90.map(|v| v.round() as i64)]),
-            None => Value::Null,
-        }
+    let qc_row = |jt: &str| qcl.iter().find(|r| r.0 == jt);
+    let qc_move_s = |jt: &str, fallback: i64| {
+        qc_row(jt).and_then(|r| r.1).map_or(fallback, |v| v.round() as i64)
     };
-    let yc_n = |jt: &str| yc.iter().find(|r| r.0 == jt).map(|r| r.4).unwrap_or(0);
+    let qc_cranes = |jt: &str| qc_row(jt).map_or(0, |r| r.2);
+    let qc_n = |jt: &str| qc_row(jt).map_or(0, |r| r.3);
+    let qc_as_of = qcl.iter().filter_map(|r| r.4).max();
+
+    // Keyed by lowercased job type so a consumer can look up exactly the service it needs.
+    let mut yc_service = serde_json::Map::new();
+    let mut yc_sample = serde_json::Map::new();
+    for (jt, p10, p50, p90, n) in &yc {
+        let r = |v: &Option<f64>| v.map(|x| x.round() as i64);
+        yc_service.insert(jt.to_lowercase(), json!([r(p10), r(p50), r(p90)]));
+        yc_sample.insert(jt.to_lowercase(), json!(n));
+    }
+    let yc_n = |jt: &str| yc.iter().find(|r| r.0 == jt).map_or(0, |r| r.4);
 
     let emulator_out = json!({
-        "qc_move_s":  { "ds": qc_med("DS"), "ld": qc_med("LD") },
-        "yc_service": { "ds": yc_p("DS"), "ld": yc_p("LD") },
-        "hatch_s": Value::Null, "bay_change_s": Value::Null, "drive_speed_ms": Value::Null,
+        "qc_move_s": {
+            "ds": qc_move_s("DS", QC_MOVE_S_FALLBACK.0),
+            "ld": qc_move_s("LD", QC_MOVE_S_FALLBACK.1),
+        },
+        "yc_service": yc_service,   // per job type: [p10, p50, p90] seconds
+        "hatch_s": { "ds": HATCH_S_DS, "ld": HATCH_S_LD },
+        "bay_change_s": BAY_CHANGE_S,
+        "drive_speed_ms": DRIVE_SPEED_MS,
+        // Every value says where it came from and, crucially, whether it describes THIS window.
         "_provenance": {
             "window": [ws.to_rfc3339(), we.to_rfc3339()],
-            "qc_sample": { "ds": qc_n("DS"), "ld": qc_n("LD") },
-            "yc_sample": { "ds": yc_n("DS"), "ld": yc_n("LD") },
-            "note": "qc_move_s/yc_service from local qc_move_log/rtg_move_log sliced to window (capped QC[1,300]s/RTG[0,1800]s); thin on small windows. twin is now per-move in the work list (twin_group/is_twin), not an emulator ratio. hatch/bay_change/drive TODO",
+            "qc_move_s": {
+                "source": "learn_qc_move_time (shift=ALL, mean of per-crane medians)",
+                "scope": "snapshot — the learner keeps only its latest refresh, so this is NOT window-specific",
+                "as_of": qc_as_of.map(|t| t.to_rfc3339()),
+                "cranes": { "ds": qc_cranes("DS"), "ld": qc_cranes("LD") },
+                "samples": { "ds": qc_n("DS"), "ld": qc_n("LD") },
+                "fallback_used": { "ds": qc_row("DS").is_none(), "ld": qc_row("LD").is_none() },
+            },
+            "yc_service": {
+                "source": "rtg_move_log", "scope": "window",
+                "cap_s": [YC_CAP_S.0, YC_CAP_S.1],
+                "samples": yc_sample,
+            },
+            "hatch_s": { "source": "research-log measurement", "scope": "constant" },
+            "bay_change_s": { "source": "research-log measurement", "scope": "constant" },
+            "drive_speed_ms": { "source": "GPS motion split, stopped segments excluded", "scope": "constant", "kmh": 22.8 },
+            "note": "twin lifts are per-move in the work list (twin_group/is_twin), not an emulator ratio. containers[].service_s is the raw observed COMP-ST and is a record of what happened, not this model parameter.",
         },
     });
 
@@ -370,7 +430,9 @@ pub async fn build(pool: &PgPool, ws: DateTime<Utc>, we: DateTime<Utc>) -> Resul
     let summary = json!({
         "vessels": nv, "containers": nc, "ds": nds, "ld": nld, "cranes": ncr, "twin_moves": ntw,
         "enriched": nenr, "enriched_pct": if nc > 0 { nenr * 100 / nc } else { 0 },
-        "qc_sample": qc_n("DS") + qc_n("LD"), "yc_sample": yc_n("DS") + yc_n("LD"),
+        // Emulator backing samples. qc_* counts the LEARNER's samples (a snapshot, not this
+        // window); yc_* counts this window's yard-crane services.
+        "qc_learn_sample": qc_n("DS") + qc_n("LD"), "yc_sample": yc_n("DS") + yc_n("LD"),
         // Landside (gate) — mirrors scenario_out.landside so the UI can show quay vs road at a
         // glance. slot_pct is the share of gate moves whose yard slot could be reconstructed.
         "gate_in": gate_in, "gate_out": gate_out, "gate_trucks": gate_trucks,
