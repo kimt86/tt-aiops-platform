@@ -5,6 +5,8 @@
 //!               (attrs+ship cell) ⨝ vessel_call (size+berth) + yard_t0 (as-of-T stack state)
 //!             + landside ← rtg_move_log GI/GO (the ROAD side: external trucks in/out, with the
 //!               external plate in trk_id) ⨝ yard_move for the decoded stack slot
+//!             + equipment ← deployment spans derived from the same real move streams
+//!               (qc_move_log / yard_move / tt_move_log), never from the TOS assignment plan
 //!   emulator  ← qc_move_log / rtg_move_log sliced to the window (period-accurate)
 //! qc_move_log is the terminal's authoritative quay-crane move stream (MCH_OPERATION, PK
 //! (machno,contno,seqno)); we use it as the work-list SPINE instead of JOB_ORDER_HISTORY, which
@@ -19,6 +21,13 @@ use serde_json::{json, Value};
 use sqlx::PgPool;
 
 use crate::state;
+
+/// Idle gap that ends an equipment deployment span. Measured: 95% of consecutive quay-crane moves
+/// are <8 min apart and only 0.6% of gaps reach 30 min, so 60 min cleanly separates "still on this
+/// job" (including a shift handover) from "no longer deployed" without fragmenting real spans.
+const SPAN_GAP_MIN: i64 = 60;
+/// Bucket width for the truck-fleet curve.
+const FLEET_BUCKET_MIN: i64 = 30;
 
 /// Build (scenario_out, emulator_out, summary) for [ws, we). Pure — no job/run side effects.
 pub async fn build(pool: &PgPool, ws: DateTime<Utc>, we: DateTime<Utc>) -> Result<(Value, Value, Value)> {
@@ -175,10 +184,119 @@ pub async fn build(pool: &PgPool, ws: DateTime<Utc>, we: DateTime<Utc>) -> Resul
     let (gate_in, gate_out, gate_trucks, gate_slots) =
         (lnd("gate_in"), lnd("gate_out"), lnd("trucks_unique"), lnd("slot_known"));
 
+    // ---- EQUIPMENT DEPLOYMENT: which machines were on duty, when, and on what. Derived from the
+    // REAL move streams, deliberately NOT from TOS's assignment plan (JOB_CRANE_HISTORY): measured
+    // against a collected ground truth, plan-derived crane->vessel attribution put 27% of quay
+    // moves on the WRONG ship (whole crane-shifts misassigned), because the plan churns and is not
+    // what the crane actually worked. scenario.crane_deploy stays a plan-vs-actual comparison aid.
+    //   qc  ← qc_move_log runs of one crane on one vessel  (vessel via move_hist, as in vessels[])
+    //   rtg ← scenario.yard_move runs of one machine in one block (RTG + ES yard cranes)
+    //   tt_fleet ← tt_move_log cycles [dispatch_ts, free_ts) overlapping each bucket. trk_id/ytno
+    //              is a real vehicle id, not a trip id — verified against GPS (432 of 443 quay-move
+    //              truck ids appear in the position feed) and against the authoritative cycle log.
+    // A span ends after SPAN_GAP_MIN of silence or when the vessel/block changes. Unattributed quay
+    // moves are skipped rather than allowed to split a span into phantom one-move deployments.
+    // Note rtg[] only covers what the yard collector has reconstructed for this window; qc[] and
+    // tt_fleet come from streams that reach back further.
+    let equipment_txt: Option<String> = sqlx::query_scalar(&format!(
+        r#"
+        WITH vv AS (
+          SELECT DISTINCT ON (contno, jobtype) contno, jobtype, vessel, voyage
+            FROM scenario.move_hist
+           WHERE comp_ts >= $1 - interval '1 day' AND comp_ts < $2 + interval '1 day'
+             AND vessel IS NOT NULL AND voyage IS NOT NULL
+           ORDER BY contno, jobtype, comp_ts
+        ),
+        qm AS (
+          SELECT q.machno, q.comp_ts, q.jobtype, vv.vessel, vv.voyage
+            FROM qc_move_log q
+            JOIN vv ON vv.contno = q.contno AND vv.jobtype = q.jobtype
+           WHERE q.comp_ts >= $1 AND q.comp_ts < $2 AND q.jobtype IN ('DS','LD')
+        ),
+        qb AS (
+          SELECT *, CASE WHEN lag(comp_ts) OVER w IS NULL
+                           OR comp_ts - lag(comp_ts) OVER w > interval '{SPAN_GAP_MIN} min'
+                           OR vessel IS DISTINCT FROM lag(vessel) OVER w
+                           OR voyage IS DISTINCT FROM lag(voyage) OVER w
+                         THEN 1 ELSE 0 END brk
+            FROM qm WINDOW w AS (PARTITION BY machno ORDER BY comp_ts)
+        ),
+        qs AS (SELECT *, sum(brk) OVER (PARTITION BY machno ORDER BY comp_ts) grp FROM qb),
+        qspan AS (
+          SELECT machno, vessel, voyage, min(comp_ts) st, max(comp_ts) en, count(*) n,
+                 count(*) FILTER (WHERE jobtype = 'DS') ds, count(*) FILTER (WHERE jobtype = 'LD') ld
+            FROM qs GROUP BY machno, vessel, voyage, grp
+        ),
+        ym AS (
+          SELECT machno, block_id, comp_ts FROM scenario.yard_move
+           WHERE comp_ts >= $1 AND comp_ts < $2
+        ),
+        yb AS (
+          SELECT *, CASE WHEN lag(comp_ts) OVER w IS NULL
+                           OR comp_ts - lag(comp_ts) OVER w > interval '{SPAN_GAP_MIN} min'
+                           OR block_id IS DISTINCT FROM lag(block_id) OVER w
+                         THEN 1 ELSE 0 END brk
+            FROM ym WINDOW w AS (PARTITION BY machno ORDER BY comp_ts)
+        ),
+        ys AS (SELECT *, sum(brk) OVER (PARTITION BY machno ORDER BY comp_ts) grp FROM yb),
+        yspan AS (
+          SELECT machno, block_id, min(comp_ts) st, max(comp_ts) en, count(*) n
+            FROM ys GROUP BY machno, block_id, grp
+        ),
+        tbk AS (
+          SELECT generate_series($1, $2 - interval '{FLEET_BUCKET_MIN} min',
+                                 interval '{FLEET_BUCKET_MIN} min') ts
+        ),
+        tcy AS (
+          SELECT ytno, dispatch_ts, free_ts FROM tt_move_log
+           WHERE free_ts >= $1 AND dispatch_ts < $2
+        ),
+        tfl AS (
+          SELECT tbk.ts, count(DISTINCT tcy.ytno) trucks, count(tcy.*) cycles
+            FROM tbk LEFT JOIN tcy
+              ON tcy.dispatch_ts < tbk.ts + interval '{FLEET_BUCKET_MIN} min'
+             AND tcy.free_ts >= tbk.ts
+           GROUP BY tbk.ts
+        )
+        SELECT jsonb_build_object(
+          'note', 'deployment derived from actual move logs, not the TOS assignment plan. a span ends after span_gap_min of silence or when the vessel/block changes. rtg is limited to the yard history reconstructed for this window.',
+          'span_gap_min', {SPAN_GAP_MIN},
+          'qc', (SELECT coalesce(jsonb_agg(jsonb_build_object(
+                    'crane', machno, 'vessel_id', vessel, 'voyage', voyage,
+                    'start_ts', st, 'end_ts', en, 'moves', n, 'ds', ds, 'ld', ld)
+                  ORDER BY machno, st), '[]'::jsonb) FROM qspan),
+          'rtg', (SELECT coalesce(jsonb_agg(jsonb_build_object(
+                    'machine', yspan.machno, 'block', ybk.block, 'block_id', yspan.block_id,
+                    'start_ts', yspan.st, 'end_ts', yspan.en, 'moves', yspan.n)
+                  ORDER BY yspan.machno, yspan.st), '[]'::jsonb)
+                    FROM yspan LEFT JOIN scenario.yard_block ybk ON ybk.block_id = yspan.block_id),
+          'tt_fleet', jsonb_build_object(
+             'bucket_minutes', {FLEET_BUCKET_MIN},
+             'trucks_total', (SELECT count(DISTINCT ytno) FROM tcy),
+             'peak_trucks',  (SELECT coalesce(max(trucks), 0) FROM tfl),
+             'buckets', (SELECT coalesce(jsonb_agg(jsonb_build_object(
+                            'ts', ts, 'trucks', trucks, 'cycles', cycles) ORDER BY ts), '[]'::jsonb)
+                         FROM tfl))
+        )::text
+        "#
+    ))
+    .bind(ws).bind(we)
+    .fetch_one(pool)
+    .await?;
+    let equipment: Value = serde_json::from_str(&equipment_txt.unwrap_or_else(|| "{}".into()))?;
+    let eq_len = |k: &str| equipment.get(k).and_then(Value::as_array).map_or(0, Vec::len) as i64;
+    let (qc_spans, rtg_spans) = (eq_len("qc"), eq_len("rtg"));
+    let peak_trucks = equipment
+        .get("tt_fleet")
+        .and_then(|f| f.get("peak_trucks"))
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
+
     let scenario_out = json!({
         "meta": { "window": [ws.to_rfc3339(), we.to_rfc3339()], "home_port": "MYPKG", "source": "scengen" },
         "vessels": vessels,
         "landside": landside,
+        "equipment": equipment,
         "yard_t0": yard_t0,
     });
 
@@ -257,6 +375,8 @@ pub async fn build(pool: &PgPool, ws: DateTime<Utc>, we: DateTime<Utc>) -> Resul
         // glance. slot_pct is the share of gate moves whose yard slot could be reconstructed.
         "gate_in": gate_in, "gate_out": gate_out, "gate_trucks": gate_trucks,
         "gate_slot_pct": if gate_in + gate_out > 0 { gate_slots * 100 / (gate_in + gate_out) } else { 0 },
+        // Equipment deployment — how much machinery the window actually used.
+        "qc_spans": qc_spans, "rtg_spans": rtg_spans, "peak_trucks": peak_trucks,
     });
 
     Ok((scenario_out, emulator_out, summary))
