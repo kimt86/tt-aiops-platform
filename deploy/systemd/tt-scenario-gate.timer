@@ -1,0 +1,10 @@
+[Unit]
+Description=tt scenario gate transactions every 5min (per-container CYC_HISTORY lookup driven by the local gate moves; isolated; honors kill switch)
+
+[Timer]
+OnBootSec=11min
+OnUnitActiveSec=300s
+AccuracySec=20s
+
+[Install]
+WantedBy=timers.target

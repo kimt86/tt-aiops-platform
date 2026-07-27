@@ -7,7 +7,7 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
-use scengen::{assemble, collect, crane_deploy, db, enrich, serve, snapshot, yard};
+use scengen::{assemble, collect, crane_deploy, db, enrich, gate, serve, snapshot, yard};
 
 #[derive(Parser)]
 #[command(
@@ -43,6 +43,12 @@ enum Command {
     },
     /// QC deployment history (crane<->vessel assignments) -> scenario.crane_deploy.
     CraneDeploy {
+        #[arg(long, default_value = "oracle-prod")]
+        target: String,
+    },
+    /// Landside gate transactions (intake/exit for the GI/GO containers we already have)
+    /// -> scenario.gate_event.
+    Gate {
         #[arg(long, default_value = "oracle-prod")]
         target: String,
     },
@@ -82,6 +88,7 @@ async fn main() -> Result<()> {
         Command::Enrich { target } => enrich::run(&pool, &target).await?,
         Command::YardMoves { target } => yard::run(&pool, &target).await?,
         Command::CraneDeploy { target } => crane_deploy::run(&pool, &target).await?,
+        Command::Gate { target } => gate::run(&pool, &target).await?,
         Command::YardBuild {} => yard::build(&pool).await?,
         Command::Assemble {} => assemble::run(&pool).await?,
         Command::Serve { port } => serve::run(pool, port).await?,

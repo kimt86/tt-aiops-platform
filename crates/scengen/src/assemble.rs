@@ -4,7 +4,8 @@
 //!               (machno,seqno)) ⨝ move_hist (vessel/voyage attribution, 99.5%) ⨝ container
 //!               (attrs+ship cell) ⨝ vessel_call (size+berth) + yard_t0 (as-of-T stack state)
 //!             + landside ← rtg_move_log GI/GO (the ROAD side: external trucks in/out, with the
-//!               external plate in trk_id) ⨝ yard_move for the decoded stack slot
+//!               external plate in trk_id) ⨝ yard_move for the decoded stack slot ⨝ gate_event for
+//!               the truck's own clock (gate transaction, wait, exit)
 //!             + equipment ← deployment spans derived from the same real move streams
 //!               (qc_move_log / yard_move / tt_move_log), never from the TOS assignment plan
 //!   emulator  ← learn_qc_move_time (crane move time; a snapshot, NOT window-sliced) + rtg_move_log
@@ -166,25 +167,52 @@ pub async fn build(pool: &PgPool, ws: DateTime<Utc>, we: DateTime<Utc>) -> Resul
            WHERE comp_ts >= $1 AND comp_ts < $2 AND jobtype IN ('GI','GO')
         ),
         m AS (
-          SELECT g.*, yb.block, y.bay_idx, y.row_idx, y.tier
+          SELECT g.*, yb.block, y.bay_idx, y.row_idx, y.tier,
+                 gi.event_ts AS gate_ts, gi.clerk AS gate_clerk, gx.event_ts AS exit_ts
             FROM g
             LEFT JOIN scenario.yard_move y
               ON y.machno = g.machno AND y.contno = g.contno AND y.seqno = g.seqno
             LEFT JOIN scenario.yard_block yb ON yb.block_id = y.block_id
+            -- Gate transaction for THIS visit: the intake nearest before the yard handling. A box
+            -- passes through many times, so match on time rather than on the container alone.
+            LEFT JOIN LATERAL (
+              SELECT ge.event_ts, ge.clerk FROM scenario.gate_event ge
+               WHERE ge.contno = g.contno
+                 AND ge.situation = CASE g.jobtype WHEN 'GI' THEN 'GIY' ELSE 'QYG' END
+                 AND ge.event_ts <= g.comp_ts
+               ORDER BY ge.event_ts DESC LIMIT 1
+            ) gi ON true
+            -- Export only: when the truck actually left the terminal.
+            LEFT JOIN LATERAL (
+              SELECT ge.event_ts FROM scenario.gate_event ge
+               WHERE g.jobtype = 'GO' AND ge.contno = g.contno AND ge.situation = 'GOY'
+                 AND ge.event_ts >= g.comp_ts
+               ORDER BY ge.event_ts LIMIT 1
+            ) gx ON true
         )
         SELECT jsonb_build_object(
-          'note', 'gate work list from rtg_move_log GI/GO (trk_id = external road truck). yard_slot joined from yard_move where reconstructed; physical gate/lane is not recorded by TOS.',
+          'note', 'gate work list from rtg_move_log GI/GO (trk_id = external road truck). yard_slot joined from yard_move where reconstructed; gate_ts/exit_ts from the gate transaction stream. physical gate/lane is not recorded by TOS.',
           'moves_total',   count(*),
           'gate_in',       count(*) FILTER (WHERE jobtype = 'GI'),
           'gate_out',      count(*) FILTER (WHERE jobtype = 'GO'),
           'trucks_unique', count(DISTINCT trk_id),
           'slot_known',    count(tier),
+          'gate_ts_known', count(gate_ts),
+          'exit_ts_known', count(exit_ts),
           'moves', coalesce(jsonb_agg(jsonb_build_object(
               'container_id', contno,
               'move_type', CASE jobtype WHEN 'GI' THEN 'gate_in' ELSE 'gate_out' END,
               'move_ts', comp_ts, 'start_ts', st_ts, 'service_s', dur_s,
               'yard_crane', machno, 'truck', trk_id,
               'fill', CASE status WHEN 'F' THEN 'full' WHEN 'M' THEN 'empty' END,
+              -- The road truck's own clock: cleared the gate, waited, was served, left.
+              'gate_ts', gate_ts,
+              'gate_wait_s', CASE WHEN gate_ts IS NOT NULL
+                                  THEN round(extract(epoch FROM (st_ts - gate_ts)))::int END,
+              'exit_ts', exit_ts,
+              'exit_s', CASE WHEN exit_ts IS NOT NULL
+                             THEN round(extract(epoch FROM (exit_ts - comp_ts)))::int END,
+              'gate_clerk', gate_clerk,
               'yard_slot', CASE WHEN tier IS NOT NULL THEN jsonb_build_object(
                    'block', block, 'bay_idx', bay_idx,
                    'row', CASE WHEN row_idx BETWEEN 0 AND 25 THEN chr(65 + row_idx) ELSE row_idx::text END,
@@ -201,6 +229,7 @@ pub async fn build(pool: &PgPool, ws: DateTime<Utc>, we: DateTime<Utc>) -> Resul
     let lnd = |k: &str| landside.get(k).and_then(Value::as_i64).unwrap_or(0);
     let (gate_in, gate_out, gate_trucks, gate_slots) =
         (lnd("gate_in"), lnd("gate_out"), lnd("trucks_unique"), lnd("slot_known"));
+    let gate_ts_known = lnd("gate_ts_known");
 
     // ---- EQUIPMENT DEPLOYMENT: which machines were on duty, when, and on what. Derived from the
     // REAL move streams, deliberately NOT from TOS's assignment plan (JOB_CRANE_HISTORY): measured
@@ -437,6 +466,9 @@ pub async fn build(pool: &PgPool, ws: DateTime<Utc>, we: DateTime<Utc>) -> Resul
         // glance. slot_pct is the share of gate moves whose yard slot could be reconstructed.
         "gate_in": gate_in, "gate_out": gate_out, "gate_trucks": gate_trucks,
         "gate_slot_pct": if gate_in + gate_out > 0 { gate_slots * 100 / (gate_in + gate_out) } else { 0 },
+        // Share of gate moves that carry the truck's own gate-transaction time (the collector
+        // walks the local stream forward, so older windows fill in as it catches up).
+        "gate_time_pct": if gate_in + gate_out > 0 { gate_ts_known * 100 / (gate_in + gate_out) } else { 0 },
         // Equipment deployment — how much machinery the window actually used.
         "qc_spans": qc_spans, "rtg_spans": rtg_spans, "peak_trucks": peak_trucks,
     });

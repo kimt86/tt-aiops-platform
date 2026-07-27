@@ -17,6 +17,7 @@ pub mod collect;
 pub mod crane_deploy;
 pub mod db;
 pub mod enrich;
+pub mod gate;
 pub mod serve;
 pub mod snapshot;
 pub mod state;
