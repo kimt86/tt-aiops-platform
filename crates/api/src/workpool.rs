@@ -314,13 +314,30 @@ pub(crate) async fn build_workpool(pool: PgPool) -> Result<WorkpoolOut, AppError
         // ESTDEP (departure) + ESTWKC (all-crane-work-complete) per vessel. ESTWKC is the terminal's
         // planned finish — often EARLIER than departure — so the real work deadline = the tighter of
         // the two. Verified vs TOS source (VSB_VOYAGE): both fields are authoritative.
-        let sched: Vec<(String, Option<DateTime<Utc>>, Option<DateTime<Utc>>)> =
-            sqlx::query_as("SELECT vessel, estdep_ts, estwkc_ts FROM live_vessel_schedule WHERE estdep_ts IS NOT NULL")
+        // live_vessel_schedule의 PK는 (vessel, voyage)다. vessel 키 HashMap으로 접으면 어느 항차가
+        // 이기는지 비결정적 — 실측(2026-07-27) MTMH가 8/6 항차를 물어 마감이 +10.2일, MTSQ +8.3일이
+        // 됐다(실제 출항은 각각 4.6h / 2.0h 후). 큐 행이 자기 voyage를 들고 있으므로(QueueRow.voyage
+        // → QueueOut.voyage) 그 키로 조회한다. 검증: 안벽 33척 전부 live_workqueue.voyage ↔ 스케줄
+        // 행이 1:1 매칭(행이 없는 건 가상선박 RHXX뿐).
+        let sched: Vec<(String, String, Option<DateTime<Utc>>, Option<DateTime<Utc>>, Option<DateTime<Utc>>)> =
+            sqlx::query_as("SELECT vessel, voyage, estdep_ts, estwkc_ts, actdep_ts
+                              FROM live_vessel_schedule WHERE estdep_ts IS NOT NULL")
                 .fetch_all(&pool).await.unwrap_or_default();
-        let estdep: std::collections::HashMap<String, DateTime<Utc>> =
-            sched.iter().filter_map(|(v, d, _)| d.map(|d| (v.clone(), d))).collect();
-        let estwkc: std::collections::HashMap<String, DateTime<Utc>> =
-            sched.iter().filter_map(|(v, _, w)| w.map(|w| (v.clone(), w))).collect();
+        // (vessel,voyage) → (ESTDEP, ESTWKC). 두 값은 반드시 같은 항차 행에서 나와야 한다.
+        let mut sched_v: HashMap<(String, String), (DateTime<Utc>, Option<DateTime<Utc>>)> = HashMap::new();
+        // voyage가 NULL인 큐를 위한 선박 폴백: 미출항 행 우선, 그다음 가장 이른 ETD.
+        // ⚠ `WHERE actdep_ts IS NULL`로 거르면 안 된다 — 실제 출항 후에도 큐가 남은 선박이 오늘 4척
+        //   (XCAH/QSTH/TSKE/CUMS) 있고, 그 마감이 통째로 사라진다(커버리지 조용한 하락).
+        let mut sched_fb: HashMap<String, (bool, DateTime<Utc>, Option<DateTime<Utc>>)> = HashMap::new();
+        for (v, voy, dep, wkc, act) in &sched {
+            let Some(dep) = *dep else { continue };
+            sched_v.insert((v.clone(), voy.clone()), (dep, *wkc));
+            let key = (act.is_some(), dep);
+            match sched_fb.get(v) {
+                Some((a, d, _)) if (*a, *d) <= key => {}
+                _ => { sched_fb.insert(v.clone(), (act.is_some(), dep, *wkc)); }
+            }
+        }
         // per-vessel twin fraction of remaining containers (from the dispatchable pool) — a proxy
         // for the whole remaining queue. moves ≈ containers × (1 − frac/2).
         let twin_frac: std::collections::HashMap<String, f64> =
@@ -412,14 +429,19 @@ pub(crate) async fn build_workpool(pool: PgPool) -> Result<WorkpoolOut, AppError
                 by_vessel.entry(q.vessel.clone()).or_default().push(i);
             }
             for (vessel, mut idxs) in by_vessel {
-                let Some(&dep) = estdep.get(&vessel) else { continue };
+                // 이 그룹의 큐가 들고 있는 voyage로 정확 조회 → 없으면 선박 폴백(미출항 우선/최이른 ETD)
+                let voy = idxs.iter().find_map(|&i| qc.queues[i].voyage.clone());
+                let (dep, wkc) = match voy.as_ref().and_then(|v| sched_v.get(&(vessel.clone(), v.clone())).copied()) {
+                    Some(x) => x,
+                    None => match sched_fb.get(&vessel) { Some(&(_, d, w)) => (d, w), None => continue },
+                };
                 // must-finish target = the tighter of (departure − buffer) and ESTWKC. GUARD: this
                 // terminal's ESTWKC is often stale garbage (verified: many vessels show work-complete
                 // DAYS before berthing — impossible), so only trust it when it's a plausible
                 // work-complete time, i.e. 0–6h before departure. Otherwise fall back to departure−buffer.
                 let dep_target = dep - chrono::Duration::seconds(FINISH_BUFFER_S);
-                let finish_by = match estwkc.get(&vessel) {
-                    Some(&w) if w < dep_target && (dep - w) <= chrono::Duration::hours(6) => w,
+                let finish_by = match wkc {
+                    Some(w) if w < dep_target && (dep - w) <= chrono::Duration::hours(6) => w,
                     _ => dep_target,
                 };
                 let twin = twin_frac.get(&vessel).copied().unwrap_or(0.0).clamp(0.0, 1.0);
