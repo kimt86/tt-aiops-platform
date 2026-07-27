@@ -312,9 +312,7 @@ pub type Cell = (i32, i32, i32, i32, Option<String>, bool);
 /// scenario.yard_move stays safe for any T at or after a surviving checkpoint — but pruning must
 /// never remove moves NEWER than the newest checkpoint, or the delta would be incomplete.
 pub async fn state_as_of(pool: &PgPool, at: DateTime<Utc>) -> Result<(Vec<Cell>, usize)> {
-    use std::collections::HashMap;
-    let mut cells: HashMap<(i32, i32, i32, i32), (Option<String>, bool)> = HashMap::new();
-    let mut where_is: HashMap<String, (i32, i32, i32, i32)> = HashMap::new();
+    let mut st = YardState::default();
 
     // Seed from the newest checkpoint <= at (if any), then replay only what came after it.
     let ckpt: Option<DateTime<Utc>> = sqlx::query_scalar(
@@ -332,18 +330,19 @@ pub async fn state_as_of(pool: &PgPool, at: DateTime<Utc>) -> Result<(Vec<Cell>,
         .fetch_all(pool)
         .await?;
         for (b, y, ri, t, contno, known) in seed {
-            let key = (b, y, ri, t);
-            if let Some(cn) = &contno {
-                where_is.insert(cn.clone(), key);
-            }
-            cells.insert(key, (contno, known));
+            st.seed_cell((b, y, ri, t), contno, known);
         }
     }
 
     let moves: Vec<(String, String, i32, i32, i32, i32)> = sqlx::query_as(
         "SELECT contno, jobtype, block_id, bay_idx, row_idx, tier
            FROM scenario.yard_move
-          WHERE comp_ts <= $1 AND ($2::timestamptz IS NULL OR comp_ts > $2::timestamptz)
+          -- `>=` the checkpoint, not `>`: comp_ts is NOT unique (up to ~7 yard moves share a
+          -- second here) and build()'s batch LIMIT can cut mid-second, so a checkpoint taken at
+          -- that second may be missing part of it — build() itself re-reads from `>= watermark`
+          -- for exactly this reason. Strict `>` dropped those moves permanently. Re-applying the
+          -- boundary second is harmless: replay is idempotent and ordered by (comp_ts, seqno).
+          WHERE comp_ts <= $1 AND ($2::timestamptz IS NULL OR comp_ts >= $2::timestamptz)
           ORDER BY comp_ts, seqno",
     )
     .bind(at)
@@ -356,32 +355,200 @@ pub async fn state_as_of(pool: &PgPool, at: DateTime<Utc>) -> Result<(Vec<Cell>,
         tracing::warn!(replayed, "state_as_of full replay (no checkpoint <= T) is large");
     }
     for (contno, jt, b, y, ri, tier) in moves {
-        match jt.as_str() {
-            "DS" | "GI" | "RH" | "AH" | "MI" => {
-                if let Some(old) = where_is.remove(&contno) {
-                    cells.remove(&old);
-                }
-                let key = (b, y, ri, tier);
-                cells.insert(key, (Some(contno.clone()), true));
-                where_is.insert(contno, key);
-                for t in 1..tier {
-                    cells.entry((b, y, ri, t)).or_insert((None, false));
-                }
-            }
-            "LD" | "GO" | "MO" => {
-                if let Some(old) = where_is.remove(&contno) {
-                    cells.remove(&old);
-                }
-                cells.remove(&(b, y, ri, tier));
-            }
-            _ => {}
+        st.apply(&contno, &jt, (b, y, ri, tier));
+    }
+    Ok((st.into_cells(), replayed))
+}
+
+type CellKey = (i32, i32, i32, i32);
+
+/// In-memory yard reconstruction — the same PLACE/REMOVE semantics the SQL replay in `build()`
+/// applies to scenario.yard_cell, kept as a pure struct so the two can be compared and tested.
+///
+/// `where_is` is the reverse index the SQL path does not need (it can just `DELETE WHERE contno=..`).
+/// Having it means every cell mutation must keep it consistent — the bug this type was extracted to
+/// fix was a PLACE that overwrote an occupied cell without dropping the displaced container's entry,
+/// so that container's later REMOVE deleted whoever had taken its place.
+#[derive(Default)]
+struct YardState {
+    cells: std::collections::HashMap<CellKey, (Option<String>, bool)>,
+    where_is: std::collections::HashMap<String, CellKey>,
+}
+
+impl YardState {
+    fn seed_cell(&mut self, key: CellKey, contno: Option<String>, known: bool) {
+        if let Some(cn) = &contno {
+            self.where_is.insert(cn.clone(), key);
+        }
+        self.cells.insert(key, (contno, known));
+    }
+
+    /// Clear a cell and drop its occupant from the reverse index. Every removal goes through here.
+    fn vacate(&mut self, key: &CellKey) {
+        if let Some((Some(prev), _)) = self.cells.remove(key) {
+            self.where_is.remove(&prev);
         }
     }
-    Ok((
-        cells
+
+    fn apply(&mut self, contno: &str, jobtype: &str, (b, y, ri, tier): CellKey) {
+        match jobtype {
+            // PLACE: DS/GI discharge & gate-in, RH/AH rehandle, MI internal transfer in.
+            "DS" | "GI" | "RH" | "AH" | "MI" => {
+                // Relocation: wherever we last saw this container, it is no longer there.
+                if let Some(old) = self.where_is.remove(contno) {
+                    self.cells.remove(&old);
+                }
+                let key = (b, y, ri, tier);
+                // The target cell may still hold a DIFFERENT container in our view (it left without
+                // a move we saw). Vacating first keeps the reverse index truthful.
+                self.vacate(&key);
+                self.cells.insert(key, (Some(contno.to_string()), true));
+                self.where_is.insert(contno.to_string(), key);
+                // Anything under an observed container must be occupied by SOMETHING; seed unknown
+                // placeholders without disturbing cells we already know.
+                for t in 1..tier {
+                    self.cells.entry((b, y, ri, t)).or_insert((None, false));
+                }
+            }
+            // REMOVE: LD/GO load & gate-out, MO internal transfer out.
+            "LD" | "GO" | "MO" => {
+                if let Some(old) = self.where_is.remove(contno) {
+                    self.cells.remove(&old);
+                }
+                // The move also names the cell being vacated — clear it even if our view had someone
+                // else there (mirrors the SQL path's `contno = $1 OR <cell matches>`).
+                self.vacate(&(b, y, ri, tier));
+            }
+            _ => {} // GC/LC etc. — rare, unclassified
+        }
+    }
+
+    fn into_cells(self) -> Vec<Cell> {
+        self.cells
             .into_iter()
             .map(|((b, y, ri, t), (c, k))| (b, y, ri, t, c, k))
-            .collect(),
-        replayed,
-    ))
+            .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::YardState;
+
+    fn occupant(st: &YardState, key: (i32, i32, i32, i32)) -> Option<String> {
+        st.cells.get(&key).and_then(|(c, _)| c.clone())
+    }
+
+    /// The regression this type exists for. A container is placed into a cell our view still shows
+    /// as occupied by someone else; when that displaced container is later loaded out, it must not
+    /// take the new occupant's cell with it.
+    #[test]
+    fn place_over_stale_occupant_does_not_corrupt_its_later_removal() {
+        let cell = (7, 3, 1, 1);
+        let mut st = YardState::default();
+        st.apply("OLDU0000001", "DS", cell);
+        st.apply("NEWU0000002", "DS", cell); // overwrites our stale view of the cell
+        assert_eq!(occupant(&st, cell).as_deref(), Some("NEWU0000002"));
+
+        // The displaced container is loaded out from somewhere else entirely.
+        st.apply("OLDU0000001", "LD", (9, 9, 9, 1));
+        assert_eq!(
+            occupant(&st, cell).as_deref(),
+            Some("NEWU0000002"),
+            "removing the displaced container must not evict whoever replaced it"
+        );
+    }
+
+    #[test]
+    fn relocation_vacates_the_previous_cell() {
+        let (from, to) = ((1, 0, 0, 1), (2, 0, 0, 1));
+        let mut st = YardState::default();
+        st.apply("MSKU0000003", "DS", from);
+        st.apply("MSKU0000003", "RH", to); // rehandled to another cell
+        assert_eq!(occupant(&st, from), None);
+        assert_eq!(occupant(&st, to).as_deref(), Some("MSKU0000003"));
+    }
+
+    #[test]
+    fn removal_clears_the_cell_named_by_the_move() {
+        let cell = (4, 2, 0, 1);
+        let mut st = YardState::default();
+        st.apply("TGHU0000004", "GI", cell);
+        st.apply("TGHU0000004", "GO", cell);
+        assert!(st.cells.is_empty() && st.where_is.is_empty());
+    }
+
+    /// Tiers below an observed container are occupied by something, but we do not know what.
+    #[test]
+    fn placing_high_seeds_unknown_tiers_below_without_overwriting_known_ones() {
+        let mut st = YardState::default();
+        st.apply("KNOW0000005", "DS", (5, 1, 2, 1)); // known box on the floor
+        st.apply("HIGH0000006", "DS", (5, 1, 2, 4)); // observed on tier 4
+        assert_eq!(occupant(&st, (5, 1, 2, 1)).as_deref(), Some("KNOW0000005"));
+        assert_eq!(occupant(&st, (5, 1, 2, 2)), None);
+        assert_eq!(occupant(&st, (5, 1, 2, 3)), None);
+        assert_eq!(st.cells[&(5, 1, 2, 2)].1, false, "seeded tiers are not known");
+        assert_eq!(st.cells[&(5, 1, 2, 4)].1, true, "observed tier is known");
+    }
+
+    /// Replaying the checkpoint boundary second re-applies moves the checkpoint may already
+    /// contain. That is only safe because application is idempotent — the property `state_as_of`
+    /// relies on when it replays from `>= checkpoint`.
+    #[test]
+    fn reapplying_the_same_moves_is_idempotent() {
+        let moves = [
+            ("AAAU0000001", "DS", (1, 1, 1, 1)),
+            ("BBBU0000002", "DS", (1, 1, 1, 3)),
+            ("AAAU0000001", "RH", (2, 0, 0, 1)),
+            ("CCCU0000003", "GI", (1, 1, 1, 1)),
+            ("BBBU0000002", "LD", (1, 1, 1, 3)),
+        ];
+        let run = |repeat_last: usize| {
+            let mut st = YardState::default();
+            for (c, jt, k) in moves {
+                st.apply(c, jt, k);
+            }
+            for _ in 0..repeat_last {
+                for (c, jt, k) in moves {
+                    st.apply(c, jt, k);
+                }
+            }
+            let mut v = st.into_cells();
+            v.sort();
+            v
+        };
+        assert_eq!(run(0), run(1), "one extra replay changed the result");
+        assert_eq!(run(0), run(2), "two extra replays changed the result");
+    }
+
+    /// Every cell holding a container must be findable through the reverse index, and the index
+    /// must never point at a cell that container no longer occupies.
+    #[test]
+    fn reverse_index_stays_consistent_with_cells() {
+        let mut st = YardState::default();
+        let moves = [
+            ("AAAU0000001", "DS", (1, 1, 1, 1)),
+            ("BBBU0000002", "DS", (1, 1, 1, 2)),
+            ("AAAU0000001", "RH", (1, 1, 1, 3)),
+            ("CCCU0000003", "GI", (1, 1, 1, 1)), // lands where AAA used to be
+            ("BBBU0000002", "LD", (1, 1, 1, 2)),
+            ("AAAU0000001", "MO", (1, 1, 1, 3)),
+        ];
+        for (c, jt, k) in moves {
+            st.apply(c, jt, k);
+        }
+        for (cn, key) in &st.where_is {
+            assert_eq!(
+                st.cells.get(key).and_then(|(c, _)| c.as_deref()),
+                Some(cn.as_str()),
+                "index entry for {cn} points at a cell it does not occupy"
+            );
+        }
+        for (key, (c, _)) in &st.cells {
+            if let Some(cn) = c {
+                assert_eq!(st.where_is.get(cn), Some(key), "{cn} is not indexed");
+            }
+        }
+        assert_eq!(occupant(&st, (1, 1, 1, 1)).as_deref(), Some("CCCU0000003"));
+    }
 }
