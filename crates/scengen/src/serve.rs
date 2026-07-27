@@ -59,9 +59,11 @@ async fn status(State(pool): State<PgPool>) -> Result<Response, AppErr> {
              -- mean the feed stopped. Streams without a timer (crane_deploy is collected by hand;
              -- it is the plan log, kept only for plan-vs-actual comparison) are expected to sit
              -- still and must not raise the silence alarm.
+             -- KEEP IN SYNC with deploy/systemd/tt-scenario-*.timer: a stream that gains a timer but
+             -- not an entry here is monitored by nobody.
              'watermarks', (SELECT coalesce(jsonb_agg(jsonb_build_object(
                         'source', source,
-                        'scheduled', source IN ('move_hist','yard_move','yard_cell'),
+                        'scheduled', source IN ('move_hist','yard_move','yard_cell','gate_event'),
                         'age_s', round(EXTRACT(epoch FROM (now()-updated_at)))::int)
                         ORDER BY source), '[]'::jsonb) FROM scenario.watermark),
              'checkpoint', (SELECT jsonb_build_object(
