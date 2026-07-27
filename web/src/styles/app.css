@@ -808,6 +808,19 @@ td.mono { font-family: "JetBrains Mono", monospace; color: var(--text); }
 .lvp-cols3 { grid-template-columns: 1fr; }
 .lvp-sub { font-size: 10.5px; color: var(--text-mute); margin: -3px 0 8px 17px; }
 
+/* ── 후보 차량 풀 ────────────────────────────────────────────────────────────────
+   헤드라인은 "매처가 지금 쓸 수 있는 차량 수". 세부(유휴/곧자유/RTG대기)는 그 내역이고,
+   '작업 중(제외)'은 대조군이라 흐리게 둔다. 타일 상단 보더 색 = 라이브맵/상태 점과 같은 색. */
+.lvp-stats5 { grid-template-columns: 1.25fr 1fr 1fr 1fr 1fr; }
+@media (max-width: 900px) { .lvp-stats5 { grid-template-columns: repeat(2, 1fr); } }
+.lvp-stat-hero { border-top-color: var(--brand); background: var(--surface-3); }
+.lvp-stat-hero .lvp-n { color: var(--brand); }
+.lvp-stat-mute { opacity: 0.62; }
+.lvp-list-tall { max-height: 330px; }
+/* 후보 행 맨 앞의 상태 점 — 열 대신 점으로 상태를 구분해 한 줄로 세운다 */
+.lvp-row .sw { width: 8px; height: 8px; border-radius: 999px; flex: none; }
+.lvp-freein.lvp-now { color: var(--good); background: var(--good-bg); border-color: var(--good-border); }
+
 /* KPI history matrix (by day/week/month) */
 .hist-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--surface); }
 .hist-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }

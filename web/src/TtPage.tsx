@@ -125,18 +125,32 @@ function freeInLabel(d: LiveTT, lang: Lang): string | null {
   return ko(lang) ? `~${m}분${hi ? ` (최대 ${hi})` : ""}` : `~${m}m${hi ? ` (max ${hi})` : ""}`;
 }
 
-// localized "why" for a soon-idle TT (built from structured fields, not the
+// localized "why" for a candidate TT (built from structured fields, not the
 // backend's Korean dispatch_reason — so EN mode shows no Korean).
 function soonWhy(d: LiveTT, lang: Lang): string {
+  const k = ko(lang);
+  if (d.dispatch === "idle") return k ? "지금 배차 가능" : "dispatchable now";
   if (d.dispatch === "approaching") {
-    return ko(lang) ? "QC 양하 완료 · RTG 대기 (~12분 후 유휴)" : "QC discharged · waiting RTG (~12m to free)";
+    return k ? "QC 양하 완료 · RTG 대기" : "QC discharged · waiting RTG";
+  }
+  if (d.dispatch === "wait_rtg") {
+    const m = d.nearest_rtg_m != null ? ` ${Math.round(d.nearest_rtg_m)}m` : "";
+    return k ? `블록 도착 · RTG 대기${m}` : `at block · waiting RTG${m}`;
   }
   if (d.nearest_rtg_m != null) {
     const m = Math.round(d.nearest_rtg_m);
-    return ko(lang) ? `블록 RTG 근접 ${m}m` : `block RTG ${m}m`;
+    return k ? `블록 RTG 근접 ${m}m` : `block RTG ${m}m`;
   }
-  return ko(lang) ? "안벽 핸드오버 · PLC" : "quay handover · PLC";
+  return k ? "안벽 핸드오버 · PLC" : "quay handover · PLC";
 }
+
+// ── 후보 차량 = 매처(spawn_stage2_shadow)가 실제로 배차 대상으로 삼는 상태 ──────────────────
+// 매처는 idle(즉시) + soon_idle/approaching/wait_rtg(곧 자유, 학습된 free_in을 비용에 더함)만
+// 후보로 쓰고 delivering/empty_travel/staging은 건너뛴다. 예전 이 카드는 idle+soon_idle만 보여줘
+// wait_rtg(블록 도착·RTG 대기)가 통째로 빠져 있었다 — 화면과 매처가 서로 다른 풀을 말했다.
+const CANDIDATE_STATES = ["idle", "soon_idle", "approaching", "wait_rtg"] as const;
+// 정렬 기준 = 매처의 간선 비용 기저(base): 지금 자유면 0, 아니면 자유까지 예측 초.
+const freeInOf = (d: LiveTT): number => (d.dispatch === "idle" ? 0 : d.free_in_s ?? 9e9);
 // localized dispatch-state label for tooltips
 function dspTitle(dispatch: string | undefined, lang: Lang): string | undefined {
   if (!dispatch || !DSP_META[dispatch]) return undefined;
@@ -160,9 +174,17 @@ function ttWhere(tt: Dev | undefined, jobtype: string | null, lang: Lang): strin
 }
 
 function LiveDispatchPool({ lang, snap, err }: { lang: Lang; snap: Snap | null; err: boolean }) {
+  const k = ko(lang);
   const tts = ((snap?.devices ?? []) as LiveTT[]).filter((d) => d.cls === "TT");
-  const soon = tts.filter((d) => d.dispatch === "soon_idle").sort((a, b) => a.id.localeCompare(b.id)); // imminent only
-  const idle = tts.filter((d) => d.dispatch === "idle").sort((a, b) => a.id.localeCompare(b.id));
+  // 후보 = 매처가 쓰는 4개 상태. 자유가 빠른 순(= 매처 비용 기저 순)으로 한 줄로 세운다.
+  const cands = tts
+    .filter((d) => (CANDIDATE_STATES as readonly string[]).includes(d.dispatch ?? ""))
+    .sort((a, b) => freeInOf(a) - freeInOf(b) || a.id.localeCompare(b.id));
+  const nBy = (s: string) => tts.filter((d) => d.dispatch === s).length;
+  const idleN = nBy("idle");
+  const soonN = nBy("soon_idle") + nBy("approaching");
+  const rtgN = nBy("wait_rtg");
+  const busyN = tts.length - cands.length; // 운반중·배차대기·공차 = 매처가 건너뛰는 차량
   const empties = tts.filter((d) => d.dispatch === "empty_travel");
   // swap pool: empty trucks still far enough from their pickup, EXCLUDING yard moves (MI/MO)
   // — only vessel work (DS/LD) is swappable. Distance threshold is operator-adjustable.
@@ -180,61 +202,89 @@ function LiveDispatchPool({ lang, snap, err }: { lang: Lang; snap: Snap | null; 
   return (
     <section className="tcard lvp">
       <div className="tcard-head">
-        <h3>{ko(lang) ? "TT 배차 풀" : "Dispatch TT Pool"}
-          <span className="h3-sub">{ko(lang) ? "websocket GPS/PLC · 차량(공급)" : "websocket GPS/PLC · vehicles (supply)"}</span></h3>
+        <h3>{k ? "후보 차량 풀" : "Candidate TT Pool"}
+          <span className="h3-sub">{k ? "websocket GPS/PLC · 지금 배차 대상이 되는 차량(공급)" : "websocket GPS/PLC · vehicles the matcher can dispatch (supply)"}</span></h3>
         <div className="head-sub">
-          <span className={`pill ${liveFresh ? "good" : "bad"}`}><span className="dot" />{!snap && !err ? "…" : liveFresh ? "LIVE" : (ko(lang) ? "정지" : "STALE")}</span>
+          <span className={`pill ${liveFresh ? "good" : "bad"}`}><span className="dot" />{!snap && !err ? "…" : liveFresh ? "LIVE" : (k ? "정지" : "STALE")}</span>
           <span className="muted mono" style={ageS != null && ageS > 120 ? { color: "#fca5a5", fontWeight: 700 } : undefined}>{ageS != null ? `⟳ ${ageS}s` : ""}</span>
         </div>
       </div>
       <div className="tcard-body">
-        <div className="lvp-cols lvp-cols3">
+        {/* 후보 총계를 먼저 크게 — 매처가 이번 틱에 쓸 수 있는 차량 수가 이 카드의 헤드라인이다. */}
+        <div className="lvp-stats lvp-stats5">
+          <div className="lvp-stat lvp-stat-hero" title={k ? "매처가 지금 배차 대상으로 삼는 차량 = 유휴 + 곧 자유 + RTG 대기" : "vehicles the matcher treats as dispatchable = idle + soon-free + waiting RTG"}>
+            <div className="lvp-n">{cands.length}</div>
+            <div className="lvp-l">{k ? "후보 차량" : "Candidates"}</div>
+          </div>
+          <div className="lvp-stat" style={{ borderTopColor: DSP_META.idle.color }}>
+            <div className="lvp-n">{idleN}</div>
+            <div className="lvp-l">{k ? "지금 유휴" : "Idle now"}</div>
+          </div>
+          <div className="lvp-stat" style={{ borderTopColor: DSP_META.soon_idle.color }}>
+            <div className="lvp-n">{soonN}</div>
+            <div className="lvp-l">{k ? "곧 자유" : "Soon free"}</div>
+          </div>
+          <div className="lvp-stat" style={{ borderTopColor: DSP_META.wait_rtg.color }}>
+            <div className="lvp-n">{rtgN}</div>
+            <div className="lvp-l">{k ? "RTG 대기" : "Waiting RTG"}</div>
+          </div>
+          <div className="lvp-stat lvp-stat-mute" title={k ? "운반 중·배차 대기·공차 — 매처가 건너뛰는 차량" : "delivering / staging / empty — skipped by the matcher"}>
+            <div className="lvp-n">{busyN}</div>
+            <div className="lvp-l">{k ? "작업 중 (제외)" : "Busy (skipped)"}</div>
+          </div>
+        </div>
+        <div className="lvp-cols">
           <div className="lvp-col">
-            <div className="lvp-col-h"><span className="sw" style={{ background: DSP_META.idle.color }} />{ko(lang) ? "현재 유휴" : "Idle now"}<span className="lvp-cn">{idle.length}</span></div>
-            <div className="lvp-sub">{ko(lang) ? "즉시 배차 가능" : "dispatchable now"}</div>
-            <div className="lvp-chips">
-              {idle.length === 0 && <div className="lvp-empty">{ko(lang) ? "없음" : "none"}</div>}
-              {idle.slice(0, 48).map((d) => <span className="lvp-chip idle mono" key={d.id}>{d.id}</span>)}
-              {idle.length > 48 && <span className="lvp-more">+{idle.length - 48}</span>}
+            <div className="lvp-col-h">{k ? "후보 — 자유가 빠른 순" : "Candidates — soonest free first"}<span className="lvp-cn">{cands.length}</span></div>
+            <div className="lvp-sub">{k
+              ? "매처가 쓰는 순서와 같음(지금 자유 = 0초, 나머지는 자유까지 예측 시간을 비용에 더함)"
+              : "same order the matcher uses (free now = 0s; others add predicted time-to-free to the cost)"}</div>
+            <div className="lvp-list lvp-list-tall">
+              {cands.length === 0 && <div className="lvp-empty">{k ? "없음" : "none"}</div>}
+              {cands.map((d) => {
+                const meta = DSP_META[d.dispatch ?? ""] ?? null;
+                const now = d.dispatch === "idle";
+                return (
+                  <div className="lvp-row" key={d.id}>
+                    <span className="sw" style={{ background: meta?.color ?? "var(--text-mute)" }} title={dspTitle(d.dispatch, lang)} />
+                    <span className="lvp-id mono">{d.id}</span>
+                    {d.jobtype && <span className={`lvp-job type-${d.jobtype.toLowerCase()}`}>{d.jobtype}</span>}
+                    {d.topos1 && <span className="lvp-dest mono">→{d.topos1}</span>}
+                    {now
+                      ? <span className="lvp-freein lvp-now">{k ? "지금" : "now"}</span>
+                      : freeInLabel(d, lang) && <span className="lvp-freein" title={k ? "자유까지 추정(측정 중앙값·표시 전용, 배차 미연결)" : "estimated time-to-free (measured median · display-only, not wired to dispatch)"}>{freeInLabel(d, lang)}</span>}
+                    <span className="lvp-why">{soonWhy(d, lang)}</span>
+                  </div>
+                );
+              })}
             </div>
           </div>
           <div className="lvp-col">
-            <div className="lvp-col-h"><span className="sw" style={{ background: DSP_META.soon_idle.color }} />{ko(lang) ? "곧 유휴 (임박)" : "Soon-idle"}<span className="lvp-cn">{soon.length}</span></div>
-            <div className="lvp-sub">{ko(lang) ? "임박만 — RTG 물리 관여·~2분 (측정값)" : "imminent only — RTG engaged ~2m (measured)"}</div>
-            <div className="lvp-list">
-              {soon.length === 0 && <div className="lvp-empty">{ko(lang) ? "없음" : "none"}</div>}
-              {soon.map((d) => (
-                <div className="lvp-row" key={d.id}>
-                  <span className="lvp-id mono">{d.id}</span>
-                  {d.jobtype && <span className={`lvp-job type-${d.jobtype.toLowerCase()}`}>{d.jobtype}</span>}
-                  {d.topos1 && <span className="lvp-dest mono">→{d.topos1}</span>}
-                  {freeInLabel(d, lang) && <span className="lvp-freein" title={ko(lang) ? "곧 빔까지 추정(측정 중앙값·표시 전용, 배차 미연결)" : "estimated time-to-free (measured median · display-only, not yet wired to dispatch)"}>{freeInLabel(d, lang)}</span>}
-                  <span className="lvp-why">{soonWhy(d, lang)}</span>
-                </div>
-              ))}
-            </div>
-          </div>
-          <div className="lvp-col">
-            <div className="lvp-col-h"><span className="sw" style={{ background: DSP_META.empty_travel.color }} />{ko(lang) ? "스왑 가능한 공차" : "Swappable empty"}<span className="lvp-cn">{swap.length}</span></div>
-            <div className="lvp-sub">{ko(lang) ? `픽업까지 잔여 ≥${swapMinM}m · MI/MO 제외 · 기준미달 ${swapExcluded} 제외` : `≥${swapMinM}m left to pickup · MI/MO excluded · ${swapExcluded} below threshold`}</div>
+            <div className="lvp-col-h"><span className="sw" style={{ background: DSP_META.empty_travel.color }} />{k ? "스왑 후보 (공차)" : "Swap candidates (empty)"}<span className="lvp-cn">{swap.length}</span></div>
+            <div className="lvp-sub">{k
+              ? `참고용 — 위 후보와 별개다(매처 풀에 안 들어감). 픽업까지 ≥${swapMinM}m · MI/MO 제외 · 기준미달 ${swapExcluded} 제외`
+              : `reference only — NOT in the matcher pool. ≥${swapMinM}m to pickup · MI/MO excluded · ${swapExcluded} below threshold`}</div>
             <div className="lvp-swapctl">
-              <span className="lvp-swapctl-l">{ko(lang) ? "기준 거리" : "min dist"}</span>
+              <span className="lvp-swapctl-l">{k ? "기준 거리" : "min dist"}</span>
               <input type="range" min={100} max={1500} step={50} value={swapMinM} onChange={(e) => setSwapMinM(Number(e.target.value))} />
               <span className="lvp-swapctl-v mono">{swapMinM}m</span>
             </div>
-            <div className="lvp-list">
-              {swap.length === 0 && <div className="lvp-empty">{ko(lang) ? "없음" : "none"}</div>}
+            <div className="lvp-list lvp-list-tall">
+              {swap.length === 0 && <div className="lvp-empty">{k ? "없음" : "none"}</div>}
               {swap.map((d) => (
                 <div className="lvp-row" key={d.id}>
                   <span className="lvp-id mono">{d.id}</span>
                   {d.jobtype && <span className={`lvp-job type-${d.jobtype.toLowerCase()}`}>{d.jobtype}</span>}
                   {d.topos1 && <span className="lvp-dest mono">→{d.topos1}</span>}
-                  <span className="lvp-why">{d.dest_remaining_m != null ? (ko(lang) ? `잔여 ${Math.round(d.dest_remaining_m)}m` : `${Math.round(d.dest_remaining_m)}m left`) : (ko(lang) ? "목적지 학습 중" : "dest learning")}</span>
+                  <span className="lvp-why">{d.dest_remaining_m != null ? (k ? `잔여 ${Math.round(d.dest_remaining_m)}m` : `${Math.round(d.dest_remaining_m)}m left`) : (k ? "목적지 학습 중" : "dest learning")}</span>
                 </div>
               ))}
             </div>
           </div>
         </div>
+        <div className="lvp-note">{k
+          ? "후보 = 유휴 + 곧 자유 + RTG 대기. 운반 중·배차 대기·공차는 이미 일이 있어 제외한다. 자유까지 시간은 측정 중앙값 기반 추정이며 표시 전용이다. 매처는 이 밖에 '마지막 단계에서 신호가 끊긴 트럭'도 잠시 후보로 붙잡아 두는데(단말이 정지 중엔 보고를 멈춘다), 그 차량은 화면에 안 보일 수 있다."
+          : "Candidates = idle + soon-free + waiting RTG. Delivering / staging / empty trucks already have work and are skipped. Time-to-free is a measured-median estimate, display-only. The matcher also holds briefly-silent last-stage trucks as candidates (devices stop reporting while stopped); those may not appear here."}</div>
       </div>
     </section>
   );
