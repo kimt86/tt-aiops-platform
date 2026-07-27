@@ -424,17 +424,43 @@ pub(crate) async fn build_workpool(pool: PgPool) -> Result<WorkpoolOut, AppError
         }
         for qc in &mut qcs {
             let qc_id = qc.qc.clone();
-            let mut by_vessel: BTreeMap<String, Vec<usize>> = BTreeMap::new();
-            for (i, q) in qc.queues.iter().enumerate() {
-                by_vessel.entry(q.vessel.clone()).or_default().push(i);
+            // ── 크레인 단일 타임라인 ───────────────────────────────────────────────────────────
+            // 크레인 하나가 여러 배를 맡는 건 예외가 아니라 기본이다(실측 2026-07-27: 잔여작업이
+            // 있는 67개 크레인 중 41개가 2척 이상, 최대 3척). 예전에는 (크레인,선박) 그룹마다
+            // 시간을 독립으로 쌓아서 **같은 크레인에 걸린 다른 배의 작업이 안 보였다** — 크레인은
+            // 한 번에 한 베이만 하는데 배마다 자기 시계를 따로 갖는 셈이라 물리적으로 틀린 모델.
+            // 실례(Z2): 크레인이 BWSS로 옮겨가 MTMH의 남은 적하 73개가 BWSS 186무브 뒤에 밀렸는데,
+            // MTMH 그룹만 보면 앞선 작업이 전부 완료(procs≈0)라 work-ETA가 "지금", 여유 +6분으로
+            // 나왔다. 실제로는 도달까지 ~5.7시간인데 출항까지 2.8시간 = 불가능.
+            // ⇒ 시간축은 크레인당 하나. 다만 **배 사이 순서를 seq로 섞으면 안 된다** — seq는 선박별로
+            //   1부터 다시 시작하므로 seq로 정렬하면 두 배가 번갈아 놓이고, 그러면 모든 배의
+            //   '마지막 베이'가 타임라인 끝에 몰려 배마다 크레인 전체 작업을 통째로 뒤집어쓴다
+            //   (시제품에서 실측: 뒤처진 크레인 16→42개로 과교정). 크레인은 실제로 한 배의 베이들을
+            //   묶어서 처리하고 배를 옮긴다. 그래서 **배 블록 단위**로 세운다:
+            //     ① 지금 실제로 붙어 있는 배(활성 무브 기준 vessels[0])가 맨 앞 — 관측된 사실
+            //     ② 나머지는 마감이 이른 순 — 마감 인지형 터미널이라면 그렇게 처리해야 하고,
+            //        우리가 없는 정보를 지어내는 것보다 낫다
+            //   블록 안에서는 종전처럼 seq 순. 단일 선박 크레인은 종전과 완전히 동일하다.
+            let mut voy_v: BTreeMap<String, String> = BTreeMap::new();
+            for q in qc.queues.iter() {
+                if let Some(v) = q.voyage.clone() {
+                    voy_v.entry(q.vessel.clone()).or_insert(v);
+                }
             }
-            for (vessel, mut idxs) in by_vessel {
-                // 이 그룹의 큐가 들고 있는 voyage로 정확 조회 → 없으면 선박 폴백(미출항 우선/최이른 ETD)
-                let voy = idxs.iter().find_map(|&i| qc.queues[i].voyage.clone());
-                let (dep, wkc) = match voy.as_ref().and_then(|v| sched_v.get(&(vessel.clone(), v.clone())).copied()) {
-                    Some(x) => x,
-                    None => match sched_fb.get(&vessel) { Some(&(_, d, w)) => (d, w), None => continue },
-                };
+            // 선박별 마감 목표. 스케줄이 없는 선박(가상선박 RHXX 등)은 예측을 내지 않지만, 그
+            // 작업도 크레인 시간은 먹으므로 타임라인에서 빼지 않는다(다른 배를 그만큼 밀어낸다).
+            let mut finish_by_v: BTreeMap<String, DateTime<Utc>> = BTreeMap::new();
+            let mut dep_v: BTreeMap<String, DateTime<Utc>> = BTreeMap::new();
+            let qc_vessels: Vec<String> = qc.queues.iter().map(|q| q.vessel.clone()).collect();
+            for vessel in qc_vessels {
+                if finish_by_v.contains_key(&vessel) {
+                    continue;
+                }
+                // 큐가 들고 있는 voyage로 정확 조회 → 없으면 선박 폴백(미출항 우선/최이른 ETD)
+                let Some((dep, wkc)) = voy_v.get(&vessel)
+                    .and_then(|v| sched_v.get(&(vessel.clone(), v.clone())).copied())
+                    .or_else(|| sched_fb.get(&vessel).map(|&(_, d, w)| (d, w)))
+                else { continue };
                 // must-finish target = the tighter of (departure − buffer) and ESTWKC. GUARD: this
                 // terminal's ESTWKC is often stale garbage (verified: many vessels show work-complete
                 // DAYS before berthing — impossible), so only trust it when it's a plausible
@@ -444,12 +470,31 @@ pub(crate) async fn build_workpool(pool: PgPool) -> Result<WorkpoolOut, AppError
                     Some(w) if w < dep_target && (dep - w) <= chrono::Duration::hours(6) => w,
                     _ => dep_target,
                 };
-                let twin = twin_frac.get(&vessel).copied().unwrap_or(0.0).clamp(0.0, 1.0);
-                let move_factor = 1.0 - twin / 2.0; // containers → moves
-                idxs.sort_by_key(|&i| qc.queues[i].seq.unwrap_or(i32::MAX));
+                finish_by_v.insert(vessel.clone(), finish_by);
+                dep_v.insert(vessel, dep);
+            }
+            // 배 블록 순서: 활성 배(0) → 마감 이른 순 → 마감 미상은 맨 뒤. 그 안에서 seq.
+            let active_vessel = qc.vessels.first().cloned();
+            let mut idxs: Vec<usize> = (0..qc.queues.len()).collect();
+            idxs.sort_by(|&a, &b| {
+                let rank = |i: usize| -> (u8, DateTime<Utc>, String) {
+                    let v = &qc.queues[i].vessel;
+                    let is_active = active_vessel.as_deref() == Some(v.as_str());
+                    let fb = finish_by_v.get(v).copied().unwrap_or(DateTime::<Utc>::MAX_UTC);
+                    (if is_active { 0 } else { 1 }, fb, v.clone())
+                };
+                rank(a).cmp(&rank(b)).then_with(|| {
+                    qc.queues[a].seq.unwrap_or(i32::MAX).cmp(&qc.queues[b].seq.unwrap_or(i32::MAX))
+                })
+            });
+            {
                 let mut procs: Vec<f64> = Vec::with_capacity(idxs.len());
                 let mut prev: Option<(String, char, char)> = None;
                 for &i in &idxs {
+                    // 트윈 비율은 선박 속성이라 큐마다 그 큐의 선박 것으로 본다(통합 타임라인이라
+                    // 그룹당 한 번 잡던 예전과 달리 여기서 조회해야 한다).
+                    let twin = twin_frac.get(&qc.queues[i].vessel).copied().unwrap_or(0.0).clamp(0.0, 1.0);
+                    let move_factor = 1.0 - twin / 2.0; // containers → moves
                     let cur = parse_q(&qc.queues[i].queuename);
                     let job = cur.as_ref().map(|c| c.2).unwrap_or('D');
                     let move_s = move_time
@@ -480,13 +525,24 @@ pub(crate) async fn build_workpool(pool: PgPool) -> Result<WorkpoolOut, AppError
                     procs.push(p);
                     prev = cur;
                 }
-                let total: f64 = procs.iter().sum();
-                let mut cum_after = 0.0_f64; // work scheduled after bay k
-                for k in (0..idxs.len()).rev() {
-                    let qi = idxs[k];
-                    qc.queues[qi].deadline_ts = Some(finish_by - chrono::Duration::seconds(cum_after as i64));
-                    // when the QC starts this bay = now + work scheduled before it (+ DS calibration)
-                    let before = (total - cum_after - procs[k]).max(0.0);
+                // 접미합 suffix[j] = procs[j..] 총합 → 구간합을 O(1)로.
+                let n = idxs.len();
+                let mut suffix = vec![0.0_f64; n + 1];
+                for k in (0..n).rev() {
+                    suffix[k] = suffix[k + 1] + procs[k];
+                }
+                // 각 선박의 '마지막 베이'가 통합 타임라인에서 어디인지 (그 배가 끝나는 지점)
+                let mut last_of: BTreeMap<String, usize> = BTreeMap::new();
+                for (k, &i) in idxs.iter().enumerate() {
+                    last_of.insert(qc.queues[i].vessel.clone(), k);
+                }
+                for (k, &qi) in idxs.iter().enumerate() {
+                    let vessel = qc.queues[qi].vessel.clone();
+                    // 스케줄 없는 선박은 예측을 내지 않는다(작업 시간은 위에서 이미 타임라인에 반영됨).
+                    let Some(&finish_by) = finish_by_v.get(&vessel) else { continue };
+                    // when the QC starts this bay = now + work scheduled before it (+ DS calibration).
+                    // 앞선 작업 = 통합 타임라인의 procs[0..k] — **다른 배 작업 포함**이 이번 수정의 핵심.
+                    let before = (suffix[0] - suffix[k]).max(0.0);
                     let job = parse_q(&qc.queues[qi].queuename).map(|c| c.2).unwrap_or('D');
                     let bias = if job == 'L' { 0 } else { DS_WORK_ETA_BIAS_S };
                     // + learned residual (per-crane, else global-jobtype, else 0) + shift-break stalls
@@ -499,13 +555,26 @@ pub(crate) async fn build_workpool(pool: PgPool) -> Result<WorkpoolOut, AppError
                     let brk = shift_breaks_between(eta_anchor, raw) * SHIFT_BREAK_S;
                     qc.queues[qi].work_eta_ts = Some(raw + chrono::Duration::seconds(brk));
                     qc.queues[qi].proc_s = Some(procs[k] as i64);
-                    cum_after += procs[k];
+                    // 마감 = 출항 목표 − (이 베이 다음부터 '이 배의 마지막 베이'까지 크레인이 해야 할
+                    // 일 전부). 사이에 낀 다른 배 작업도 그 배의 완료를 실제로 늦추므로 포함한다.
+                    let last = last_of.get(&vessel).copied().unwrap_or(k);
+                    let cum_after = (suffix[k + 1] - suffix[last + 1]).max(0.0);
+                    qc.queues[qi].deadline_ts =
+                        Some(finish_by - chrono::Duration::seconds(cum_after as i64));
                 }
-                if qc.vessels.first().map(|v| v == &vessel).unwrap_or(false) {
-                    qc.estdep_ts = Some(dep);
-                    qc.work_left_s = Some(total as i64);
-                    // slack vs the must-finish target = min(departure − buffer, ESTWKC); work-ETA stays buffer-free
-                    qc.slack_s = Some((finish_by - now).num_seconds() - total as i64);
+                // QC 헤더는 '지금 작업 중인 배'(vessels[0] = 활성 무브 기준) 기준으로 낸다.
+                if let Some(vessel) = qc.vessels.first().cloned() {
+                    if let (Some(&finish_by), Some(&last)) =
+                        (finish_by_v.get(&vessel), last_of.get(&vessel))
+                    {
+                        // 이 배를 끝내려면 크레인이 지금부터 해야 할 총 시간 = procs[0..=last].
+                        // 예전엔 그 배의 작업만 셌다 → 크레인을 나눠 쓰면 여유가 과대평가됐다.
+                        let need = (suffix[0] - suffix[last + 1]).max(0.0);
+                        qc.estdep_ts = dep_v.get(&vessel).copied();
+                        qc.work_left_s = Some(need as i64);
+                        // slack vs the must-finish target = min(departure − buffer, ESTWKC); work-ETA stays buffer-free
+                        qc.slack_s = Some((finish_by - now).num_seconds() - need as i64);
+                    }
                 }
             }
         }
