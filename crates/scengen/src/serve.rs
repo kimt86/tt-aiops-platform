@@ -55,8 +55,13 @@ async fn status(State(pool): State<PgPool>) -> Result<Response, AppErr> {
              'watermark', (SELECT cursor_evt FROM scenario.watermark WHERE source='move_hist'),
              'move_hist', (SELECT jsonb_build_object('rows',count(*),'min',min(comp_ts),'max',max(comp_ts))
                              FROM scenario.move_hist),
+             -- `scheduled` = a systemd timer drives this stream, so a stale watermark really does
+             -- mean the feed stopped. Streams without a timer (crane_deploy is collected by hand;
+             -- it is the plan log, kept only for plan-vs-actual comparison) are expected to sit
+             -- still and must not raise the silence alarm.
              'watermarks', (SELECT coalesce(jsonb_agg(jsonb_build_object(
                         'source', source,
+                        'scheduled', source IN ('move_hist','yard_move','yard_cell'),
                         'age_s', round(EXTRACT(epoch FROM (now()-updated_at)))::int)
                         ORDER BY source), '[]'::jsonb) FROM scenario.watermark),
              'checkpoint', (SELECT jsonb_build_object(
@@ -282,11 +287,14 @@ function ckpt(c){
   if(!c.count)return'<b style="color:#f87171">⚠ 없음 (다운로드가 전체 재생)</b>';
   return c.age_h>12?`<b style="color:#f87171">⚠ ${c.count}개 · ${c.age_h}h 정체</b>`:`${c.count}개 · ${c.age_h}h 전`;
 }
-// Data silence: the worst watermark age. A watermark only advances when new rows arrive, so a long
-// age means the feed stopped even though the timer may still be firing (fetched=0 every tick).
+// Data silence: the worst watermark age AMONG TIMER-DRIVEN streams. A watermark only advances when
+// new rows arrive, so a long age means the feed stopped even though the timer may still be firing
+// (fetched=0 every tick). Hand-run streams are excluded — they are always stale by design, and
+// including them pinned this tile red permanently, which trains everyone to ignore it.
 function silence(wms){
-  if(!wms.length)return'<span class=mut>–</span>';
-  const w=wms.reduce((a,b)=>(b.age_s||0)>(a.age_s||0)?b:a);
+  const s=(wms||[]).filter(w=>w.scheduled);
+  if(!s.length)return'<span class=mut>–</span>';
+  const w=s.reduce((a,b)=>(b.age_s||0)>(a.age_s||0)?b:a);
   const m=Math.round((w.age_s||0)/60);
   return m>30?`<b style="color:#f87171">⚠ ${w.source} ${m}분 무진행</b>`:`최대 ${m}분 (${w.source})`;
 }
