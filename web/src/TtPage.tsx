@@ -151,6 +151,12 @@ function soonWhy(d: LiveTT, lang: Lang): string {
 const CANDIDATE_STATES = ["idle", "soon_idle", "approaching", "wait_rtg"] as const;
 // 정렬 기준 = 매처의 간선 비용 기저(base): 지금 자유면 0, 아니면 자유까지 예측 초.
 const freeInOf = (d: LiveTT): number => (d.dispatch === "idle" ? 0 : d.free_in_s ?? 9e9);
+// ⚠ 후보를 두 갈래로만 센다: '지금 유휴' vs '곧 자유'. 곧유휴/접근/RTG대기를 갈라 세우지 않는다 —
+// ADR 0002(유휴 리드타임은 예측하지 않는다, 채택 2026-07-15)로 상태별 개별 예측을 중단했고,
+// 실제 코드도 트럭이 정차(<3km/h)면 learn_free_in_stationary(=jobtype만, DS 242s/LD 145s)를 써서
+// 상태를 아예 보지 않는다(상태별 learn_free_in_bias는 '움직이는 중'일 때만 폴백). 화면이 세 갈래로
+// 나누면 시스템이 실제로 하지 않는 구분을 하는 것처럼 읽힌다. 상태는 행 앞 점(보조 정보)으로만 남긴다.
+const isIdleNow = (d: LiveTT) => d.dispatch === "idle";
 // localized dispatch-state label for tooltips
 function dspTitle(dispatch: string | undefined, lang: Lang): string | undefined {
   if (!dispatch || !DSP_META[dispatch]) return undefined;
@@ -180,10 +186,8 @@ function LiveDispatchPool({ lang, snap, err }: { lang: Lang; snap: Snap | null; 
   const cands = tts
     .filter((d) => (CANDIDATE_STATES as readonly string[]).includes(d.dispatch ?? ""))
     .sort((a, b) => freeInOf(a) - freeInOf(b) || a.id.localeCompare(b.id));
-  const nBy = (s: string) => tts.filter((d) => d.dispatch === s).length;
-  const idleN = nBy("idle");
-  const soonN = nBy("soon_idle") + nBy("approaching");
-  const rtgN = nBy("wait_rtg");
+  const idleN = cands.filter(isIdleNow).length;
+  const soonN = cands.length - idleN;  // 곧 자유 = 곧유휴 + 접근 + RTG대기 (한 갈래로 센다·위 주석 참조)
   const busyN = tts.length - cands.length; // 운반중·배차대기·공차 = 매처가 건너뛰는 차량
   const empties = tts.filter((d) => d.dispatch === "empty_travel");
   // swap pool: empty trucks still far enough from their pickup, EXCLUDING yard moves (MI/MO)
@@ -211,22 +215,18 @@ function LiveDispatchPool({ lang, snap, err }: { lang: Lang; snap: Snap | null; 
       </div>
       <div className="tcard-body">
         {/* 후보 총계를 먼저 크게 — 매처가 이번 틱에 쓸 수 있는 차량 수가 이 카드의 헤드라인이다. */}
-        <div className="lvp-stats lvp-stats5">
-          <div className="lvp-stat lvp-stat-hero" title={k ? "매처가 지금 배차 대상으로 삼는 차량 = 유휴 + 곧 자유 + RTG 대기" : "vehicles the matcher treats as dispatchable = idle + soon-free + waiting RTG"}>
+        <div className="lvp-stats lvp-stats4">
+          <div className="lvp-stat lvp-stat-hero" title={k ? "매처가 지금 배차 대상으로 삼는 차량 = 지금 유휴 + 곧 자유" : "vehicles the matcher treats as dispatchable = idle now + soon free"}>
             <div className="lvp-n">{cands.length}</div>
             <div className="lvp-l">{k ? "후보 차량" : "Candidates"}</div>
           </div>
-          <div className="lvp-stat" style={{ borderTopColor: DSP_META.idle.color }}>
+          <div className="lvp-stat" style={{ borderTopColor: DSP_META.idle.color }} title={k ? "대기 없이 지금 보낼 수 있다(비용 기저 0초)" : "dispatchable with no wait (cost base 0s)"}>
             <div className="lvp-n">{idleN}</div>
             <div className="lvp-l">{k ? "지금 유휴" : "Idle now"}</div>
           </div>
-          <div className="lvp-stat" style={{ borderTopColor: DSP_META.soon_idle.color }}>
+          <div className="lvp-stat" style={{ borderTopColor: DSP_META.soon_idle.color }} title={k ? "아직 작업 중이지만 곧 자유 — 자유까지 예측 시간이 비용에 더해진다. 안벽 핸드오버·RTG 대기를 갈라 세지 않는다(ADR 0002: 상태별 개별 예측 중단, 정차 시엔 작업유형 중앙값만 사용)" : "still working but soon free — predicted time-to-free is added to the cost. Quay handover vs RTG wait are NOT counted separately (ADR 0002: per-state prediction discontinued; when stopped, only the job-type median is used)"}>
             <div className="lvp-n">{soonN}</div>
             <div className="lvp-l">{k ? "곧 자유" : "Soon free"}</div>
-          </div>
-          <div className="lvp-stat" style={{ borderTopColor: DSP_META.wait_rtg.color }}>
-            <div className="lvp-n">{rtgN}</div>
-            <div className="lvp-l">{k ? "RTG 대기" : "Waiting RTG"}</div>
           </div>
           <div className="lvp-stat lvp-stat-mute" title={k ? "운반 중·배차 대기·공차 — 매처가 건너뛰는 차량" : "delivering / staging / empty — skipped by the matcher"}>
             <div className="lvp-n">{busyN}</div>
@@ -283,8 +283,8 @@ function LiveDispatchPool({ lang, snap, err }: { lang: Lang; snap: Snap | null; 
           </div>
         </div>
         <div className="lvp-note">{k
-          ? "후보 = 유휴 + 곧 자유 + RTG 대기. 운반 중·배차 대기·공차는 이미 일이 있어 제외한다. 자유까지 시간은 측정 중앙값 기반 추정이며 표시 전용이다. 매처는 이 밖에 '마지막 단계에서 신호가 끊긴 트럭'도 잠시 후보로 붙잡아 두는데(단말이 정지 중엔 보고를 멈춘다), 그 차량은 화면에 안 보일 수 있다."
-          : "Candidates = idle + soon-free + waiting RTG. Delivering / staging / empty trucks already have work and are skipped. Time-to-free is a measured-median estimate, display-only. The matcher also holds briefly-silent last-stage trucks as candidates (devices stop reporting while stopped); those may not appear here."}</div>
+          ? "후보 = 지금 유휴 + 곧 자유. 운반 중·배차 대기·공차는 이미 일이 있어 제외한다. 자유까지 시간은 측정 중앙값 기반 추정이고 표시 전용이다 — 트럭이 멈춰 있으면 작업유형(양하/적하) 중앙값만 쓰고 '안벽 핸드오버냐 RTG 대기냐'는 보지 않는다. 개별 트럭의 남은 시간을 정밀하게 맞히는 일은 관측 신호의 근본 한계로 중단했다(대기를 만드는 크레인 큐가 안 보이고, 트럭은 멈추면 단말이 침묵한다). 같은 이유로 매처가 잠시 붙잡아 두는 '신호가 끊긴 마지막 단계 트럭'은 화면에 안 보일 수 있다."
+          : "Candidates = idle now + soon free. Delivering / staging / empty trucks already have work and are skipped. Time-to-free is a measured-median estimate, display-only — when a truck is stopped only the job-type (DS/LD) median is used; whether it is a quay handover or an RTG wait is not considered. Predicting an individual truck's remaining time precisely was discontinued as an observability limit (the crane queue that creates the wait is invisible, and devices go silent while stopped). For the same reason the matcher's briefly-silent last-stage trucks may not appear here."}</div>
       </div>
     </section>
   );

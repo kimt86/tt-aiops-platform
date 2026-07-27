@@ -811,8 +811,8 @@ td.mono { font-family: "JetBrains Mono", monospace; color: var(--text); }
 /* ── 후보 차량 풀 ────────────────────────────────────────────────────────────────
    헤드라인은 "매처가 지금 쓸 수 있는 차량 수". 세부(유휴/곧자유/RTG대기)는 그 내역이고,
    '작업 중(제외)'은 대조군이라 흐리게 둔다. 타일 상단 보더 색 = 라이브맵/상태 점과 같은 색. */
-.lvp-stats5 { grid-template-columns: 1.25fr 1fr 1fr 1fr 1fr; }
-@media (max-width: 900px) { .lvp-stats5 { grid-template-columns: repeat(2, 1fr); } }
+.lvp-stats4 { grid-template-columns: 1.25fr 1fr 1fr 1fr; }
+@media (max-width: 900px) { .lvp-stats4 { grid-template-columns: repeat(2, 1fr); } }
 .lvp-stat-hero { border-top-color: var(--brand); background: var(--surface-3); }
 .lvp-stat-hero .lvp-n { color: var(--brand); }
 .lvp-stat-mute { opacity: 0.62; }
