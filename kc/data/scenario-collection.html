@@ -56,16 +56,18 @@
   <div class="kc-cal note"><span class="h">TOS 접근 순서도 양보합니다</span><p>시나리오 수집기들끼리는 <strong>한 번에 하나씩</strong> TOS에 접근하도록 줄을 세웠습니다. 다만 <strong>운영 추출기는 이 줄에 세우지 않습니다</strong> — 운영 쪽은 1분마다 여러 개가 동시에 도는 설계라, 같은 줄에 세우면 시나리오가 조회하는 동안 <strong>운영이 막히기</strong> 때문입니다. 정확히 피하려던 사고가 그것입니다.</p></div>
 
   <h2>3. 무엇을 모으나</h2>
-  <p>자동으로 도는 것은 <strong>네 가지</strong>입니다.</p>
+  <p>자동으로 도는 것은 <strong>다섯 가지</strong>입니다.</p>
   <div class="kc-tablewrap"><table>
     <thead><tr><th>모으는 것</th><th>왜 필요한가</th><th>주기</th><th>TOS를 보나</th></tr></thead>
     <tbody>
       <tr><td><strong>배 귀속 정보</strong></td><td>컨테이너 이동 기록에는 <strong>어느 배 것인지가 없습니다</strong>. 이걸 따로 모아 붙여 줍니다</td><td>10분</td><td>예</td></tr>
       <tr><td><strong>야드 크레인 이동</strong></td><td>컨테이너가 야적장 <strong>어느 자리</strong>에 놓이고 빠졌는지 (칸·단까지)</td><td>5분</td><td>예</td></tr>
+      <tr><td><strong>게이트 통과 시각</strong></td><td>외부 트럭이 <strong>언제 게이트를 지났고 언제 나갔는지</strong> — 야드 기록에 없는 유일한 값</td><td>5분</td><td>예</td></tr>
       <tr><td><strong>배·컨테이너 상세</strong></td><td>배 길이·접안 위치, 컨테이너 크기·무게·냉동 여부·배 안에서의 위치</td><td>15분</td><td>예</td></tr>
       <tr><td><strong>야드 모습 다시 그리기</strong></td><td>모아 둔 이동 기록을 되짚어 <strong>야적장 현재 모습</strong>을 만듦 (아래 5번)</td><td>10분</td><td><strong>아니오</strong></td></tr>
     </tbody>
   </table></div>
+  <div class="kc-cal note"><span class="h">게이트 수집만 방식이 다릅니다</span><p>다른 수집기는 "지난번에 읽은 <strong>시각</strong> 다음부터" 읽습니다. 그런데 게이트 기록이 있는 TOS 표는 <strong>시각으로 찾아 들어갈 수단이 없습니다</strong>(컨테이너 번호로만 빠르게 찾을 수 있게 돼 있음). 그래서 이것만은 <strong>우리 기록을 기준으로</strong> 걷습니다 — "게이트를 지난 컨테이너가 누구인지"는 우리가 이미 아니까, 그 번호로 하나씩 찾습니다. 그리고 트럭이 나가는 기록은 야드 작업보다 <strong>10~25분 늦게</strong> 남기 때문에, 일부러 <strong>1시간 뒤에서</strong> 따라갑니다.</p></div>
   <div class="kc-cal note"><span class="h">작업목록 자체는 새로 모으지 않습니다</span><p>"어느 크레인이 어떤 컨테이너를 언제 처리했나"는 <strong>대시보드가 이미 1분마다 모으고 있습니다</strong>. 시나리오는 그걸 그대로 빌려 씁니다. 그래서 가장 덩치 큰 재료에 대해 <strong>TOS 부담이 0</strong>입니다.</p></div>
 
   <h2>4. 시나리오에 담기는 것</h2>
@@ -73,7 +75,7 @@
     <thead><tr><th>항목</th><th>내용</th></tr></thead>
     <tbody>
       <tr><td><strong>배별 작업목록</strong></td><td>배마다: 이름·길이·접안 위치·접안/출항 시각·마감, 그리고 처리한 <strong>컨테이너 한 줄 한 줄</strong>(양하인지 적하인지, 어느 크레인이 몇 번째로, 크기·무게·목적지, 배 안에서의 자리, <strong>두 개를 한 번에 든 경우</strong>인지)</td></tr>
-      <tr><td><strong>육측(게이트)</strong></td><td>외부 도로 트럭의 반입·반출 한 건 한 건 — 컨테이너·차량번호·시각·비었나 찼나·야드 어느 자리</td></tr>
+      <tr><td><strong>육측(게이트)</strong></td><td>외부 도로 트럭의 반입·반출 한 건 한 건 — 컨테이너·차량번호·비었나 찼나·야드 어느 자리, 그리고 <strong>게이트 통과 시각 · 야드에서 기다린 시간 · 출차 시각</strong></td></tr>
       <tr><td><strong>장비 투입</strong></td><td>안벽 크레인이 어느 배에 언제부터 언제까지, 야드 크레인이 어느 블록에 언제까지, 트럭이 시간대별로 몇 대 (→ <a href="/kc/data/equipment-deployment.html">자세히</a>)</td></tr>
       <tr><td><strong>야드 초기 상태</strong></td><td>시작 시각에 <strong>어느 컨테이너가 어느 칸 몇 단에</strong> 있었는지 (아래 5번)</td></tr>
       <tr><td><strong>품질 표시</strong></td><td>이 파일이 <strong>얼마나 잘 채워졌는지</strong> — 배가 몇 척 붙었나, 컨테이너 상세가 몇 % 채워졌나 등</td></tr>
@@ -124,11 +126,11 @@
   <div class="kc-tablewrap"><table>
     <thead><tr><th>조각</th><th>상태</th></tr></thead>
     <tbody>
-      <tr><td>자동 수집 4가지</td><td><strong>✅ 가동 중</strong></td></tr>
+      <tr><td>자동 수집 5가지</td><td><strong>✅ 가동 중</strong></td></tr>
       <tr><td>배별 작업목록 · 육측 · 장비 투입 · 야드 초기 상태</td><td><strong>✅ 시나리오에 실림</strong></td></tr>
       <tr><td>에뮬레이터 값</td><td><strong>✅ 전부 채워짐</strong> (각 값이 이 기간을 설명하는지, 전체 평균인지, 고정값인지까지 함께 표기)</td></tr>
+      <tr><td>게이트 통과·대기·출차 시각</td><td><strong>✅ 됨</strong> — 지난 기간은 수집기가 시간순으로 채우는 중</td></tr>
       <tr><td>관리 페이지 · 기간 선택 내려받기</td><td><strong>✅ 됨</strong></td></tr>
-      <tr><td>게이트 <strong>창구 처리 시각·대기</strong></td><td><strong>⏳ 아직</strong> — 게이트 혼잡을 다뤄야 할 때 착수</td></tr>
       <tr><td>지난 기간 <strong>몰아서 채우기</strong> 명령</td><td><strong>⏳ 아직</strong> — 대신 시작 지점을 과거로 지정하는 방법으로 처리 (8번)</td></tr>
       <tr><td>시나리오를 <strong>받아 돌리는 시뮬레이터</strong></td><td><strong>⏳ 아직</strong> — 재료 쪽이 먼저 준비된 상태</td></tr>
     </tbody>

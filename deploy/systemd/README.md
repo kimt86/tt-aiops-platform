@@ -51,9 +51,15 @@ soon as a new shift starts.
 |---|---|---|---|
 | `tt-scenario-collect` | `scengen collect` (vessel attribution stream) | 10 min | yes |
 | `tt-scenario-yard` | `scengen yard-moves` (yard-crane moves + decoded slot) | 5 min | yes |
+| `tt-scenario-gate` | `scengen gate` (gate transaction times for the local GI/GO containers) | 5 min | yes |
 | `tt-scenario-enrich` | `scengen enrich` (vessel particulars, container details) | 15 min | yes |
 | `tt-scenario-yard-build` | `scengen yard-build` (replays moves into the stack model) | 10 min | **no** |
 | `tt-scenario-snapshot` | `scengen snapshot` | — | **do not enable** |
+
+`tt-scenario-gate` is the odd one out: its watermark points at **our own** `rtg_move_log`, not at an
+Oracle key, because `CYC_HISTORY` has no time-leading index. It walks the local gate moves forward
+and looks those containers up by number, staying 60 minutes behind live so a truck's exit has been
+written before it asks. Reset its watermark to re-collect a past range.
 
 `tt-scenario-snapshot` is retired as a periodic job: it swept a hot 110k-row table six times a day
 to keep a 302-row static block-name map current. Run it **by hand** when new yard blocks appear —
@@ -81,10 +87,11 @@ systemctl --user enable --now tt-nightly.timer tt-shift-t1.timer tt-shift-t2.tim
 systemctl --user enable --now tt-move-log.timer tt-cycle-recon.timer \
                               tt-cycle-pred-shadow.timer tt-learn-cycle-remaining.timer
 
-# scenario subsystem (4 timers — snapshot is on-demand, see above)
+# scenario subsystem (5 timers — snapshot is on-demand, see above)
 systemctl --user enable --now tt-scenario-web.service
 systemctl --user enable --now tt-scenario-collect.timer tt-scenario-yard.timer \
-                              tt-scenario-yard-build.timer tt-scenario-enrich.timer
+                              tt-scenario-gate.timer tt-scenario-yard-build.timer \
+                              tt-scenario-enrich.timer
 
 # keep everything running after logout (REQUIRED — otherwise --user units stop on SSH disconnect)
 loginctl enable-linger tkadmin
