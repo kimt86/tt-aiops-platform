@@ -802,6 +802,11 @@ pub(crate) struct Stage2Work {
     pub(crate) src_block: Option<String>,  // LD: pickup block; DS: None (pickup = the QC)
     pub(crate) n: i32,                      // containers in this bucket still needing a truck
     pub(crate) work_eta_ts: Option<DateTime<Utc>>, // when the QC reaches this work (deadline base)
+    /// SHADOW: 이 베이가 선박 출항을 지키려면 끝나 있어야 하는 시각(QueueOut.deadline_ts).
+    /// work_eta와 달리 DS +600s / 학습잔차 / 교대정지 / as_of 앵커가 전혀 안 들어간다.
+    pub(crate) deadline_ts: Option<DateTime<Utc>>,
+    /// SHADOW: 이 베이의 총 처리 초(QueueOut.proc_s). 완료기한 → 시작기한 환산에 쓴다.
+    pub(crate) proc_s: Option<i64>,
 }
 
 /// Build the Stage-2 work-demand list from the same engine the dispatch page uses (build_workpool):
@@ -817,11 +822,15 @@ const LEAD_LD_S: i64 = 1180;
 
 pub(crate) async fn stage2_work_candidates(pool: PgPool) -> Result<Vec<Stage2Work>, AppError> {
     let wp = build_workpool(pool).await?;
-    let mut eta: HashMap<(String, String, String), DateTime<Utc>> = HashMap::new();
+    // (qc,vessel,queuename) = live_workqueue의 PK(0012:22)라 1:1 — dedup 불필요. work-ETA와 나란히
+    // 출항 역산 마감(deadline_ts)·베이 처리시간(proc_s)도 같이 담는다(신규 계산 0, :465/:479에서 이미
+    // 산출됨). ⚠ QcOut.slack_s는 쓰지 않는다 — QC의 '첫 선박'에만 채워지고(:482) 64개 중 37 QC가
+    // 다선박이라 같은 QC의 모든 베이가 동일값이 되며, dispatch_pred_sample.slack_s와 이름이 충돌한다.
+    let mut eta: HashMap<(String, String, String), (DateTime<Utc>, Option<DateTime<Utc>>, Option<i64>)> = HashMap::new();
     for qc in &wp.qcs {
         for q in &qc.queues {
             if let Some(e) = q.work_eta_ts {
-                eta.insert((qc.qc.clone(), q.vessel.clone(), q.queuename.clone()), e);
+                eta.insert((qc.qc.clone(), q.vessel.clone(), q.queuename.clone()), (e, q.deadline_ts, q.proc_s));
             }
         }
     }
@@ -829,7 +838,7 @@ pub(crate) async fn stage2_work_candidates(pool: PgPool) -> Result<Vec<Stage2Wor
     for c in &wp.candidates {
         let Some(qc) = c.qc.clone().filter(|s| !s.is_empty()) else { continue };
         let jt = c.jobtype.clone().unwrap_or_default();
-        let work_eta = eta.get(&(qc.clone(), c.vessel.clone(), c.queuename.clone())).copied();
+        let row = eta.get(&(qc.clone(), c.vessel.clone(), c.queuename.clone())).copied();
         out.push(Stage2Work {
             qc,
             vessel: c.vessel.clone(),
@@ -837,7 +846,9 @@ pub(crate) async fn stage2_work_candidates(pool: PgPool) -> Result<Vec<Stage2Wor
             jobtype: jt,
             src_block: c.src_block.clone(),
             n: c.n,
-            work_eta_ts: work_eta,
+            work_eta_ts: row.map(|r| r.0),
+            deadline_ts: row.and_then(|r| r.1),
+            proc_s: row.and_then(|r| r.2),
         });
     }
     Ok(out)

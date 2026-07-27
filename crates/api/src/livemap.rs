@@ -3830,6 +3830,25 @@ const LD_MOVE_S: i64 = 110;
 // commit to one bucket at what it can serve within this horizon (spreads trucks across more QCs).
 const NEED_HORIZON_S: i64 = 900;
 
+// ── 출항 역산 마감 → Stage-1 선택 티어 (SHADOW) ──────────────────────────────────────────────
+// 마감을 '값'이 아니라 '계층'으로만 쓴다. work_eta에는 DS +600s(workpool.rs DS_WORK_ETA_BIAS_S)·
+// 학습잔차(LD 평균 +780s)·교대정지가 들어 있고 deadline_ts에는 없어서(workpool.rs의 "UNAFFECTED"
+// 주석 참조) 두 값의 산술 혼합은 부적절하다. 분기로 결합하면 보정 계통이 섞이지 않는다.
+const DEP_TIGHT_S: i64 = 1800;        // = workpool FINISH_BUFFER_S. 마감식이 이미 '출항 30분 전
+                                      //   완료'를 버퍼로 잡았으므로, 여유가 버퍼 하나보다 작다
+                                      //   = 버퍼를 먹기 시작했다는 물리적 진술(임계값 발명 아님).
+const DEP_HYST_S: i64 = 300;          // 60초 틱 5회. 여유는 벽시계만으로 틱당 −60s 표류하므로
+                                      //   상승(덜 급해짐) 방향에만 밴드를 건다. SWITCH_PENALTY_S
+                                      //   (180s)와 같은 자릿수.
+const DEP_URGENT_SLOT_PCT: i64 = 50;  // 긴급 티어(0·1)가 먹을 수 있는 트럭 슬롯 상한 %.
+                                      //   실측(2026-07-27): 티어0만으로 캡 통과 슬롯 90개 ≥ 평균
+                                      //   트럭 64.7대 → 굶주림이 빈 틱에서 선단을 통째로 삼킨다
+                                      //   (음수여유 슬롯 34%→94%, 버킷 Jaccard 0.21). 50%면 같은
+                                      //   조건에서 54%·0.67로 잡힌다. 굶주림 버킷은 이 예산에서
+                                      //   면제되므로(설계원칙 #3) '굶지는 않는데 마감만 급한'
+                                      //   버킷에만 걸리는 가드지 드라이버가 아니다.
+static DEP_TIER_ON: AtomicBool = AtomicBool::new(false); // STAGE2_DEP_TIER=1 로 켬 (기본 OFF)
+
 // The yard grid (blocks + roads) is rotated ~29.8° from north. Manhattan distance measured along the
 // QUAY-ALIGNED axes (not lat/lon) tracks the real road detour (×1.18 of straight-line ≈ the road
 // graph's ×1.15) at near-zero cost — far better than straight-line for the untrained-OD (L3)
@@ -4174,6 +4193,9 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(Duration::from_secs(60));
         let mut tick = 0u64;
+        DEP_TIER_ON.store(std::env::var("STAGE2_DEP_TIER").map(|s| s == "1").unwrap_or(false), Ordering::Relaxed);
+        // 티어 히스테리시스 상태(틱마다 현재 키 집합으로 통째 교체 = 누수 없음)
+        let mut prev_tier: HashMap<(String, String, String), u8> = HashMap::new();
         loop {
             ticker.tick().await;
             tick += 1;
@@ -4322,14 +4344,65 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                     }
                 }
             };
+            // 버킷 여유 = (이 베이의 완료기한 − now) − 이 베이의 처리시간
+            //          = "지금 당장 트럭이 붙어도 자기 마감 전에 끝나는가"
+            // 대수적으로 = (크레인 여유 + 앞선 작업량)이라 크레인 '내부'에서는 work-ETA와 같은 단조
+            // 순서 → 크레인 내부 순서는 오늘과 동일하고, 효과는 100% 크레인 '사이' 재배열이다. 위험
+            // 크레인의 앞쪽 베이만 자동으로 티어0에 들어온다(뒤 베이는 자기 마감이 뒤 작업을 이미
+            // 반영하므로 덜 급함). 실측 2026-07-27: 여유<0이 26버킷·147컨·11 QC이고 그 11개 위험 QC
+            // 중 지금 굶주림인 것은 1개뿐 — 즉 기존 최상위 키와 거의 직교하는 신호다.
+            // ⚠ 여유 산식에 work_eta를 섞지 않는다(deadline_ts·proc_s 둘 다 출항 역산 단일 출처).
+            let dep_on = DEP_TIER_ON.load(Ordering::Relaxed);
+            let mut dep_slack: Vec<Option<i64>> = Vec::with_capacity(works.len());
+            let mut dep_tier: Vec<u8> = Vec::with_capacity(works.len());
+            let mut next_tier: HashMap<(String, String, String), u8> = HashMap::new();
+            for &(wi, _, _, _) in &works {
+                let w = &work[wi];
+                // 하드 언랩 금지: 불변식(deadline ⟺ work_eta ⟺ proc)은 오늘의 사실이지 계약이 아니다.
+                let s: Option<i64> = w.deadline_ts.zip(w.proc_s)
+                    .map(|(d, p)| (d.timestamp_millis() - now) / 1000 - p);
+                let raw: u8 = match s {
+                    None => 2,                              // 마감 없음(가상선박 RHXX 등) = 중립
+                    Some(v) if v < 0 => 0,                  // 이미 늦음
+                    Some(v) if v < DEP_TIGHT_S => 1,        // 빠듯 (완료 버퍼를 먹는 중)
+                    _ => 2,                                 // 여유
+                };
+                let key = (w.qc.clone(), w.vessel.clone(), w.queuename.clone());
+                let p = prev_tier.get(&key).copied().unwrap_or(raw);
+                // 하강(더 급해짐)은 즉시, 상승(덜 급해짐)은 밴드를 넘어야 허용 — 경계 왕복(flap)이 풀
+                // 멤버십을 흔들어 강제 전환(thrash)을 늘리는 것을 막는다. thrash의 95%가 "직전 QC가
+                // 풀에서 사라져서" 생기는 강제 전환이고 SWITCH_PENALTY/COMMIT_LOCK은 그 경우 무력하다.
+                let t = if raw <= p { raw } else {
+                    let need = if p == 0 { DEP_HYST_S } else { DEP_TIGHT_S + DEP_HYST_S };
+                    if s.unwrap_or(i64::MAX) >= need { raw } else { p }
+                };
+                next_tier.insert(key, t);
+                dep_slack.push(s);
+                dep_tier.push(t);
+            }
+            prev_tier = next_tier;
             // STAGE 1 owns urgency + per-crane demand caps; STAGE 2 (the matching below) is then PURE
             // efficiency: edge cost = empty-travel arrival only (+ anti-thrash switch penalty). Order the
-            // work pool by urgency HERE — starving cranes first, then deadline (work-ETA) — so urgency is
-            // decided in SELECTION, not leaked into the matching cost.
+            // work pool by urgency HERE — starving cranes first, then the DEPARTURE tier (vessel-deadline
+            // risk), then work-ETA (when the crane reaches the bay) — so urgency is decided in SELECTION,
+            // not leaked into the matching cost.
             let mut order: Vec<usize> = (0..works.len()).collect();
             order.sort_by_key(|&i| {
                 let qc = &work[works[i].0].qc;
-                (if starving.contains(qc) { 0 } else { 1 }, works[i].3)
+                (if starving.contains(qc) { 0u8 } else { 1u8 },   // ① 굶주림(살아있는 신호) — 불변·최상위
+                 if dep_on { dep_tier[i] } else { 0u8 },          // ② 출항 마감 티어 — 유일한 연결점
+                 works[i].3)                                      // ③ work-ETA ms — 결정적 타이브레이크(필수)
+            });
+            // ③은 필수다: LD src_block fan-out 때문에 최대 13버킷이 같은 (qc,vessel,queuename) = 같은
+            // 마감·같은 work_eta를 공유하므로 여기서 끊지 않으면 Vec 삽입순서로 무너진다.
+            // OFF일 때 ②가 전 버킷 상수 0 → sort_by_key는 stable sort이므로 오늘과 바이트 단위로
+            // 동일한 order가 언어 보장으로 성립한다(완전 무동작 킬스위치).
+            // 티어 '없는' 기본 순서 = 레버가 꺼져 있을 때의 바로 그 순서(①③만). 아래 슬롯 예산에
+            // 밀린 긴급 버킷을 버리지 않고 '원래 자리'로 되돌리는 데 쓴다 — 마감이 더 급한 버킷이
+            // 레버 때문에 되레 풀 꼬리로 밀리는 역전을 막는 안전망.
+            let mut base_order: Vec<usize> = (0..works.len()).collect();
+            base_order.sort_by_key(|&i| {
+                (if starving.contains(&work[works[i].0].qc) { 0u8 } else { 1u8 }, works[i].3)
             });
             // POINT 1 — cap the work pool to the available-truck count, most deadline-urgent first.
             // Walk works in deadline order, summing each bucket's QC-capped demand (= the slots a crane
@@ -4340,30 +4413,84 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
             // per-crane horizon cap. This is the bucket cap carried into the matching, so STAGE 2 needs
             // NO separate QC layer (the per-crane limit is already baked into the demand here).
             let mut cap_by_oi: HashMap<usize, i64> = HashMap::new();
+            let mut dep_demoted_n: i32 = 0; // 예산에 밀려 기본 순서로 강등된 긴급 버킷 수(레버 세기 진단)
             {
                 let truck_n = vehicles.len() as i64;
+                // 긴급 슬롯 예산 = 캡 '바깥'의 상한. NEED_HORIZON_S / qc_cap 산식은 일절 손대지 않는다
+                // (마감 p50 222분 vs 캡 지평 15분 = 스케일 15~20배 불일치 → 섞으면 캡의 물리적 의미가
+                // 깨지고 회귀 원인 특정이 불가능해진다).
+                // ⚠ 굶주림 버킷은 예산에서 면제한다 — 설계원칙 #3(굶주림 최우선)은 불변이고, 예산은
+                //   '굶지는 않는데 마감만 급한' 버킷이 선단을 삼키는 것을 막는 가드일 뿐이다. 면제가
+                //   없으면 정렬 ①이 굶주림을 order 앞머리에 몰아놓은 탓에 예산이 굶주림 블록 '안에서'
+                //   먼저 소진되고(굶주림 QC p50 5·p90 11 × 버킷캡 8~10 ≫ 트럭 68대 기준 예산 34),
+                //   뒤쪽 굶주림 버킷이 굶지 않는 여유 버킷에 자리를 뺏긴다. 재현(라이브 workpool을
+                //   "늦은 배의 크레인이 곧 굶는다"로 합성·굶주림 QC 5개): 면제 전에는 트럭 40대에서
+                //   굶주림 슬롯 40→21·서빙 굶주림 QC 5→3개, 65대에서 40→34. 면제 후 전 구간 OFF와 동일.
+                // 예산을 넘긴 긴급 버킷은 '삭제'가 아니라 티어 승격만 잃고 base_order(=OFF 순서)로
+                // 강등된다. 아래 두 패스가 그 강등을 실제로 수행한다.
+                let urgent_budget = if dep_on { truck_n * DEP_URGENT_SLOT_PCT / 100 } else { 0 };
                 let mut qc_room: HashMap<String, i64> = HashMap::new();
                 let mut acc: i64 = 0;
+                let mut urgent_acc: i64 = 0; // 예산 '판정' 전용 카운터(로깅 집계는 아래에서 따로 낸다)
                 let mut kept: Vec<usize> = Vec::with_capacity(order.len());
-                for &oi in &order {
-                    if acc >= truck_n {
-                        break;
-                    }
-                    let w = &work[works[oi].0];
+                // 기존 take 계산을 그대로 쓰는 내부 함수(캡처 없음 → 빌림 충돌 없음)
+                fn take_bucket(w: &crate::workpool::Stage2Work, oi: usize,
+                               qc_room: &mut HashMap<String, i64>, acc: &mut i64,
+                               kept: &mut Vec<usize>, cap_by_oi: &mut HashMap<usize, i64>) -> i64 {
                     let move_s = if w.jobtype == "LD" { LD_MOVE_S } else { DS_MOVE_S };
                     let qc_cap = (NEED_HORIZON_S / move_s).max(1);
                     let room = qc_room.entry(w.qc.clone()).or_insert(qc_cap);
                     let take = (w.n.max(0) as i64).min(*room);
                     if take <= 0 {
-                        continue; // this QC can't consume more trucks this horizon → skip its bucket
+                        return 0; // this QC can't consume more trucks this horizon → skip its bucket
                     }
                     *room -= take;
-                    acc += take;
+                    *acc += take;
                     cap_by_oi.insert(oi, take);
                     kept.push(oi);
+                    take
+                }
+                // 승격 패스 — 굶주림 버킷(전부·예산 면제) + 비굶주림 긴급 버킷(예산까지)을 티어 순서로.
+                for &oi in &order {
+                    if acc >= truck_n {
+                        break;
+                    }
+                    let starve = starving.contains(&work[works[oi].0].qc);
+                    let urgent = dep_on && !starve && dep_tier[oi] < 2;
+                    if !starve && !urgent {
+                        continue;                            // 여유 티어는 아래 기본 패스에서 담는다
+                    }
+                    if urgent && urgent_acc >= urgent_budget {
+                        dep_demoted_n += 1;                  // 강등 — 버리는 게 아니라 기본 패스에서 다시 만난다
+                        continue;
+                    }
+                    let took = take_bucket(&work[works[oi].0], oi, &mut qc_room, &mut acc, &mut kept, &mut cap_by_oi);
+                    if urgent {
+                        urgent_acc += took;
+                    }
+                }
+                // 기본 패스 — 남은 버킷 전부를 티어 없는 기본 순서로. 강등된 긴급 버킷은 꼬리로
+                // 밀리는 게 아니라 여기서 자기 원래(OFF) 자리를 되찾는다. 예산이 먼저 먹은 슬롯만큼
+                // 남은 자리가 주는 것은 예산 레버의 의도된 효과이고, '더 급한데 더 뒤로'는 없다.
+                // OFF일 때는 urgent가 전 버킷 false + order==base_order이라 두 패스를 이어붙인 방문
+                // 순서가 종전 단일 워크와 완전히 동일하다(무동작 킬스위치 유지). 예산이 물리지 않는
+                // 구간에서도 (승격=티어0→1, 기본=티어2) 순서가 종전 티어 워크와 동일하다.
+                for &oi in &base_order {
+                    if acc >= truck_n {
+                        break;
+                    }
+                    if cap_by_oi.contains_key(&oi) {
+                        continue;                            // 승격 패스에서 이미 담김
+                    }
+                    take_bucket(&work[works[oi].0], oi, &mut qc_room, &mut acc, &mut kept, &mut cap_by_oi);
                 }
                 order = kept;
             }
+            // 로깅용 집계는 예산 '판정'과 분리한다(굶주림 면제·강등 때문에 판정 카운터는 최종 풀의
+            // 구성과 다르다). 이 값 = 최종 풀에서 티어0·1 버킷이 실제로 가져간 슬롯 = 레버의 실세기.
+            // dep_on이 꺼져 있어도 티어는 계산되므로 그대로 반사실 베이스라인이 된다.
+            let dep_urgent_slots: i64 = order.iter().filter(|&&oi| dep_tier[oi] < 2)
+                .map(|&oi| cap_by_oi.get(&oi).copied().unwrap_or(0)).sum();
             // (qc,vessel,queuename) → work-ETA ms, for the committed-window check on prior recommendations
             let eta_by_key: HashMap<(String, String, String), i64> = work.iter()
                 .filter_map(|w| w.work_eta_ts.map(|e| ((w.qc.clone(), w.vessel.clone(), w.queuename.clone()), e.timestamp_millis())))
@@ -4373,6 +4500,11 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
             // switch penalty). No urgency/starve/load-balance terms and no QC layer — those are Stage-1.
             let mut caps: Vec<i64> = Vec::with_capacity(order.len()); // per-bucket demand (Stage-1 capped)
             let mut deadlines: Vec<i64> = Vec::with_capacity(order.len()); // feasibility deadline ms per wpos
+            // 출항 축 로깅용(정렬 후 wpos 인덱스로 재배열). 기존 deadlines[]와 '별개 축'이다 —
+            // 절대 교체/융합하지 않는다(현행 지평 p50 1043s는 실제 도착 p90 538s와 같은 스케일이라
+            // 진짜 물리는 지표인데, 출항 마감 p50 17041s로 바꾸면 전 구간 88% 평평한 상수가 된다).
+            let mut dep_slack_w: Vec<Option<i64>> = Vec::with_capacity(order.len());
+            let mut dep_tier_w: Vec<u8> = Vec::with_capacity(order.len());
             let mut edges: Vec<(usize, usize, i64)> = Vec::new(); // (truck, work-pos, cost)
             let mut matrix: Vec<Vec<(i64, i64, &'static str, bool)>> = Vec::with_capacity(order.len()); // [wpos][vi]=(arr,p90,tier,switched)
             for &oi in &order {
@@ -4384,6 +4516,8 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                 // feasibility deadline: bucket served from max(eta,now) over its near slots — midpoint.
                 let spread_ms = (cap_j / 2) * move_s * 1000;
                 deadlines.push(eta_ms.max(now) + spread_ms);
+                dep_slack_w.push(dep_slack[oi]);
+                dep_tier_w.push(dep_tier[oi]);
                 let this_key = (w.qc.clone(), w.vessel.clone(), w.queuename.clone());
                 let wpos = matrix.len();
                 // DISPATCH COST = the truck's EMPTY travel to engage the work (truck→pickup): discharge
@@ -4449,6 +4583,12 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
             let ts = Utc::now();
             let mut opt_cost: i64 = 0;
             let mut opt_miss: i32 = 0;
+            // 이 INSERT가 조용히 실패하면 로깅만 멈추는 게 아니다 — 다음 틱의 anti-thrash가 바로 이
+            // 테이블에서 직전 추천(prev)을 읽으므로 prev가 영구히 비고 switched=false가 되어
+            // SWITCH_PENALTY_S/COMMIT_LOCK_S가 통째로 죽는다. sqlx::query는 런타임 바인딩이라 빌드가
+            // 못 막으므로(예: 0104 미적용) 반드시 경보를 남긴다. 틱당 1줄만.
+            let mut ins_err: Option<String> = None;
+            let mut ins_err_n: i32 = 0;
             for &(vi, wpos) in &assign {
                 let (wi, wlat, wlon, _eta) = works[order[wpos]];
                 let w = &work[wi];
@@ -4462,26 +4602,51 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                 }
                 opt_cost += arr;
                 let v = &vehicles[vi];
-                let _ = sqlx::query(
+                // deadline_slack_s / feasible = 크레인 필요 시각(work-ETA) 기준 — 정의 불변(19일치
+                // 시계열 + 21일 보존이라 재정의하면 두 의미가 구분자 없이 섞인다). 출항 축은 신규
+                // 컬럼(dep_slack_s / dep_tier)으로만 추가한다.
+                let ins = sqlx::query(
                     "INSERT INTO stage2_match_shadow
-                       (ts,tick,ytno,qc,vessel,queuename,jobtype,src_block,veh_state,arrival_s,od_p90_s,deadline_slack_s,feasible,cost_tier,switched,dest_lat,dest_lon,src_lat,src_lon)
-                     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19) ON CONFLICT (ts,ytno) DO NOTHING",
+                       (ts,tick,ytno,qc,vessel,queuename,jobtype,src_block,veh_state,arrival_s,od_p90_s,deadline_slack_s,feasible,cost_tier,switched,dest_lat,dest_lon,src_lat,src_lon,dep_slack_s,dep_tier)
+                     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21) ON CONFLICT (ts,ytno) DO NOTHING",
                 )
                 .bind(ts).bind(tick as i64).bind(&v.0).bind(&w.qc).bind(&w.vessel).bind(&w.queuename)
                 .bind(&w.jobtype).bind(&w.src_block).bind(v.4)
                 .bind(arr as i32).bind(arr_p90 as i32).bind(slack as i32).bind(feasible).bind(tier).bind(switched)
                 .bind(wlat).bind(wlon).bind(v.1).bind(v.2)
+                .bind(dep_slack_w[wpos].map(|v| v.clamp(-2_000_000_000, 2_000_000_000) as i32))
+                .bind(dep_tier_w[wpos] as i16)
                 .execute(&pool).await;
+                if let Err(e) = ins {
+                    ins_err_n += 1;
+                    if ins_err.is_none() {
+                        ins_err = Some(e.to_string());
+                    }
+                }
+            }
+            if let Some(e) = ins_err {
+                tracing::warn!(error = %e, failed = ins_err_n, of = assign.len(),
+                    "stage2_match_shadow insert failed — anti-thrash(prev)도 함께 죽는다. 0104 마이그레이션 적용 여부 확인");
             }
             let gap_pct = if opt_cost > 0 { 100.0 * (greedy_cost - opt_cost) as f64 / opt_cost as f64 } else { 0.0 };
-            let _ = sqlx::query(
-                "INSERT INTO stage2_solver_shadow (ts,tick,n_trucks,n_works,greedy_n,greedy_cost_s,optimal_n,optimal_cost_s,gap_pct,greedy_miss,optimal_miss)
-                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) ON CONFLICT (ts) DO NOTHING",
+            let solver_ins = sqlx::query(
+                "INSERT INTO stage2_solver_shadow (ts,tick,n_trucks,n_works,greedy_n,greedy_cost_s,optimal_n,optimal_cost_s,gap_pct,greedy_miss,optimal_miss,dep_tier_on,dep_tier0_n,dep_urgent_slots,dep_null_n,dep_demoted_n)
+                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) ON CONFLICT (ts) DO NOTHING",
             )
             .bind(ts).bind(tick as i64).bind(vehicles.len() as i32).bind(order.len() as i32)
             .bind(greedy_n).bind(greedy_cost).bind(assign.len() as i32).bind(opt_cost).bind(gap_pct as f32)
             .bind(greedy_miss).bind(opt_miss)
+            // 티어가 꺼진 구간에서도 항상 기록 → 켜기 전 반사실 베이스라인(신규 컬럼이라 과거
+            // 19일치로는 복원 불가). dep_null_n은 커밋 A의 폴백이 선박을 잃으면 즉시 드러나는 경보.
+            .bind(dep_on)                                                                 // dep_tier_on
+            .bind(order.iter().filter(|&&oi| dep_tier[oi] == 0).count() as i32)           // dep_tier0_n
+            .bind(dep_urgent_slots as i32)                                                // dep_urgent_slots
+            .bind(order.iter().filter(|&&oi| dep_slack[oi].is_none()).count() as i32)     // dep_null_n
+            .bind(dep_demoted_n)                                                          // dep_demoted_n
             .execute(&pool).await;
+            if let Err(e) = solver_ins {
+                tracing::warn!(error = %e, "stage2_solver_shadow insert failed — 0104 마이그레이션 적용 여부 확인");
+            }
             if tick % 30 == 0 {
                 let _ = sqlx::query("DELETE FROM stage2_match_shadow WHERE ts < now() - interval '21 days'").execute(&pool).await;
                 let _ = sqlx::query("DELETE FROM stage2_solver_shadow WHERE ts < now() - interval '21 days'").execute(&pool).await;
