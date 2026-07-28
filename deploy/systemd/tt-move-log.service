@@ -3,6 +3,10 @@ Description=tt-aiops-platform refresh tt_move_log (join tos_handover_label + qc_
 After=network-online.target
 
 [Service]
+# 폭발 반경 제한(2026-07-28 OOM 장애 재발방지). 실측 최고치 4M 대비 넉넉하다.
+# 초과 시 커널이 서버가 아니라 이 유닛만 죽인다.
+MemoryMax=1G
+MemorySwapMax=0
 Type=oneshot
 EnvironmentFile=%h/projects/tt-aiops-platform/.env
 # Re-scan a 2-day window and upsert (ON CONFLICT DO NOTHING) so both twin legs and late-arriving

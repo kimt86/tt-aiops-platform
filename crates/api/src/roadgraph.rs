@@ -71,6 +71,22 @@ impl RoadGraph {
             return None;
         }
         let maxid = nodes_raw.iter().map(|r| r.0).max().unwrap_or(0).max(0) as usize;
+        // GUARD: the two arrays below are sized by the largest node ID, not by the row count.
+        // IDs are renumbered densely on every build (see the doc comment above), so maxid+1 should
+        // track nodes_raw.len(). A single stray large ID would allocate ~40 bytes x maxid inside
+        // the always-on API — the same shape as the 2026-07-28 raster blowup that OOM-killed the
+        // box (a raster sized by the farthest GPS fix instead of the terminal). Refuse and fall
+        // back to no router, which degrades routing but keeps the process alive.
+        const ID_SLACK: usize = 4; // dense ids give maxid+1 == len; allow generous slack
+        if maxid + 1 > nodes_raw.len().saturating_mul(ID_SLACK).max(1 << 16) {
+            tracing::error!(
+                maxid,
+                nodes = nodes_raw.len(),
+                would_alloc_mb = (maxid + 1) * 40 / 1_048_576,
+                "road_node ids implausibly sparse — refusing to build the router"
+            );
+            return None;
+        }
         let mut nodes = vec![(0.0f64, 0.0f64); maxid + 1];
         for (id, la, lo) in &nodes_raw {
             if *id >= 0 {

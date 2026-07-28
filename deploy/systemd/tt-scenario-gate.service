@@ -3,6 +3,10 @@ Description=tt scenario landside gate transactions (ISOLATED, non-critical): CYC
 After=network-online.target
 
 [Service]
+# 폭발 반경 제한(2026-07-28 OOM 장애 재발방지). 실측 최고치 18M 대비 넉넉하다.
+# 초과 시 커널이 서버가 아니라 이 유닛만 죽인다.
+MemoryMax=2G
+MemorySwapMax=0
 Type=oneshot
 EnvironmentFile=%h/projects/tt-aiops-platform/.env
 ExecStart=%h/projects/tt-aiops-platform/target/release/scengen gate --target oracle-prod

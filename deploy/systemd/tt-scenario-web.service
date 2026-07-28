@@ -3,6 +3,10 @@ Description=wp-tt scenario monitor/control web (ISOLATED, non-critical). Own por
 After=network-online.target
 
 [Service]
+# 폭발 반경 제한(2026-07-28 OOM 장애 재발방지). 실측 최고치 14M 대비 넉넉하다.
+# 초과 시 커널이 서버가 아니라 이 유닛만 죽인다.
+MemoryMax=1G
+MemorySwapMax=0
 EnvironmentFile=%h/projects/tt-aiops-platform/.env
 ExecStart=%h/projects/tt-aiops-platform/target/release/scengen serve --port 8899
 Restart=on-failure
