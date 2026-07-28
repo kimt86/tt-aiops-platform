@@ -1773,7 +1773,7 @@ pub fn spawn_free_in_logger(lm: Arc<LiveMap>, pool: PgPool) {
                               WHERE fs.actual_free_at IS NULL AND fs.ts < now() - interval '2 minutes') nd
                       WHERE s.ytno = nd.ytno AND s.ts = nd.ts AND nd.d IS NOT NULL",
                 ).execute(&pool).await;
-                let _ = sqlx::query("DELETE FROM free_in_sample WHERE ts < now() - interval '30 days'").execute(&pool).await;
+                crate::db::prune(&pool, "free_in_sample", "DELETE FROM free_in_sample WHERE ts < now() - interval '30 days'").await;
             }
         }
     });
@@ -2123,9 +2123,7 @@ pub fn spawn_learn_persist(lm: Arc<LiveMap>, pool: PgPool) {
             )
             .execute(&pool)
             .await;
-            let _ = sqlx::query("DELETE FROM learn_topos_metric WHERE captured_at < now() - interval '30 days'")
-                .execute(&pool)
-                .await;
+            crate::db::prune(&pool, "learn_topos_metric", "DELETE FROM learn_topos_metric WHERE captured_at < now() - interval '30 days'").await;
 
             // ── soon-idle accuracy snapshot (④): precision/lead per (jobtype,source) + recall ──
             // per jobtype (source='ALL'), over a 24h window. Powers the GPS-vs-TOS improvement
@@ -2193,9 +2191,7 @@ pub fn spawn_learn_persist(lm: Arc<LiveMap>, pool: PgPool) {
             )
             .execute(&pool)
             .await;
-            let _ = sqlx::query("DELETE FROM tt_soon_idle_metric WHERE captured_at < now() - interval '30 days'")
-                .execute(&pool)
-                .await;
+            crate::db::prune(&pool, "tt_soon_idle_metric", "DELETE FROM tt_soon_idle_metric WHERE captured_at < now() - interval '30 days'").await;
 
             // ── lanes (③): persist grid cells (skip the 1-2 pass noise tail) + quality ──
             let lsnap: Vec<((i32, i32), LaneCell)> = {
@@ -2240,9 +2236,7 @@ pub fn spawn_learn_persist(lm: Arc<LiveMap>, pool: PgPool) {
             )
             .execute(&pool)
             .await;
-            let _ = sqlx::query("DELETE FROM learn_lane_metric WHERE captured_at < now() - interval '30 days'")
-                .execute(&pool)
-                .await;
+            crate::db::prune(&pool, "learn_lane_metric", "DELETE FROM learn_lane_metric WHERE captured_at < now() - interval '30 days'").await;
         }
     });
 }
@@ -2302,9 +2296,7 @@ pub fn spawn_density_sampler(lm: Arc<LiveMap>, pool: PgPool) {
             .execute(&pool)
             .await;
             if tick % 10 == 0 {
-                let _ = sqlx::query("DELETE FROM zone_density WHERE ts < now() - interval '4 days'")
-                    .execute(&pool)
-                    .await;
+                crate::db::prune(&pool, "zone_density", "DELETE FROM zone_density WHERE ts < now() - interval '4 days'").await;
             }
         }
     });
@@ -2511,13 +2503,9 @@ pub fn spawn_qc_wait_logger(lm: Arc<LiveMap>, pool: PgPool) {
             let avg_wait = (!waits.is_empty()).then(|| waits.iter().sum::<i64>() / waits.len() as i64);
             *lm.qc_wait_live.write().await = Some((avg_count, avg_wait));
             if tick % 20 == 0 {
-                let _ = sqlx::query("DELETE FROM qc_wait_sample WHERE ts < now() - interval '14 days'")
-                    .execute(&pool)
-                    .await;
+                crate::db::prune(&pool, "qc_wait_sample", "DELETE FROM qc_wait_sample WHERE ts < now() - interval '14 days'").await;
                 // 21d to match dispatch_pred_sample so the join window isn't truncated
-                let _ = sqlx::query("DELETE FROM qc_wait_qc_sample WHERE ts < now() - interval '21 days'")
-                    .execute(&pool)
-                    .await;
+                crate::db::prune(&pool, "qc_wait_qc_sample", "DELETE FROM qc_wait_qc_sample WHERE ts < now() - interval '21 days'").await;
             }
         }
     });
@@ -2736,9 +2724,7 @@ pub fn spawn_travel_aggregator(pool: PgPool) {
             )
             .execute(&pool)
             .await;
-            let _ = sqlx::query("DELETE FROM learn_travel_sample WHERE captured_at < now() - interval '30 days'")
-                .execute(&pool)
-                .await;
+            crate::db::prune(&pool, "learn_travel_sample", "DELETE FROM learn_travel_sample WHERE captured_at < now() - interval '30 days'").await;
             // refresh the realized zone summary (참조용 — the dispatch cost is the road-network route
             // time, roadgraph::RouteCost; the 순수주행 격자 matview was dropped in mig 0082).
             let _ = sqlx::query("REFRESH MATERIALIZED VIEW CONCURRENTLY learn_travel_zone225")
@@ -2765,9 +2751,7 @@ pub fn spawn_travel_aggregator(pool: PgPool) {
             )
             .execute(&pool)
             .await;
-            let _ = sqlx::query("DELETE FROM learn_travel_metric WHERE captured_at < now() - interval '30 days'")
-                .execute(&pool)
-                .await;
+            crate::db::prune(&pool, "learn_travel_metric", "DELETE FROM learn_travel_metric WHERE captured_at < now() - interval '30 days'").await;
         }
     });
 }
@@ -4648,8 +4632,8 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                 tracing::warn!(error = %e, "stage2_solver_shadow insert failed — 0104 마이그레이션 적용 여부 확인");
             }
             if tick % 30 == 0 {
-                let _ = sqlx::query("DELETE FROM stage2_match_shadow WHERE ts < now() - interval '21 days'").execute(&pool).await;
-                let _ = sqlx::query("DELETE FROM stage2_solver_shadow WHERE ts < now() - interval '21 days'").execute(&pool).await;
+                crate::db::prune(&pool, "stage2_match_shadow", "DELETE FROM stage2_match_shadow WHERE ts < now() - interval '21 days'").await;
+                crate::db::prune(&pool, "stage2_solver_shadow", "DELETE FROM stage2_solver_shadow WHERE ts < now() - interval '21 days'").await;
             }
         }
     });
@@ -4778,7 +4762,7 @@ pub fn spawn_dispatch_compare(lm: Arc<LiveMap>, pool: PgPool) {
                 .bind(&our_ytno).bind(our_arrival as i32).bind(agree).bind(reason).bind(delta.map(|x| x as i32)).bind(tos_upd)
                 .execute(&pool).await;
             }
-            let _ = sqlx::query("DELETE FROM dispatch_compare_shadow WHERE ts < now() - interval '21 days'").execute(&pool).await;
+            crate::db::prune(&pool, "dispatch_compare_shadow", "DELETE FROM dispatch_compare_shadow WHERE ts < now() - interval '21 days'").await;
         }
     });
 }
@@ -4837,7 +4821,7 @@ pub fn spawn_pos_hist(lm: Arc<LiveMap>, pool: PgPool) {
             .execute(&pool).await;
             n += 1;
             if n % 120 == 0 {
-                let _ = sqlx::query("DELETE FROM truck_pos_hist WHERE ts < now() - interval '2 days'").execute(&pool).await;
+                crate::db::prune(&pool, "truck_pos_hist", "DELETE FROM truck_pos_hist WHERE ts < now() - interval '2 days'").await;
             }
         }
     });
@@ -4890,7 +4874,7 @@ pub fn spawn_rtg_pos_hist(lm: Arc<LiveMap>, pool: PgPool) {
             .execute(&pool).await;
             n += 1;
             if n % 200 == 0 {
-                let _ = sqlx::query("DELETE FROM rtg_pos_hist WHERE ts < now() - interval '3 days'").execute(&pool).await;
+                crate::db::prune(&pool, "rtg_pos_hist", "DELETE FROM rtg_pos_hist WHERE ts < now() - interval '3 days'").await;
             }
         }
     });
@@ -4991,7 +4975,7 @@ pub fn spawn_pos_hist_hifreq(lm: Arc<LiveMap>, pool: PgPool) {
             .execute(&pool).await;
             n += 1;
             if n % 200 == 0 {
-                let _ = sqlx::query("DELETE FROM truck_pos_hifreq WHERE ts < now() - interval '5 days'").execute(&pool).await;
+                crate::db::prune(&pool, "truck_pos_hifreq", "DELETE FROM truck_pos_hifreq WHERE ts < now() - interval '5 days'").await;
             }
         }
     });
@@ -5150,7 +5134,7 @@ pub fn spawn_fair_compare(lm: Arc<LiveMap>, pool: PgPool) {
             )
             .bind(WINDOW_MIN as i32).bind(n as i32).bind(tos_total).bind(our_total).bind(savings).bind(same)
             .execute(&pool).await;
-            let _ = sqlx::query("DELETE FROM fair_compare_shadow WHERE ts < now() - interval '21 days'").execute(&pool).await;
+            crate::db::prune(&pool, "fair_compare_shadow", "DELETE FROM fair_compare_shadow WHERE ts < now() - interval '21 days'").await;
             // per-pair detail for breakdown/bias analysis (bulk insert via UNNEST)
             if !det.is_empty() {
                 let jts: Vec<String> = det.iter().map(|d| d.0.clone()).collect();
@@ -5163,7 +5147,7 @@ pub fn spawn_fair_compare(lm: Arc<LiveMap>, pool: PgPool) {
                 )
                 .bind(&jts).bind(&qcs).bind(&toss).bind(&ours)
                 .execute(&pool).await;
-                let _ = sqlx::query("DELETE FROM fair_compare_detail WHERE ts < now() - interval '7 days'").execute(&pool).await;
+                crate::db::prune(&pool, "fair_compare_detail", "DELETE FROM fair_compare_detail WHERE ts < now() - interval '7 days'").await;
             }
         }
     });

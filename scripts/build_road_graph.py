@@ -8,7 +8,7 @@
 import numpy as np, json, math, os, csv
 import sknw
 from scipy.spatial import cKDTree
-SCRATCH = os.environ.get('ROADSCRATCH', '/tmp')
+SCRATCH = os.environ.get('ROADSCRATCH', '/var/tmp/roadscratch')
 SEG_M = 35.0     # densify: max sub-edge length in metres
 
 d = np.load(f'{SCRATCH}/road_raster.npz')

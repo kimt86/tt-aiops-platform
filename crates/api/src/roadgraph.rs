@@ -534,9 +534,7 @@ pub fn spawn_roadgraph_eval(pool: PgPool) {
                 }
                 tokio::task::yield_now().await;
             }
-            let _ = sqlx::query("DELETE FROM road_route_eval WHERE ts < now() - interval '60 days'")
-                .execute(&pool)
-                .await;
+            crate::db::prune(&pool, "road_route_eval", "DELETE FROM road_route_eval WHERE ts < now() - interval '60 days'").await;
         }
     });
 }

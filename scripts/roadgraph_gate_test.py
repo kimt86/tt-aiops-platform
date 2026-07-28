@@ -5,7 +5,7 @@
 import json, math, os, csv
 import numpy as np, networkx as nx
 from scipy.spatial import cKDTree
-SCRATCH = os.environ.get('ROADSCRATCH', '/tmp')
+SCRATCH = os.environ.get('ROADSCRATCH', '/var/tmp/roadscratch')
 g = json.load(open(f'{SCRATCH}/road_graph.json'))
 nodes = {int(k): v for k, v in g['nodes'].items()}
 Gr = nx.Graph()

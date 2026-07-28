@@ -1,0 +1,22 @@
+[Unit]
+Description=TOS ETW gateway SSH tunnel (127.0.0.1:18080 -> azure 100.124.171.118 -> localhost:18080)
+After=network-online.target
+
+[Service]
+# 폭발 반경 제한(2026-07-28 OOM 장애 재발방지). ssh 터널이라 실사용 ~10M.
+# 초과 시 커널이 서버가 아니라 이 유닛만 죽인다.
+MemoryMax=256M
+MemorySwapMax=0
+ExecStart=/usr/bin/ssh -N \
+  -o BatchMode=yes \
+  -o ExitOnForwardFailure=yes \
+  -o StrictHostKeyChecking=accept-new \
+  -o ServerAliveInterval=20 \
+  -o ServerAliveCountMax=3 \
+  -L 127.0.0.1:18080:127.0.0.1:18080 \
+  aiadmin@100.124.171.118
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

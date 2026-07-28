@@ -4,7 +4,7 @@
 # Input: /tmp/gps_moving.tsv  (ytno \t epoch \t lat \t lon, ordered by truck,ts).  Run with .venv-geo.
 import csv, math, sys, os
 import numpy as np
-SCRATCH = os.environ.get('ROADSCRATCH', '/tmp')  # redirect big temp files off the RAM tmpfs
+SCRATCH = os.environ.get('ROADSCRATCH', '/var/tmp/roadscratch')  # redirect big temp files off the RAM tmpfs
 from scipy.ndimage import gaussian_filter
 from skimage.morphology import skeletonize, remove_small_objects, binary_closing, disk
 import matplotlib; matplotlib.use('Agg'); import matplotlib.pyplot as plt

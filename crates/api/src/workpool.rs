@@ -845,9 +845,7 @@ pub fn spawn_dispatch_pred_logger(pool: PgPool) {
                 }
             }
             if tick % 30 == 0 {
-                let _ = sqlx::query("DELETE FROM dispatch_pred_sample WHERE logged_at < now() - interval '21 days'")
-                    .execute(&pool)
-                    .await;
+                crate::db::prune(&pool, "dispatch_pred_sample", "DELETE FROM dispatch_pred_sample WHERE logged_at < now() - interval '21 days'").await;
             }
             // learned work-ETA residual layer (mig 0083): refit ~20 min from freshly resolved rows.
             if tick % 10 == 0 {

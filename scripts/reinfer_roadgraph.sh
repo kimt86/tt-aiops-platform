@@ -27,9 +27,16 @@ P="-h 127.0.0.1 -p 5433 -U wp -d wp_tt"
 SCRATCH="${ROADSCRATCH:-/var/tmp/roadscratch}"; mkdir -p "$SCRATCH"; export ROADSCRATCH="$SCRATCH"  # off the full RAM tmpfs
 
 # 1) dump moving GPS (30s + 3s) → infer skeleton + build graph (densified + work-point connectors)
+# The 7-day floor is a BACKSTOP, not a filter: retention already caps these at 2d (hist) and 5d
+# (hifreq), so today it removes nothing. Without it this dump is "whole table", and the size of
+# the whole table is a promise made by a prune that runs elsewhere and can fail. That coupling is
+# how the 2026-07-28 OOM would come back, so the dump states its own bound.
 psql $P -tAF$'\t' -c "
-  SELECT ytno, extract(epoch FROM ts), lat, lon FROM truck_pos_hist WHERE state IN ('empty_travel','delivering')
-  UNION ALL SELECT ytno, extract(epoch FROM ts), lat, lon FROM truck_pos_hifreq ORDER BY 1,2" > "$SCRATCH/gps_moving.tsv"
+  SELECT ytno, extract(epoch FROM ts), lat, lon FROM truck_pos_hist
+   WHERE state IN ('empty_travel','delivering') AND ts >= now() - interval '7 days'
+  UNION ALL
+  SELECT ytno, extract(epoch FROM ts), lat, lon FROM truck_pos_hifreq
+   WHERE ts >= now() - interval '7 days' ORDER BY 1,2" > "$SCRATCH/gps_moving.tsv"
 # work-points must be dumped BEFORE build (build attaches connectors to them)
 psql $P -tAF$'\t' -c "SELECT lat,lon,topos,obs,round(spread_m)::int FROM learn_topos_point WHERE n>=30" > "$SCRATCH/workpoints.tsv"
 $PY scripts/infer_road_network.py >/dev/null
@@ -77,7 +84,7 @@ def block_coloring(block_pts, ADJ_M=38.0):
         return '#%02x%02x%02x' % (int(r * 255), int(g * 255), int(b * 255))
     avgdeg = (sum(len(v) for v in adj.values()) / len(prefs)) if prefs else 0
     return {p: hexof(col[idx[p]]) for p in prefs}, ncol, avgdeg
-SCRATCH = os.environ.get('ROADSCRATCH', '/tmp')
+SCRATCH = os.environ.get('ROADSCRATCH', '/var/tmp/roadscratch')
 CONNECTOR_KMH = 10.0   # work-point approach-stub speed (bidirectional connectors)
 g = json.load(open(f'{SCRATCH}/road_graph.json'))
 MLAT = 111320.0
