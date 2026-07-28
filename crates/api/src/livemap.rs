@@ -223,6 +223,32 @@ const NEAR_TRIP_M: f64 = 100.0;
 // guard: ignore a single inter-fix jump larger than this when accumulating path length
 // (GPS teleport / accuracy spike), so jitter can't fake "movement".
 const MAX_FIX_STEP_M: f64 = 600.0;
+
+/// UPSTREAM COORDINATE GATE — terminal anchor + hard radius for an incoming GPS fix.
+///
+/// Measured footprint (2026-07-28, 6.3M fixes): lat 2.9052..2.9510, lon 101.2789..101.3064 —
+/// about 5x3 km. The feed also carries fixes 100~250km out (20 of 6.3M), and a single one of
+/// them (lat 4.1975 / lon 99.7827) sized the road-inference raster 3,374x and OOM-killed the
+/// whole server. That consumer is now bounded, but a corrupt coordinate is garbage for EVERY
+/// consumer — positions, centroids, lane field, density, cycle detection — so it is dropped
+/// once here rather than defended against N times downstream.
+///
+/// 25km is ~8x the real footprint and still 4x inside the nearest observed bad fix, so it
+/// cannot clip real traffic. Rejections are counted and surfaced on /api/livemap/health:
+/// a gate that drops silently just moves the blindness somewhere else.
+const TERMINAL_LAT: f64 = 2.928;
+const TERMINAL_LON: f64 = 101.2927;
+const FIX_MAX_R_M: f64 = 25_000.0;
+
+/// True if a fix is physically plausible for this terminal. See FIX_MAX_R_M.
+fn fix_in_terminal(lat: f64, lon: f64) -> bool {
+    if !lat.is_finite() || !lon.is_finite() {
+        return false; // NaN/Inf would poison every downstream min/max and mean
+    }
+    let dn = (lat - TERMINAL_LAT) * 111_320.0;
+    let de = (lon - TERMINAL_LON) * 111_320.0 * TERMINAL_LAT.to_radians().cos();
+    dn * dn + de * de <= FIX_MAX_R_M * FIX_MAX_R_M
+}
 // the median needs a non-trivial sample before it is shown — a 5-sample median is noise.
 // Below this the UI shows "collecting n/N" instead of a number (per external eval #4).
 const MIN_CYCLE_SAMPLES: usize = 20;
@@ -540,6 +566,8 @@ pub struct LiveMap {
     connected: AtomicBool,
     messages: AtomicU64,
     reconnects: AtomicU64,
+    /// GPS fixes dropped by the upstream coordinate gate (see FIX_MAX_R_M).
+    rejected_far: AtomicU64,
     last_msg_ms: AtomicU64,
     connected_since_ms: AtomicU64,
     started_ms: AtomicU64,
@@ -617,6 +645,7 @@ impl LiveMap {
             connected: AtomicBool::new(false),
             messages: AtomicU64::new(0),
             reconnects: AtomicU64::new(0),
+            rejected_far: AtomicU64::new(0),
             last_msg_ms: AtomicU64::new(0),
             connected_since_ms: AtomicU64::new(0),
             started_ms: AtomicU64::new(Utc::now().timestamp_millis() as u64),
@@ -1286,6 +1315,8 @@ pub struct HealthOut {
     last_message_at: Option<DateTime<Utc>>,
     messages_total: u64,
     reconnects: u64,
+    /// fixes dropped as physically impossible for this terminal (upstream coordinate gate)
+    rejected_far_fixes: u64,
     last_error: Option<String>,
     uptime_s: i64,
     /// messages in the last completed minute
@@ -1442,6 +1473,7 @@ pub async fn health(State(lm): State<Arc<LiveMap>>) -> Json<HealthOut> {
         last_message_at,
         messages_total: lm.messages.load(Ordering::Relaxed),
         reconnects: lm.reconnects.load(Ordering::Relaxed),
+        rejected_far_fixes: lm.rejected_far.load(Ordering::Relaxed),
         last_error: lm.last_error.read().await.clone(),
         uptime_s: (now - started) / 1000,
         rate_per_min,
@@ -3184,6 +3216,15 @@ async fn ingest_text(lm: &Arc<LiveMap>, text: &str) {
     };
     if lat == 0.0 && lon == 0.0 {
         return; // no fix
+    }
+    // UPSTREAM COORDINATE GATE (see FIX_MAX_R_M): drop physically impossible fixes before they
+    // reach ANY consumer. Logged on powers of two so a burst is visible without flooding.
+    if !fix_in_terminal(lat, lon) {
+        let n = lm.rejected_far.fetch_add(1, Ordering::Relaxed) + 1;
+        if n.is_power_of_two() {
+            tracing::warn!(id, lat, lon, total = n, "GPS fix outside the terminal — dropped");
+        }
+        return;
     }
     let speed = g
         .get("speed")
@@ -5151,4 +5192,36 @@ pub fn spawn_fair_compare(lm: Arc<LiveMap>, pool: PgPool) {
             }
         }
     });
+}
+
+#[cfg(test)]
+mod gate_tests {
+    use super::fix_in_terminal;
+
+    /// Pins the upstream coordinate gate to MEASURED data, not to a guess: every corner of the
+    /// real footprint must pass, and every corrupt fix seen on 2026-07-28 must not. Widening
+    /// FIX_MAX_R_M until this test's rejects start passing would be re-opening the outage.
+    #[test]
+    fn gate_keeps_real_traffic_and_drops_the_corrupt_fixes() {
+        // measured footprint (p0.1..p99.9 of 6.3M fixes): lat 2.9052..2.9510, lon 101.2789..101.3064
+        for (la, lo) in [
+            (2.9052, 101.2789),
+            (2.9052, 101.3064),
+            (2.9510, 101.2789),
+            (2.9510, 101.3064),
+        ] {
+            assert!(fix_in_terminal(la, lo), "real footprint corner rejected: {la},{lo}");
+        }
+
+        // the single row that sized the road-inference raster 3,374x and OOM-killed the box
+        assert!(!fix_in_terminal(4.1975, 99.7827), "the 2026-07-28 killer fix must be dropped");
+        // the other far outliers in the same 5-day window
+        assert!(!fix_in_terminal(1.9081, 101.0023));
+        assert!(!fix_in_terminal(3.6898, 101.5460));
+
+        // non-finite would poison every downstream min/max, mean and raster bound
+        assert!(!fix_in_terminal(f64::NAN, 101.2927));
+        assert!(!fix_in_terminal(2.928, f64::INFINITY));
+        assert!(!fix_in_terminal(f64::NEG_INFINITY, f64::NAN));
+    }
 }
