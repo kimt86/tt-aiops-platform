@@ -73,6 +73,7 @@ fn app(state: AppState) -> Router {
         .route("/api/learn/data-catalog", get(learn::data_catalog))
         .route("/api/learn/data-sample", get(learn::data_sample))
         .route("/api/health", get(routes::health))
+        .route("/api/ops/alerts", get(routes::ops_alerts))
         .layer(CorsLayer::permissive()) // dev; tighten to the dashboard origin in prod
         .with_state(state);
 
@@ -113,7 +114,7 @@ async fn main() -> anyhow::Result<()> {
     livemap::load_centroids(&livemap, &pool).await; // restore learned topos coords before ingest
     livemap::load_lanes(&livemap, &pool).await; // restore learned driving-lane grid before ingest
     livemap::spawn(livemap.clone()); // background GPS ingest (via local SSH tunnel)
-    db::spawn_size_watchdog(pool.clone()); // 30min: DB/테이블 크기 상한 감시(미검증 입력이 쓰기 행수를 정하는 유형 탐지)
+    db::spawn_size_watchdog(pool.clone()); // 2min: 크기 상한·디스크·데드맨·보존 감시 -> ops_alert(mig0107)
     livemap::spawn_util_sampler(livemap.clone(), pool.clone()); // 60s TT-utilization samples
     livemap::spawn_assignment_refresh(livemap.clone(), pool.clone()); // 30s work-pool assignment cache
     livemap::spawn_cycle_flusher(livemap.clone(), pool.clone()); // 30s persist completed TT cycles

@@ -23,6 +23,8 @@ sqlx = { version = "0.8", default-features = false, features = [
   "runtime-tokio", "tls-rustls", "postgres", "chrono", "bigdecimal", "macros", "migrate",
 ] }
 bigdecimal = "0.4"
+# statvfs (디스크 여유 감시). 이미 tokio -> signal-hook-registry -> errno 로 트리에 있어 새 다운로드 없음.
+libc = "0.2"
 # cli
 clap = { version = "4", features = ["derive", "env"] }
 # api

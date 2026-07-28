@@ -489,3 +489,52 @@ pub async fn health(State(pool): State<PgPool>) -> Result<Json<HealthResponse>, 
             .collect(),
     }))
 }
+
+/// One persisted operational alert (mig 0107) as the dashboard sees it.
+#[derive(serde::Serialize)]
+pub struct OpsAlertRow {
+    source: String,
+    subject: String,
+    severity: String,
+    message: String,
+    detail: Option<String>,
+    occurrences: i64,
+    /// seconds since this alert was last refreshed — the freshness the banner filters on
+    age_s: i64,
+    first_seen_s: i64,
+}
+
+/// `GET /api/ops/alerts` — the channel that makes `db::prune` failures, size ceilings, dead-man
+/// checks and unit failures reach a person. Before this, they were `tracing::warn!` lines in a
+/// journal nobody reads, which is why the road graph could run degraded for five days unnoticed.
+///
+/// No ack: alerts self-heal. Every row carries `age_s`, and the banner treats only recent ones as
+/// active, so a condition that clears simply stops being refreshed and drops off. A 24h window is
+/// returned (not just the active ones) so the dashboard can also show what just resolved.
+pub async fn ops_alerts(State(pool): State<PgPool>) -> Result<Json<Vec<OpsAlertRow>>, AppError> {
+    let rows: Vec<(String, String, String, String, Option<String>, i64, f64, f64)> = sqlx::query_as(
+        "SELECT source, subject, severity, message, detail, occurrences,
+                extract(epoch FROM now() - last_ts)::float8,
+                extract(epoch FROM now() - first_ts)::float8
+           FROM ops_alert
+          WHERE last_ts > now() - interval '24 hours'
+          ORDER BY (severity = 'crit') DESC, last_ts DESC
+          LIMIT 50",
+    )
+    .fetch_all(&pool)
+    .await?;
+    Ok(Json(
+        rows.into_iter()
+            .map(|(source, subject, severity, message, detail, occurrences, age, first)| OpsAlertRow {
+                source,
+                subject,
+                severity,
+                message,
+                detail,
+                occurrences,
+                age_s: age as i64,
+                first_seen_s: first as i64,
+            })
+            .collect(),
+    ))
+}

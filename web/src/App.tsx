@@ -120,6 +120,51 @@ function OutageBanner({ feed, lang }: { feed: FeedHealth; lang: Lang }) {
   );
 }
 
+// ── operational alerts (mig 0107) — the channel that makes db::prune failures, size ceilings,
+// dead-man checks and unit failures reach a person. Before this they were tracing::warn! lines in a
+// journal nobody read, which is how the road graph ran degraded for five days unnoticed.
+//
+// Deliberately a SECOND bar rather than an extension of OutageBanner above: that banner's verdict is
+// computed server-side in livemap.rs and LiveMapPage consumes the same FeedHealthContext for its
+// live/stale/replay modes, so folding another source into it would change dispatch-page behaviour.
+//
+// Self-healing, no ack: the API returns a 24h window with age_s and only recent rows count as
+// active, so a condition that clears stops being refreshed and drops off on its own. A manual ack
+// would get neglected, and a neglected crit becomes a permanent bar — which is how alert plumbing
+// stops being read at all.
+type OpsAlert = {
+  source: string; subject: string; severity: string; message: string; occurrences: number; age_s: number;
+};
+const OPS_ACTIVE_S = 3600; // watchdog refreshes every 120s; the slowest prune cadence is well inside an hour
+
+function OpsAlertBanner({ lang }: { lang: Lang }) {
+  const [rows, setRows] = useState<OpsAlert[]>([]);
+  useEffect(() => {
+    let alive = true;
+    const poll = () => fetch("/api/ops/alerts").then((r) => (r.ok ? r.json() : []))
+      .then((a: OpsAlert[]) => { if (alive) setRows(Array.isArray(a) ? a : []); })
+      // a dead API is already the feed banner's job; staying quiet here avoids a duplicate bar
+      .catch(() => {});
+    poll();
+    const id = setInterval(poll, 30000);
+    return () => { alive = false; clearInterval(id); };
+  }, []);
+  const active = rows.filter((r) => r.age_s < OPS_ACTIVE_S);
+  if (active.length === 0) return null;
+  const ko = lang === "ko";
+  const crit = active.filter((r) => r.severity === "crit");
+  const head = crit[0] ?? active[0];
+  const more = active.length - 1;
+  const msg = (ko ? "운영 경고" : "Ops alert") + ": " + head.message
+    + (more > 0 ? (ko ? ` · 외 ${more}건` : ` · +${more} more`) : "");
+  return (
+    <div className={`outage-banner ${crit.length > 0 ? "down" : "warn"}`} role="alert" title={active.map((r) => `${r.source}/${r.subject}: ${r.message}`).join("\n")}>
+      <span className="ob-ico" aria-hidden="true">⚑</span>
+      <span className="ob-msg">{msg}</span>
+    </div>
+  );
+}
+
 function HealthPill({ health, feed, lang }: { health: HealthResponse | null; feed: FeedHealth; lang: Lang }) {
   const s = t(lang);
   // real-time GPS feed down dominates — the pill must not read green during a live outage; otherwise
@@ -701,6 +746,7 @@ export default function App() {
         </div>
       </div>
       <OutageBanner feed={feed} lang={lang} />
+      <OpsAlertBanner lang={lang} />
       <div className="app-body">
         <nav className="sidebar">
           {PAGES.map((p) => (
