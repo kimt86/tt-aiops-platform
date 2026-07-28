@@ -18,6 +18,13 @@ const STREAM: &str = "yard_move";
 const FETCH_CAP: u32 = 8000;
 /// Watermark safety lag (s) — covers TOS out-of-order row visibility. See util::wm_minus_secs.
 const LAG_S: i64 = 120;
+/// PHYSICAL stacking limit of an RTG/ES block — not a limit derived from what TOS sends.
+/// `tier` is `CRNT_PSN_IDX_NO4 + 1` straight off Oracle, and build() expands it into that many
+/// placeholder rows via generate_series, so a single corrupt NO4 would size a write by the input
+/// VALUE rather than by physics — the failure class that OOM'd the whole server on 2026-07-28
+/// (roadgraph raster bounded by raw GPS min/max). Observed max here is 7; 10 leaves headroom
+/// without leaving the door open.
+const MAX_TIER: i32 = 10;
 
 pub async fn run(pool: &PgPool, target: &str) -> Result<()> {
     let cfg = state::load_config(pool).await?;
@@ -91,7 +98,7 @@ async fn tick(pool: &PgPool, run_id: i64, target: &str, cfg: &Config) -> Result<
 
     let mut tx = pool.begin().await?;
     let mut max_seq: Option<String> = None;
-    let mut inserted = 0u64;
+    let (mut inserted, mut rejected) = (0u64, 0u64);
     for r in &rows {
         let (Some(machno), Some(contno), Some(seqno), Some(comp)) =
             (jstr(r, "MACHNO"), jstr(r, "CONTNO"), jstr(r, "SEQNO"), jstr(r, "COMP"))
@@ -105,26 +112,41 @@ async fn tick(pool: &PgPool, run_id: i64, target: &str, cfg: &Config) -> Result<
             continue;
         };
         let jt = jstr(r, "JT").unwrap_or_default();
-        let res = sqlx::query(
-            "INSERT INTO scenario.yard_move
-               (comp_ts, contno, jobtype, block_id, bay_idx, row_idx, tier, machno, seqno)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
-             ON CONFLICT (machno, contno, seqno) DO NOTHING",
-        )
-        .bind(comp_ts)
-        .bind(contno.trim())
-        .bind(&jt)
-        .bind(b)
-        .bind(y)
-        .bind(ri)
-        .bind(tt + 1) // tier = NO4 + 1
-        .bind(machno.trim())
-        .bind(seqno.trim())
-        .execute(&mut *tx)
-        .await?;
-        inserted += res.rows_affected();
+        // Gate the stack position against MAX_TIER HERE, at the single choke point where TOS data
+        // enters. checked_add because NO4 is an unvalidated i32 and i32::MAX would otherwise wrap
+        // into a negative tier that reads as plausible-ish garbage.
+        let tier = tt.checked_add(1).unwrap_or(i32::MIN);
+        if (1..=MAX_TIER).contains(&tier) {
+            let res = sqlx::query(
+                "INSERT INTO scenario.yard_move
+                   (comp_ts, contno, jobtype, block_id, bay_idx, row_idx, tier, machno, seqno)
+                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+                 ON CONFLICT (machno, contno, seqno) DO NOTHING",
+            )
+            .bind(comp_ts)
+            .bind(contno.trim())
+            .bind(&jt)
+            .bind(b)
+            .bind(y)
+            .bind(ri)
+            .bind(tier) // tier = NO4 + 1
+            .bind(machno.trim())
+            .bind(seqno.trim())
+            .execute(&mut *tx)
+            .await?;
+            inserted += res.rows_affected();
+        } else {
+            rejected += 1;
+            tracing::warn!(
+                machno = %machno, contno = %contno, seqno = %seqno,
+                block = b, bay = y, row = ri, raw_no4 = tt,
+                "yard move dropped: stack position outside physical bounds"
+            );
+        }
         // Watermark advances on SEQNO (the seek key), not comp — they are not the same ordering —
-        // and ONLY on well-formed keys, so a malformed SEQNO can never jump or stall it.
+        // and ONLY on well-formed keys, so a malformed SEQNO can never jump or stall it. It advances
+        // for a REJECTED row too: that row was seen and deliberately discarded, not left unprocessed,
+        // so re-reading it every tick would buy nothing and could stall the stream behind bad data.
         if crate::util::is_wm_key(&seqno) && max_seq.as_deref().is_none_or(|m| seqno.as_str() > m) {
             max_seq = Some(seqno);
         }
@@ -139,10 +161,18 @@ async fn tick(pool: &PgPool, run_id: i64, target: &str, cfg: &Config) -> Result<
     state::merge_json(pool, run_id, "load_stats", json!({
         "queries": 1, "rows_read": fetched, "query_ms": query_ms, "fetch_capped": capped,
     })).await?;
-    state::merge_json(pool, run_id, "collection", json!({ "fetched": fetched, "inserted": inserted }))
-        .await?;
+    state::merge_json(pool, run_id, "collection", json!({
+        "fetched": fetched, "inserted": inserted, "rejected_position": rejected,
+    })).await?;
+    // Surface rejects rather than dropping them silently: a nonzero count means TOS is emitting
+    // positions we can't trust, which is worth seeing BEFORE it becomes an incident.
+    if rejected > 0 {
+        state::emit(pool, run_id, "warn", "position_out_of_bounds", json!({
+            "rejected": rejected, "max_tier": MAX_TIER,
+        })).await?;
+    }
 
-    tracing::info!(fetched, inserted, query_ms, capped, "scenario yard moves");
+    tracing::info!(fetched, inserted, rejected, query_ms, capped, "scenario yard moves");
     Ok(())
 }
 
@@ -215,7 +245,11 @@ async fn do_build(pool: &PgPool, run_id: i64) -> Result<()> {
                 .execute(&mut *tx)
                 .await?;
                 // seed "unknown" placeholders on tiers 1..tier-1 (only where currently empty)
-                if *tier > 1 {
+                // MAX_TIER is re-checked here, not just at collection: this is the ACTUAL
+                // unbounded-write site, and yard_move can be written by other paths (backfill,
+                // manual SQL) that never pass through the collector's gate. A bound that only
+                // exists upstream of the allocation is not a bound.
+                if *tier > 1 && *tier <= MAX_TIER {
                     let r = sqlx::query(
                         "INSERT INTO scenario.yard_cell (block_id,bay_idx,row_idx,tier,contno,known,updated_ts)
                          SELECT $1,$2,$3,g,NULL,false,$4 FROM generate_series(1,$5) g
