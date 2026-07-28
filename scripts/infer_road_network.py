@@ -28,7 +28,12 @@ for r in csv.reader(open(f'{SCRATCH}/gps_moving.tsv'), delimiter='\t'):
 # that, peaked ~121GB and OOM-killed the machine. So: centre on the MEDIAN fix, drop anything past
 # a physical radius, and hard-cap the raster so a bad day aborts loudly instead of eating the box.
 MAX_R_M   = 20_000.0      # farther than this from the median centre = corrupt fix, not traffic
-MAX_CELLS = 60_000_000    # backstop (~240MB float32); normal is ~0.4M
+# Backstop. ⚠ This was 60M and could therefore NEVER fire: MAX_R_M=20km bounds the bbox to
+# 40km per side, so at CELL=6m the raster tops out at (40000/6)^2 = 44.4M cells — always under
+# 60M. A cap above the maximum its own radius allows is decoration, not a backstop. 20M sits
+# above real operation (measured 8.05M on the 2026-07-28 input) and below that 44.4M worst case,
+# so it can actually stop something.
+MAX_CELLS = 20_000_000    # ~80MB float32; measured normal 8.05M, radius-implied worst case 44.4M
 _la = np.fromiter((p[1] for v in trucks.values() for p in v), dtype=np.float64)
 _lo = np.fromiter((p[2] for v in trucks.values() for p in v), dtype=np.float64)
 cla = float(np.median(_la)); clo = float(np.median(_lo))

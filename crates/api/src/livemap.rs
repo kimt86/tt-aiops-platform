@@ -224,30 +224,65 @@ const NEAR_TRIP_M: f64 = 100.0;
 // (GPS teleport / accuracy spike), so jitter can't fake "movement".
 const MAX_FIX_STEP_M: f64 = 600.0;
 
-/// UPSTREAM COORDINATE GATE — terminal anchor + hard radius for an incoming GPS fix.
+/// UPSTREAM COORDINATE GATE.
 ///
-/// Measured footprint (2026-07-28, 6.3M fixes): lat 2.9052..2.9510, lon 101.2789..101.3064 —
-/// about 5x3 km. The feed also carries fixes 100~250km out (20 of 6.3M), and a single one of
-/// them (lat 4.1975 / lon 99.7827) sized the road-inference raster 3,374x and OOM-killed the
-/// whole server. That consumer is now bounded, but a corrupt coordinate is garbage for EVERY
-/// consumer — positions, centroids, lane field, density, cycle detection — so it is dropped
-/// once here rather than defended against N times downstream.
+/// 2026-07-28: one corrupt fix (lat 4.1975 / lon 99.7827, 219km out) sized the road-inference
+/// raster 3,374x and OOM-killed the box. Every >50km fix in that window was a TT, and
+/// truck_pos_hist/hifreq — the only tables the raster reads — hold TT and nothing else
+/// (1.03M / 6.33M rows, zero other classes). So TT is the population this gate bounds.
 ///
-/// 25km is ~8x the real footprint and still 4x inside the nearest observed bad fix, so it
-/// cannot clip real traffic. Rejections are counted and surfaced on /api/livemap/health:
-/// a gate that drops silently just moves the blindness somewhere else.
+/// ⚠ THE FIRST VERSION OF THIS GATE WAS WRONG and this is why the split exists. It applied a
+/// TT-derived radius (25km) to every device class, and silently dropped live H-* external
+/// hauliers reporting from 25.66km — 57 real fixes in 51 minutes before it was caught. The
+/// footprint had been measured on a TT-only table; applying it to classes absent from that
+/// sample invented a limit for them. A bound is only valid for the population it was measured on.
+///
+/// TT distance from the anchor, all 6,331,399 fixes:
+///   <5km 6,331,239 (99.9975%, max 4,959m) · 5-10km 31 · 10-20km 92
+///   · 20-30km 5 · 30-50km 12 · >50km 20 (89km..219km — the corrupt ones) · p99.99 3,032m
+/// 20km keeps 99.9997% of real TT and sits 4.5x inside the nearest corrupt fix. It equals
+/// MAX_R_M in infer_road_network.py, so the gate and the raster agree on what a TT can be.
 const TERMINAL_LAT: f64 = 2.928;
 const TERMINAL_LON: f64 = 101.2927;
-const FIX_MAX_R_M: f64 = 25_000.0;
+/// Hard bound, TT only — a yard tractor does not leave the terminal.
+const TT_MAX_R_M: f64 = 20_000.0;
+/// ADVISORY ONLY, for classes with no measured footprint (external hauliers, cranes, stackers).
+/// Counted and logged so the data needed to bound them accumulates — never dropped. Guessing a
+/// bound for an unmeasured population is exactly what broke the live map above.
+const UNMEASURED_ADVISORY_R_M: f64 = 50_000.0;
 
-/// True if a fix is physically plausible for this terminal. See FIX_MAX_R_M.
-fn fix_in_terminal(lat: f64, lon: f64) -> bool {
-    if !lat.is_finite() || !lon.is_finite() {
-        return false; // NaN/Inf would poison every downstream min/max and mean
-    }
+fn dist_from_terminal_m(lat: f64, lon: f64) -> f64 {
     let dn = (lat - TERMINAL_LAT) * 111_320.0;
     let de = (lon - TERMINAL_LON) * 111_320.0 * TERMINAL_LAT.to_radians().cos();
-    dn * dn + de * de <= FIX_MAX_R_M * FIX_MAX_R_M
+    (dn * dn + de * de).sqrt()
+}
+
+/// What to do with one incoming fix.
+pub(crate) enum FixGate {
+    Keep,
+    /// kept, but far enough out to be worth counting — see UNMEASURED_ADVISORY_R_M
+    KeepButFar(f64),
+    Drop(&'static str),
+}
+
+/// Gate one fix. Drops only what we can justify: non-finite values, and TT beyond its measured
+/// physical range. Everything else is kept — see the ⚠ note on TT_MAX_R_M.
+pub(crate) fn gate_fix(cls: &str, lat: f64, lon: f64) -> FixGate {
+    if !lat.is_finite() || !lon.is_finite() {
+        // a single NaN/Inf poisons every downstream min/max, mean and raster bound
+        return FixGate::Drop("non-finite coordinate");
+    }
+    let d = dist_from_terminal_m(lat, lon);
+    if cls == "TT" {
+        if d > TT_MAX_R_M {
+            return FixGate::Drop("TT beyond its measured physical range");
+        }
+        return FixGate::Keep;
+    }
+    if d > UNMEASURED_ADVISORY_R_M {
+        return FixGate::KeepButFar(d);
+    }
+    FixGate::Keep
 }
 // the median needs a non-trivial sample before it is shown — a 5-sample median is noise.
 // Below this the UI shows "collecting n/N" instead of a number (per external eval #4).
@@ -566,8 +601,10 @@ pub struct LiveMap {
     connected: AtomicBool,
     messages: AtomicU64,
     reconnects: AtomicU64,
-    /// GPS fixes dropped by the upstream coordinate gate (see FIX_MAX_R_M).
+    /// GPS fixes dropped by the upstream coordinate gate (see TT_MAX_R_M).
     rejected_far: AtomicU64,
+    /// fixes KEPT but flagged far — classes with no measured footprint (see UNMEASURED_ADVISORY_R_M).
+    far_unmeasured: AtomicU64,
     last_msg_ms: AtomicU64,
     connected_since_ms: AtomicU64,
     started_ms: AtomicU64,
@@ -646,6 +683,7 @@ impl LiveMap {
             messages: AtomicU64::new(0),
             reconnects: AtomicU64::new(0),
             rejected_far: AtomicU64::new(0),
+            far_unmeasured: AtomicU64::new(0),
             last_msg_ms: AtomicU64::new(0),
             connected_since_ms: AtomicU64::new(0),
             started_ms: AtomicU64::new(Utc::now().timestamp_millis() as u64),
@@ -1315,8 +1353,10 @@ pub struct HealthOut {
     last_message_at: Option<DateTime<Utc>>,
     messages_total: u64,
     reconnects: u64,
-    /// fixes dropped as physically impossible for this terminal (upstream coordinate gate)
+    /// fixes dropped by the upstream coordinate gate (non-finite, or TT past its measured range)
     rejected_far_fixes: u64,
+    /// fixes KEPT but far out, from a class with no measured footprint — data to bound them later
+    far_unmeasured_fixes: u64,
     last_error: Option<String>,
     uptime_s: i64,
     /// messages in the last completed minute
@@ -1474,6 +1514,7 @@ pub async fn health(State(lm): State<Arc<LiveMap>>) -> Json<HealthOut> {
         messages_total: lm.messages.load(Ordering::Relaxed),
         reconnects: lm.reconnects.load(Ordering::Relaxed),
         rejected_far_fixes: lm.rejected_far.load(Ordering::Relaxed),
+        far_unmeasured_fixes: lm.far_unmeasured.load(Ordering::Relaxed),
         last_error: lm.last_error.read().await.clone(),
         uptime_s: (now - started) / 1000,
         rate_per_min,
@@ -3217,14 +3258,27 @@ async fn ingest_text(lm: &Arc<LiveMap>, text: &str) {
     if lat == 0.0 && lon == 0.0 {
         return; // no fix
     }
-    // UPSTREAM COORDINATE GATE (see FIX_MAX_R_M): drop physically impossible fixes before they
-    // reach ANY consumer. Logged on powers of two so a burst is visible without flooding.
-    if !fix_in_terminal(lat, lon) {
-        let n = lm.rejected_far.fetch_add(1, Ordering::Relaxed) + 1;
-        if n.is_power_of_two() {
-            tracing::warn!(id, lat, lon, total = n, "GPS fix outside the terminal — dropped");
+    let cls: String = id.chars().take_while(|c| c.is_ascii_alphabetic()).collect();
+    // UPSTREAM COORDINATE GATE — see TT_MAX_R_M. Runs before ANY consumer sees the fix, but it
+    // only DROPS for populations we have actually measured (TT) plus non-finite values.
+    match gate_fix(&cls, lat, lon) {
+        FixGate::Keep => {}
+        FixGate::KeepButFar(d) => {
+            let n = lm.far_unmeasured.fetch_add(1, Ordering::Relaxed) + 1;
+            if n.is_power_of_two() {
+                tracing::warn!(
+                    id, cls = %cls, lat, lon, km = (d / 1000.0).round(), total = n,
+                    "fix far from the terminal from a class with no measured footprint — KEPT"
+                );
+            }
         }
-        return;
+        FixGate::Drop(why) => {
+            let n = lm.rejected_far.fetch_add(1, Ordering::Relaxed) + 1;
+            if n.is_power_of_two() {
+                tracing::warn!(id, cls = %cls, lat, lon, why, total = n, "GPS fix dropped by the coordinate gate");
+            }
+            return;
+        }
     }
     let speed = g
         .get("speed")
@@ -3236,7 +3290,6 @@ async fn ingest_text(lm: &Arc<LiveMap>, text: &str) {
         Some(s) if s.to_ascii_uppercase().contains("ON") => 1,
         _ => 0,
     };
-    let cls: String = id.chars().take_while(|c| c.is_ascii_alphabetic()).collect();
     let now = Utc::now().timestamp_millis();
 
     let mut pos = Pos {
@@ -5196,32 +5249,55 @@ pub fn spawn_fair_compare(lm: Arc<LiveMap>, pool: PgPool) {
 
 #[cfg(test)]
 mod gate_tests {
-    use super::fix_in_terminal;
+    use super::{gate_fix, FixGate};
 
-    /// Pins the upstream coordinate gate to MEASURED data, not to a guess: every corner of the
-    /// real footprint must pass, and every corrupt fix seen on 2026-07-28 must not. Widening
-    /// FIX_MAX_R_M until this test's rejects start passing would be re-opening the outage.
+    fn kept(cls: &str, lat: f64, lon: f64) -> bool {
+        !matches!(gate_fix(cls, lat, lon), FixGate::Drop(_))
+    }
+
+    /// Pins the gate to MEASURED data per population. The first version of this gate applied a
+    /// TT-derived radius to every class and dropped live H-* hauliers at 25.66km; the cases below
+    /// exist so that cannot happen again. Widening TT_MAX_R_M until the TT rejects pass, or
+    /// making the non-TT cases drop, would each re-open a real outage.
     #[test]
-    fn gate_keeps_real_traffic_and_drops_the_corrupt_fixes() {
-        // measured footprint (p0.1..p99.9 of 6.3M fixes): lat 2.9052..2.9510, lon 101.2789..101.3064
+    fn tt_is_bounded_by_its_own_measured_range() {
+        // 99.9975% of 6.33M TT fixes are within 5km (max 4,959m); p99.99 = 3,032m
+        assert!(kept("TT", 2.9052, 101.2789));
+        assert!(kept("TT", 2.9510, 101.3064));
+        assert!(kept("TT", 2.928, 101.2927));
+        // the corrupt TT fixes from the 2026-07-28 window (89km..219km)
+        assert!(!kept("TT", 4.1975, 99.7827), "the fix that OOM-killed the box must be dropped");
+        assert!(!kept("TT", 1.9081, 101.0023));
+        assert!(!kept("TT", 3.6898, 101.5460));
+    }
+
+    #[test]
+    fn unmeasured_classes_are_never_dropped_for_distance() {
+        // real live H-* external hauliers at 25.66km — the regression this test exists for
         for (la, lo) in [
-            (2.9052, 101.2789),
-            (2.9052, 101.3064),
-            (2.9510, 101.2789),
-            (2.9510, 101.3064),
+            (2.989742, 101.51491),
+            (2.989817, 101.515058),
+            (2.98935, 101.514427),
+            (2.9898, 101.515),
+            (2.9902, 101.5155),
+            (2.990667, 101.516),
         ] {
-            assert!(fix_in_terminal(la, lo), "real footprint corner rejected: {la},{lo}");
+            assert!(kept("H", la, lo), "live haulier fix dropped: {la},{lo}");
         }
+        // far out is flagged for measurement, still kept
+        assert!(matches!(gate_fix("H", 4.1975, 99.7827), FixGate::KeepButFar(_)));
+        // terminal equipment classes are not bounded either — no footprint measured for them
+        assert!(kept("RT", 2.99, 101.52));
+        assert!(kept("C", 2.99, 101.52));
+        assert!(kept("ES", 2.99, 101.52));
+    }
 
-        // the single row that sized the road-inference raster 3,374x and OOM-killed the box
-        assert!(!fix_in_terminal(4.1975, 99.7827), "the 2026-07-28 killer fix must be dropped");
-        // the other far outliers in the same 5-day window
-        assert!(!fix_in_terminal(1.9081, 101.0023));
-        assert!(!fix_in_terminal(3.6898, 101.5460));
-
-        // non-finite would poison every downstream min/max, mean and raster bound
-        assert!(!fix_in_terminal(f64::NAN, 101.2927));
-        assert!(!fix_in_terminal(2.928, f64::INFINITY));
-        assert!(!fix_in_terminal(f64::NEG_INFINITY, f64::NAN));
+    #[test]
+    fn non_finite_is_dropped_for_every_class() {
+        for cls in ["TT", "H", "RT", "C", ""] {
+            assert!(!kept(cls, f64::NAN, 101.2927), "NaN kept for {cls}");
+            assert!(!kept(cls, 2.928, f64::INFINITY), "Inf kept for {cls}");
+            assert!(!kept(cls, f64::NEG_INFINITY, f64::NAN));
+        }
     }
 }
