@@ -211,10 +211,36 @@ async fn do_build(pool: &PgPool, run_id: i64) -> Result<()> {
     // a backfill), and a lost move corrupts the stack state forever. Re-applying the boundary row is
     // harmless because replay is idempotent: PLACE = delete-by-contno then upsert the cell, and
     // REMOVE = delete. Cannot livelock (one second's rows are far under LIMIT).
+    // Upper bound on comp_ts. `comp_ts` is TOS COMPDATE||COMPTIME with no validation, and the
+    // watermark below is simply the largest one processed — so a single future-dated row would
+    // park this watermark in the future and reconstruction would never resume (scenario.watermark
+    // keeps ONE row per source, so unlike etl_watermark there is no earlier sane value to fall
+    // back to). The collector's SEQNO bound does not help: it constrains SEQNO, not comp_ts.
+    // Nothing is lost — a row merely ahead of the clock is picked up on a later tick, and replay
+    // is idempotent (`>=` re-reads the boundary second on purpose).
+    //
+    // A watermark that is ALREADY in the future is clamped and reported: silently resuming from
+    // now() would skip the gap without anyone knowing, which is the failure shape this whole
+    // hardening pass exists to remove.
+    if let Some(w) = wm.as_deref().and_then(|w| DateTime::parse_from_rfc3339(w).ok()) {
+        if w.with_timezone(&Utc) > Utc::now() {
+            tracing::error!(watermark = %w, "yard_cell watermark is in the FUTURE — clamping to now;                  reconstruction would otherwise never resume");
+            let _ = sqlx::query(
+                "INSERT INTO ops_alert (source, subject, severity, message)
+                      VALUES ('watermark', 'yard_cell', 'crit',
+                              '야드 재구성 워터마크가 미래에 박혔다 — 손상된 comp_ts 유입')
+                 ON CONFLICT (source, subject) DO UPDATE
+                    SET last_ts = now(), occurrences = ops_alert.occurrences + 1",
+            )
+            .execute(pool)
+            .await;
+        }
+    }
     let moves: Vec<(DateTime<Utc>, String, String, i32, i32, i32, i32)> = sqlx::query_as(
         "SELECT comp_ts, contno, jobtype, block_id, bay_idx, row_idx, tier
            FROM scenario.yard_move
-          WHERE ($1::timestamptz IS NULL OR comp_ts >= $1::timestamptz)
+          WHERE ($1::timestamptz IS NULL OR comp_ts >= least($1::timestamptz, now()))
+            AND comp_ts <= now()
           ORDER BY comp_ts, seqno
           LIMIT $2",
     )

@@ -40,10 +40,26 @@ pub async fn tick_handover(pool: &PgPool, target: &str) -> Result<()> {
     run_logged(pool, "HANDOVER_LABEL", date, |_| async move {
         // Watermark = last completion event seen (text "YYYYMMDDHHMMSS[mmm]", chronological by
         // lexicographic order). First run: start ~10 min back so we don't backfill 15 days.
+        // Upper edge of this poll's window. It bounds BOTH the Oracle read and the watermark,
+        // because a future-dated key can never be walked back: etl_watermark advances with
+        // GREATEST(), is read as max() over EVERY snapshot_date, and nothing prunes that table — so
+        // ONE future key stalls this stream permanently and only a hand-written UPDATE recovers it
+        // (reproduced in a transaction 2026-07-28: a planted '20270101120000' pinned the read there).
+        // Nothing is dropped: the bound follows the wall clock, so a key merely ahead of us is read
+        // on a later tick — `>=` plus ON CONFLICT already make that re-read free.
+        // Measured 2026-07-28: Oracle SYSDATE matches our clock to the second, and no row carries a
+        // key ahead of SYSDATE, so a zero-margin bound costs nothing today.
+        // 17 chars to match this key's width (DATE||TIME carries a millisecond tail): the '999'
+        // tail keeps the CURRENT second's rows inside the window instead of delaying them 1s.
+        let until = format!("{}999", tt_core::shift::terminal_now().format("%Y%m%d%H%M%S"));
+        // Clamping the READ is what heals an already-poisoned watermark: a future value is
+        // ignored and the poll restarts from the last sane one (a bounded, deduped re-read).
         let wm: Option<String> = sqlx::query_scalar(
-            "SELECT max(last_completed_at) FROM etl_watermark WHERE stream = $1",
+            "SELECT max(last_completed_at) FROM etl_watermark
+              WHERE stream = $1 AND last_completed_at <= $2",
         )
         .bind(STREAM)
+        .bind(&until)
         .fetch_one(pool)
         .await?;
         let wm = wm.unwrap_or_else(|| {
@@ -61,6 +77,7 @@ pub async fn tick_handover(pool: &PgPool, target: &str) -> Result<()> {
                     YT_DIS_DT AS dis_dt, SUBSTR(JOB_HIST_YT_TOPOS,1,40) AS topos
                FROM TOSADM.JOB_ORDER_HISTORY
               WHERE JOB_HIST_DATE||JOB_HIST_TIME >= '{wm}'
+                AND JOB_HIST_DATE||JOB_HIST_TIME <= '{until}'
                 AND JOB_HIST_JOBSTATUS = 'C'
                 AND JOB_HIST_JOBTYPE IN ('DS','LD')
               ORDER BY JOB_HIST_DATE||JOB_HIST_TIME
@@ -99,7 +116,11 @@ pub async fn tick_handover(pool: &PgPool, target: &str) -> Result<()> {
             .await
             .context("insert tos_handover_label")?;
             inserted += res.rows_affected();
-            if max_evt.as_deref().is_none_or(|m| evt > m) {
+            // Only a well-formed key may advance the watermark. qc_moves/rtg_moves already guard
+            // their SEQNO this way; this stream did not, so a malformed value that happens to sort
+            // high could park the watermark somewhere no real row will ever reach.
+            let well_formed = evt.len() == 17 && evt.bytes().all(|b| b.is_ascii_digit());
+            if well_formed && max_evt.as_deref().is_none_or(|m| evt > m) {
                 max_evt = Some(evt.to_string());
             }
         }

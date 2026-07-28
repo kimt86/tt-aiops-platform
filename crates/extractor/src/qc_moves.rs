@@ -39,10 +39,25 @@ pub async fn tick_qc_moves(pool: &PgPool, target: &str) -> Result<()> {
     run_logged(pool, "QC_MOVE", run_date, |_| async move {
         // watermark = last SEQNO seen (text "YYYYMMDDHHMMSS", = global completion order). First run:
         // start of today so we self-backfill today (FETCH_CAP per poll, ORDER BY SEQNO ASC → catches up).
+        // Upper edge of this poll's window. It bounds BOTH the Oracle read and the watermark,
+        // because a future-dated key can never be walked back: etl_watermark advances with
+        // GREATEST(), is read as max() over EVERY snapshot_date, and nothing prunes that table — so
+        // ONE future key stalls this stream permanently and only a hand-written UPDATE recovers it
+        // (reproduced in a transaction 2026-07-28: a planted '20270101120000' pinned the read there).
+        // Nothing is dropped: the bound follows the wall clock, so a key merely ahead of us is read
+        // on a later tick — `>=` plus ON CONFLICT already make that re-read free.
+        // Measured 2026-07-28: Oracle SYSDATE matches our clock to the second, and no row carries a
+        // key ahead of SYSDATE, so a zero-margin bound costs nothing today.
+        // 14 chars to match SEQNO's own width: a wider bound would not bite if SEQNO is numeric.
+        let until = today.format("%Y%m%d%H%M%S").to_string();
+        // Clamping the READ is what heals an already-poisoned watermark: a future value is
+        // ignored and the poll restarts from the last sane one (a bounded, deduped re-read).
         let wm: Option<String> = sqlx::query_scalar(
-            "SELECT max(last_completed_at) FROM etl_watermark WHERE stream = $1",
+            "SELECT max(last_completed_at) FROM etl_watermark
+              WHERE stream = $1 AND last_completed_at <= $2",
         )
         .bind(STREAM)
+        .bind(&until)
         .fetch_one(pool)
         .await?;
         let wm = wm.unwrap_or_else(|| format!("{day}000000"));
@@ -67,6 +82,7 @@ pub async fn tick_qc_moves(pool: &PgPool, target: &str) -> Result<()> {
                     MCH_OPER_STATUS AS status
                FROM TOSADM.MCH_OPERATION
               WHERE MCH_OPER_SEQNO >= '{seek_from}'
+                AND MCH_OPER_SEQNO <= '{until}'
                 AND REGEXP_LIKE(MCH_OPER_MACHNO, '^(C|M|Z)[0-9]')
                 AND LENGTH(MCH_OPER_COMPTIME) >= 6
               ORDER BY MCH_OPER_SEQNO
