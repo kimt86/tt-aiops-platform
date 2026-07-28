@@ -4,6 +4,22 @@
 # publish to the live map, and store ROAD-NETWORK congestion (congestion_edge). Denser as 3s grows.
 # Run hourly. Writes web/{public,dist}/livemap-roadgraph.geojson + congestion_edge + stats line.
 set -euo pipefail
+
+# Hard memory ceiling — blast-radius containment, independent of any bug in this pipeline.
+# 2026-07-28: a corrupt-GPS raster blowup in infer_road_network.py peaked ~121GB and OOM-killed
+# the whole 247GB box (down 07:21→11:32). Normal peak here is a couple of GB; 16G is generous.
+# Re-exec into a memory-capped user scope so the kernel kills THIS job, never the machine.
+if [[ -z "${ROADGRAPH_SCOPED:-}" ]]; then
+  export ROADGRAPH_SCOPED=1
+  export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+  export DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=$XDG_RUNTIME_DIR/bus}"
+  if systemd-run --user --scope -q -p MemoryMax=64M -- /bin/true >/dev/null 2>&1; then
+    exec systemd-run --user --scope -q -p MemoryMax=16G -p MemorySwapMax=0 -- bash "$0" "$@"
+  fi
+  echo "WARN: systemd user scope unavailable — falling back to ulimit -v 24G" >&2
+  ulimit -v $((24 * 1024 * 1024)) || true
+fi
+
 cd /home/tkadmin/projects/tt-aiops-platform
 export PGPASSWORD=wp
 PY=.venv-geo/bin/python
