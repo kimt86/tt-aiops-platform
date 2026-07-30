@@ -44,6 +44,17 @@ const DEADMAN: &[(&str, &str, i64)] = &[
     ("congestion_edge", "hour", 240), // hourly cron; `hour` lags ~1-2h by design, so 4h = 2+ misses
     ("road_route_eval", "ts", 90),    // spawn_roadgraph_eval, 10min → 9 misses
     ("stage2_match_shadow", "ts", 30), // spawn_stage2_shadow, 60s → 30 misses
+    // The two crane handover logs. These are TOS ground truth for every cycle timestamp, they poll
+    // every 60s, and until now NOTHING watched them: absent from DEADMAN and RETENTION, and no code
+    // alerts on etl_run_log.status='FAILED' or data_freshness.last_status (the only reader is a plain
+    // GET endpoint). A stalled move poll is therefore silent — and it does not stay merely late:
+    // populate_cycle_pred_shadow works a 90-minute window and spawn_cycle_pickup_correct a 2-hour
+    // one, so past those, rows are lost permanently rather than caught up. On comp_ts, not
+    // captured_at: comp_ts is indexed so max() is an index scan, while captured_at would seq-scan
+    // 509MB every cycle. Both tables gain 36-68 rows per minute around the clock, so 30 min of
+    // nothing means our poll is broken, not that the terminal went quiet.
+    ("qc_move_log", "comp_ts", 30),
+    ("rtg_move_log", "comp_ts", 30),
 ];
 
 /// Retention checks: the prune ran without error but did not actually delete anything. A prune

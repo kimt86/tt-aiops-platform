@@ -54,10 +54,22 @@ async fn tick(pool: &PgPool, run_id: i64, target: &str, cfg: &Config) -> Result<
     // stall: 2 min of moves is orders of magnitude under FETCH_CAP.
     // NOTE: deleting the scenario.watermark row makes this fall back to a day-start seek (bounded
     // by the cap and self-catching-up, but a needless rescan) — don't delete it.
-    let day = tt_core::shift::terminal_now().format("%Y%m%d").to_string();
+    let now = tt_core::shift::terminal_now();
+    let day = now.format("%Y%m%d").to_string();
+    // Upper edge of this poll's window. It bounds the Oracle read AND, by construction, whatever can
+    // become the next watermark — without it a single future-dated SEQNO stalls this stream for good:
+    // set_watermark advances with GREATEST and scenario.watermark holds one row per source, so there
+    // is no earlier sane value left to fall back to. Clamping the READ is what heals it: a poisoned
+    // value is ignored, the seek restarts from day start, and ON CONFLICT makes that re-read free.
+    // Nothing is dropped — the bound follows the wall clock, so a key merely ahead of us arrives on a
+    // later tick. Same guard commit 4a7c53a gave the critical extractor's qc_moves/rtg_moves; this
+    // collector reads the same table and the same column, and was missed.
+    let until = now.format("%Y%m%d%H%M%S").to_string();
     let wm = state::get_watermark(pool, STREAM)
         .await?
         .as_deref()
+        // Compare on the leading 14 chars so a wider key (ms precision) still compares by instant.
+        .filter(|w| w.get(..14).unwrap_or(w) <= until.as_str())
         .and_then(|w| crate::util::wm_minus_secs(w, LAG_S))
         .unwrap_or_else(|| format!("{day}000000"));
 
@@ -79,6 +91,7 @@ async fn tick(pool: &PgPool, run_id: i64, target: &str, cfg: &Config) -> Result<
                 CRNT_PSN_IDX_NO3 AS rr, CRNT_PSN_IDX_NO4 AS tt
            FROM TOSADM.MCH_OPERATION
           WHERE MCH_OPER_SEQNO >= '{wm}'
+            AND MCH_OPER_SEQNO <= '{until}'
             AND REGEXP_LIKE(MCH_OPER_MACHNO, '^(RTG|ES)')
             AND CRNT_PSN_IDX_NO1 IS NOT NULL
             AND LENGTH(MCH_OPER_COMPTIME) >= 6
