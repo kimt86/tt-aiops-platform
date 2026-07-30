@@ -29,6 +29,14 @@ struct MoveRow {
     st_dt: Option<String>,
     comp_dt: Option<String>, // MCH_OPER_COMPDATE||MCH_OPER_COMPTIME (14-char)
     status: Option<String>,  // MCH_OPER_STATUS: F=Full / M=empty(MT)
+    // Stowage label + vessel identity, read from the row we already fetch (see mig 0109). Without
+    // these, the bay label survives only in 21-day sliding shadow logs and vessel/voyage only via
+    // scenario.move_hist (starts 2026-07-21, DS/LD only) — which is why 85% of this table has no
+    // vessel today. All three are VARCHAR2 on the Oracle side, so String is the right shape: the
+    // toolbox maps NUMBER to a JSON number, and that would make parse_rows fail the whole batch.
+    queuename: Option<String>, // MCH_OPER_QUEUENAME: "18H-L" = 40ft bay 18 / Hold / Load
+    vessel: Option<String>,
+    voyage: Option<String>,
 }
 
 /// One incremental poll: upsert quay-crane moves completed since the watermark, advance it.
@@ -79,7 +87,8 @@ pub async fn tick_qc_moves(pool: &PgPool, target: &str) -> Result<()> {
                     MCH_OPER_MACHNO AS machno, SUBSTR(MCH_OPER_CONTNO,1,11) AS contno,
                     MCH_OPER_SEQNO AS seqno, MCH_OPER_JOBTYPE AS jobtype, TRK_ID AS trk_id,
                     ST_DT AS st_dt, MCH_OPER_COMPDATE||MCH_OPER_COMPTIME AS comp_dt,
-                    MCH_OPER_STATUS AS status
+                    MCH_OPER_STATUS AS status, MCH_OPER_QUEUENAME AS queuename,
+                    MCH_OPER_VESSEL AS vessel, MCH_OPER_VOYAGE AS voyage
                FROM TOSADM.MCH_OPERATION
               WHERE MCH_OPER_SEQNO >= '{seek_from}'
                 AND MCH_OPER_SEQNO <= '{until}'
@@ -106,8 +115,9 @@ pub async fn tick_qc_moves(pool: &PgPool, target: &str) -> Result<()> {
             let bdate = NaiveDate::parse_from_str(comp_dt.get(..8).unwrap_or(""), "%Y%m%d").unwrap_or(run_date);
             let res = sqlx::query(
                 "INSERT INTO qc_move_log
-                   (machno, contno, seqno, jobtype, trk_id, st_ts, comp_ts, dur_s, business_date, status)
-                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+                   (machno, contno, seqno, jobtype, trk_id, st_ts, comp_ts, dur_s, business_date, status,
+                    queuename, vessel, voyage)
+                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
                  ON CONFLICT (machno, contno, seqno) DO NOTHING",
             )
             .bind(machno.trim())
@@ -120,6 +130,12 @@ pub async fn tick_qc_moves(pool: &PgPool, target: &str) -> Result<()> {
             .bind(dur_s.map(|d| d as i32))
             .bind(bdate)
             .bind(r.status.as_deref().map(str::trim).filter(|s| !s.is_empty()))
+            // Empty-string filter, like trk_id/status: Oracle hands back '' for unset VARCHAR2 in
+            // some paths, and '' would read as a real bay label. NULL here is legitimate, not a gap —
+            // AH/GI/GO moves belong to no ship bay at all (see mig 0109).
+            .bind(r.queuename.as_deref().map(str::trim).filter(|s| !s.is_empty()))
+            .bind(r.vessel.as_deref().map(str::trim).filter(|s| !s.is_empty()))
+            .bind(r.voyage.as_deref().map(str::trim).filter(|s| !s.is_empty()))
             .execute(&mut *tx)
             .await
             .context("insert qc_move_log")?;
