@@ -7,7 +7,7 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
-use scengen::{assemble, collect, crane_deploy, db, enrich, gate, serve, snapshot, yard};
+use scengen::{assemble, collect, crane_deploy, db, enrich, gate, qc_plan, serve, snapshot, yard};
 
 #[derive(Parser)]
 #[command(
@@ -52,6 +52,9 @@ enum Command {
         #[arg(long, default_value = "oracle-prod")]
         target: String,
     },
+    /// Archive the quay-crane work plan per vessel call (LOCAL only, zero Oracle) -> scenario.qc_plan.
+    /// Row-level revisions while a call is pre-berth, sealed once it berths. See mig 0110.
+    QcPlan {},
     /// Reconstruct scenario.yard_cell by replaying yard_move (LOCAL only, zero Oracle).
     YardBuild {},
     /// On-demand assembly worker (local only, zero Oracle): pending jobs -> scenario+emulator JSON.
@@ -89,6 +92,7 @@ async fn main() -> Result<()> {
         Command::YardMoves { target } => yard::run(&pool, &target).await?,
         Command::CraneDeploy { target } => crane_deploy::run(&pool, &target).await?,
         Command::Gate { target } => gate::run(&pool, &target).await?,
+        Command::QcPlan {} => qc_plan::run(&pool).await?,
         Command::YardBuild {} => yard::build(&pool).await?,
         Command::Assemble {} => assemble::run(&pool).await?,
         Command::Serve { port } => serve::run(pool, port).await?,
