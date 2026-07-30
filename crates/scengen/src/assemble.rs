@@ -82,7 +82,11 @@ pub async fn build(pool: &PgPool, ws: DateTime<Utc>, we: DateTime<Utc>) -> Resul
                    'pod', c.pod, 'pol', c.pol, 'operator', c.operator,
                    'ship_cell', CASE WHEN c.ship_bay IS NOT NULL THEN jsonb_build_object(
                         'bay', c.ship_bay, 'row', c.ship_row, 'tier', c.ship_tier,
-                        'deck_hold', CASE WHEN c.ship_tier >= 80 THEN 'deck' ELSE 'hold' END) END,
+                        -- 50, not 80. Cross-checked against the queuename D/H letter that TOS itself
+                        -- writes, over 2,094 discharge moves: 'H' rows are ship_tier 2..22 and 'D'
+                        -- rows are 66..94, with the 25..65 band empty. The old threshold put tiers
+                        -- 66..78 — 33.6% of all deck containers — into 'hold'.
+                        'deck_hold', CASE WHEN c.ship_tier >= 50 THEN 'deck' ELSE 'hold' END) END,
                    'out_vessel', c.out_vessel, 'out_voyage', c.out_voyage
                  ) AS cobj
             FROM q
