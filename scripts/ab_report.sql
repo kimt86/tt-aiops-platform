@@ -64,3 +64,61 @@ SELECT dep_tier_on AS 팔,
          WHERE ab_block IS NOT NULL AND NOT ab_warmup
          GROUP BY 1, 2) b
  GROUP BY 1 ORDER BY 1;
+
+\echo ''
+\echo '=== 5. 판정 (블록 단위 Welch 근사) ==='
+-- 틱은 서로 독립이 아니므로 **블록 하나를 관측 하나로** 본다. 각 지표에 대해 팔 간 차이를
+-- 표준오차로 나눈 t 를 낸다. |t| < 2 면 표본이 부족하거나 효과가 없다는 뜻이고, 그때
+-- "좋아졌다"고 말하면 안 된다 — 이 하네스를 만든 이유가 그 말을 못 하게 하는 것이다.
+-- ⚠ 블록이 팔당 10개 미만이면 표준편차 추정 자체가 불안정해 t 도 믿을 수 없다.
+WITH b AS (
+  SELECT ab_block, dep_tier_on,
+         avg(optimal_miss)                                   AS miss,
+         avg(optimal_cost_s::numeric / NULLIF(optimal_n,0))  AS cost,
+         avg(dep_tier0_n)                                    AS late_served
+    FROM stage2_solver_shadow
+   WHERE ab_block IS NOT NULL AND NOT ab_warmup
+   GROUP BY 1,2
+), m AS (
+  SELECT 'ON'::text arm, count(*) n, avg(miss) miss, stddev(miss) s_miss,
+         avg(cost) cost, stddev(cost) s_cost, avg(late_served) late, stddev(late_served) s_late
+    FROM b WHERE dep_tier_on
+  UNION ALL
+  SELECT 'OFF', count(*), avg(miss), stddev(miss), avg(cost), stddev(cost), avg(late_served), stddev(late_served)
+    FROM b WHERE NOT dep_tier_on
+), t AS (
+  SELECT (SELECT n FROM m WHERE arm='ON')  AS n_on,
+         (SELECT n FROM m WHERE arm='OFF') AS n_off,
+         (SELECT miss FROM m WHERE arm='OFF') - (SELECT miss FROM m WHERE arm='ON') AS d_miss,
+         sqrt((SELECT s_miss^2/NULLIF(n,0) FROM m WHERE arm='ON')
+            + (SELECT s_miss^2/NULLIF(n,0) FROM m WHERE arm='OFF'))                  AS se_miss,
+         (SELECT cost FROM m WHERE arm='ON') - (SELECT cost FROM m WHERE arm='OFF') AS d_cost,
+         sqrt((SELECT s_cost^2/NULLIF(n,0) FROM m WHERE arm='ON')
+            + (SELECT s_cost^2/NULLIF(n,0) FROM m WHERE arm='OFF'))                  AS se_cost,
+         (SELECT late FROM m WHERE arm='ON') - (SELECT late FROM m WHERE arm='OFF') AS d_late,
+         sqrt((SELECT s_late^2/NULLIF(n,0) FROM m WHERE arm='ON')
+            + (SELECT s_late^2/NULLIF(n,0) FROM m WHERE arm='OFF'))                  AS se_late
+)
+SELECT 지표, round(차이::numeric,2) "차이(ON−OFF)", round(se::numeric,2) 표준오차,
+       round((차이/NULLIF(se,0))::numeric,2) t,
+       CASE WHEN LEAST(n_on,n_off) < 10 THEN '표본부족(팔당 10블록 미만)'
+            WHEN abs(차이/NULLIF(se,0)) >= 2 THEN '유의'
+            ELSE '판정불가(효과 없거나 표본 부족)' END AS 판정
+  FROM t, LATERAL (VALUES
+    ('마감미스 감소(+가 좋음)', d_miss, se_miss),
+    ('배정당 비용(−가 좋음)',   d_cost, se_cost),
+    ('늦은버킷 서빙(+가 의도)', d_late, se_late)
+  ) v(지표, 차이, se);
+
+\echo ''
+\echo '=== 6. 앞으로 얼마나 더 필요한가 ==='
+WITH b AS (
+  SELECT ab_block, dep_tier_on, avg(optimal_miss) miss
+    FROM stage2_solver_shadow WHERE ab_block IS NOT NULL AND NOT ab_warmup GROUP BY 1,2
+)
+SELECT round(stddev(miss)::numeric,2)                                    AS "블록간 표준편차",
+       count(*) FILTER (WHERE dep_tier_on)                               AS "ON 블록",
+       count(*) FILTER (WHERE NOT dep_tier_on)                           AS "OFF 블록",
+       ceil(16 * (stddev(miss)/1.0)^2)                                   AS "1.0차이 감지에 필요(팔당)",
+       round((ceil(16*(stddev(miss)/1.0)^2)*2*0.5/24)::numeric,1)        AS "그때까지 일수"
+  FROM b;
