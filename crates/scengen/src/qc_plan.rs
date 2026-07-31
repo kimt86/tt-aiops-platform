@@ -382,8 +382,17 @@ async fn backfill_tick(pool: &PgPool, run_id: i64, target: &str, cfg: &state::Co
            FROM scenario.vessel_call vc
            LEFT JOIN scenario.qc_plan_call c ON c.vessel = vc.vessel AND c.voyage = vc.voyage
           WHERE vc.actber IS NOT NULL
-            AND (c.vessel IS NULL OR (c.revs = 0 AND c.source = 'live'))
-          ORDER BY vc.actber
+            AND ( c.vessel IS NULL
+               OR (c.revs = 0 AND c.source = 'live')
+               -- Revisit. A call backfilled while it was still alongside gets a SHORT plan: the plan
+               -- keeps growing after berthing (measured ~1.4% per call), and the header was sealed at
+               -- that moment, so without this clause the difference is lost for good. Once the ship
+               -- has actually left, one more pass closes it.
+               OR (c.source = 'oracle_backfill' AND vc.actdep IS NOT NULL
+                   AND c.sealed_ts < vc.actdep) )
+          -- Departed calls first: their plan is final, so one pass finishes them. Calls still
+          -- alongside are worth deferring — they would only need the revisit above.
+          ORDER BY (vc.actdep IS NULL), vc.actber
           LIMIT $1",
     )
     .bind(BACKFILL_BATCH as i64)
@@ -441,13 +450,26 @@ async fn backfill_tick(pool: &PgPool, run_id: i64, target: &str, cfg: &state::Co
         else {
             continue;
         };
-        // rev 1: these calls have no live revs by construction (the candidate query excludes any
-        // that do), so there is no chain to extend and no risk of renumbering one.
+        // Append as the NEXT rev, not a hardcoded 1 — a revisited call already has rev 1 from the
+        // pass that ran while it was alongside, and the whole point of the revisit is to record what
+        // the plan grew into. Skipped entirely when nothing that defines a rev changed, so a revisit
+        // that finds no growth writes zero rows (same rule as the live path).
         sqlx::query(
             "INSERT INTO scenario.qc_plan
                (vessel, voyage, qc, queuename, rev, disload, seq, total_qty, plan_qty,
                 comp_qty_at_capture, act_dt, cre_dt, upd_dt, cre_usr)
-             VALUES ($1,$2,$3,$4,1,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+             SELECT $1,$2,$3,$4,
+                    COALESCE((SELECT max(rev) FROM scenario.qc_plan
+                               WHERE vessel=$1 AND voyage=$2 AND qc=$3 AND queuename=$4), 0) + 1,
+                    $5,$6,$7,$8,$9,$10,$11,$12,$13
+              WHERE NOT EXISTS (
+                    SELECT 1 FROM scenario.qc_plan p
+                     WHERE p.vessel=$1 AND p.voyage=$2 AND p.qc=$3 AND p.queuename=$4
+                       AND p.rev = (SELECT max(rev) FROM scenario.qc_plan
+                                     WHERE vessel=$1 AND voyage=$2 AND qc=$3 AND queuename=$4)
+                       AND p.seq       IS NOT DISTINCT FROM $6
+                       AND p.total_qty IS NOT DISTINCT FROM $7
+                       AND p.disload   IS NOT DISTINCT FROM $5)
              ON CONFLICT (vessel, voyage, qc, queuename, rev) DO NOTHING",
         )
         .bind(vessel.trim()).bind(voyage.trim()).bind(qc.trim()).bind(queuename.trim())
@@ -473,10 +495,17 @@ async fn backfill_tick(pool: &PgPool, run_id: i64, target: &str, cfg: &state::Co
             "INSERT INTO scenario.qc_plan_call
                (vessel, voyage, last_rev_ts, revs, rows_latest, qty_latest,
                 actber_ts, disvan, loadvan, sealed_ts, sealed_reason, source)
-             SELECT $1, $2, now(), $3::int, $3::int,
-                    (SELECT sum(total_qty) FROM scenario.qc_plan
-                      WHERE vessel=$1 AND voyage=$2 AND rev=1),
-                    vc.actber, $4, $5, now(), $6, 'oracle_backfill'
+             -- Counts come from the table, not from this pass's tally: a revisit adds to what an
+             -- earlier pass wrote, and an accumulate-vs-overwrite choice here would be wrong in one
+             -- of the two cases. qty_latest sums the LATEST rev per queue, so growth is reflected.
+             SELECT $1, $2, now(),
+                    (SELECT count(*) FROM scenario.qc_plan WHERE vessel=$1 AND voyage=$2),
+                    (SELECT count(DISTINCT (qc, queuename)) FROM scenario.qc_plan
+                      WHERE vessel=$1 AND voyage=$2),
+                    (SELECT sum(total_qty) FROM (
+                        SELECT DISTINCT ON (qc, queuename) total_qty FROM scenario.qc_plan
+                         WHERE vessel=$1 AND voyage=$2 ORDER BY qc, queuename, rev DESC) z),
+                    vc.actber, $3, $4, now(), $5, 'oracle_backfill'
                FROM scenario.vessel_call vc WHERE vc.vessel=$1 AND vc.voyage=$2
              ON CONFLICT (vessel, voyage) DO UPDATE SET
                last_rev_ts   = now(),
@@ -490,7 +519,7 @@ async fn backfill_tick(pool: &PgPool, run_id: i64, target: &str, cfg: &state::Co
                sealed_reason = EXCLUDED.sealed_reason,
                source        = 'oracle_backfill'",
         )
-        .bind(vessel).bind(voyage).bind(n as i32).bind(disvan).bind(loadvan).bind(reason)
+        .bind(vessel).bind(voyage).bind(disvan).bind(loadvan).bind(reason)
         .execute(&mut *tx)
         .await?;
     }
