@@ -11,7 +11,7 @@
 //! the local tunnel endpoint — no Oracle/SSH access, cannot reach the production DB.
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -3925,7 +3925,18 @@ const DEP_URGENT_SLOT_PCT: i64 = 50;  // 긴급 티어(0·1)가 먹을 수 있�
                                       //   조건에서 54%·0.67로 잡힌다. 굶주림 버킷은 이 예산에서
                                       //   면제되므로(설계원칙 #3) '굶지는 않는데 마감만 급한'
                                       //   버킷에만 걸리는 가드지 드라이버가 아니다.
-static DEP_TIER_ON: AtomicBool = AtomicBool::new(false); // STAGE2_DEP_TIER=1 로 켬 (기본 OFF)
+/// 출항 마감 티어 모드. `STAGE2_DEP_TIER` 로 정한다:
+///   미설정/그 외 = 0 (항상 OFF, 기존 기본값) · `1` = 1 (항상 ON) · `ab` = 2 (A/B 측정)
+///
+/// A/B 모드가 필요한 이유: 07-27 부터 전 틱이 ON 이라 같은 조건의 반사실이 없다. 그래서 이
+/// 레버가 도움이 됐는지 **판정 자체가 불가능**했다. 측정 없는 개선을 쌓지 않으려면 이게 먼저다.
+static DEP_TIER_MODE: AtomicU8 = AtomicU8::new(0);
+/// 팔을 바꾸는 단위(분). 틱 단위 교대가 아닌 이유: anti-thrash 의 '직전 추천'이 틱을 넘어
+/// 이어지므로 매 틱 바꾸면 두 팔이 서로의 잔상에 오염돼 "항상 ON vs 항상 OFF" 를 근사하지 못한다.
+const AB_BLOCK_MIN: i64 = 30;
+/// 블록 앞부분 = 직전 팔의 잔상이 남은 구간. 버리지 않고 표시만 한다(조용히 버리면 표본이 왜
+/// 줄었는지 나중에 아무도 모른다).
+const AB_WARMUP_MIN: i64 = 3;
 
 // The yard grid (blocks + roads) is rotated ~29.8° from north. Manhattan distance measured along the
 // QUAY-ALIGNED axes (not lat/lon) tracks the real road detour (×1.18 of straight-line ≈ the road
@@ -4271,7 +4282,14 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(Duration::from_secs(60));
         let mut tick = 0u64;
-        DEP_TIER_ON.store(std::env::var("STAGE2_DEP_TIER").map(|s| s == "1").unwrap_or(false), Ordering::Relaxed);
+        DEP_TIER_MODE.store(
+            match std::env::var("STAGE2_DEP_TIER").unwrap_or_default().as_str() {
+                "1" => 1,
+                "ab" => 2,
+                _ => 0,
+            },
+            Ordering::Relaxed,
+        );
         // 티어 히스테리시스 상태(틱마다 현재 키 집합으로 통째 교체 = 누수 없음)
         let mut prev_tier: HashMap<(String, String, String), u8> = HashMap::new();
         loop {
@@ -4430,7 +4448,21 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
             // 반영하므로 덜 급함). 실측 2026-07-27: 여유<0이 26버킷·147컨·11 QC이고 그 11개 위험 QC
             // 중 지금 굶주림인 것은 1개뿐 — 즉 기존 최상위 키와 거의 직교하는 신호다.
             // ⚠ 여유 산식에 work_eta를 섞지 않는다(deadline_ts·proc_s 둘 다 출항 역산 단일 출처).
-            let dep_on = DEP_TIER_ON.load(Ordering::Relaxed);
+            // 팔 배정. 블록 번호를 해시해서 정하므로 결정적이고(같은 블록은 늘 같은 팔) 단순 교대가
+            // 아니다 — 30분 주기와 공명하는 외부 요인(교대·선박 리듬)에 팔이 정렬되는 것을 피한다.
+            let mode = DEP_TIER_MODE.load(Ordering::Relaxed);
+            let minute = now / 1000 / 60;
+            let (ab_block, ab_warmup) = if mode == 2 {
+                (Some(minute / AB_BLOCK_MIN), (minute % AB_BLOCK_MIN) < AB_WARMUP_MIN)
+            } else {
+                (None, false)
+            };
+            let dep_on = match mode {
+                1 => true,
+                // top bit of a splitmix64 hash of the block index — see the note on splitmix64
+                2 => (splitmix64(ab_block.unwrap_or(0) as u64 ^ 0xA5A5_5A5A_1234_5678) >> 63) & 1 == 1,
+                _ => false,
+            };
             let mut dep_slack: Vec<Option<i64>> = Vec::with_capacity(works.len());
             let mut dep_tier: Vec<u8> = Vec::with_capacity(works.len());
             let mut next_tier: HashMap<(String, String, String), u8> = HashMap::new();
@@ -4490,6 +4522,9 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
             // The CAPPED per-bucket demand (take) — the truck-loads each bucket may receive after the
             // per-crane horizon cap. This is the bucket cap carried into the matching, so STAGE 2 needs
             // NO separate QC layer (the per-crane limit is already baked into the demand here).
+            // 캡 적용 '전' 후보 버킷 수. n_works(캡 후)만으로는 수요가 적은 건지 트럭이 모자라
+            // 잘린 건지 구분할 수 없고, 두 팔 비교에는 그 구분이 필수다.
+            let works_raw = order.len() as i32;
             let mut cap_by_oi: HashMap<usize, i64> = HashMap::new();
             let mut dep_demoted_n: i32 = 0; // 예산에 밀려 기본 순서로 강등된 긴급 버킷 수(레버 세기 진단)
             {
@@ -4708,8 +4743,8 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
             }
             let gap_pct = if opt_cost > 0 { 100.0 * (greedy_cost - opt_cost) as f64 / opt_cost as f64 } else { 0.0 };
             let solver_ins = sqlx::query(
-                "INSERT INTO stage2_solver_shadow (ts,tick,n_trucks,n_works,greedy_n,greedy_cost_s,optimal_n,optimal_cost_s,gap_pct,greedy_miss,optimal_miss,dep_tier_on,dep_tier0_n,dep_urgent_slots,dep_null_n,dep_demoted_n)
-                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) ON CONFLICT (ts) DO NOTHING",
+                "INSERT INTO stage2_solver_shadow (ts,tick,n_trucks,n_works,greedy_n,greedy_cost_s,optimal_n,optimal_cost_s,gap_pct,greedy_miss,optimal_miss,dep_tier_on,dep_tier0_n,dep_urgent_slots,dep_null_n,dep_demoted_n,ab_block,ab_warmup,works_raw)
+                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19) ON CONFLICT (ts) DO NOTHING",
             )
             .bind(ts).bind(tick as i64).bind(vehicles.len() as i32).bind(order.len() as i32)
             .bind(greedy_n).bind(greedy_cost).bind(assign.len() as i32).bind(opt_cost).bind(gap_pct as f32)
@@ -4721,6 +4756,7 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
             .bind(dep_urgent_slots as i32)                                                // dep_urgent_slots
             .bind(order.iter().filter(|&&oi| dep_slack[oi].is_none()).count() as i32)     // dep_null_n
             .bind(dep_demoted_n)                                                          // dep_demoted_n
+            .bind(ab_block).bind(ab_warmup).bind(works_raw)                                // A/B 하네스
             .execute(&pool).await;
             if let Err(e) = solver_ins {
                 tracing::warn!(error = %e, "stage2_solver_shadow insert failed — 0104 마이그레이션 적용 여부 확인");
@@ -5090,6 +5126,21 @@ fn xorshift(state: &mut u64) -> u64 {
     x ^= x << 17;
     *state = x;
     x
+}
+
+/// splitmix64 finalizer — hashes a COUNTER (here: the A/B block index) into a well-mixed word.
+///
+/// ⚠ xorshift is the wrong tool for this and was the first attempt: one round of it over
+/// sequential inputs barely avalanches, and the lowest bit is the least mixed of all. Measured
+/// over 480 blocks it gave a **6-hour repeating pattern** (402 runs out of 480 = near-alternating),
+/// which would have locked the two arms to the shift rhythm — the exact confound the block design
+/// exists to avoid. splitmix64 + taking the TOP bit gives no detectable period, 222 runs (random
+/// expectation ~240), and an even spread across time-of-day slots.
+fn splitmix64(mut z: u64) -> u64 {
+    z = z.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
 }
 
 /// Fisher-Yates, in place.
