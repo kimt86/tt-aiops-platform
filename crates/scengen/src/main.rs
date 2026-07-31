@@ -55,6 +55,13 @@ enum Command {
     /// Archive the quay-crane work plan per vessel call (LOCAL only, zero Oracle) -> scenario.qc_plan.
     /// Row-level revisions while a call is pre-berth, sealed once it berths. See mig 0110.
     QcPlan {},
+    /// Recover the plan for calls the live path missed (first seen post-berth, or from before the
+    /// archiver existed) by asking Oracle per (vessel, voyage) with the live query's time predicates
+    /// removed. One batched round trip per invocation.
+    PlanBackfill {
+        #[arg(long, default_value = "oracle-prod")]
+        target: String,
+    },
     /// Reconstruct scenario.yard_cell by replaying yard_move (LOCAL only, zero Oracle).
     YardBuild {},
     /// On-demand assembly worker (local only, zero Oracle): pending jobs -> scenario+emulator JSON.
@@ -93,6 +100,7 @@ async fn main() -> Result<()> {
         Command::CraneDeploy { target } => crane_deploy::run(&pool, &target).await?,
         Command::Gate { target } => gate::run(&pool, &target).await?,
         Command::QcPlan {} => qc_plan::run(&pool).await?,
+        Command::PlanBackfill { target } => qc_plan::backfill(&pool, &target).await?,
         Command::YardBuild {} => yard::build(&pool).await?,
         Command::Assemble {} => assemble::run(&pool).await?,
         Command::Serve { port } => serve::run(pool, port).await?,

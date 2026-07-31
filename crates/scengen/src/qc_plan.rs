@@ -20,10 +20,13 @@ use std::collections::HashMap;
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use serde_json::json;
+use serde_json::{json, Value};
 use sqlx::PgPool;
+use tt_core::parse::parse_rows;
 
 use crate::state;
+use crate::toolbox::Toolbox;
+use crate::util::{jstr, parse_myt};
 
 /// One row of the current plan, joined to its call's schedule. The join to live_vessel_schedule is
 /// also the sentinel filter: live_workqueue carries vessel='RHXX' rows whose `qc` is not a crane
@@ -322,6 +325,191 @@ async fn coverage_alert(pool: &PgPool) -> Result<()> {
     .bind(&msg)
     .execute(pool)
     .await;
+    Ok(())
+}
+
+/// How many calls one backfill invocation pulls. They go in ONE Oracle round trip via a tuple
+/// IN-list, so this is not a per-call cost — the SSH round trip (~0.9s) dominates and batching is
+/// what makes the whole 174-call catch-up cheap. Kept modest so a single tick stays well inside the
+/// toolbox timeout even for the largest calls (~60 plan rows each).
+const BACKFILL_BATCH: usize = 12;
+
+/// Recover the plan for calls the live path could not archive — either first seen after berthing
+/// (already eroded) or from before this collector existed.
+///
+/// THIS IS POSSIBLE AT ALL because the earlier "the plan is destroyed every 90s" reading was wrong:
+/// only OUR copy is. Oracle keeps JOB_QUEUE_SCHEDULE 6+ months (CRE_DT seen back to 2026-02-04,
+/// DELT_FLG never used). Asking by (vessel, voyage) with the live query's two time predicates
+/// REMOVED returned the complete plan for 12 of 12 sampled calls — totals matching each call's
+/// declared disvan+loadvan exactly — including one that had departed 74.7h earlier.
+///
+/// And it is CHEAPER than what already runs: the live 90s query filters on UPD_DT, which has no
+/// index, so it scans the table; (VESSEL, VOYAGE) is the leading edge of both the PK and
+/// IDX_JOB_QUE_VESSEL, so this seeks.
+///
+/// What a backfilled row IS NOT: the plan as it stood at any past instant. It is the final edited
+/// state. Live capture shows revisions (682 of 1,657 queues revised, up to 13 times); backfill
+/// collapses them to one. Hence source='oracle_backfill' on the header — a reader comparing plans
+/// across calls has to know which kind they hold.
+pub async fn backfill(pool: &PgPool, target: &str) -> Result<()> {
+    let cfg = state::load_config(pool).await?;
+    if !cfg.enabled {
+        tracing::info!("scenario collection disabled (kill switch) — skipping qc-plan backfill");
+        return Ok(());
+    }
+    let run_id = state::start_run(pool, "qc_plan_backfill").await?;
+    match backfill_tick(pool, run_id, target, &cfg).await {
+        Ok(()) => state::finish_run(pool, run_id, "done", None).await?,
+        Err(e) => {
+            tracing::error!(error = %e, "scenario qc-plan backfill failed (isolated)");
+            let _ = state::emit(pool, run_id, "error", "backfill_failed", json!({ "error": e.to_string() })).await;
+            let _ = state::finish_run(pool, run_id, "error", Some(&e.to_string())).await;
+        }
+    }
+    Ok(())
+}
+
+async fn backfill_tick(pool: &PgPool, run_id: i64, target: &str, cfg: &state::Config) -> Result<()> {
+    state::set_phase(pool, run_id, "extract").await?;
+
+    // Candidates, oldest berth first so the historical tail fills in a sensible order:
+    //   * a call we recorded but could not archive (revs = 0 — the missed_preberth case), or
+    //   * a berthed call we have no header for at all (everything from before this collector).
+    // Calls WITH live revs are deliberately excluded: those were captured pre-berth, which is
+    // strictly better evidence than the final edited state this path returns.
+    let todo: Vec<(String, String, Option<i32>, Option<i32>)> = sqlx::query_as(
+        "SELECT vc.vessel, vc.voyage, vc.disvan, vc.loadvan
+           FROM scenario.vessel_call vc
+           LEFT JOIN scenario.qc_plan_call c ON c.vessel = vc.vessel AND c.voyage = vc.voyage
+          WHERE vc.actber IS NOT NULL
+            AND (c.vessel IS NULL OR (c.revs = 0 AND c.source = 'live'))
+          ORDER BY vc.actber
+          LIMIT $1",
+    )
+    .bind(BACKFILL_BATCH as i64)
+    .fetch_all(pool)
+    .await?;
+    if todo.is_empty() {
+        state::merge_json(pool, run_id, "collection", json!({ "calls": 0, "note": "nothing to backfill" })).await?;
+        tracing::info!("qc-plan backfill: nothing to do");
+        return Ok(());
+    }
+
+    // Tuple IN-list -> one round trip, one INLIST ITERATOR over IDX_JOB_QUE_VESSEL. The two time
+    // predicates of the live query are absent ON PURPOSE — they are exactly what erodes a plan once
+    // work starts, and recovering that erosion is this function's whole job.
+    // Dates go through TO_CHAR: the toolbox serialises Oracle DATE/NUMBER as JSON non-strings, and a
+    // non-string into a String field fails parse_rows for the entire batch. Same lesson that made us
+    // leave CRNT_PSN_IDX out of the extractor until it could be wrapped.
+    let pairs = todo
+        .iter()
+        .map(|(v, y, _, _)| format!("('{}','{}')", v.replace('\'', "''"), y.replace('\'', "''")))
+        .collect::<Vec<_>>()
+        .join(",");
+    let sql = format!(
+        "SELECT s.JOB_QUE_VESSEL AS vessel, s.JOB_QUE_VOYAGE AS voyage,
+                s.JOB_QUE_CRANENO AS qc, s.JOB_QUE_QUEUENAME AS queuename,
+                s.JOB_QUE_DISLOAD AS disload, s.JOB_QUE_SEQ AS seq,
+                s.JOB_QUE_TOTALQTY AS total_qty, s.JOB_QUE_COMPQTY AS comp_qty,
+                s.JOB_QUE_PLANQTY AS plan_qty,
+                TO_CHAR(s.CRE_DT,'YYYYMMDDHH24MISS') AS cre_dt,
+                TO_CHAR(s.UPD_DT,'YYYYMMDDHH24MISS') AS upd_dt,
+                TO_CHAR(s.ACT_DT,'YYYYMMDDHH24MISS') AS act_dt,
+                s.CRE_USR_ID AS cre_usr
+           FROM TOSADM.JOB_QUEUE_SCHEDULE s
+          WHERE (s.JOB_QUE_VESSEL, s.JOB_QUE_VOYAGE) IN ({pairs})
+            AND NVL(s.DELT_FLG,'N') <> 'Y'
+            AND s.JOB_QUE_CRANENO IS NOT NULL
+          ORDER BY s.JOB_QUE_VESSEL, s.JOB_QUE_VOYAGE, s.JOB_QUE_CRANENO, s.JOB_QUE_SEQ"
+    );
+
+    let t0 = std::time::Instant::now();
+    let raw = Toolbox::from_env(target, cfg.oracle_timeout_s as u64)?.run_sql(&sql).await?;
+    let query_ms = t0.elapsed().as_millis() as i64;
+    let rows: Vec<Value> = parse_rows(&raw)?;
+    let fetched = rows.len();
+
+    state::set_phase(pool, run_id, "assemble").await?;
+    let num = |r: &Value, k: &str| jstr(r, k).and_then(|s| s.parse::<i32>().ok());
+    let ts = |r: &Value, k: &str| jstr(r, k).as_deref().and_then(parse_myt);
+
+    let mut tx = pool.begin().await?;
+    let mut per_call: HashMap<(String, String), i64> = HashMap::new();
+    for r in &rows {
+        let (Some(vessel), Some(voyage), Some(qc), Some(queuename)) =
+            (jstr(r, "VESSEL"), jstr(r, "VOYAGE"), jstr(r, "QC"), jstr(r, "QUEUENAME"))
+        else {
+            continue;
+        };
+        // rev 1: these calls have no live revs by construction (the candidate query excludes any
+        // that do), so there is no chain to extend and no risk of renumbering one.
+        sqlx::query(
+            "INSERT INTO scenario.qc_plan
+               (vessel, voyage, qc, queuename, rev, disload, seq, total_qty, plan_qty,
+                comp_qty_at_capture, act_dt, cre_dt, upd_dt, cre_usr)
+             VALUES ($1,$2,$3,$4,1,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+             ON CONFLICT (vessel, voyage, qc, queuename, rev) DO NOTHING",
+        )
+        .bind(vessel.trim()).bind(voyage.trim()).bind(qc.trim()).bind(queuename.trim())
+        .bind(jstr(r, "DISLOAD").as_deref().map(str::trim).filter(|s| !s.is_empty()))
+        .bind(num(r, "SEQ")).bind(num(r, "TOTAL_QTY")).bind(num(r, "PLAN_QTY")).bind(num(r, "COMP_QTY"))
+        .bind(ts(r, "ACT_DT")).bind(ts(r, "CRE_DT")).bind(ts(r, "UPD_DT"))
+        .bind(jstr(r, "CRE_USR").as_deref().map(str::trim).filter(|s| !s.is_empty()))
+        .execute(&mut *tx)
+        .await?;
+        *per_call.entry((vessel.trim().to_string(), voyage.trim().to_string())).or_insert(0) += 1;
+    }
+
+    // Header per candidate — including the ones Oracle returned nothing for. A call with a real
+    // zero-row plan and a call we failed to fetch look identical downstream unless we say which is
+    // which, so 'backfilled_empty' is recorded rather than leaving the candidate to be retried
+    // forever.
+    let (mut done, mut empty) = (0u64, 0u64);
+    for (vessel, voyage, disvan, loadvan) in &todo {
+        let n = per_call.get(&(vessel.clone(), voyage.clone())).copied().unwrap_or(0);
+        let reason = if n > 0 { "backfilled" } else { "backfilled_empty" };
+        if n > 0 { done += 1 } else { empty += 1 }
+        sqlx::query(
+            "INSERT INTO scenario.qc_plan_call
+               (vessel, voyage, last_rev_ts, revs, rows_latest, qty_latest,
+                actber_ts, disvan, loadvan, sealed_ts, sealed_reason, source)
+             SELECT $1, $2, now(), $3::int, $3::int,
+                    (SELECT sum(total_qty) FROM scenario.qc_plan
+                      WHERE vessel=$1 AND voyage=$2 AND rev=1),
+                    vc.actber, $4, $5, now(), $6, 'oracle_backfill'
+               FROM scenario.vessel_call vc WHERE vc.vessel=$1 AND vc.voyage=$2
+             ON CONFLICT (vessel, voyage) DO UPDATE SET
+               last_rev_ts   = now(),
+               revs          = EXCLUDED.revs,
+               rows_latest   = EXCLUDED.rows_latest,
+               qty_latest    = EXCLUDED.qty_latest,
+               actber_ts     = COALESCE(EXCLUDED.actber_ts, scenario.qc_plan_call.actber_ts),
+               disvan        = COALESCE(EXCLUDED.disvan, scenario.qc_plan_call.disvan),
+               loadvan       = COALESCE(EXCLUDED.loadvan, scenario.qc_plan_call.loadvan),
+               sealed_ts     = now(),
+               sealed_reason = EXCLUDED.sealed_reason,
+               source        = 'oracle_backfill'",
+        )
+        .bind(vessel).bind(voyage).bind(n as i32).bind(disvan).bind(loadvan).bind(reason)
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
+
+    state::merge_json(pool, run_id, "load_stats", json!({
+        "queries": 1, "rows_read": fetched, "query_ms": query_ms, "calls_in_batch": todo.len(),
+    })).await?;
+    state::merge_json(pool, run_id, "collection", json!({
+        "calls": todo.len(), "backfilled": done, "empty": empty, "rows": fetched,
+    })).await?;
+    if empty > 0 {
+        state::emit(pool, run_id, "warn", "backfill_empty", json!({
+            "calls": empty, "note": "Oracle returned no assigned plan rows for these calls",
+        })).await?;
+    }
+    coverage_alert(pool).await?;
+
+    tracing::info!(calls = todo.len(), fetched, done, empty, query_ms, "scenario qc plan backfill");
     Ok(())
 }
 
