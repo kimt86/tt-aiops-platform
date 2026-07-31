@@ -48,6 +48,22 @@ struct PlanRow {
     loadvan: Option<i32>,
 }
 
+/// How long AFTER berthing we keep archiving a call. Not zero, and this is the point:
+/// a plan does not reliably exist before its ship arrives. Measured 2026-07-31 across every call
+/// currently alongside — live plan total against the call's own declared counts, by hours since
+/// berthing: 2.8h 100% · 4.8h 100% · 5.4h 100% · 9.3h 89.7% · 11.0h 67.4% · 13.8h 73.5% ·
+/// 18.8h 25.9%. Nothing erodes inside ~5h because the extractor only drops a queue 6h after it
+/// finishes, and discharge (which finishes first) is what goes missing first.
+///
+/// So "archive only before berthing" — the original rule — throws away every call whose plan is not
+/// issued until its ship is at the quay, and those are permanent losses. Four hours keeps a full
+/// margin under the measured cliff while the 5-minute tick gives ~48 chances to catch the call.
+const POST_BERTH_ARCHIVE_H: i64 = 4;
+
+/// Completeness bar for sealing early. Healthy calls land at 99.2-100.0% of their declared counts,
+/// so 99 accepts the normal case without waiting out the window for a box or two of drift.
+const COMPLETE_PCT: f64 = 99.0;
+
 /// What defines a NEW revision. Deliberately excludes comp_qty (progress) and plan_qty (which is not
 /// the remainder and wobbles between three different meanings — see mig 0110 note 6).
 type RevKey = (String, Option<i32>, Option<i32>, Option<String>);
@@ -154,12 +170,17 @@ async fn tick(pool: &PgPool, run_id: i64) -> Result<()> {
         }
 
         let s = &plan[0]; // schedule fields are per-call, identical across its rows
-        let berthed = s.actber_ts.is_some();
         let known = hdr.is_some();
+        // Past the window the local copy has started losing finished queues, and we cannot tell that
+        // apart from the plan shrinking. Inside it, the copy is whole.
+        let past_window = s
+            .actber_ts
+            .is_some_and(|b| Utc::now() - b > chrono::Duration::hours(POST_BERTH_ARCHIVE_H));
 
-        // First sight of a call that has ALREADY berthed: the local plan is partially eroded, so
-        // archiving it would record a short plan as the truth. Record the gap instead.
-        if berthed && !known {
+        // First sight of a call only AFTER its safe window closed: what is left in the local table is
+        // a partial plan, and storing that as the plan would quietly shorten every scenario built
+        // from it. Record the gap instead of a wrong number.
+        if past_window && !known {
             sqlx::query(
                 "INSERT INTO scenario.qc_plan_call
                    (vessel, voyage, estber_ts, actber_ts, disvan, loadvan, rows_latest, qty_latest,
@@ -216,10 +237,39 @@ async fn tick(pool: &PgPool, run_id: i64) -> Result<()> {
             call_revs += 1;
         }
 
-        // Seal on berthing: from here the extractor's 6h exclusion starts removing completed rows,
-        // and we cannot tell that apart from the plan actually shrinking.
-        let (seal_ts, seal_reason) = if berthed {
-            (Some(Utc::now()), Some("berthed"))
+        // Seal on completeness first, on the window only as a backstop. Sealing the moment a ship
+        // berths — the original rule — stopped us exactly when the calls whose plan arrives late
+        // were about to become archivable.
+        let arch: Option<(Option<i64>, Option<i64>)> = sqlx::query_as(
+            "SELECT sum(tq) FILTER (WHERE dl='D'), sum(tq) FILTER (WHERE dl='L')
+               FROM (SELECT queuename, max(disload) dl, max(total_qty) tq
+                       FROM (SELECT DISTINCT ON (qc, queuename) qc, queuename, disload, total_qty
+                               FROM scenario.qc_plan WHERE vessel=$1 AND voyage=$2
+                              ORDER BY qc, queuename, rev DESC) a
+                      GROUP BY queuename) b",
+        )
+        .bind(vessel)
+        .bind(voyage)
+        .fetch_optional(&mut *tx)
+        .await?;
+        // Folded by queue name, MAX per queue — the same collapse the remaining() function does. A
+        // straight sum over crane rows double-counts every reassigned bay and would declare calls
+        // complete that are not.
+        let pct = |got: Option<i64>, want: Option<i32>| -> bool {
+            match (got, want) {
+                (_, Some(0)) | (_, None) => true, // nothing declared -> nothing to be short of
+                (Some(g), Some(w)) => 100.0 * g as f64 / w as f64 >= COMPLETE_PCT,
+                (None, Some(_)) => false,
+            }
+        };
+        let (ad, al) = arch.unwrap_or((None, None));
+        let complete = pct(ad, s.disvan) && pct(al, s.loadvan);
+        let (seal_ts, seal_reason) = if complete {
+            (Some(Utc::now()), Some("complete"))
+        } else if past_window {
+            // Out of time and still short. Sealed anyway — leaving it open would keep appending from
+            // an eroding source — but named so the coverage monitor can surface it.
+            (Some(Utc::now()), Some("window_expired"))
         } else {
             (None, None)
         };
@@ -300,8 +350,8 @@ async fn coverage_alert(pool: &PgPool) -> Result<()> {
     // and a 1-3 box difference on a 400-box call is that, not a lost plan. Measured spread on
     // healthy calls was 99.2-100.0%.
     let bad: Option<(i64, i64)> = sqlx::query_as(
-        "SELECT count(*) FILTER (WHERE sealed_reason = 'missed_preberth'),
-                count(*) FILTER (WHERE sealed_reason <> 'missed_preberth'
+        "SELECT count(*) FILTER (WHERE sealed_reason IN ('missed_preberth', 'window_expired')),
+                count(*) FILTER (WHERE sealed_reason NOT IN ('missed_preberth', 'window_expired')
                                    AND (pct_d < 95 OR pct_l < 95))
            FROM scenario.qc_plan_coverage
           WHERE coalesce(actber_ts, sealed_ts) > now() - interval '7 days'",
@@ -313,7 +363,7 @@ async fn coverage_alert(pool: &PgPool) -> Result<()> {
         return Ok(());
     }
     let msg = format!(
-        "안벽 계획 아카이브 부족 — 접안 후에야 발견한 항차 {missed}건, 신고량보다 적게 저장된 항차 {short}건 (최근 7일). 소급 백필 필요"
+        "안벽 계획 아카이브 부족 — 온전히 담지 못한 항차 {missed}건(늦게 발견했거나 창 안에 계획이 안 나옴), 신고량보다 적게 저장된 항차 {short}건 (최근 7일)"
     );
     // warn, not crit: scenarios for those calls are unavailable, which is a gap, not an outage.
     let _ = sqlx::query(
