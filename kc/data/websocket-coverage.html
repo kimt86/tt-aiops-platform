@@ -40,6 +40,21 @@
   <p><strong>배차 상태로도 확인</strong>: 움직이는 상태는 침묵이 짧고(공차이동 4.1%·배달중 7.0%가 60초 초과 공백), 기다리는 상태는 길다(<code>wait_rtg</code> 14.0%·곧유휴 11.6%·staging 11.2%·idle 11.1%, <code>wait_rtg</code> 공백 p90 = 210초). <strong>정확히 트럭이 멈춰 크레인/RTG를 기다리는 순간에 신호가 사라집니다.</strong></p>
   <div class="kc-cal note"><span class="h">파급</span><p>멈춤을 관측해야 하는 모든 GPS 지표(유휴시간·RTG/QC 큐 대기·곧-유휴 리드타임·정밀 도착 dwell)는 <strong>구조적으로 과소집계</strong>됩니다. 이는 우리 상류라 더 나은 수집으로 못 고치고, <strong>래칭·지오펜스·PLC/TOS 앵커</strong>로 메워야 합니다(<a href="/kc/dispatch/leadtime-adr.html">리드타임 ADR</a>). 반대로 <strong>주행 구간은 잘 표집</strong>돼 이동시간·OD 모델은 견고합니다.</p></div>
 
+  <h2>2-1. 그래서 "언제 자유로워졌나"의 정답지는 GPS가 아니다</h2>
+  <p>위 한계에는 실무적으로 아주 중요한 결과가 하나 딸려 있습니다. <strong>트럭이 실제로 언제 비었는지</strong>를 우리는 두 가지로 알 수 있는데, 둘이 보는 세상이 다릅니다.</p>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th>기록</th><th>어디서 오나</th><th>7일간 사건 수</th></tr></thead>
+    <tbody>
+      <tr><td><strong>TOS 크레인 기록</strong></td><td>크레인이 트럭을 놓아준 순간을 TOS가 직접 남김</td><td><strong>139,783건</strong></td></tr>
+      <tr><td>GPS 하차 추정</td><td>트럭 좌표 움직임으로 "내려놨다"고 우리가 추론</td><td>92,959건</td></tr>
+    </tbody>
+  </table></div>
+  <p><strong>GPS 쪽이 33% 적습니다.</strong> 트윈(한 번에 컨테이너 2개) 때문인가 확인했지만 아닙니다 — 트윈을 합쳐도 4.6%밖에 안 줄어듭니다.</p>
+  <div class="kc-cal warn"><span class="h">놓치는 방식이 하필 최악이다</span><p>TOS가 기록한 자유 순간을 기준으로 그 근처에 GPS 하차가 있는지 세어보면, <strong>1분 안에 있는 경우가 37.3%</strong>(양하 32.6% · 적하 43.4%)뿐이고 <strong>앞뒤 30분을 뒤져도 아무것도 없는 경우가 26.0%</strong>입니다. 이유는 위 2절 그대로입니다 — 트럭이 크레인 앞에 <strong>서서 기다리는 동안 단말이 침묵</strong>하므로, 하필 "곧 비겠구나"를 알아야 하는 순간을 골라서 빠집니다.</p></div>
+  <div class="kc-cal note"><span class="h">정의가 어긋난 건 아니다</span><p>둘 다 본 사건에서는 시각이 잘 맞습니다 — 중앙값 차이 <strong>+28초</strong>. 이 표를 만들 때 적어둔 "GPS 대비 ±27~44초로 검증됨"이라는 문구가 바로 이 값입니다. 다만 그건 <strong>둘 다 본 사건에 대한 이야기</strong>일 뿐 <strong>얼마나 많이 놓치는지에 대해서는 아무 말도 하지 않습니다.</strong> 이 구분을 놓치면 "검증됐다"를 커버리지 보증으로 오해하게 됩니다.</p></div>
+  <div class="kc-cal warn"><span class="h">실제로 저지른 실수 (2026-07-31)</span><p>"GPS 기반 곧-빔 추정"과 "TOS 기반 완료시각 예측기" 중 어느 쪽이 정확한지 오프라인으로 비교하면서 <strong>GPS 하차 추정을 정답지로 썼습니다.</strong> 결과는 GPS 우세로 나왔고 <strong>철회했습니다.</strong> 이유는 셋입니다. ① GPS 추정치를 <strong>GPS 자신의 학습 목표</strong>로 채점했고, ② 그 정답지가 <strong>GPS가 틀렸을 사건 33%를 아예 빼고</strong> 채점했으며, ③ 두 기록이 서로 다른 사건을 가리키는데 "가장 가까운 것끼리" 억지로 짝지어 겉보기 불일치까지 만들었습니다.</p></div>
+  <div class="kc-cal tip"><span class="h">규칙</span><p><strong>정확도를 채점할 때는 TOS 크레인 기록을 정답지로 쓸 것.</strong> 그리고 예측 정확도는 어차피 대리 지표이므로, 가능하면 <strong>실제 배차 결과</strong>(마감을 놓친 건수·재배정 비율·도착 시각)를 A/B로 비교하는 편이 낫습니다. GPS 하차 추정은 <strong>후보를 고르는 학습용으로는 여전히 유효</strong>합니다 — 버릴 것은 그 라벨이 만들어내는 <strong>"몇 초 뒤에 빈다"는 시간 값</strong>뿐입니다.</p></div>
+
   <h2>3. 케이던스 &amp; 블랙아웃</h2>
   <div class="kc-tablewrap"><table>
     <thead><tr><th>지표 (연속 fix 간격)</th><th>TT (<code>truck_pos_hifreq</code>)</th><th>RTG (<code>rtg_pos_hist</code>)</th></tr></thead>

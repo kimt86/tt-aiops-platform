@@ -1769,6 +1769,30 @@ pub fn spawn_soon_idle_logger(lm: Arc<LiveMap>, pool: PgPool) {
 /// applies) with its features + our current prediction + soon-idle flag → free_in_sample. Every ~10 min,
 /// BACKFILL the actual free moment (the truck's NEXT drop from tt_cycle_log) → actual_remaining_s, which is
 /// both the training LABEL and the verification ("predicted soon-idle → actually freed N s later").
+///
+/// ⚠⚠ THIS LABEL IS BIASED. DO NOT USE IT TO SCORE A NON-GPS PREDICTOR. ⚠⚠
+///
+/// `actual_free_at` comes from `tt_cycle_log.dropped_at`, which is a GPS-DERIVED drop event. The TOS
+/// crane handover (`tt_move_log.free_ts`) is the authoritative one, and the two do not see the same
+/// world. Measured 2026-07-31 over 7 days:
+///   · TOS free events 139,783 (twin legs collapsed) vs GPS drops 92,959 → **GPS misses ~33%**
+///   · per TOS free event, a GPS drop within 60s exists only 37.3% of the time (DS 32.6 / LD 43.4),
+///     and 26.0% have NO GPS drop within ±30 minutes at all
+///   · where both DO see the event the medians agree (+28s), which is what mig 0092's "validated
+///     ±27–44s vs GPS" recorded — that number is a MEDIAN-ONLY statement about the matched subset
+/// The misses are not random: the device only reports on movement, so it goes quiet exactly when a
+/// truck is parked waiting for a crane — i.e. the moment "about to be free" matters most.
+///
+/// Consequence, learned the hard way: an offline head-to-head that scores the GPS free_in estimate
+/// against THIS column is scoring it against its own training target, on a population that already
+/// dropped the events it would have got wrong. It will conclude GPS wins. It did (2026-07-31) and
+/// the conclusion was withdrawn. Score against `tt_move_log.free_ts`, or against real dispatch
+/// outcomes (deadline misses, reassignment rate, arrival times) via the A/B harness.
+///
+/// Kept as-is because the GPS states are still what SELECTS candidates, and this table is the
+/// training set for that selection. What was retired (decision recorded, not yet implemented) is
+/// the DURATION estimate this label feeds — see the `soon_idle | approaching | wait_rtg` arm in
+/// spawn_stage2_shadow.
 pub fn spawn_free_in_logger(lm: Arc<LiveMap>, pool: PgPool) {
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(Duration::from_secs(60));
@@ -4363,6 +4387,14 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                         // ⑤⑥ time-to-free: learned per-stage median seconds (state × jobtype × RTG
                         // bin, fallback state×jobtype, fallback the free_in constant). Replaces the
                         // miscalibrated constants for every candidate stage (soon_idle 120→~300, etc).
+                        //
+                        // ⚠ RETIREMENT DECIDED, NOT YET DONE. The plan is: keep the GPS states for
+                        // SELECTING candidates, but drop this DURATION and take it from the move-log
+                        // predictor (learn_cycle_remaining) instead — because this value is learned
+                        // against tt_cycle_log.dropped_at, a GPS label that misses ~33% of real free
+                        // events (see the ⚠⚠ block on spawn_free_in_logger for the measurements).
+                        // Until that swap lands this is still what the matcher uses, so anyone
+                        // benchmarking "current vs new" must not mistake it for a validated baseline.
                         s @ ("soon_idle" | "approaching" | "wait_rtg") => {
                             // jobtype must use the SAME latched fallback the MV/logger key on
                             // (free_in_sample writer + near-miss logger), else a momentary None
