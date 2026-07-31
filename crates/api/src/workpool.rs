@@ -1309,13 +1309,28 @@ pub struct FairCompare {
     n: i32,
     tos_total_s: i64,
     our_total_s: i64,
+    /// ⚠ NOT a saving. The identity permutation (what TOS actually did) is always a feasible
+    /// solution, so the min-cost matching can never cost more — this can never be negative
+    /// (measured 2026-07-31: 0 negatives in 1,924 ticks, min +0.027%). Read it as "how far TOS's
+    /// assignment sits from the optimum of the same pool" = the CEILING on improvement, not a
+    /// realized gain.
     savings_pct: f64,
     same_n: i32,
+    /// Cost of assigning the same pool at random (8 shuffles averaged). NULL for rows written
+    /// before mig 0110. This is the third point that makes the other two interpretable.
+    rand_total_s: Option<i64>,
 }
 #[derive(Serialize)]
 pub struct FairCompareOut {
     latest: Option<FairCompare>,
-    avg_savings_pct: Option<f64>, // averaged over the recent rows (stabler than one window)
+    /// average of `savings_pct` — see the warning on that field. Kept for continuity.
+    avg_savings_pct: Option<f64>,
+    /// ★ the honest one: of the range a coin-flip assignment leaves open (random − optimal), what
+    /// share does TOS already capture? 100% = TOS is already optimal and there is nothing to win;
+    /// low = real headroom. None until enough rows carry the random baseline.
+    avg_tos_capture_pct: Option<f64>,
+    /// how many of the returned rows have the random baseline (0 right after deploy)
+    rand_n: usize,
     recent: Vec<FairCompare>,
 }
 
@@ -1324,7 +1339,7 @@ pub struct FairCompareOut {
 /// number, unlike the per-work "closest truck" metric which double-books the nearest truck.
 pub async fn stage2_fair_compare(State(pool): State<PgPool>) -> Result<Json<FairCompareOut>, AppError> {
     let recent: Vec<FairCompare> = sqlx::query_as(
-        "SELECT ts, window_min, n, tos_total_s, our_total_s, savings_pct, same_n
+        "SELECT ts, window_min, n, tos_total_s, our_total_s, savings_pct, same_n, rand_total_s
            FROM fair_compare_shadow ORDER BY ts DESC LIMIT 48",
     )
     .fetch_all(&pool)
@@ -1335,7 +1350,20 @@ pub async fn stage2_fair_compare(State(pool): State<PgPool>) -> Result<Json<Fair
     } else {
         Some(recent.iter().map(|r| r.savings_pct).sum::<f64>() / recent.len() as f64)
     };
-    Ok(Json(FairCompareOut { latest, avg_savings_pct, recent }))
+    // random >= TOS >= optimal, so (random-TOS)/(random-optimal) is the share of the achievable
+    // range TOS already holds. Skip rows where the denominator is degenerate (random == optimal
+    // means every permutation costs the same and there was nothing to decide).
+    let caps: Vec<f64> = recent
+        .iter()
+        .filter_map(|r| {
+            let rand = r.rand_total_s?;
+            let span = rand - r.our_total_s;
+            (span > 0).then(|| 100.0 * (rand - r.tos_total_s) as f64 / span as f64)
+        })
+        .collect();
+    let avg_tos_capture_pct = (!caps.is_empty()).then(|| caps.iter().sum::<f64>() / caps.len() as f64);
+    let rand_n = recent.iter().filter(|r| r.rand_total_s.is_some()).count();
+    Ok(Json(FairCompareOut { latest, avg_savings_pct, avg_tos_capture_pct, rand_n, recent }))
 }
 
 #[derive(Serialize, sqlx::FromRow)]

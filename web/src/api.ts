@@ -285,7 +285,16 @@ export interface WorkPoint {
 export interface FairCompare {
   ts: string; window_min: number; n: number; tos_total_s: number; our_total_s: number; savings_pct: number; same_n: number;
 }
-export interface FairCompareOut { latest: FairCompare | null; avg_savings_pct: number | null; recent: FairCompare[]; }
+export interface FairCompareOut {
+  latest: FairCompare | null;
+  /** ⚠ 절감이 아니라 '최적까지의 거리'. 정의상 음수가 될 수 없다. */
+  avg_savings_pct: number | null;
+  /** ★정직한 지표: 무작위 배정이 남긴 여지 중 TOS 가 이미 잡고 있는 비율(%) */
+  avg_tos_capture_pct: number | null;
+  /** 무작위 대조군이 있는 최근 행 수(배포 직후엔 0) */
+  rand_n: number;
+  recent: FairCompare[];
+}
 // 학습 센터 — 데이터 수집 카탈로그(데이터 탭)
 export interface DataStat { key: string; total: number; n_1h: number; n_24h: number; latest: string | null; }
 export type DataRow = Record<string, string | number | boolean | null>;

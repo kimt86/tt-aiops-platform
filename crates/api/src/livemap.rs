@@ -5081,10 +5081,31 @@ pub fn spawn_pos_hist_hifreq(lm: Arc<LiveMap>, pool: PgPool) {
 /// optimal 1:1 matching (min-cost perfect matching — each truck used once, reservation respected).
 /// This is the apples-to-apples efficiency comparison; unlike the per-work "closest truck" metric it
 /// can NOT double-book the nearest truck, so it tells the true empty-travel saving over TOS.
+/// xorshift64* — a shuffle and a few random permutations do not warrant a new dependency, and a
+/// fixed algorithm keeps the result reproducible from a logged seed if a number ever needs re-checking.
+fn xorshift(state: &mut u64) -> u64 {
+    let mut x = *state;
+    x ^= x << 13;
+    x ^= x >> 7;
+    x ^= x << 17;
+    *state = x;
+    x
+}
+
+/// Fisher-Yates, in place.
+fn shuffle<T>(v: &mut [T], rng: &mut u64) {
+    for i in (1..v.len()).rev() {
+        let j = (xorshift(rng) % (i as u64 + 1)) as usize;
+        v.swap(i, j);
+    }
+}
+
 pub fn spawn_fair_compare(lm: Arc<LiveMap>, pool: PgPool) {
     tokio::spawn(async move {
         const WINDOW_MIN: i64 = 15;
         const MAX_N: usize = 120; // bound the assignment problem (keeps the solve sub-second)
+        /// Random permutations averaged per batch to get the "coin-flip assignment" baseline.
+        const RAND_TRIALS: usize = 8;
         let mut ticker = tokio::time::interval(Duration::from_secs(300));
         loop {
             ticker.tick().await;
@@ -5139,9 +5160,21 @@ pub fn spawn_fair_compare(lm: Arc<LiveMap>, pool: PgPool) {
             // idle at the SAME instant form a valid pool to re-match — pooling trucks across different
             // times would hand the optimum an unreal pick (a truck that was only free at another moment).
             // Truck position = its position in THAT snapshot, so every batch is instant-consistent.
-            let mut groups: HashMap<i64, Vec<((f64, f64), (f64, f64), String, String)>> = HashMap::new();
+            #[allow(clippy::type_complexity)]
+            let mut groups: HashMap<
+                i64,
+                Vec<((f64, f64), (f64, f64), String, String, String, String, DateTime<Utc>)>,
+            > = HashMap::new();
             let mut considered = 0usize;
-            for (qc, _queue, jobtype, ytno, upd, yt_topos) in rows {
+            // Shuffle BEFORE the cap. The rows arrive ordered by (qc, queuename, ytno) for the
+            // DISTINCT ON, so taking the first MAX_N dropped whichever cranes sort late in the
+            // alphabet — every single time. Measured 2026-07-31: 1,743 of 1,924 ticks (91%) hit the
+            // cap, so that truncation was not a rare edge, it was the normal case and it always
+            // removed the same cranes. A random sample of the same size is unbiased.
+            let mut rng: u64 = (now as u64) | 1; // xorshift needs a non-zero seed
+            let mut rows = rows;
+            shuffle(&mut rows, &mut rng);
+            for (qc, queue, jobtype, ytno, upd, yt_topos) in rows {
                 if considered >= MAX_N {
                     break;
                 }
@@ -5160,7 +5193,7 @@ pub fn spawn_fair_compare(lm: Arc<LiveMap>, pool: PgPool) {
                 // group into 60-second buckets ≈ "the same operational moment" — trucks dispatched
                 // within the same minute are an ~simultaneous pool to re-match (no cross-time pooling).
                 let bucket = t1 / 60_000;
-                groups.entry(bucket).or_default().push((tp, wc, jobtype, qc));
+                groups.entry(bucket).or_default().push((tp, wc, jobtype, qc, ytno, queue, upd));
                 considered += 1;
             }
             // per-instant optimal permutation (min-cost perfect matching), summed across instants.
@@ -5169,15 +5202,27 @@ pub fn spawn_fair_compare(lm: Arc<LiveMap>, pool: PgPool) {
             let mut n = 0i32;
             let mut tos_total = 0i64;
             let mut our_total = 0i64;
+            // Coin-flip baseline over the SAME pool. Without it `savings_pct` is uninterpretable:
+            // the identity permutation (= what TOS actually did) is always a feasible solution, so
+            // the min-cost matching can never cost more and the "saving" can never be negative
+            // (measured: 0 negatives in 1,924 ticks, min +0.027%). Random gives the third point that
+            // makes the number mean something — random >= TOS >= optimal, so (random-TOS)/(random-optimal)
+            // is the share of the achievable range TOS already captures.
+            let mut rand_total = 0i64;
             let mut same = 0i32;
-            let mut det: Vec<(String, String, i32, i32)> = Vec::new(); // (jobtype, qc, tos_s, our_s)
+            #[allow(clippy::type_complexity)]
+            // (jobtype, qc, tos_s, our_s, ytno, queuename, dispatch_ts)
+            let mut det: Vec<(String, String, i32, i32, String, String, DateTime<Utc>)> = Vec::new();
             for batch in groups.values() {
                 let m = batch.len();
                 if m == 0 {
                     continue;
                 }
                 n += m as i32;
-                let tos_each: Vec<i64> = batch.iter().map(|(tp, wc, jt, _)| cost(tp.0, tp.1, wc.0, wc.1, jt == "LD")).collect();
+                let tos_each: Vec<i64> = batch
+                    .iter()
+                    .map(|(tp, wc, jt, ..)| cost(tp.0, tp.1, wc.0, wc.1, jt == "LD"))
+                    .collect();
                 for &c in &tos_each {
                     tos_total += c;
                 }
@@ -5209,13 +5254,34 @@ pub fn spawn_fair_compare(lm: Arc<LiveMap>, pool: PgPool) {
                         }
                     }
                 }
+                // random baseline: average over RAND_TRIALS shuffles of the same pool
+                if m > 1 {
+                    let mut acc = 0i64;
+                    let mut perm: Vec<usize> = (0..m).collect();
+                    for _ in 0..RAND_TRIALS {
+                        shuffle(&mut perm, &mut rng);
+                        for i in 0..m {
+                            acc += cost(
+                                batch[i].0 .0, batch[i].0 .1,
+                                batch[perm[i]].1 .0, batch[perm[i]].1 .1,
+                                batch[perm[i]].2 == "LD",
+                            );
+                        }
+                    }
+                    rand_total += acc / RAND_TRIALS as i64;
+                } else {
+                    rand_total += tos_each[0]; // a single pair has only one permutation
+                }
                 for i in 0..m {
                     let our_s = cost(batch[i].0 .0, batch[i].0 .1, batch[sigma[i]].1 .0, batch[sigma[i]].1 .1, batch[sigma[i]].2 == "LD");
                     our_total += our_s;
                     if sigma[i] == i {
                         same += 1;
                     }
-                    det.push((batch[i].2.clone(), batch[i].3.clone(), tos_each[i] as i32, our_s as i32));
+                    det.push((
+                        batch[i].2.clone(), batch[i].3.clone(), tos_each[i] as i32, our_s as i32,
+                        batch[i].4.clone(), batch[i].5.clone(), batch[i].6,
+                    ));
                 }
             }
             if n < 4 {
@@ -5223,10 +5289,10 @@ pub fn spawn_fair_compare(lm: Arc<LiveMap>, pool: PgPool) {
             }
             let savings = if tos_total > 0 { 100.0 * (tos_total - our_total) as f64 / tos_total as f64 } else { 0.0 };
             let _ = sqlx::query(
-                "INSERT INTO fair_compare_shadow (window_min, n, tos_total_s, our_total_s, savings_pct, same_n)
-                 VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (ts) DO NOTHING",
+                "INSERT INTO fair_compare_shadow (window_min, n, tos_total_s, our_total_s, savings_pct, same_n, rand_total_s)
+                 VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT (ts) DO NOTHING",
             )
-            .bind(WINDOW_MIN as i32).bind(n as i32).bind(tos_total).bind(our_total).bind(savings).bind(same)
+            .bind(WINDOW_MIN as i32).bind(n as i32).bind(tos_total).bind(our_total).bind(savings).bind(same).bind(rand_total)
             .execute(&pool).await;
             crate::db::prune(&pool, "fair_compare_shadow", "DELETE FROM fair_compare_shadow WHERE ts < now() - interval '21 days'").await;
             // per-pair detail for breakdown/bias analysis (bulk insert via UNNEST)
@@ -5235,11 +5301,19 @@ pub fn spawn_fair_compare(lm: Arc<LiveMap>, pool: PgPool) {
                 let qcs: Vec<String> = det.iter().map(|d| d.1.clone()).collect();
                 let toss: Vec<i32> = det.iter().map(|d| d.2).collect();
                 let ours: Vec<i32> = det.iter().map(|d| d.3).collect();
+                let yts: Vec<String> = det.iter().map(|d| d.4.clone()).collect();
+                let qns: Vec<String> = det.iter().map(|d| d.5.clone()).collect();
+                let dts: Vec<DateTime<Utc>> = det.iter().map(|d| d.6).collect();
+                // ON CONFLICT: this runs every 5 minutes over a 15-minute window, so the same
+                // dispatch is seen by ~3 consecutive ticks. Counting it 3x inflated the sample and
+                // its weight in every breakdown (measured: 34,075 rows / 288 ticks in 24h against a
+                // 120-row cap). The dedupe key keeps the first tick that scored it.
                 let _ = sqlx::query(
-                    "INSERT INTO fair_compare_detail (jobtype, qc, tos_s, our_s)
-                     SELECT * FROM UNNEST($1::text[], $2::text[], $3::int[], $4::int[])",
+                    "INSERT INTO fair_compare_detail (jobtype, qc, tos_s, our_s, ytno, queuename, dispatch_ts)
+                     SELECT * FROM UNNEST($1::text[], $2::text[], $3::int[], $4::int[], $5::text[], $6::text[], $7::timestamptz[])
+                     ON CONFLICT (ytno, queuename, dispatch_ts) WHERE ytno IS NOT NULL DO NOTHING",
                 )
-                .bind(&jts).bind(&qcs).bind(&toss).bind(&ours)
+                .bind(&jts).bind(&qcs).bind(&toss).bind(&ours).bind(&yts).bind(&qns).bind(&dts)
                 .execute(&pool).await;
                 crate::db::prune(&pool, "fair_compare_detail", "DELETE FROM fair_compare_detail WHERE ts < now() - interval '7 days'").await;
             }

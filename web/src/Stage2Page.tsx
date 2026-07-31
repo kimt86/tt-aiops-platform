@@ -20,7 +20,8 @@ function Chip({ label, value, accent }: { label: string; value: string; accent?:
   );
 }
 
-// one breakdown dimension as diverging savings bars (green right = we save, red left = we're worse)
+// one breakdown dimension as diverging bars (green right = optimum beats TOS, red left = we're worse).
+// NOTE: this decomposes the improvement CEILING, not a realized saving — see the headline note.
 function BdGroup({ title, rows }: { title: string; rows: import("./api").FairBucket[] }) {
   return (
     <div className="ls-card" style={{ padding: 8 }}>
@@ -32,7 +33,7 @@ function BdGroup({ title, rows }: { title: string; rows: import("./api").FairBuc
             const pos = sv >= 0;
             const half = Math.min(Math.abs(sv), 50) / 2; // bar half-width %, capped at ±50%
             return (
-              <div key={r.key} title={`절감 ${sv.toFixed(0)}% · ${r.pairs}짝 · 우리가 더 나쁨 ${(r.worse_pct ?? 0).toFixed(0)}%`}
+              <div key={r.key} title={`여지 ${sv.toFixed(0)}% · ${r.pairs}짝 · 우리가 더 나쁨 ${(r.worse_pct ?? 0).toFixed(0)}%`}
                    style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 3, fontSize: 11 }}>
                 <div style={{ width: 86, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{r.key}</div>
                 <div style={{ flex: 1, height: 12, background: "#1f2937", borderRadius: 3, position: "relative", overflow: "hidden" }}>
@@ -94,11 +95,20 @@ export default function Stage2Page({ lang }: { lang: Lang }) {
         return (
           <div className="ls-note" style={{ borderLeft: "3px solid #34d399", background: "rgba(52,211,153,0.08)", padding: "10px 12px", marginBottom: 12 }}>
             <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 3 }}>
-              {k ? `⚖️ 공정 비교 — 빈 차 이동 ${sav}% 절감 (우리 최적 매칭 vs TOS)` : `⚖️ Fair: ${sav}% less empty travel (our optimal matching vs TOS)`}
+              {k ? `⚖️ 개선 여지의 상한 — 빈 차 이동 ${sav}% (같은 풀 최적 재매칭 vs TOS)` : `⚖️ Improvement ceiling: ${sav}% of empty travel (optimal re-match of the same pool vs TOS)`}
             </div>
             {k
-              ? `같은 순간 TOS가 배차한 트럭들(${f.n}쌍)을 우리 솔버가 1:1로 다시 최적 매칭하면 빈 차 이동 총량이 TOS보다 ${sav}% 적습니다(최근 평균). 같은 트럭 선택 ${Math.round(100 * f.same_n / Math.max(f.n, 1))}%. ⓘ 트럭 1대=작업 1개(예약 지킴)·같은 순간 유휴 풀만 사용 → 정직한 효율 지표. (아래 '각 작업 최근접'은 같은 트럭을 여러 작업이 중복 차지해 우리 이득을 과장합니다.)`
-              : `re-matching TOS's own dispatched trucks (${f.n} pairs) optimally (1:1, reservation-respected, same-instant pool) cuts total empty travel by ${sav}% (recent avg). The honest efficiency metric.`}
+              ? `같은 순간 TOS가 배차한 트럭들(${f.n}쌍)을 1:1로 다시 최적 매칭하면 빈 차 이동이 ${sav}% 적습니다. ` +
+                `⚠ 이건 절감 실적이 아니라 상한입니다 — TOS의 배정도 가능한 순열 중 하나라 최적해가 그보다 나쁠 수 없고, 따라서 이 값은 정의상 음수가 나오지 않습니다. ` +
+                (fair.avg_tos_capture_pct != null
+                  ? `무작위로 짝지었을 때 대비 TOS는 이미 개선 여지의 ${Math.round(fair.avg_tos_capture_pct)}%를 잡고 있습니다 — 남은 ${100 - Math.round(fair.avg_tos_capture_pct)}%가 실제로 노려볼 수 있는 몫입니다.`
+                  : `무작위 대조군 수집 중(${fair.rand_n}/48) — 이 값이 채워지면 "TOS가 이미 잡은 몫"과 "실제로 남은 몫"을 구분해 보여줍니다.`) +
+                ` 같은 트럭 선택 ${Math.round(100 * f.same_n / Math.max(f.n, 1))}%.`
+              : `Re-matching TOS's own dispatched trucks (${f.n} pairs) optimally cuts empty travel by ${sav}%. ` +
+                `⚠ This is a ceiling, not a realized saving — TOS's assignment is itself a feasible permutation, so the optimum can never be worse and this can never be negative.` +
+                (fair.avg_tos_capture_pct != null
+                  ? ` Against a random assignment, TOS already captures ${Math.round(fair.avg_tos_capture_pct)}% of the available range.`
+                  : ` Random baseline still filling (${fair.rand_n}/48).`)}
           </div>
         );
       })()}
@@ -106,7 +116,7 @@ export default function Stage2Page({ lang }: { lang: Lang }) {
       {/* ── VALUE BREAKDOWN: where the saving comes from + bias check (is the headline trustworthy?) ── */}
       {bd && bd.pairs > 0 && (
         <div style={{ marginBottom: 14 }}>
-          <div className="area-divider"><span>{k ? "가치 입증 — 절감의 출처와 신뢰성 (최근 24h)" : "Value breakdown — where it comes from (24h)"}</span></div>
+          <div className="area-divider"><span>{k ? "개선 여지의 출처와 신뢰성 (최근 24h)" : "Where the improvement ceiling comes from (24h)"}</span></div>
           <div className="ls-chips" style={{ marginBottom: 8 }}>
             <Chip label={k ? "표본 (짝)" : "pairs"} value={String(bd.pairs)} accent="#60a5fa" />
             <Chip label={k ? "우리가 더 나쁨" : "we're worse"} value={pct(bd.worse_pct)} accent={(bd.worse_pct ?? 0) > 20 ? "#f59e0b" : "#34d399"} />

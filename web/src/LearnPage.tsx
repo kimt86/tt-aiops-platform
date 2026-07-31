@@ -573,8 +573,8 @@ const DATA_CATALOG: Category[] = [
       { key: "fair_compare_detail",
         name: ["공정 1:1 비교 상세", "fair 1:1 detail"],
         source: ["공정 비교기 (5분)", "fair comparator (5min)"],
-        usage: ["가치 입증 (절감 분해)", "value breakdown"],
-        desc: ["TOS 실현 풀을 사후 최적 재매칭한 페어별 공차초(TOS vs 우리). 작업유형·거리·크레인별 절감 분해의 원천.", "Per-pair empty-seconds from re-optimizing TOS's realized pool (TOS vs ours). Source of the savings breakdown."] },
+        usage: ["가치 입증 (개선 여지 분해)", "improvement-ceiling breakdown"],
+        desc: ["TOS 실현 풀을 사후 최적 재매칭한 페어별 공차초(TOS vs 우리). ⚠절감 실적이 아니라 개선 여지의 상한 — 항등 순열이 늘 실행 가능해 최적해가 TOS보다 나쁠 수 없다. 배차 1건당 1행(mig0110 중복제거).", "Per-pair empty-seconds from re-optimizing TOS's realized pool. ⚠A ceiling, not a realized saving — the identity permutation is always feasible. One row per dispatch (mig0110)."] },
     ],
   },
   {
