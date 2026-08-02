@@ -85,4 +85,4 @@ print(f'raster {W}x{H} @ {CELL:.0f}m ({W*H/1e6:.2f}M cells) | densified pts {npt
 # persist mask+skel for the graph step
 np.savez_compressed(f'{SCRATCH}/road_raster.npz', dens=dens, mask=mask, skel=skel,
                     la0=la0, lo0=lo0, mlat=mlat, mlon=mlon, cell=CELL)
-print('saved /tmp/gps_skeleton.png and /tmp/road_raster.npz')
+print(f'saved {SCRATCH}/gps_skeleton.png and {SCRATCH}/road_raster.npz')

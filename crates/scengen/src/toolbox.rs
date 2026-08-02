@@ -53,7 +53,14 @@ impl Toolbox {
     pub async fn run_sql(&self, sql: &str) -> Result<String> {
         let _guard = ORACLE_LOCK.lock().await; // serialize Oracle access
 
-        let dir = std::env::temp_dir();
+        // On DISK, not std::env::temp_dir(). That default is /tmp, a 124GB tmpfs — RAM — on this
+        // host, and when it filled on 2026-08-02 every collector failed on this exact write. Same
+        // change as extractor::runner; the two toolboxes stay separate copies on purpose, so the
+        // fix has to be made twice. Bounded: one file per pid, overwritten on reuse, removed below.
+        let dir = std::path::PathBuf::from(
+            std::env::var("TT_SQL_SCRATCH").unwrap_or_else(|_| "/var/tmp/tt-sql".into()),
+        );
+        let _ = tokio::fs::create_dir_all(&dir).await;
         let path = dir.join(format!("scengen-{}.sql", std::process::id()));
         tokio::fs::write(&path, sql)
             .await
@@ -63,8 +70,13 @@ impl Toolbox {
         // timers, so run the script under flock(1) on a shared lock file. Waiting a little longer
         // than our own query timeout lets an in-flight sibling finish rather than failing early; if
         // the wait elapses flock exits non-zero and the tick is recorded as failed (isolated).
+        // Also off the tmpfs. It is a zero-byte file, but flock has to CREATE it when it is missing,
+        // and a full /tmp fails that — so the lock that exists to keep our own collectors from
+        // colliding would itself be what stops them. Moving it costs one brief window during
+        // rollout where an old and a new binary hold different lock files; the worst case there is
+        // two of our own index-seek queries overlapping, which the extractor does unguarded anyway.
         let lock_file = std::env::var("ORACLE_LOCK_FILE")
-            .unwrap_or_else(|_| "/tmp/wp-oracle-toolbox.lock".to_string());
+            .unwrap_or_else(|_| "/var/tmp/tt-sql/oracle-toolbox.lock".to_string());
         let lock_wait = self.timeout_secs + 15;
 
         let out = tokio::process::Command::new("flock")
