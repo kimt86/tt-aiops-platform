@@ -343,9 +343,90 @@ pub async fn build(pool: &PgPool, ws: DateTime<Utc>, we: DateTime<Utc>) -> Resul
         .and_then(Value::as_i64)
         .unwrap_or(0);
 
+    // cranes[] — the work list the simulator walks, derived from what the quay cranes ACTUALLY did.
+    //
+    // WHY ACTUALS AND NOT THE PLAN. A quay crane does not choose its work; it executes the stowage
+    // plan it was given. It is a boundary condition of the simulation, not one of its decisions —
+    // the decision under test is truck dispatch. So taking the observed sequence as given is not a
+    // compromise on fidelity, it is the correct model of the machine.
+    //
+    // And the plan is the wrong source for a REPLAY besides: ships leave with work undone. Measured
+    // over 41 departed calls, 805 planned containers were never worked (CVAS 003/2026 alone: 4,430
+    // planned, 4,121 done). Handing the simulator the plan makes it perform moves that never
+    // happened, and charges dispatch for a shortfall that was a roll-over or a cut-off.
+    //
+    // Runs, not totals: a crane returning to a bay is a real event that costs a gantry move, and the
+    // data is full of them — C37 on MOUA 007/2026 went 22D-D, 22H-D, 10D-D, back to 22H-D for a
+    // SINGLE container, then 10D-D again. Collapsing by bay would erase that; the run boundary keeps
+    // each visit as its own queue entry, which is also how the spec asks for it.
+    //
+    // `vessel_id` sits on the queue ENTRY, not on the crane. The spec's one-vessel-per-crane shape
+    // does not hold here — measured, 41 of 73 cranes serve two or more vessels, one of them four.
+    //
+    // observed_from/to are provenance, NOT a schedule. They are what happened, kept so a run can be
+    // scored against reality; the simulator decides its own timing from the queue and the policy
+    // under test. Window is [ws, we), so for a past window these moves ARE the outstanding work at ws.
+    let cranes_txt: Option<String> = sqlx::query_scalar(
+        r#"
+        WITH mv AS (
+          SELECT machno, comp_ts, vessel, voyage,
+                 regexp_replace(queuename, '^([0-9]+[HD]-[DL])[0-9]+$', '\1') AS qkey
+            FROM qc_move_log
+           WHERE comp_ts >= $1 AND comp_ts < $2
+             AND jobtype IN ('DS','LD')          -- MI/MO carry yard-internal ids, a different grammar
+             AND queuename IS NOT NULL           -- labels start 2026-07-30 02:12Z; older windows resolve nothing
+             AND vessel IS NOT NULL
+        ),
+        b AS (
+          SELECT *, CASE WHEN lag(qkey)   OVER w IS DISTINCT FROM qkey
+                           OR lag(vessel) OVER w IS DISTINCT FROM vessel
+                           OR lag(voyage) OVER w IS DISTINCT FROM voyage
+                         THEN 1 ELSE 0 END brk
+            FROM mv WINDOW w AS (PARTITION BY machno ORDER BY comp_ts)
+        ),
+        r AS (SELECT *, sum(brk) OVER (PARTITION BY machno ORDER BY comp_ts) grp FROM b),
+        q AS (
+          SELECT machno, vessel, voyage, qkey, grp,
+                 count(*)::int qty, min(comp_ts) st, max(comp_ts) en
+            FROM r GROUP BY machno, vessel, voyage, qkey, grp
+        ),
+        s AS (SELECT *, row_number() OVER (PARTITION BY machno ORDER BY st)::int seq FROM q)
+        SELECT coalesce(jsonb_agg(c ORDER BY c->>'qc_id'), '[]'::jsonb)::text FROM (
+          SELECT jsonb_build_object(
+                   'qc_id', machno,
+                   'moves', sum(qty)::int,
+                   'queue', jsonb_agg(jsonb_build_object(
+                       'seq', seq, 'vessel_id', vessel, 'voyage', voyage,
+                       'bay', substring(qkey from '^([0-9]+)')::int,
+                       'dh',  substring(qkey from '^[0-9]+([HD])'),
+                       'job', right(qkey, 1),
+                       'qty', qty,
+                       'observed_from', st, 'observed_to', en) ORDER BY seq)) AS c
+            FROM s GROUP BY machno
+        ) z
+        "#,
+    )
+    .bind(ws).bind(we)
+    .fetch_one(pool)
+    .await?;
+    let cranes: Value = serde_json::from_str(&cranes_txt.unwrap_or_else(|| "[]".into()))?;
+
+    // How much of the window's quay work made it into cranes[]. The failure that matters here is
+    // UNDER-reporting: a move without a bay label is simply absent, and a scenario missing a third of
+    // the berth looks exactly like a quiet shift. Surfaced rather than assumed.
+    let (qc_moves_total, qc_moves_queued): (i64, i64) = sqlx::query_as(
+        "SELECT count(*), count(*) FILTER (WHERE queuename IS NOT NULL AND vessel IS NOT NULL)
+           FROM qc_move_log
+          WHERE comp_ts >= $1 AND comp_ts < $2 AND jobtype IN ('DS','LD')",
+    )
+    .bind(ws).bind(we)
+    .fetch_one(pool)
+    .await?;
+
     let scenario_out = json!({
         "meta": { "window": [ws.to_rfc3339(), we.to_rfc3339()], "home_port": "MYPKG", "source": "scengen" },
         "vessels": vessels,
+        "cranes": cranes,
         "landside": landside,
         "equipment": equipment,
         "yard_t0": yard_t0,
@@ -475,6 +556,17 @@ pub async fn build(pool: &PgPool, ws: DateTime<Utc>, we: DateTime<Utc>) -> Resul
         "gate_time_pct": if gate_in + gate_out > 0 { gate_ts_known * 100 / (gate_in + gate_out) } else { 0 },
         // Equipment deployment — how much machinery the window actually used.
         "qc_spans": qc_spans, "rtg_spans": rtg_spans, "peak_trucks": peak_trucks,
+        // ★Trust signal for cranes[]. A quay move can only enter the work list if it carries a bay
+        // label and a vessel, and labels only exist from 2026-07-30 02:12Z — so an older window
+        // silently yields an almost empty crane list that reads as a quiet terminal rather than as
+        // missing data. Read queue_pct BEFORE reading cranes[]: below ~99 the window predates the
+        // labels and the scenario is not usable as a replay.
+        "qc_moves": qc_moves_total,
+        "qc_queued": qc_moves_queued,
+        "queue_pct": if qc_moves_total > 0 { qc_moves_queued * 100 / qc_moves_total } else { 0 },
+        "crane_queues": cranes.as_array().map_or(0, |a| {
+            a.iter().map(|c| c.get("queue").and_then(Value::as_array).map_or(0, Vec::len) as i64).sum()
+        }),
     });
 
     Ok((scenario_out, emulator_out, summary))
