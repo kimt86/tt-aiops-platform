@@ -22,6 +22,14 @@ const MAX_VOYAGES: i64 = 6; // rate-limit per tick
 const FETCH_CAP: u32 = 20000; // per-voyage manifest cap (a call is a few thousand)
 
 pub async fn run(pool: &PgPool, target: &str) -> Result<()> {
+    // Local refresh first, and NOT gated on the kill switch — same rule as yard::build, because it
+    // reads only our own tables and should keep working while collection is paused.
+    match refresh_open_calls(pool).await {
+        Ok(n) if n > 0 => tracing::info!(updated = n, "vessel_call refreshed from live schedule"),
+        Ok(_) => {}
+        Err(e) => tracing::warn!(error = %e, "vessel_call refresh failed"),
+    }
+
     let cfg = state::load_config(pool).await?;
     if !cfg.enabled {
         tracing::info!("scenario collection disabled (kill switch) — skipping enrich");
@@ -39,6 +47,56 @@ pub async fn run(pool: &PgPool, target: &str) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Fill in the half of a vessel call that is not yet known when we first see it — above all the
+/// ACTUAL DEPARTURE. Reads public.live_vessel_schedule, which the extractor already refreshes every
+/// 90s, so this costs ZERO Oracle.
+///
+/// WHY THIS EXISTS. The Oracle enrich below deliberately picks only voyages absent from vessel_call
+/// (`v.vessel IS NULL`), which makes the row write-once. A voyage is first seen a few hours after it
+/// berths — measured average 3.6h — which is long before it leaves, so `actdep` is captured as NULL
+/// and never revisited. The damage was invisible because of an accident of history: the 105 calls
+/// that DO carry a departure were all enriched on 2026-07-27, in the catch-up burst after collection
+/// had been stopped since 07-23, at an average of 93.4h after berthing — i.e. they had already sailed
+/// when we first looked. Every call enriched live since then has actdep NULL, which reads as
+/// "68 ships berthed and not one has left".
+///
+/// That is not a cosmetic gap. Departure time is the baseline the whole simulator is scored against
+/// ("did a better dispatch finish this ship earlier"), the plan backfill's revisit-after-departure
+/// clause keys on it, and the invariant test that guards the subtraction — a departed call must have
+/// zero remaining — cannot run without it.
+///
+/// Bounded and self-limiting: only rows still missing a departure are considered, and the moment one
+/// lands the row drops out of the WHERE for good. The extra predicates keep an unchanged row from
+/// being rewritten every tick — a guard that is always true is how a "fill only" update turns into
+/// tuple churn.
+///
+/// LIMIT: the live schedule holds a departed voyage for about two days (measured actdep_ts span
+/// 2026-07-31 15:05 .. 08-02 21:50), so this recovers anything that left within that window. At a
+/// 15-minute cadence that is never close. Calls that sailed longer ago than the window need Oracle.
+async fn refresh_open_calls(pool: &PgPool) -> Result<u64> {
+    let n = sqlx::query(
+        "UPDATE scenario.vessel_call vc SET
+            actdep      = COALESCE(s.actdep_ts, vc.actdep),
+            estdep      = COALESCE(s.estdep_ts, vc.estdep),
+            cutoff      = COALESCE(s.cutoff_ts, vc.cutoff),
+            disvan      = COALESCE(s.disvan,    vc.disvan),
+            loadvan     = COALESCE(s.loadvan,   vc.loadvan),
+            enriched_at = now()
+           FROM public.live_vessel_schedule s
+          WHERE s.vessel = vc.vessel AND s.voyage = vc.voyage
+            AND vc.actdep IS NULL
+            AND (s.actdep_ts IS NOT NULL
+              OR s.estdep_ts  IS DISTINCT FROM vc.estdep
+              OR s.cutoff_ts  IS DISTINCT FROM vc.cutoff
+              OR s.disvan     IS DISTINCT FROM vc.disvan
+              OR s.loadvan    IS DISTINCT FROM vc.loadvan)",
+    )
+    .execute(pool)
+    .await?
+    .rows_affected();
+    Ok(n)
 }
 
 async fn enrich(pool: &PgPool, run_id: i64, target: &str, cfg: &Config) -> Result<()> {
