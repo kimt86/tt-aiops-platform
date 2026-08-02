@@ -41,8 +41,17 @@ impl Toolbox {
     pub async fn run_sql(&self, sql: &str) -> Result<String> {
         let _guard = ORACLE_LOCK.lock().await; // serialize Oracle access
 
-        // write SQL to a temp file the script can read
-        let dir = std::env::temp_dir();
+        // Write SQL to a scratch file the script can read — on DISK, not std::env::temp_dir().
+        // That default is /tmp, which on this host is a 124GB tmpfs: RAM. On 2026-08-02 it filled
+        // and every Oracle poll failed on this exact write, taking QC_MOVE, RTG_MOVE and
+        // HANDOVER_LABEL down together — the critical move streams, killed by a few-KB file that had
+        // no business competing for the scarcest resource on the box. Commit 5a24c7e moved the
+        // roadgraph dumps off the same tmpfs (ROADSCRATCH -> /var/tmp/roadscratch) and missed this.
+        // Growth is bounded by construction: one file per pid, overwritten on reuse, removed below.
+        let dir = std::path::PathBuf::from(
+            std::env::var("TT_SQL_SCRATCH").unwrap_or_else(|_| "/var/tmp/tt-sql".into()),
+        );
+        let _ = tokio::fs::create_dir_all(&dir).await;
         let path = dir.join(format!("wp-extract-{}.sql", std::process::id()));
         tokio::fs::write(&path, sql)
             .await
