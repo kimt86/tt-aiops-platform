@@ -100,14 +100,26 @@ pub async fn build(pool: &PgPool, ws: DateTime<Utc>, we: DateTime<Utc>) -> Resul
             'vessel_id', cont.vessel, 'voyage', cont.voyage, 'vsl_name', vc.vsl_name,
             'loa_m', vc.loa_m, 'beam_m', vc.beam_m, 'total_bays', vc.total_bays,
             'berth', jsonb_build_object('berthno', vc.berthno, 'side', vc.berthside, 'startpos_m', vc.startpos_m),
-            'schedule', jsonb_build_object('berth_ts', vc.actber, 'depart_ts', vc.actdep, 'cutoff_ts', vc.cutoff),
+            -- est_depart_ts is THE SCORING BASELINE. A better dispatch does not make a ship carry
+            -- more boxes — its stowage plan is fixed — it makes the ship FINISH EARLIER, and
+            -- "earlier" needs something to be earlier than. It was collected all along and simply
+            -- never emitted, which left the output with no way to say whether a run was good.
+            -- depart_ts (actual) is what happened; est_depart_ts is what was promised. Note actual
+            -- is only present once the ship has left AND while it is still inside the live
+            -- schedule's ~2-day window, so a scenario for a call still alongside carries the
+            -- estimate alone — which is the right input for a forward-looking run anyway.
+            -- The spec's deadline is min(est_depart − buffer, estwkc). estwkc does not exist in this
+            -- schema, so the raw times are emitted and the buffer stays where it belongs: a policy
+            -- parameter of the run, not a constant baked into the data.
+            'schedule', jsonb_build_object('berth_ts', vc.actber, 'depart_ts', vc.actdep,
+                                           'est_depart_ts', vc.estdep, 'cutoff_ts', vc.cutoff),
             'cranes', to_jsonb(array_agg(DISTINCT cont.machno)),
             'containers', jsonb_agg(cont.cobj ORDER BY cont.machno, cont.crane_seq)
           ) AS vobj
           FROM cont
           LEFT JOIN scenario.vessel_call vc ON vc.vessel = cont.vessel AND vc.voyage = cont.voyage
           GROUP BY cont.vessel, cont.voyage, vc.startpos_m, vc.vsl_name, vc.loa_m, vc.beam_m,
-                   vc.total_bays, vc.berthno, vc.berthside, vc.actber, vc.actdep, vc.cutoff
+                   vc.total_bays, vc.berthno, vc.berthside, vc.actber, vc.actdep, vc.estdep, vc.cutoff
         ) t
         "#,
     )
@@ -566,6 +578,18 @@ pub async fn build(pool: &PgPool, ws: DateTime<Utc>, we: DateTime<Utc>) -> Resul
         "queue_pct": if qc_moves_total > 0 { qc_moves_queued * 100 / qc_moves_total } else { 0 },
         "crane_queues": cranes.as_array().map_or(0, |a| {
             a.iter().map(|c| c.get("queue").and_then(Value::as_array).map_or(0, Vec::len) as i64).sum()
+        }),
+        // How many vessels carry a departure baseline. Without it a run cannot be scored at all —
+        // "finished earlier" needs something to be earlier than — so this belongs next to the other
+        // trust signals rather than being discovered as a null halfway through an analysis.
+        "vessels_with_eta": vessels.as_array().map_or(0, |a| {
+            a.iter()
+                .filter(|v| {
+                    v.get("schedule")
+                        .and_then(|s| s.get("est_depart_ts"))
+                        .is_some_and(|t| !t.is_null())
+                })
+                .count() as i64
         }),
     });
 
