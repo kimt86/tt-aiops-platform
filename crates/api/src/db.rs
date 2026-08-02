@@ -215,7 +215,18 @@ pub fn spawn_size_watchdog(pool: PgPool) {
             .await
             .ok()
             .flatten();
-            let feed_fresh = feed_age_s.is_some_and(|s| s < 900.0);
+            // ⚠ 이 게이트를 truck_pos_hifreq 하나에만 걸면, **그 표에 쓰는 것을 막는 방어**
+            // (livemap.rs POS_WRITE_MAX)가 발동한 순간 감시가 통째로 꺼진다 — 방어가 감시를
+            // 끄는 구조다. 기록기가 스스로 멈춘 상황은 "상류 피드가 죽었다"가 아니라 오히려
+            // "뭔가 이상하다"이므로 그때는 감시를 **켜 둬야** 한다.
+            let writer_stopped: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM ops_alert
+                                 WHERE source = 'pos_write' AND last_ts > now() - interval '30 min')",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap_or(false);
+            let feed_fresh = feed_age_s.is_some_and(|s| s < 900.0) || writer_stopped;
 
             if feed_fresh {
                 for (table, col, max_age_min) in DEADMAN {

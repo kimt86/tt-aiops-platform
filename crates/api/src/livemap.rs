@@ -224,6 +224,22 @@ const NEAR_TRIP_M: f64 = 100.0;
 // (GPS teleport / accuracy spike), so jitter can't fake "movement".
 const MAX_FIX_STEP_M: f64 = 600.0;
 
+/// 위치 이력 한 틱에 쓸 수 있는 최대 행수.
+///
+/// 세 개의 위치 이력 기록기는 "지금 지도에 있는 기기 수"만큼 행을 쓴다. 기기 지도는 10분
+/// 창으로 정리되므로 무한히 자라진 않지만, 손상된 기기 ID가 쏟아지면 그 창 안에서 얼마든지
+/// 부풀 수 있고 그만큼이 3초마다 DB로 나간다. 이건 07-28 사고와 같은 유형(미검증 입력이
+/// 쓰기 행수를 정함)이고, 실행자가 Postgres 라 프로세스 메모리 상한이 듣지 않는 쪽이다.
+/// 실측 2026-08-02(틱당 행수 최대/평균): truck_pos_hist 253/185 · truck_pos_hifreq 123/46.
+/// 물리 천장은 동시 관측 대수가 아니라 120초 창에 보고한 서로 다른 TT 수이고 하루 최대 532대다.
+/// 2,000 은 그 천장의 3.8배 — 넘으면 쓰기를 멈추고 알림을 올린다(조용히 자르면 어떤 기기가
+/// 빠졌는지 나중에 알 수 없고, 부분집합은 이 표를 읽는 그림자 분석을 그럴듯하게 오염시킨다).
+const POS_WRITE_MAX: usize = 2_000;
+/// RTG/ES 전용 상한. TT 로 잰 값을 그대로 쓰면 안 된다 — 이 모집단은 실측 틱당 최대 8행·
+/// 기기 30대라 2,000 은 250배 헐거워 **어떤 폭주도 못 잡는다**(측정하지 않은 모집단에 남의
+/// 상한을 적용한 셈). 200 은 기기 수 기준 6.7배 여유.
+const RTG_WRITE_MAX: usize = 200;
+
 /// UPSTREAM COORDINATE GATE.
 ///
 /// 2026-07-28: one corrupt fix (lat 4.1975 / lon 99.7827, 219km out) sized the road-inference
@@ -4966,6 +4982,18 @@ pub fn spawn_pos_hist(lm: Arc<LiveMap>, pool: PgPool) {
                     })
                     .collect()
             };
+            if rows.len() > POS_WRITE_MAX {
+                // 자르지 않고 이번 틱을 통째로 거른다: 기기 모집단이 말이 안 되는 상태면 상류가
+                // 고장난 것이고, 그때 일부만 골라 쓰면 어떤 기기가 빠졌는지 아무도 모른다.
+                let msg = format!(
+                    "truck_pos_hist 한 틱에 {}행 — 상한 {} 초과, 이번 틱 기록을 건너뛴다(기기 ID 폭주 의심)",
+                    rows.len(), POS_WRITE_MAX
+                );
+                if crate::db::alert(&pool, "pos_write", "truck_pos_hist", "crit", &msg, None).await {
+                    tracing::warn!(rows = rows.len(), "POSITION WRITE OVER CAP");
+                }
+                continue;
+            }
             if rows.is_empty() {
                 continue;
             }
@@ -5009,6 +5037,10 @@ pub fn spawn_rtg_pos_hist(lm: Arc<LiveMap>, pool: PgPool) {
             // one row per NEW fix (last_seen advanced) — keeps stationary jitter, skips stale repeats
             let fixes: Vec<(String, i64, f64, f64)> = {
                 let map = lm.devices.read().await;
+                // hifreq 와 같은 문제이고 같은 이유로 나이 기준으로 턴다(값 자체가 시각이라
+                // 추가 필드가 필요 없다). 기기 지도 존재 여부로 털면 600초 침묵-재출현이
+                // 중복제거를 잃는다.
+                last_seen.retain(|_, &mut ls| now - ls < 3_600_000);
                 map.iter()
                     .filter(|(_, p)| matches!(p.cls.as_str(), "RTG" | "ES") && (now - p.last_seen_ms) / 1000 <= STALE_AFTER_S)
                     .filter_map(|(id, p)| {
@@ -5017,6 +5049,18 @@ pub fn spawn_rtg_pos_hist(lm: Arc<LiveMap>, pool: PgPool) {
                     })
                     .collect()
             };
+            if fixes.len() > RTG_WRITE_MAX {
+                // 자르지 않고 이번 틱을 통째로 거른다: 기기 모집단이 말이 안 되는 상태면 상류가
+                // 고장난 것이고, 그때 일부만 골라 쓰면 어떤 기기가 빠졌는지 아무도 모른다.
+                let msg = format!(
+                    "rtg_pos_hist 한 틱에 {}행 — 상한 {} 초과, 이번 틱 기록을 건너뛴다(기기 ID 폭주 의심)",
+                    fixes.len(), RTG_WRITE_MAX
+                );
+                if crate::db::alert(&pool, "pos_write", "rtg_pos_hist", "crit", &msg, None).await {
+                    tracing::warn!(rows = fixes.len(), "POSITION WRITE OVER CAP");
+                }
+                continue;
+            }
             for f in &fixes {
                 last_seen.insert(f.0.clone(), f.1);
             }
@@ -5099,7 +5143,8 @@ pub fn spawn_cycle_pickup_correct(pool: PgPool) {
 pub fn spawn_pos_hist_hifreq(lm: Arc<LiveMap>, pool: PgPool) {
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(Duration::from_secs(3));
-        let mut last: HashMap<String, (f64, f64)> = HashMap::new();
+        // (lat, lon, 마지막 기록 ms) — 시각을 함께 들고 있어야 나이 기준으로 정리할 수 있다.
+        let mut last: HashMap<String, (f64, f64, i64)> = HashMap::new();
         let mut n = 0u64;
         loop {
             ticker.tick().await;
@@ -5110,16 +5155,35 @@ pub fn spawn_pos_hist_hifreq(lm: Arc<LiveMap>, pool: PgPool) {
             let ts = Utc::now();
             let rows: Vec<(String, f64, f64)> = {
                 let map = lm.devices.read().await;
+                // 이 이동-중복제거 캐시는 한 번도 정리된 적이 없어 프로세스가 본 모든 ID 가 영구
+                // 누적됐다. 다만 "기기 지도에 있는가"로 털면 안 된다 — 지도는 600초 침묵이면
+                // 항목을 버리는데, 단말은 정지 시 침묵하므로(reference: 멈추면 침묵) 주차·대기
+                // 지점의 트럭이 그렇게 빠졌다가 돌아오면 기준점을 잃어 **안 움직였는데도 한 행을
+                // 더 쓴다**. 실측 하루 14,298건(1.13%)이고 하필 정지 지점에 몰려서, 이 표를 먹는
+                // 도로망 추론 래스터를 밀 수 있다. 그래서 나이로만 턴다.
+                last.retain(|_, &mut (_, _, t)| now - t < 3_600_000);
                 map.iter()
                     .filter(|(_, p)| p.cls == "TT" && (now - p.last_seen_ms) / 1000 <= STALE_AFTER_S)
                     .filter_map(|(id, p)| {
-                        let moved = last.get(id).map(|&(la, lo)| dist_m((la, lo), (p.lat, p.lon)) > 5.0).unwrap_or(true);
+                        let moved = last.get(id).map(|&(la, lo, _)| dist_m((la, lo), (p.lat, p.lon)) > 5.0).unwrap_or(true);
                         moved.then(|| (id.clone(), p.lat, p.lon))
                     })
                     .collect()
             };
+            if rows.len() > POS_WRITE_MAX {
+                // 자르지 않고 이번 틱을 통째로 거른다: 기기 모집단이 말이 안 되는 상태면 상류가
+                // 고장난 것이고, 그때 일부만 골라 쓰면 어떤 기기가 빠졌는지 아무도 모른다.
+                let msg = format!(
+                    "truck_pos_hifreq 한 틱에 {}행 — 상한 {} 초과, 이번 틱 기록을 건너뛴다(기기 ID 폭주 의심)",
+                    rows.len(), POS_WRITE_MAX
+                );
+                if crate::db::alert(&pool, "pos_write", "truck_pos_hifreq", "crit", &msg, None).await {
+                    tracing::warn!(rows = rows.len(), "POSITION WRITE OVER CAP");
+                }
+                continue;
+            }
             for r in &rows {
-                last.insert(r.0.clone(), (r.1, r.2));
+                last.insert(r.0.clone(), (r.1, r.2, now));
             }
             if rows.is_empty() {
                 continue;

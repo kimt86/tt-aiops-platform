@@ -56,18 +56,36 @@ impl RoadGraph {
             .execute(&mut *tx)
             .await
             .ok()?;
+        // Bound the FETCH, not just the allocation that follows it. The sparsity guard below used to
+        // be the only check, and it runs after both of these have already been fully materialised —
+        // so a road_node table that had somehow grown huge would exhaust memory here, before
+        // anything got a chance to refuse. LIMIT+1 makes the read itself bounded and doubles as the
+        // anomaly detector: coming back full means the table is not what this router expects.
+        // Measured 2026-08-02: 7,696 nodes / 7,839 edges, so the cap is ~26x real size.
+        const ROW_MAX: i64 = 200_000;
         let nodes_raw: Vec<(i32, f64, f64)> =
-            sqlx::query_as("SELECT id, lat, lon FROM road_node ORDER BY id")
+            sqlx::query_as("SELECT id, lat, lon FROM road_node ORDER BY id LIMIT $1")
+                .bind(ROW_MAX + 1)
                 .fetch_all(&mut *tx)
                 .await
                 .ok()?;
         let edges: Vec<(i32, i32, f64, Option<f64>, bool)> =
-            sqlx::query_as("SELECT from_id, to_id, len_m, speed_kmh, oneway FROM road_edge")
+            sqlx::query_as("SELECT from_id, to_id, len_m, speed_kmh, oneway FROM road_edge LIMIT $1")
+                .bind(ROW_MAX + 1)
                 .fetch_all(&mut *tx)
                 .await
                 .ok()?;
         let _ = tx.commit().await;
         if nodes_raw.is_empty() {
+            return None;
+        }
+        if nodes_raw.len() as i64 > ROW_MAX || edges.len() as i64 > ROW_MAX {
+            tracing::error!(
+                nodes = nodes_raw.len(),
+                edges = edges.len(),
+                row_max = ROW_MAX,
+                "road graph exceeds the row cap — refusing to build the router"
+            );
             return None;
         }
         let maxid = nodes_raw.iter().map(|r| r.0).max().unwrap_or(0).max(0) as usize;
@@ -77,13 +95,24 @@ impl RoadGraph {
         // the always-on API — the same shape as the 2026-07-28 raster blowup that OOM-killed the
         // box (a raster sized by the farthest GPS fix instead of the terminal). Refuse and fall
         // back to no router, which degrades routing but keeps the process alive.
+        // Two independent limits. ⚠ They must be chosen TOGETHER or one of them is dead code: the
+        // first version paired ROW_MAX=200k (→ ratio fires above maxid+1 = 800k) with a 64MB byte
+        // cap (→ fires above maxid+1 = 1.68M), so the byte condition could never be the deciding
+        // one and the comment claiming it was "what actually protects the process" was false.
+        // 16MB fires above maxid+1 = 419k, i.e. INSIDE the ratio's 800k, so it genuinely binds for
+        // a large-but-not-sparse graph — while still admitting a dense ROW_MAX table (200k × 40B
+        // = 8MB). Real graph is 7.7k nodes = 0.3MB.
         const ID_SLACK: usize = 4; // dense ids give maxid+1 == len; allow generous slack
-        if maxid + 1 > nodes_raw.len().saturating_mul(ID_SLACK).max(1 << 16) {
+        const ALLOC_MAX_BYTES: usize = 16 * 1024 * 1024;
+        let alloc_bytes = (maxid + 1).saturating_mul(40);
+        if maxid + 1 > nodes_raw.len().saturating_mul(ID_SLACK).max(1 << 16)
+            || alloc_bytes > ALLOC_MAX_BYTES
+        {
             tracing::error!(
                 maxid,
                 nodes = nodes_raw.len(),
-                would_alloc_mb = (maxid + 1) * 40 / 1_048_576,
-                "road_node ids implausibly sparse — refusing to build the router"
+                would_alloc_mb = alloc_bytes / 1_048_576,
+                "road_node ids implausibly sparse or too large — refusing to build the router"
             );
             return None;
         }
