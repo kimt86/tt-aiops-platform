@@ -14,7 +14,8 @@
   <p class="kc-lede">레이아웃·라우터가 준비된 시뮬레이터에 해측(QC↔야드, TT) 배차를 모델링하는 기획 — 에뮬레이터(장비 물리) ↔ 정책(배차) 구조, 장비 모듈, 시나리오 스키마, 동적 QC 작업지점·베이이동·해치커버, 정책 훅·보정. 지금은 <strong>해측만</strong>(게이트는 나중).</p>
   <div class="kc-meta"><span class="kc-badge kind">배차 · 시뮬레이터 기획</span><span class="kc-badge living">구현자용</span></div>
 
-  <div class="kc-cal note"><span class="h">전제·범위</span><p><strong>독자</strong>: 시뮬레이터 구현자. <strong>전제</strong>: 레이아웃 + 라우터는 이미 준비됨 — 빠진 건 <strong>에뮬레이터 장비 모듈 + 시뮬레이션 시나리오</strong>. <strong>범위(지금)</strong>: 해측(quayside)만 — QC ↔ 야드 블록을 TT가 나르는 양하(DS)·적하(LD). 게이트(외부트럭·반출입)는 나중. 모든 수치/공식은 라이브 코드·DB로 검증(2026-07-01, MYT=UTC+8).</p></div>
+  <div class="kc-cal note"><span class="h">전제·범위</span><p><strong>독자</strong>: 시뮬레이터 구현자. <strong>전제</strong>: 레이아웃 + 라우터는 이미 준비됨. <strong>모델링 범위(지금)</strong>: 해측(quayside)만 — QC ↔ 야드 블록을 TT가 나르는 양하(DS)·적하(LD). 게이트 <em>모델링</em>은 나중이지만 <strong>게이트 자료는 이미 시나리오에 실려 나간다</strong>(§4 <code>landside</code>) — 외부 트럭이 언제 들어오고 나갔는지가 야드 부하로 들어오므로, 모델링을 시작할 때 자료를 새로 모을 필요는 없다.</p>
+  <p><strong>이 문서의 상태</strong>: §4·§5는 <strong>실제로 나가는 것</strong>을 적은 계약이다(2026-08-03 라이브 확인). 나머지 절은 아직 <strong>기획</strong>이다 — 시뮬레이터 구현체는 없다. 수치·공식은 라이브 코드·DB로 검증(§3.6은 2026-07-01, §4·§5는 2026-08-03, MYT=UTC+8).</p></div>
 
   <h2>1. "해측 작업"의 정확한 정의</h2>
   <p>해측 = QC가 선박을 작업하고 그 컨테이너를 <strong>내부 트럭(TT)</strong>이 QC ↔ 야드 블록으로 나르는 사이클.</p>
@@ -131,31 +132,67 @@ t=465  [YC] YcServiceDone → TT_42 자유 → 다음 결정틱(t=480) 후보
   <div class="kc-cal note"><span class="h">★ 순수주행(구간시간) OD — 도로망 경로시간→실제 곡선으로 가동 (2026-07-02)</span><p>순수주행 = 주행 구간 시간(출발→작업지점 도달; 경로 정체 포함·핸드오버 대기 제외) → <strong>배차 cost = 추론 도로망 최단시간 경로를 실측 곡선으로 변환</strong>(<code>roadgraph.rs RouteCost/CostCurve</code>: <code>road_route_eval</code>에서 경로시간 6구간별 실제 p50/p90 초를 매듭으로 직접 학습 — 단조 잠금·짧은 경로 바닥 ~89s·매듭 보간). L3 폴백(라우팅 불능 ~3%) = 같은 표의 맨해튼→실제 곡선(콜드스타트만 <code>quay_manhattan_m ÷ 3.30 m/s</code>). Stage-2 cost = 빈차 도착시간 = <code>free_in</code>(곧빔 잔여) + TRAVEL. <em>처음의 "비율 × 경로시간, 4구간+중점보간"은 당일 리뷰 탈락(비단조 역전·바닥 소실). 소스 변천: 순수-OD → 실현 → 움직인순간만 → 구간시간 → 도로망 곡선(현재). 삭제됨(STALE): <code>learn_travel_zone225_pure</code>, <code>learn_travel_drive_sample</code>, <code>learn_eval</code>, <code>learn_crane_approach</code>, <code>learn_leg_decomp</code>, <code>learn_travel_zone225_drive</code>. <code>learn_travel_zone225</code>(실현·핸드오버 포함)은 갱신되나 cost엔 미사용.</em> 자세히 → <a href="/kc/learn/travel-time.html">이동시간 모델</a>.</p></div>
 
   <h2>4. ★ 시나리오 구조</h2>
-  <p>에뮬레이터를 초기화·구동하는 모든 것. 모듈 상태(§3) + 적부계획.</p>
-  <pre><code>Scenario {
-  meta: { id, start_ts, duration_s, decision_tick_s: 60, source: "replay:&lt;win&gt;"|"synthetic", seed },
-  vessels: [ { vessel_id, voyage, berth_id, berth_loc, estwkc_ts, estdep_ts, cutoff_ts,
-    bays: [ { bay, dh:"D"|"H", job:"D"|"L", qty } ] } ],          // queuename 디코드=적부계획
-  cranes: [ { qc_id, vessel_id, start_loc,
-    queue: [ { bay, dh, job, qty, deadline_ts } ] } ],            // seq 순서. work 단위
-  yards:  [ { block_id, loc, latlon, dims:{rows,bays,tiers}, pitch:{row_m,bay_m} } ],
-  equipment_specs: {                                             // 실측 분포(§3.6), 로그정규 샘플
-    qc_move_s:  { DS: 90,  LD: 121 },
-    yc_service: { DS: [10,51,140], LD: [10,76,164] },            // p10/p50/p90
-    hatch_s:    { ds: 428, ld: 496 }, bay_change_s: 180 },
-  fleet: [ { ytno, loc, latlon, state, free_at_offset_s } ],     // truck_pos_hist/classify_tt/free_in
-  env:    { travel:"router", policy_od:"router"|"learned", stochastic: bool },
-  policy: { kind:"ours"|"tos_baseline", params:{ SWITCH_PENALTY_S, NEED_HORIZON_S, fleet_size, ... } }
-}</code></pre>
-  <p><strong>개별 work는 시나리오에 정적으로 박지 않음</strong> — QC 모듈이 <code>queue</code>(베이 플랜)를 walk하며 동적 생성(베이이동·해치커버·STALL이 ready/작업지점을 시점마다 바꿈). 각 work: <code>{work_id, qc_id, queuename, container, twin_key, quay_loc=QC현재위치(동적), yard_loc=block, deadline_ts(정적)}</code>.</p>
-  <div class="kc-cal note"><span class="h">§4-주 마감</span><p><code>deadline = min(estdep−버퍼, estwkc[가드])</code>. estwkc는 대부분 쓰레기라 <strong>출항 0~6h前 정상값일 때만</strong>(라이브 <code>finish_by</code> 로직). 선박은 정시 출항 → deadline 정책무관 정적. ready는 §3.2 동적.</p></div>
+  <p>기간을 고르면 파일 <strong>두 개</strong>가 나온다 — 그 기간에 무슨 일이 있었나(<code>scenario</code>)와 장비가 얼마나 빨리 움직이나(<code>emulator</code>). 아래는 <strong>기획이 아니라 실제로 나가는 모양</strong>(2026-08-03 라이브 확인).</p>
+  <pre><code>scenario {
+  meta:     { window:[from,to], home_port:"MYPKG", source:"scengen", summary:{…신뢰 지표…} },
+  vessels:  [ { vessel_id, voyage, vsl_name, loa_m, beam_m, total_bays,
+                berth:      { berthno, side, startpos_m },
+                schedule:   { berth_ts, depart_ts, est_depart_ts, cutoff_ts },
+                cranes:     [ 크레인 이름 ],
+                containers: [ 실제 무브 1건 = 1원소 ] } ],
+  cranes:   [ { qc_id, moves,
+                queue: [ { seq, vessel_id, voyage, bay, dh:"D"|"H", job:"D"|"L", qty,
+                           observed_from, observed_to } ] } ],
+  landside: { note, moves_total, gate_in, gate_out, trucks_unique,
+              slot_known, gate_ts_known, exit_ts_known, moves:[…] },
+  equipment:{ note, span_gap_min, qc:[…], rtg:[…], tt_fleet:{…} },
+  yard_t0:  { as_of, note, cells_total, moves_replayed, blocks:[…], cells:[…] }
+}
+emulator  { qc_move_s, yc_service, hatch_s, bay_change_s, drive_speed_ms, _provenance }</code></pre>
+
+  <div class="kc-cal danger"><span class="h">★먼저 읽을 것 — <code>meta.summary</code>의 신뢰 지표</span><p>이 서브시스템에서 가장 위험한 실패는 <strong>조용히 반쪽인 파일</strong>이다. 자료가 없는 창은 오류를 내지 않고 <strong>한산한 터미널</strong>처럼 보인다. 그래서 <code>cranes[]</code>를 읽기 <strong>전에</strong> 아래를 본다.</p>
+  <ul>
+    <li><code>queue_pct</code> — 그 기간 안벽 무브 중 작업 목록에 들어간 비율. <strong>100에 가깝지 않으면 그 창은 리플레이로 쓸 수 없다.</strong> 무브가 목록에 들어가려면 칸 이름표와 선박이 있어야 하는데 이름표는 <strong>2026-07-30 02:12Z부터</strong>다. 실측: 07-31 창 100%(3,061/3,061) · 07-25 창 <strong>0%(0/3,533)</strong>.</li>
+    <li><code>vessels_with_eta</code> — 출항 예정시각을 가진 배 수. 없으면 그 배는 채점이 안 된다(아래 §4-주).</li>
+    <li><code>gate_time_pct</code> · <code>gate_slot_pct</code> — 육측의 시각·야드자리 충족률.</li>
+    <li><code>enriched_pct</code> — 컨테이너 속성 충족률. <strong>방향을 뭉갠 값이라 주의</strong>: 양하는 사실상 전부, 적하는 극히 일부다.</li>
+  </ul></div>
+
+  <div class="kc-cal warn"><span class="h">★<code>cranes[]</code>는 계획이 아니라 <strong>실제로 한 작업</strong>이다</span><p>안벽크레인은 작업을 <strong>고르지 않는다</strong> — 받은 적부계획을 수행할 뿐이고 배차처럼 의사결정을 하지 않는다. 즉 크레인은 이 시뮬레이션의 <strong>의사결정 대상이 아니라 경계 조건</strong>이고, 관측된 순서를 그대로 쓰는 것은 충실도의 타협이 아니라 올바른 모델이다.</p>
+  <p>계획을 쓰면 오히려 틀린다 — <strong>배는 계획을 다 못 하고 떠난다.</strong> 출항한 41항차 실측에서 계획됐으나 실행 안 된 것이 805개였다(CVAS 003/2026 한 척만 계획 4,430 대 실적 4,121). 계획을 넘기면 시뮬레이터가 <strong>일어나지 않은 무브</strong>를 수행하고, 롤오버·마감으로 빠진 몫을 배차 탓으로 돌리게 된다.</p>
+  <ul>
+    <li><strong>합계가 아니라 방문 단위.</strong> 크레인이 칸으로 되돌아가는 것은 갠트리 이동 비용이 드는 실제 사건이고 흔하다 — C37이 22D-D → 22H-D → 10D-D → <strong>22H-D(단 1개)</strong> → 10D-D. 베이로 합치면 이게 지워진다.</li>
+    <li><strong><code>vessel_id</code>가 크레인이 아니라 큐 항목에 있다.</strong> 크레인 하나에 배 하나가 아니다 — 실측 73대 중 41대가 2척 이상, 한 대는 4척.</li>
+    <li><strong><code>observed_from/to</code>는 일정이 아니라 출처 표시.</strong> 실제로 그렇게 흘러갔다는 기록일 뿐이고, 타이밍은 시뮬레이터가 큐와 시험 중인 정책으로 정한다. 채점(그 타이밍을 재현했나)에 쓰라고 남긴다.</li>
+    <li><code>bay</code>는 <strong>40ft 베이 라벨</strong>이다. 20ft 베이는 인접 홀수가 그 아래로 묶인다.</li>
+  </ul></div>
+
+  <div class="kc-cal note"><span class="h">§4-주 마감 — <strong>계산해서 넣지 않는다</strong></span><p>원래 식은 <code>deadline = min(estdep−버퍼, estwkc[가드])</code>였다. 실제로는 <strong><code>estwkc</code>가 이 스키마에 없고</strong>(수집 대상이 아니다), <strong>버퍼는 실행의 정책 파라미터</strong>이지 자료에 박을 상수가 아니다. 그래서 원시 시각만 내보낸다 — <code>est_depart_ts</code>(약속)와 <code>depart_ts</code>(실제). 버퍼는 받는 쪽이 정한다.</p>
+  <p><strong>개선을 재는 기준선이 <code>est_depart_ts</code>다.</strong> 배차를 개선해도 배가 컨테이너를 더 싣지는 않는다(적부계획 고정) — 개선은 <strong>일찍 끝나는 것</strong>으로만 나타난다. 실측 예: LKGD 018/2026 예정 08-01 16:36 대 실제 09:46 = <strong>6시간 50분 일찍</strong>. <code>depart_ts</code>는 배가 떠난 뒤에야, 그리고 라이브 스케줄의 약 2일 창 안에서만 채워진다.</p></div>
+
+  <div class="kc-cal note"><span class="h">기획에 있었으나 <strong>안 나가는 것</strong></span>
+  <ul>
+    <li><code>yards[]</code>(블록 좌표·격자) — <code>scenario.yard_block</code>에 좌표 컬럼 자체가 없다. 로컬 <code>learn_topos_point</code>로 302블록 중 300개가 매칭되므로 만들 수는 있다(미구현).</li>
+    <li><code>fleet[]</code>(시작 시각 트럭별 위치·상태) — 미구현. <code>equipment.tt_fleet</code>은 30분 버킷 <strong>대수 곡선</strong>이라 초기화용이 아니다.</li>
+    <li><code>cranes[].start_loc</code> — 미구현.</li>
+    <li><code>env</code>·<code>policy</code> — 수집물이 아니라 <strong>실행 설정</strong>이라 시나리오 파일에 넣지 않았다. 넣을지 자체가 열린 결정.</li>
+    <li><code>equipment_specs</code>가 시나리오 안이 아니라 <strong>별 파일</strong>(<code>emulator</code>)로 나간다. 키 표기도 소문자(<code>ds</code>/<code>ld</code>)이고 <code>yc_service</code>는 6종(<code>ds ld rh ah gi go</code>)이다.</li>
+    <li><code>meta</code>의 <code>id</code>·<code>duration_s</code>·<code>decision_tick_s</code>·<code>seed</code> — 미구현(<code>window</code>가 <code>start_ts</code>와 <code>duration_s</code>를 덮는다).</li>
+  </ul></div>
 
   <h2>5. 시나리오 만들기 — 리플레이 vs 합성</h2>
   <ul>
     <li><strong>(A) 합성 — 1차 권장</strong>: 선박 수·QC 수·베이 플랜(베이수×덱/홀드×수량)·블록 분포·트럭 수·마감여유·트윈비율 파라미터화. 부하/공급비/적부패턴을 의도대로 통제.</li>
-    <li><strong>(B) 리플레이</strong>: 충실 윈도 = 최근 약 2일(병목 GPS <code>truck_pos_hist</code> 2일). start_ts 트럭위치·QC 큐·마감·cadence를 실데이터로. <strong>반사실 불가</strong>(정책 바뀌면 궤적이 달라져 과거 GPS 재생 불가) → 초기조건+적부계획만 실데이터, 이후 전진 시뮬. TOS 실제배차는 baseline 교차검증용.</li>
+    <li><strong>(B) 리플레이</strong> — <strong>구현됨</strong>(§4가 그 산출물). 작업 목록은 <strong>안벽크레인이 실제로 한 것</strong>에서 나온다. <strong>반사실은 여전히 제한적</strong>: 무엇을·어느 순서로는 고정이고 시뮬레이터의 자유는 <strong>언제</strong>뿐이다. 그래서 답할 수 있는 질문은 <em>"배차를 바꾸면 이 배가 몇 시간 일찍 끝나나"</em>이고, <em>"처리량이 느나"</em>는 아니다 — 적부계획이 고정이라 애초에 늘지 않는다.</li>
   </ul>
-  <p><em><code>live_*</code>는 매 ETL 덮어쓰기 → 과거 큐·마감 추이 미보존. 장기 리플레이엔 append 이력테이블 별건.</em></p>
+  <div class="kc-cal warn"><span class="h">리플레이가 가능한 기간 — 천장이 셋</span>
+  <ul>
+    <li><strong>2026-07-30 02:12Z</strong> — 안벽 무브에 칸 이름표가 붙기 시작한 시각. 그 이전 창은 작업 목록을 만들 수 없다(<code>queue_pct</code>가 0으로 나온다).</li>
+    <li><strong>약 2일</strong> — 트럭 위치 이력(<code>truck_pos_hist</code>)이 그만큼만 남는다. 시작 시각의 트럭 배치를 실데이터로 하려면 이 안이어야 한다.</li>
+    <li><strong>약 9일</strong> — 야드 이동 이력이 시작된 시점. <code>yard_t0</code>의 하한.</li>
+  </ul>
+  <p>계획을 아무리 과거까지 끌어와도 이 셋을 넘지 못한다. <strong>기간을 늘리는 쪽이 아니라 최근 창의 충실도를 100%로 만드는 쪽</strong>이 실효가 있다.</p></div>
+  <p><em><code>live_*</code>는 매 ETL 덮어쓰기라 그 자체로는 과거가 없다. 적부계획은 <strong>별도로 아카이브하고 있다</strong>(<code>scenario.qc_plan</code>) — 시나리오 본체에는 안 들어가지만 <strong>"하려던 일"의 유일한 기록</strong>이라, 계획 대비 실적을 보려면 그것이 필요하고 지나가면 다시 만들 수 없다.</em></p>
 
   <h2>6. 정책 훅 (코드 재사용 — 재구현 금지)</h2>
   <p>매 <code>decision_tick_s</code>(60s): <code>snapshot → 배차</code>. 에뮬레이터 상태에서 snapshot 합성 → 정책 호출 → 주문을 에뮬레이터가 실행.</p>
