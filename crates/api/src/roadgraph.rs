@@ -379,6 +379,27 @@ impl JobCurves {
     }
 }
 
+/// The road graph was CORRUPT from 2026-07-24 to the fix on 07-28 (connectors ballooned from 118km
+/// to 379km because the inference raster had been degraded by corrupt GPS — commit 6bacb8b). Route
+/// TIMES computed on that graph are inflated, while `actual_s` is real measured travel — so those
+/// pairs teach the curve "this route time corresponds to a SHORTER actual", i.e. they make the cost
+/// OPTIMISTIC, and an optimistic cost makes the matcher believe a truck can reach work it cannot.
+///
+/// Measured 2026-08-03 on the live 14-day window (excluded vs included, p50 knots):
+///   route 178s: 121 → 128s (+5.8%) · 341s: 180 → 188s (+4.4%) · 705s: 290 → 297s (+2.4%)
+/// Short bins move ≤1.4%. Contaminated rows are 2,904 of 11,501 (25%).
+///
+/// ⚠ A dated exclusion, not a rule — DELETE IT once 07-28 falls out of the 14-day window (≈08-11),
+/// after which it is a no-op that only confuses the next reader.
+/// ⚠ A row-level physical filter was tried FIRST and rejected: the route/Manhattan ratio does not
+/// separate the two populations (at a 1.5 cut it drops 30.7% of contaminated rows but also 21.3% of
+/// clean ones; p90 2.51 vs 2.35, p99 7.93 vs 7.89 — they overlap). Legitimate detours look the same
+/// as inflated connectors from a single row, so only the date separates them.
+/// Bounds are UTC and deliberately generous on both ends: mislabelling a few clean hours costs far
+/// less than leaving contaminated ones in.
+const CONTAMINATED_GRAPH: &str =
+    " AND NOT (ts >= timestamptz '2026-07-23 12:00+00' AND ts < timestamptz '2026-07-28 04:00+00')";
+
 /// Fit one estimator→actual curve from road_route_eval, optionally restricted to a job type.
 /// `xcol`/`base_where`/`bins` are code constants (never user input) so the format! is injection-safe.
 async fn fit_cost_curve(
@@ -391,7 +412,8 @@ async fn fit_cost_curve(
                 percentile_cont(0.9) WITHIN GROUP (ORDER BY actual_s)::float8,
                 count(*)
            FROM road_route_eval
-          WHERE {base_where} AND actual_s BETWEEN 10 AND 3600 AND ts > now() - interval '14 days'{jt_clause}
+          WHERE {base_where} AND actual_s BETWEEN 10 AND 3600 AND ts > now() - interval '14 days'
+                {CONTAMINATED_GRAPH}{jt_clause}
           GROUP BY width_bucket({xcol}::float8, ARRAY[{bins}])"
     );
     let rows: Vec<(Option<f64>, Option<f64>, Option<f64>, i64)> =
