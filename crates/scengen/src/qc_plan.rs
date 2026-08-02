@@ -64,6 +64,18 @@ const POST_BERTH_ARCHIVE_H: i64 = 4;
 /// so 99 accepts the normal case without waiting out the window for a box or two of drift.
 const COMPLETE_PCT: f64 = 99.0;
 
+/// Band the coverage monitor calls healthy, as a percentage of the call's declared counts. Plans get
+/// edited between our capture and the call's van counters settling, and a 1-3 box difference on a
+/// 400-box call is that, not a lost plan — 246 of 254 archived calls sit inside this band.
+///
+/// Symmetric on purpose. The original check only looked for a SHORT archive, which meant the
+/// crane-double-count bug (fixed in mig 0113) inflated 26 of 80 live calls to as much as 316% of
+/// their declared totals and the monitor never said a word. An archive holding more work than the
+/// ship declared builds a scenario with moves that were never planned; that is as wrong as a short
+/// one, and it now gets counted.
+const COVERAGE_LO_PCT: f64 = 95.0;
+const COVERAGE_HI_PCT: f64 = 105.0;
+
 /// What defines a NEW revision. Deliberately excludes comp_qty (progress) and plan_qty (which is not
 /// the remainder and wobbles between three different meanings — see mig 0110 note 6).
 type RevKey = (String, Option<i32>, Option<i32>, Option<String>);
@@ -340,30 +352,35 @@ async fn tick(pool: &PgPool, run_id: i64) -> Result<()> {
 /// captured against what the call declared, so a lost plan was completely silent — and a scenario
 /// built on a short plan is wrong in a way that looks perfectly normal.
 ///
-/// Two conditions, both measured against the call's own declared counts (disvan / loadvan):
+/// Three conditions, all measured against the call's own declared counts (disvan / loadvan):
 ///   * a berthed call we never archived pre-berth — its plan has to come from the Oracle backfill;
-///   * a sealed call whose archived totals fall below what it declared.
+///   * a sealed call whose archived totals fall below what it declared;
+///   * a sealed call whose archived totals exceed it — see COVERAGE_HI_PCT for why that counts.
+///
 /// The alert refreshes while the condition holds and stops being refreshed when it clears, so it
 /// drops off the banner by itself (mig 0107's contract — there is deliberately no ack).
 async fn coverage_alert(pool: &PgPool) -> Result<()> {
-    // 95%, not 100%: plans get edited between our capture and the call's own van counters settling,
-    // and a 1-3 box difference on a 400-box call is that, not a lost plan. Measured spread on
-    // healthy calls was 99.2-100.0%.
-    let bad: Option<(i64, i64)> = sqlx::query_as(
+    let bad: Option<(i64, i64, i64)> = sqlx::query_as(
+        // pct_* are numeric (round()), and a bare $1 next to one is inferred as numeric — which an
+        // f64 bind cannot satisfy. Cast the column, not the parameter, so $1 lands as float8.
         "SELECT count(*) FILTER (WHERE sealed_reason IN ('missed_preberth', 'window_expired')),
                 count(*) FILTER (WHERE sealed_reason NOT IN ('missed_preberth', 'window_expired')
-                                   AND (pct_d < 95 OR pct_l < 95))
+                                   AND (pct_d::float8 < $1 OR pct_l::float8 < $1)),
+                count(*) FILTER (WHERE sealed_reason NOT IN ('missed_preberth', 'window_expired')
+                                   AND (pct_d::float8 > $2 OR pct_l::float8 > $2))
            FROM scenario.qc_plan_coverage
           WHERE coalesce(actber_ts, sealed_ts) > now() - interval '7 days'",
     )
+    .bind(COVERAGE_LO_PCT)
+    .bind(COVERAGE_HI_PCT)
     .fetch_optional(pool)
     .await?;
-    let Some((missed, short)) = bad else { return Ok(()) };
-    if missed == 0 && short == 0 {
+    let Some((missed, short, over)) = bad else { return Ok(()) };
+    if missed == 0 && short == 0 && over == 0 {
         return Ok(());
     }
     let msg = format!(
-        "안벽 계획 아카이브 부족 — 온전히 담지 못한 항차 {missed}건(늦게 발견했거나 창 안에 계획이 안 나옴), 신고량보다 적게 저장된 항차 {short}건 (최근 7일)"
+        "안벽 계획 아카이브가 신고량과 안 맞음 — 온전히 담지 못한 항차 {missed}건(늦게 발견했거나 창 안에 계획이 안 나옴), 적게 저장된 항차 {short}건, 많게 저장된 항차 {over}건 (최근 7일)"
     );
     // warn, not crit: scenarios for those calls are unavailable, which is a gap, not an outage.
     let _ = sqlx::query(
@@ -552,9 +569,15 @@ async fn backfill_tick(pool: &PgPool, run_id: i64, target: &str, cfg: &state::Co
                     (SELECT count(*) FROM scenario.qc_plan WHERE vessel=$1 AND voyage=$2),
                     (SELECT count(DISTINCT (qc, queuename)) FROM scenario.qc_plan
                       WHERE vessel=$1 AND voyage=$2),
-                    (SELECT sum(total_qty) FROM (
-                        SELECT DISTINCT ON (qc, queuename) total_qty FROM scenario.qc_plan
-                         WHERE vessel=$1 AND voyage=$2 ORDER BY qc, queuename, rev DESC) z),
+                    -- Folded by queue name (mig 0113's fold): a bay reassigned between cranes has a
+                    -- row under each, and summing them straight inflates qty_latest. The live path
+                    -- sums one snapshot so it never saw this; backfill reads the whole call at once.
+                    (SELECT sum(tq) FROM (
+                        SELECT queuename, max(total_qty) tq FROM (
+                            SELECT DISTINCT ON (qc, queuename) qc, queuename, total_qty
+                              FROM scenario.qc_plan WHERE vessel=$1 AND voyage=$2
+                             ORDER BY qc, queuename, rev DESC) z
+                         GROUP BY queuename) y),
                     vc.actber, $3, $4, now(), $5, 'oracle_backfill'
                FROM scenario.vessel_call vc WHERE vc.vessel=$1 AND vc.voyage=$2
              ON CONFLICT (vessel, voyage) DO UPDATE SET
