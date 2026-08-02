@@ -2838,14 +2838,16 @@ pub fn spawn_travel_aggregator(pool: PgPool) {
             .execute(&pool)
             .await;
             crate::db::prune(&pool, "learn_travel_sample", "DELETE FROM learn_travel_sample WHERE captured_at < now() - interval '30 days'").await;
-            // refresh the realized zone summary (참조용 — the dispatch cost is the road-network route
-            // time, roadgraph::RouteCost; the 순수주행 격자 matview was dropped in mig 0082).
-            let _ = sqlx::query("REFRESH MATERIALIZED VIEW CONCURRENTLY learn_travel_zone225")
-                .execute(&pool)
-                .await;
-            // [pure-driving OD pipeline removed] — dispatch cost now uses REALIZED learn_travel_zone225
-            // (it already carries route congestion empirically). drive_sample / zone225_pure /
-            // topos_sample / topos_pure dropped in mig 0073.
+            // [dropped mig 0112] the 225m realized zone summary (learn_travel_zone225) and its lookup
+            // function used to be refreshed here every 5 minutes at 2.3s a go — with no reader
+            // anywhere: no code, no view, and the one DB function that read it had no callers either.
+            // Dispatch cost comes from the road-network route curve (roadgraph::RouteCost) since
+            // mig 0082. Refreshing it cost ~11 minutes of DB work a day to keep 68MB nobody looked at.
+            // [pure-driving OD pipeline removed] drive_sample / zone225_pure / topos_sample /
+            // topos_pure dropped in mig 0073. ⚠ The line that used to sit here said the dispatch cost
+            // "now uses REALIZED learn_travel_zone225" — that stopped being true at mig 0082 and stayed
+            // in the file for a month, so every reader had to go and check whether the grid still fed
+            // the matcher. It does not: the cost is the road-network route curve (roadgraph::RouteCost).
             let _ = sqlx::query(
                 "INSERT INTO learn_travel_metric
                    (captured_at, samples, od_pairs, confident_pairs, median_speed_kmh,
