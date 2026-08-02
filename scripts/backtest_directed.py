@@ -3,11 +3,26 @@
 # lane field (learn_lane_cell: per ~22m cell → heading, one-way/two-way (directionality), mean speed).
 # Edge u->v allowed if v is a road cell AND (u two-way, OR bearing(u->v) aligns with u's heading=one-way).
 # Weight = travel TIME (dist / cell speed). Backtest: route O->D, predict time, vs Manhattan vs actual.
-import csv, math
+import csv, math, os, sys
 import numpy as np
 from scipy.spatial import cKDTree
 from scipy.sparse import csr_matrix
 from scipy.sparse.csgraph import dijkstra
+
+# Same scratch convention as the producers. These readers were left on /tmp when commit 5a24c7e moved
+# the writers to /var/tmp/roadscratch, so they have been pointing at a directory nothing writes to.
+SCRATCH = os.environ.get('ROADSCRATCH', '/var/tmp/roadscratch')
+
+def need(path, how):
+    if not os.path.exists(path):
+        sys.exit(f'missing {path}\n  produce it with: {how}\n  (override the directory with ROADSCRATCH)')
+    return path
+
+LANES = need(f'{SCRATCH}/lane_cells.tsv', 'scripts/reinfer_roadgraph.sh')
+# legs_od.tsv is a hand-made dump: origin_lat, origin_lon, dest_lat, dest_lon, drive_seconds (TSV).
+LEGS = need(f'{SCRATCH}/legs_od.tsv',
+            "psql -tAF'\\t' -c 'SELECT o_lat,o_lon,d_lat,d_lon,drive_s FROM <your leg query>' "
+            f"> {SCRATCH}/legs_od.tsv")
 
 CELL_DEG = 0.0002                 # lane grid ~22m
 ONEWAY_DIR = 0.6                  # directionality above this = enforce one-way (forward only)
@@ -15,9 +30,18 @@ ALIGN_DEG = 75.0                  # bearing within this of heading = "forward"
 COS, SIN = 0.86777, 0.49697       # quay-axis (Manhattan baseline)
 
 cells = {}                        # (i,j) -> (lat,lon,heading,dir,speed_mps)
-for r in csv.reader(open('/tmp/lane_cells.tsv'), delimiter='\t'):
-    if len(r) < 6: continue
-    lat, lon, _passes, hd, di, spd = float(r[0]), float(r[1]), float(r[2]), float(r[3]), float(r[4]), float(r[5])
+for r in csv.reader(open(LANES), delimiter='\t'):
+    # TWO layouts exist and only one of them is produced here. reinfer_roadgraph.sh dumps 5 columns
+    # (lat, lon, heading, directionality, speed) with the passes filter already applied in SQL; this
+    # script was written against a 6-column hand dump that also carried `passes`. Insisting on 6
+    # would silently skip every row of the pipeline's own file and report a clean zero-leg result,
+    # which is worse than crashing. Accept both.
+    if len(r) == 5:
+        lat, lon, hd, di, spd = (float(x) for x in r[:5])
+    elif len(r) >= 6:
+        lat, lon, _passes, hd, di, spd = (float(x) for x in r[:6])
+    else:
+        continue
     i, j = round(lat / CELL_DEG), round(lon / CELL_DEG)
     cells[(i, j)] = (lat, lon, hd, di, max(5.0, spd) / 3.6)   # speed floor 5km/h → m/s
 
@@ -51,7 +75,7 @@ for (i, j), (lat, lon, hd, di, spd) in cells.items():
 A = csr_matrix((W, (I, J)), shape=(len(keys), len(keys)))
 
 legs = []
-for r in csv.reader(open('/tmp/legs_od.tsv'), delimiter='\t'):
+for r in csv.reader(open(LEGS), delimiter='\t'):
     if len(r) < 5: continue
     ola, olo, dla, dlo, ds = map(float, r)
     ox, oy = (olo - lo.min()) * mlon, (ola - la.min()) * mlat

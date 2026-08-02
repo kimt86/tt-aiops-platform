@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 # GPS map inference (B): build a trusted road network from our OWN truck traces (not the imported graph).
 # density(densified GPS) -> smooth -> road mask -> skeleton (1px road centerlines) -> [graph].
-# Input: /tmp/gps_moving.tsv  (ytno \t epoch \t lat \t lon, ordered by truck,ts).  Run with .venv-geo.
+# Input: $ROADSCRATCH/gps_moving.tsv  (ytno \t epoch \t lat \t lon, ordered by truck,ts). Run with
+# .venv-geo. Scratch defaults to /var/tmp/roadscratch — NOT /tmp, which is RAM on this host.
 import csv, math, sys, os
 import numpy as np
 SCRATCH = os.environ.get('ROADSCRATCH', '/var/tmp/roadscratch')  # redirect big temp files off the RAM tmpfs

@@ -1,11 +1,32 @@
 #!/usr/bin/env python3
 # Stage 3-4: does GPS-inferred-graph shortest-path predict pure drive time better than Manhattan?
 # Pixel-level routing graph from skeleton + Dijkstra. Compares graph-path / Manhattan / straight vs actual drive_s.
-import numpy as np, math, csv
+import numpy as np, math, csv, os, sys
 from scipy.spatial import cKDTree
 from scipy.sparse import csr_matrix
 from scipy.sparse.csgraph import dijkstra
-d = np.load('/tmp/road_raster.npz')
+
+# Same scratch convention as the producers (infer_road_network.py, reinfer_roadgraph.sh). These used
+# to read /tmp, which is a 124GB tmpfs — RAM — on this host; commit 5a24c7e moved the WRITERS to
+# /var/tmp/roadscratch and left these readers pointing at the old place, so they have been looking at
+# a directory nothing writes to since.
+SCRATCH = os.environ.get('ROADSCRATCH', '/var/tmp/roadscratch')
+
+def need(path, how):
+    """Fail with the path and how to produce it. A bare FileNotFoundError here sends you hunting for
+    a file whose location just moved."""
+    if not os.path.exists(path):
+        sys.exit(f'missing {path}\n  produce it with: {how}\n  (override the directory with ROADSCRATCH)')
+    return path
+
+RASTER = need(f'{SCRATCH}/road_raster.npz', 'scripts/infer_road_network.py')
+# legs_od.tsv has no producer in this repo — it is a hand-made dump. Columns, tab separated, no header:
+#   origin_lat  origin_lon  dest_lat  dest_lon  drive_seconds
+LEGS = need(f'{SCRATCH}/legs_od.tsv',
+            "psql -tAF'\\t' -c 'SELECT o_lat,o_lon,d_lat,d_lon,drive_s FROM <your leg query>' "
+            f"> {SCRATCH}/legs_od.tsv")
+
+d = np.load(RASTER)
 skel = d['skel']; la0, lo0, mlat, mlon, cell = map(float, (d['la0'], d['lo0'], d['mlat'], d['mlon'], d['cell']))
 COS, SIN = 0.86777, 0.49697            # quay-axis rotation (livemap GRID_COS/SIN)
 ys, xs = np.where(skel)                 # skeleton pixels (row=y/lat, col=x/lon)
@@ -25,7 +46,7 @@ A = csr_matrix((Wt, (I, J)), shape=(len(idx), len(idx)))
 def merc(la, lo): return ((lo - lo0) * mlon, (la - la0) * mlat)
 # load legs, snap
 legs = []
-for row in csv.reader(open('/tmp/legs_od.tsv'), delimiter='\t'):
+for row in csv.reader(open(LEGS), delimiter='\t'):
     if len(row) < 5: continue
     ola, olo, dla, dlo, ds = map(float, row)
     ox, oy = merc(ola, olo); dx, dy = merc(dla, dlo)
