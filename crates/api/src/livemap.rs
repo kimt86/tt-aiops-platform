@@ -3945,10 +3945,44 @@ const COMMIT_LOCK_S: i64 = 1200;
 // and the per-crane truck cap (NEED_HORIZON/move) bounds demand there. See spawn_stage2_shadow.
 // per-container QC handling time (for the bucket's service window + the needed-trucks cap)
 const DS_MOVE_S: i64 = 90;
-const LD_MOVE_S: i64 = 110;
+// LD_MOVE_S was 110s. Measured 2026-08-03 on consecutive comp_ts of a continuously-working crane:
+// DS p50 90s (the DS constant is exact), LD p50 132s — the LD constant ran 20% optimistic, and it
+// scales the deadline spread term ((cap/2)*move_s), so LD deadlines were short by that much too.
+const LD_MOVE_S: i64 = 132;
 // a bucket can only usefully consume trucks as fast as the QC works through it — cap the trucks we
 // commit to one bucket at what it can serve within this horizon (spreads trucks across more QCs).
-const NEED_HORIZON_S: i64 = 900;
+//
+// ⚠⚠ This must be at least as long as the journey a truck has to make, or the cap silences work the
+// matcher could actually have served. Measured 2026-08-03: the required lead (p90 travel + the
+// unmodelled legs, learn_dispatch_lead) is DS p90 877s but LD p90 1,693s — so at 900s the share of
+// LD recommendations whose journey fits inside the horizon was **0.0%**. LD feasibility could not
+// exceed ~10% no matter what the matcher did, while real crane starvation ran 8.9%.
+//
+// It is now derived per job type: lead + a pad for the free-time prediction error. The asymmetry is
+// physical, not a special case — for DS the handover IS the pickup (truck drives to the QC and is
+// loaded there), for LD the handover is the DROP at the quay and the whole laden leg comes after the
+// pickup. mig 0116 measures exactly that gap (DS +75s / LD +1,084s).
+// ⚠⚠ DEFAULT OFF — this is a diagnosis that is not yet validated as an improvement.
+// Widening the horizon lets one crane absorb more trucks, and the original comment above was right
+// that the cap is what "spreads trucks across more QCs". Measured on the live shadow, normalised by
+// truck count (which varies with time of day, so the raw counts are confounded):
+//     cranes served per truck   before → after
+//        ~30 trucks/tick        14.1%  → 13.6%
+//        ~50 trucks/tick        13.6%  → 12.7%
+//        ~70 trucks/tick        13.9%  → 11.9%
+// i.e. the cost (less crane spread) is real and reproducible, while the benefit (feasibility that
+// tracks actual starvation) is still unmeasured. Shipping it on that balance would be exactly the
+// "measurement-free improvement" the A/B harness above exists to prevent. Turn on with
+// `STAGE2_NEED_HORIZON=1`, or `=ab` once the harness carries this arm.
+static NEED_HORIZON_MODE: AtomicU8 = AtomicU8::new(0);
+const NEED_HORIZON_BASE_S: i64 = 900;   // floor = the old constant; never shrink below it
+const NEED_HORIZON_PAD_S: i64 = 300;    // free-time prediction slack (cycle_pred_shadow |err| p50 ~303s)
+const NEED_HORIZON_MAX_S: i64 = 3_000;  // hard ceiling — this term sizes the solver, see works_raw
+// The per-crane cap has always been computed with these move times. Kept separate from the physical
+// LD_MOVE_S so that correcting the physics (110 → measured 132) does not silently tighten the cap
+// while the lever is off — with the lever off the cap must reproduce the historical value exactly.
+const CAP_MOVE_DS_S: i64 = 90;
+const CAP_MOVE_LD_S: i64 = 110;
 
 // ── 출항 역산 마감 → Stage-1 선택 티어 (SHADOW) ──────────────────────────────────────────────
 // 마감을 '값'이 아니라 '계층'으로만 쓴다. work_eta에는 DS +600s(workpool.rs DS_WORK_ETA_BIAS_S)·
@@ -4324,6 +4358,13 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(Duration::from_secs(60));
         let mut tick = 0u64;
+        NEED_HORIZON_MODE.store(
+            match std::env::var("STAGE2_NEED_HORIZON").unwrap_or_default().as_str() {
+                "1" => 1,
+                _ => 0, // default OFF — the cost is measured, the benefit is not (see the const above)
+            },
+            Ordering::Relaxed,
+        );
         DEP_TIER_MODE.store(
             match std::env::var("STAGE2_DEP_TIER").unwrap_or_default().as_str() {
                 "1" => 1,
@@ -4355,6 +4396,32 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                 "SELECT DISTINCT qc FROM qc_wait_qc_sample WHERE ts > now() - interval '90 seconds' AND starving_real",
             )
             .fetch_all(&pool).await.unwrap_or_default().into_iter().collect();
+            // mig 0116 — seconds between REACHING THE PICKUP POINT and the crane handover that our
+            // travel model does not count. For DS the pickup point IS the crane, so this is small
+            // (~74s of queue). For LD the pickup point is the YARD BLOCK while the deadline is the
+            // QC at the quay, so the entire laden leg (RTG service + block→quay drive + quay queue)
+            // was missing — measured ~1,014s. Comparing "time to reach the block" against "when the
+            // QC needs it" is what drove LD feasibility to 30.9% while real crane starvation was
+            // only 6–16%. Feasibility ONLY — never the edge cost (Stage-2 stays pure empty travel).
+            let lead_extra: HashMap<String, i64> = sqlx::query_as::<_, (String, i32)>(
+                "SELECT jobtype, extra_s FROM learn_dispatch_lead",
+            )
+            .fetch_all(&pool).await.unwrap_or_default()
+            .into_iter().map(|(j, e)| (j, (e as i64).clamp(0, 2400))).collect();
+            // Per-crane demand horizon, derived from the same measured lead. At the old flat 900s the
+            // LD journey (p90 1,693s) never fit, so LD buckets were capped to work the crane would
+            // reach within 15 minutes — work TOS had already dispatched ~21 minutes earlier. Every LD
+            // recommendation was therefore late by construction. See NEED_HORIZON_BASE_S.
+            let horizon_on = NEED_HORIZON_MODE.load(Ordering::Relaxed) == 1;
+            let need_horizon: HashMap<String, i64> = ["DS", "LD"].iter().map(|jt| {
+                if !horizon_on {
+                    return (jt.to_string(), NEED_HORIZON_BASE_S); // no-op: exactly the old constant
+                }
+                let lead = lead_extra.get(*jt).copied().unwrap_or(0);
+                let h = (lead + NEED_HORIZON_PAD_S + NEED_HORIZON_BASE_S / 2)
+                    .clamp(NEED_HORIZON_BASE_S, NEED_HORIZON_MAX_S);
+                (jt.to_string(), h)
+            }).collect();
             // ── move-log in-flight anchor ────────────────────────────────────────────────────
             // A truck is provably still working the moment a crane hands it a box: DS pickup is a
             // qc_move_log row, LD pickup an rtg_move_log row, and the trip closes with tt_move_log
@@ -4660,9 +4727,12 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                 // 기존 take 계산을 그대로 쓰는 내부 함수(캡처 없음 → 빌림 충돌 없음)
                 fn take_bucket(w: &crate::workpool::Stage2Work, oi: usize,
                                qc_room: &mut HashMap<String, i64>, acc: &mut i64,
-                               kept: &mut Vec<usize>, cap_by_oi: &mut HashMap<usize, i64>) -> i64 {
-                    let move_s = if w.jobtype == "LD" { LD_MOVE_S } else { DS_MOVE_S };
-                    let qc_cap = (NEED_HORIZON_S / move_s).max(1);
+                               kept: &mut Vec<usize>, cap_by_oi: &mut HashMap<usize, i64>,
+                               horizon: &HashMap<String, i64>) -> i64 {
+                    // Cap arithmetic uses the historical move constants on purpose — see CAP_MOVE_*.
+                    let move_s = if w.jobtype == "LD" { CAP_MOVE_LD_S } else { CAP_MOVE_DS_S };
+                    let h = horizon.get(&w.jobtype).copied().unwrap_or(NEED_HORIZON_BASE_S);
+                    let qc_cap = (h / move_s).max(1);
                     let room = qc_room.entry(w.qc.clone()).or_insert(qc_cap);
                     let take = (w.n.max(0) as i64).min(*room);
                     if take <= 0 {
@@ -4688,7 +4758,7 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                         dep_demoted_n += 1;                  // 강등 — 버리는 게 아니라 기본 패스에서 다시 만난다
                         continue;
                     }
-                    let took = take_bucket(&work[works[oi].0], oi, &mut qc_room, &mut acc, &mut kept, &mut cap_by_oi);
+                    let took = take_bucket(&work[works[oi].0], oi, &mut qc_room, &mut acc, &mut kept, &mut cap_by_oi, &need_horizon);
                     if urgent {
                         urgent_acc += took;
                     }
@@ -4706,7 +4776,7 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                     if cap_by_oi.contains_key(&oi) {
                         continue;                            // 승격 패스에서 이미 담김
                     }
-                    take_bucket(&work[works[oi].0], oi, &mut qc_room, &mut acc, &mut kept, &mut cap_by_oi);
+                    take_bucket(&work[works[oi].0], oi, &mut qc_room, &mut acc, &mut kept, &mut cap_by_oi, &need_horizon);
                 }
                 order = kept;
             }
@@ -4724,18 +4794,6 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
             // switch penalty). No urgency/starve/load-balance terms and no QC layer — those are Stage-1.
             let mut caps: Vec<i64> = Vec::with_capacity(order.len()); // per-bucket demand (Stage-1 capped)
             let mut deadlines: Vec<i64> = Vec::with_capacity(order.len()); // feasibility deadline ms per wpos
-            // mig 0116 — seconds between REACHING THE PICKUP POINT and the crane handover that our
-            // travel model does not count. For DS the pickup point IS the crane, so this is small
-            // (~74s of queue). For LD the pickup point is the YARD BLOCK while the deadline is the
-            // QC at the quay, so the entire laden leg (RTG service + block→quay drive + quay queue)
-            // was missing — measured ~1,014s. Comparing "time to reach the block" against "when the
-            // QC needs it" is what drove LD feasibility to 30.9% while real crane starvation was
-            // only 6–16%. Feasibility ONLY — never the edge cost (Stage-2 stays pure empty travel).
-            let lead_extra: HashMap<String, i64> = sqlx::query_as::<_, (String, i32)>(
-                "SELECT jobtype, extra_s FROM learn_dispatch_lead",
-            )
-            .fetch_all(&pool).await.unwrap_or_default()
-            .into_iter().map(|(j, e)| (j, (e as i64).clamp(0, 2400))).collect();
             // 출항 축 로깅용(정렬 후 wpos 인덱스로 재배열). 기존 deadlines[]와 '별개 축'이다 —
             // 절대 교체/융합하지 않는다(현행 지평 p50 1043s는 실제 도착 p90 538s와 같은 스케일이라
             // 진짜 물리는 지표인데, 출항 마감 p50 17041s로 바꾸면 전 구간 88% 평평한 상수가 된다).

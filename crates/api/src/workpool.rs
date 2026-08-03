@@ -402,7 +402,13 @@ pub(crate) async fn build_workpool(pool: PgPool) -> Result<WorkpoolOut, AppError
             // the whole per-crane effect we would be trying to read, so it fits noise. n=150 puts
             // SE near 105s. Cranes that never reach 150 in 7 days fall back to the global row —
             // which is the correct behaviour, not a gap.
-            let min_n = if bqc.is_empty() { 100 } else { 150 };
+            // Global rows: 100 → 50. Adding the horizon dimension (mig 0118) splits the same sample
+            // across 5 buckets, so a 100-row bar keeps the whole term at ZERO for hours after any
+            // change to the truth or the bias version — and zero is not neutral here, it is wrong by
+            // the full residual (LD +1,474s measured). A median off n=50 carries SE ≈ 250s against a
+            // σ≈1,400s spread; being 250s noisy beats being 1,474s wrong. Per-crane stays at 150 for
+            // the reason above — there the competing estimate is the global row, not zero.
+            let min_n = if bqc.is_empty() { 50 } else { 150 };
             if n < min_n {
                 continue;
             }
