@@ -4370,7 +4370,8 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
         NEED_HORIZON_MODE.store(
             match std::env::var("STAGE2_NEED_HORIZON").unwrap_or_default().as_str() {
                 "1" => 1,
-                _ => 0, // default OFF — the cost is measured, the benefit is not (see the const above)
+                "ab" => 2, // block-randomised A/B (mig 0119) — the only honest way to judge this arm
+                _ => 0,    // default OFF — the cost is measured, the benefit is not (see the const above)
             },
             Ordering::Relaxed,
         );
@@ -4421,7 +4422,16 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
             // LD journey (p90 1,693s) never fit, so LD buckets were capped to work the crane would
             // reach within 15 minutes — work TOS had already dispatched ~21 minutes earlier. Every LD
             // recommendation was therefore late by construction. See NEED_HORIZON_BASE_S.
-            let horizon_on = NEED_HORIZON_MODE.load(Ordering::Relaxed) == 1;
+            // A/B arm for the horizon lever. Same 30-min blocks as the departure-tier harness, but a
+            // DIFFERENT salt: sharing one would make the two levers' arms perfectly correlated and
+            // neither effect could be separated from the other.
+            let horizon_mode = NEED_HORIZON_MODE.load(Ordering::Relaxed);
+            let horizon_block = now / 1000 / 60 / AB_BLOCK_MIN;
+            let horizon_on = match horizon_mode {
+                1 => true,
+                2 => (splitmix64(horizon_block as u64 ^ 0x3C6E_F372_FE94_F82B) >> 63) & 1 == 1,
+                _ => false,
+            };
             let need_horizon: HashMap<String, i64> = ["DS", "LD"].iter().map(|jt| {
                 if !horizon_on {
                     return (jt.to_string(), NEED_HORIZON_BASE_S); // no-op: exactly the old constant
@@ -4941,8 +4951,8 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
             }
             let gap_pct = if opt_cost > 0 { 100.0 * (greedy_cost - opt_cost) as f64 / opt_cost as f64 } else { 0.0 };
             let solver_ins = sqlx::query(
-                "INSERT INTO stage2_solver_shadow (ts,tick,n_trucks,n_works,greedy_n,greedy_cost_s,optimal_n,optimal_cost_s,gap_pct,greedy_miss,optimal_miss,dep_tier_on,dep_tier0_n,dep_urgent_slots,dep_null_n,dep_demoted_n,ab_block,ab_warmup,works_raw)
-                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19) ON CONFLICT (ts) DO NOTHING",
+                "INSERT INTO stage2_solver_shadow (ts,tick,n_trucks,n_works,greedy_n,greedy_cost_s,optimal_n,optimal_cost_s,gap_pct,greedy_miss,optimal_miss,dep_tier_on,dep_tier0_n,dep_urgent_slots,dep_null_n,dep_demoted_n,ab_block,ab_warmup,works_raw,need_horizon_on)
+                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20) ON CONFLICT (ts) DO NOTHING",
             )
             .bind(ts).bind(tick as i64).bind(vehicles.len() as i32).bind(order.len() as i32)
             .bind(greedy_n).bind(greedy_cost).bind(assign.len() as i32).bind(opt_cost).bind(gap_pct as f32)
@@ -4955,6 +4965,7 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
             .bind(order.iter().filter(|&&oi| dep_slack[oi].is_none()).count() as i32)     // dep_null_n
             .bind(dep_demoted_n)                                                          // dep_demoted_n
             .bind(ab_block).bind(ab_warmup).bind(works_raw)                                // A/B 하네스
+            .bind(horizon_on)                                                             // mig 0119: 지평 팔
             .execute(&pool).await;
             if let Err(e) = solver_ins {
                 tracing::warn!(error = %e, "stage2_solver_shadow insert failed — 0104 마이그레이션 적용 여부 확인");
