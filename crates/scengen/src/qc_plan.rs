@@ -68,13 +68,28 @@ const COMPLETE_PCT: f64 = 99.0;
 /// edited between our capture and the call's van counters settling, and a 1-3 box difference on a
 /// 400-box call is that, not a lost plan — 246 of 254 archived calls sit inside this band.
 ///
-/// Symmetric on purpose. The original check only looked for a SHORT archive, which meant the
-/// crane-double-count bug (fixed in mig 0113) inflated 26 of 80 live calls to as much as 316% of
-/// their declared totals and the monitor never said a word. An archive holding more work than the
-/// ship declared builds a scenario with moves that were never planned; that is as wrong as a short
-/// one, and it now gets counted.
+/// ONE-SIDED, after trying the other way. An upper bound was added because the crane-double-count
+/// bug (mig 0113) had inflated 26 of 80 calls to 316% of declared while the monitor said nothing —
+/// a fair reaction, but the ratio cannot carry that meaning. An archive legitimately exceeds what a
+/// ship declared whenever the ship leaves work undone, which is normal (41 departed calls left 805
+/// containers unworked) and, worse, is indistinguishable from an in-progress call. Measured
+/// 2026-08-04: planned-over-actual reaches 1,780% on CODV 003/2026 — a call that berthed the same
+/// day and had barely started. Every one of the four calls the upper bound was firing on turned out
+/// to be unexecuted bays, not inflation: WLHD 001/2026's excess is six load queues with zero moves
+/// against a per-queue match of ±5 everywhere else.
+///
+/// The guard is not dropped, it is aimed properly — see AMBIGUOUS_QUEUE_WARN. Duplication is caught
+/// where it happens (two cranes disagreeing about one queue) instead of being inferred from a total.
 const COVERAGE_LO_PCT: f64 = 95.0;
-const COVERAGE_HI_PCT: f64 = 105.0;
+
+/// Queues where two or more REAL cranes claim the same bay-job with DIFFERENT quantities. This is
+/// the fold's blind spot made visible: it resolves them by preferring a real crane and then the
+/// larger number, which is a guess, and a guess that grows is the shape the old double-count bug
+/// actually had. Placeholder cranes (CR4, DC01..DC05) are excluded — a real crane and a placeholder
+/// disagreeing is expected and the fold handles it by construction.
+/// Measured 2026-08-04: 54 of 7,868 queues (0.7%), 500 of which carry more than one real crane at
+/// all. The threshold sits above that so today's normal churn is silent and a step change is not.
+const AMBIGUOUS_QUEUE_WARN: i64 = 150;
 
 /// What defines a NEW revision. Deliberately excludes comp_qty (progress) and plan_qty (which is not
 /// the remainder and wobbles between three different meanings — see mig 0110 note 6).
@@ -352,35 +367,48 @@ async fn tick(pool: &PgPool, run_id: i64) -> Result<()> {
 /// captured against what the call declared, so a lost plan was completely silent — and a scenario
 /// built on a short plan is wrong in a way that looks perfectly normal.
 ///
-/// Three conditions, all measured against the call's own declared counts (disvan / loadvan):
+/// Three conditions. Two compare against the call's own declared counts (disvan / loadvan) and only
+/// in the SHORT direction; the third looks for duplication directly rather than through a total:
 ///   * a berthed call we never archived pre-berth — its plan has to come from the Oracle backfill;
 ///   * a sealed call whose archived totals fall below what it declared;
-///   * a sealed call whose archived totals exceed it — see COVERAGE_HI_PCT for why that counts.
+///   * queues where two real cranes disagree on the quantity, so the fold is guessing.
 ///
 /// The alert refreshes while the condition holds and stops being refreshed when it clears, so it
 /// drops off the banner by itself (mig 0107's contract — there is deliberately no ack).
 async fn coverage_alert(pool: &PgPool) -> Result<()> {
-    let bad: Option<(i64, i64, i64)> = sqlx::query_as(
+    let bad: Option<(i64, i64)> = sqlx::query_as(
         // pct_* are numeric (round()), and a bare $1 next to one is inferred as numeric — which an
         // f64 bind cannot satisfy. Cast the column, not the parameter, so $1 lands as float8.
         "SELECT count(*) FILTER (WHERE sealed_reason IN ('missed_preberth', 'window_expired')),
                 count(*) FILTER (WHERE sealed_reason NOT IN ('missed_preberth', 'window_expired')
-                                   AND (pct_d::float8 < $1 OR pct_l::float8 < $1)),
-                count(*) FILTER (WHERE sealed_reason NOT IN ('missed_preberth', 'window_expired')
-                                   AND (pct_d::float8 > $2 OR pct_l::float8 > $2))
+                                   AND (pct_d::float8 < $1 OR pct_l::float8 < $1))
            FROM scenario.qc_plan_coverage
           WHERE coalesce(actber_ts, sealed_ts) > now() - interval '7 days'",
     )
     .bind(COVERAGE_LO_PCT)
-    .bind(COVERAGE_HI_PCT)
     .fetch_optional(pool)
     .await?;
-    let Some((missed, short, over)) = bad else { return Ok(()) };
-    if missed == 0 && short == 0 && over == 0 {
+    // Duplication, looked for where it happens. Real cranes only: a real crane and a placeholder
+    // disagreeing is the expected shape and the fold resolves it deterministically.
+    let ambiguous: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM (
+           SELECT 1 FROM (
+             SELECT DISTINCT ON (vessel, voyage, qc, queuename) vessel, voyage, qc, queuename, total_qty
+               FROM scenario.qc_plan
+              WHERE qc ~ '^(C|M|Z)[0-9]'
+              ORDER BY vessel, voyage, qc, queuename, rev DESC) l
+            GROUP BY vessel, voyage, queuename
+           HAVING count(DISTINCT total_qty) > 1) z",
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap_or(0);
+    let Some((missed, short)) = bad else { return Ok(()) };
+    if missed == 0 && short == 0 && ambiguous < AMBIGUOUS_QUEUE_WARN {
         return Ok(());
     }
     let msg = format!(
-        "안벽 계획 아카이브가 신고량과 안 맞음 — 온전히 담지 못한 항차 {missed}건(늦게 발견했거나 창 안에 계획이 안 나옴), 적게 저장된 항차 {short}건, 많게 저장된 항차 {over}건 (최근 7일)"
+        "안벽 계획 아카이브 점검 — 온전히 담지 못한 항차 {missed}건(늦게 발견했거나 창 안에 계획이 안 나옴), 신고량보다 적게 저장된 항차 {short}건, 크레인끼리 수량이 엇갈리는 큐 {ambiguous}개 (최근 7일)"
     );
     // warn, not crit: scenarios for those calls are unavailable, which is a gap, not an outage.
     let _ = sqlx::query(
