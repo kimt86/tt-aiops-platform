@@ -956,6 +956,13 @@ pub(crate) struct Stage2Work {
     pub(crate) deadline_ts: Option<DateTime<Utc>>,
     /// SHADOW: 이 베이의 총 처리 초(QueueOut.proc_s). 완료기한 → 시작기한 환산에 쓴다.
     pub(crate) proc_s: Option<i64>,
+    /// 설계 ②(mig 0120): 크레인 시작시각 − 작업유형별 트럭 준비시간 = **배차를 해야 할 시각**.
+    /// 이 값이 없어서 Stage-2 는 대신 "크레인 시작 + 크레인당 상한의 절반"을 마감으로 써 왔다 —
+    /// 트럭을 크레인에 흩뿌리려고 둔 상한(NEED_HORIZON_S)이 마감까지 정하고 있었다는 뜻이다.
+    /// 지금은 기록 전용(판정은 종전대로). 옛 축과 나란히 비교한 뒤 전환한다.
+    pub(crate) dispatch_deadline_ts: Option<DateTime<Utc>>,
+    /// 위에서 실제로 뺀 준비시간(초). 학습값(learn_dispatch_lead) 우선, 없으면 LEAD_*_S 상수.
+    pub(crate) dd_lead_s: Option<i64>,
 }
 
 /// Build the Stage-2 work-demand list from the same engine the dispatch page uses (build_workpool):
@@ -970,6 +977,7 @@ const LEAD_DS_S: i64 = 450;
 const LEAD_LD_S: i64 = 1180;
 
 pub(crate) async fn stage2_work_candidates(pool: PgPool) -> Result<Vec<Stage2Work>, AppError> {
+    let pool_for_lead = pool.clone();
     let wp = build_workpool(pool).await?;
     // (qc,vessel,queuename) = live_workqueue의 PK(0012:22)라 1:1 — dedup 불필요. work-ETA와 나란히
     // 출항 역산 마감(deadline_ts)·베이 처리시간(proc_s)도 같이 담는다(신규 계산 0, :465/:479에서 이미
@@ -983,10 +991,22 @@ pub(crate) async fn stage2_work_candidates(pool: PgPool) -> Result<Vec<Stage2Wor
             }
         }
     }
+    // 설계 ②의 "트럭 준비시간" = 작업 할당부터 QC 작업지점 도착까지. 학습값을 쓴다(mig 0116의
+    // realized_lead_s = TOS 실현 선행시간 = 배차 → 크레인 핸드오버, 7일 창으로 재측정).
+    // ⚠ 같은 표의 extra_s 가 아니다 — 그건 "픽업 지점 도착 **이후**" 남은 몫이라 주행이 빠져 있다.
+    // 학습값이 없으면 2026-07-01 실측 상수(LEAD_*_S)로 폴백. 실측 대조: 양하 455 vs 상수 450(일치),
+    // 적하 1,448 vs 상수 1,180(학습값이 23% 큼 — 상수는 5주 전 p75).
+    let lead_realized: HashMap<String, i64> = sqlx::query_as::<_, (String, i32)>(
+        "SELECT jobtype, realized_lead_s FROM learn_dispatch_lead",
+    )
+    .fetch_all(&pool_for_lead).await.unwrap_or_default()
+    .into_iter().map(|(j, v)| (j, (v as i64).clamp(60, 3600))).collect();
     let mut out = Vec::new();
     for c in &wp.candidates {
         let Some(qc) = c.qc.clone().filter(|s| !s.is_empty()) else { continue };
         let jt = c.jobtype.clone().unwrap_or_default();
+        let lead = lead_realized.get(&jt).copied()
+            .unwrap_or(if jt == "LD" { LEAD_LD_S } else { LEAD_DS_S });
         let row = eta.get(&(qc.clone(), c.vessel.clone(), c.queuename.clone())).copied();
         out.push(Stage2Work {
             qc,
@@ -998,6 +1018,8 @@ pub(crate) async fn stage2_work_candidates(pool: PgPool) -> Result<Vec<Stage2Wor
             work_eta_ts: row.map(|r| r.0),
             deadline_ts: row.and_then(|r| r.1),
             proc_s: row.and_then(|r| r.2),
+            dispatch_deadline_ts: row.map(|r| r.0 - chrono::Duration::seconds(lead)),
+            dd_lead_s: Some(lead),
         });
     }
     Ok(out)
