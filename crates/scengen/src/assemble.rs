@@ -47,6 +47,20 @@ const BAY_CHANGE_S: i64 = 180;
 const DRIVE_SPEED_MS: f64 = 6.33;
 /// Used only when the learner has no row for a job type yet.
 const QC_MOVE_S_FALLBACK: (i64, i64) = (90, 110);
+/// Cap on the gap between one crane's consecutive completions, in seconds. Copied from the learner
+/// (extractor/sql/qc_move_time.sql) so a window-measured number is comparable with the snapshot it
+/// replaces. The cap is the whole measurement: it drops meal breaks, idle stretches and bay/hatch
+/// transitions, leaving the per-container handling cadence rather than a shift log.
+const QC_GAP_CAP_S: (f64, f64) = (1.0, 300.0);
+/// Gaps a crane needs before its median counts, also the learner's threshold. A window too short or
+/// too quiet to clear this simply falls back — reported per job type, not silently averaged in.
+const QC_MIN_GAPS_PER_CRANE: i64 = 30;
+/// Cranes that must qualify before the window's own number is used. This is a FLEET parameter, and
+/// one crane is not a fleet. Measured on a 1-hour window: only a single crane cleared the gap
+/// threshold for load, so its personal rhythm would have become the published fleet figure while the
+/// sample count alone looked healthy. Below this the learner's multi-day, ~55-crane snapshot is the
+/// better estimate, and the scope field says which one was used.
+const QC_MIN_CRANES: i64 = 3;
 
 /// Build (scenario_out, emulator_out, summary) for [ws, we). Pure — no job/run side effects.
 pub async fn build(pool: &PgPool, ws: DateTime<Utc>, we: DateTime<Utc>) -> Result<(Value, Value, Value)> {
@@ -475,12 +489,63 @@ pub async fn build(pool: &PgPool, ws: DateTime<Utc>, we: DateTime<Utc>) -> Resul
           GROUP BY jobtype",
     ).bind(ws).bind(we).bind(YC_CAP_S.0 as i32).bind(YC_CAP_S.1 as i32).fetch_all(pool).await?;
 
+    // Same measure as the learner, but over THIS window — so a scenario describes the crane speed of
+    // the period it depicts instead of whatever the learner last refreshed to.
+    //
+    // The definition is copied deliberately, not invented (extractor/sql/qc_move_time.sql): the gap
+    // between one crane's consecutive completions, capped to [1,300]s. The cap is what makes it a
+    // handling cadence rather than a shift log — it drops meal breaks, idle stretches, and bay/hatch
+    // transitions, leaving the genuine per-container rhythm. Per-crane median first, then averaged
+    // across cranes, so one busy crane cannot set the fleet's number.
+    //
+    // Everything it needs is in qc_move_log, so this costs no Oracle. What it does NOT use is
+    // dur_s (COMP-ST): the equipment study rejected that as not capturing the lift cycle, and
+    // measured here it was worse than imprecise — capping dur_s to [1,300]s admitted 34% of
+    // discharge moves but 0.91% of load moves (median 1396s), so the published "load move time"
+    // was the median of a 0.9% selection-biased tail.
+    let qcw: Vec<(String, Option<f64>, i64, i64)> = sqlx::query_as(
+        "WITH g AS (
+           SELECT machno, jobtype,
+                  extract(epoch FROM comp_ts
+                          - lag(comp_ts) OVER (PARTITION BY machno ORDER BY comp_ts)) AS gap
+             FROM qc_move_log
+            WHERE comp_ts >= $1 AND comp_ts < $2
+              AND jobtype IN ('DS','LD') AND machno ~ '^[CMZ][0-9]+$'
+         ),
+         per_crane AS (
+           SELECT machno, jobtype,
+                  percentile_cont(0.5) WITHIN GROUP (ORDER BY gap) AS med, count(*) AS n
+             FROM g WHERE gap BETWEEN $3 AND $4
+            GROUP BY machno, jobtype HAVING count(*) >= $5
+         )
+         SELECT jobtype, avg(med)::float8, count(*)::bigint, coalesce(sum(n),0)::bigint
+           FROM per_crane GROUP BY jobtype",
+    )
+    .bind(ws).bind(we)
+    .bind(QC_GAP_CAP_S.0).bind(QC_GAP_CAP_S.1).bind(QC_MIN_GAPS_PER_CRANE)
+    .fetch_all(pool)
+    .await?;
+
     let qc_row = |jt: &str| qcl.iter().find(|r| r.0 == jt);
-    let qc_move_s = |jt: &str, fallback: i64| {
-        qc_row(jt).and_then(|r| r.1).map_or(fallback, |v| v.round() as i64)
+    let qcw_row = |jt: &str| {
+        qcw.iter().find(|r| r.0 == jt && r.1.is_some() && r.2 >= QC_MIN_CRANES)
     };
-    let qc_cranes = |jt: &str| qc_row(jt).map_or(0, |r| r.2);
-    let qc_n = |jt: &str| qc_row(jt).map_or(0, |r| r.3);
+    // Window first, learner second, constant last. A short window may not give any crane the
+    // minimum number of gaps, and that is a normal outcome rather than an error — which is exactly
+    // why the scope is reported per job type instead of being claimed once for the whole file.
+    let qc_move_s = |jt: &str, fallback: i64| {
+        qcw_row(jt)
+            .and_then(|r| r.1)
+            .or_else(|| qc_row(jt).and_then(|r| r.1))
+            .map_or(fallback, |v| v.round() as i64)
+    };
+    let qc_scope = |jt: &str| {
+        if qcw_row(jt).is_some() { "window" }
+        else if qc_row(jt).map_or(false, |r| r.1.is_some()) { "snapshot (learner — NOT this window)" }
+        else { "constant fallback" }
+    };
+    let qc_cranes = |jt: &str| qcw_row(jt).map_or_else(|| qc_row(jt).map_or(0, |r| r.2), |r| r.2);
+    let qc_n = |jt: &str| qcw_row(jt).map_or_else(|| qc_row(jt).map_or(0, |r| r.3), |r| r.3);
     let qc_as_of = qcl.iter().filter_map(|r| r.4).max();
 
     // Keyed by lowercased job type so a consumer can look up exactly the service it needs.
@@ -506,12 +571,16 @@ pub async fn build(pool: &PgPool, ws: DateTime<Utc>, we: DateTime<Utc>) -> Resul
         "_provenance": {
             "window": [ws.to_rfc3339(), we.to_rfc3339()],
             "qc_move_s": {
-                "source": "learn_qc_move_time (shift=ALL, mean of per-crane medians)",
-                "scope": "snapshot — the learner keeps only its latest refresh, so this is NOT window-specific",
-                "as_of": qc_as_of.map(|t| t.to_rfc3339()),
+                "source": "gap between one crane's consecutive completions, capped, per-crane median then averaged",
+                // Per job type, because a window can measure one and fall back for the other.
+                "scope": { "ds": qc_scope("DS"), "ld": qc_scope("LD") },
+                "cap_s": [QC_GAP_CAP_S.0, QC_GAP_CAP_S.1],
+                "min_gaps_per_crane": QC_MIN_GAPS_PER_CRANE,
+                "min_cranes": QC_MIN_CRANES,
                 "cranes": { "ds": qc_cranes("DS"), "ld": qc_cranes("LD") },
                 "samples": { "ds": qc_n("DS"), "ld": qc_n("LD") },
-                "fallback_used": { "ds": qc_row("DS").is_none(), "ld": qc_row("LD").is_none() },
+                // Only meaningful where scope fell back to the learner.
+                "learner_as_of": qc_as_of.map(|t| t.to_rfc3339()),
             },
             "yc_service": {
                 "source": "rtg_move_log", "scope": "window",
