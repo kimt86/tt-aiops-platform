@@ -286,7 +286,9 @@ pub async fn build(pool: &PgPool, ws: DateTime<Utc>, we: DateTime<Utc>) -> Resul
     // REAL move streams, deliberately NOT from TOS's assignment plan (JOB_CRANE_HISTORY): measured
     // against a collected ground truth, plan-derived crane->vessel attribution put 27% of quay
     // moves on the WRONG ship (whole crane-shifts misassigned), because the plan churns and is not
-    // what the crane actually worked. scenario.crane_deploy stays a plan-vs-actual comparison aid.
+    // what the crane actually worked. The plan-log collector that fed that comparison was retired
+    // once this replaced it (mig 0115): it had no timer, nothing read it, and its table had sat
+    // frozen since 2026-07-23 while the status page reported it as an unscheduled stream.
     //   qc  ← qc_move_log runs of one crane on one vessel  (vessel via move_hist, as in vessels[])
     //   rtg ← scenario.yard_move runs of one machine in one block (RTG + ES yard cranes)
     //   tt_fleet ← tt_move_log cycles [dispatch_ts, free_ts) overlapping each bucket. trk_id/ytno

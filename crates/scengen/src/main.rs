@@ -2,12 +2,11 @@
 //! Separate binary from the critical `extractor` on purpose (see lib.rs). Subcommands:
 //!   collect  — continuous, watermark-incremental move-stream pull (systemd timer)
 //!   assemble — on-demand LOCAL slice of a period -> scenario + emulator JSON (zero Oracle)
-//!   backfill — bounded pull of a past window into scenario.move_hist
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
-use scengen::{assemble, collect, cont_spec, crane_deploy, db, enrich, gate, qc_plan, serve, snapshot, yard};
+use scengen::{assemble, collect, cont_spec, db, enrich, gate, qc_plan, serve, snapshot, yard};
 
 #[derive(Parser)]
 #[command(
@@ -38,11 +37,6 @@ enum Command {
     },
     /// Yard-crane (RTG) move stream with decoded stack position -> scenario.yard_move.
     YardMoves {
-        #[arg(long, default_value = "oracle-prod")]
-        target: String,
-    },
-    /// QC deployment history (crane<->vessel assignments) -> scenario.crane_deploy.
-    CraneDeploy {
         #[arg(long, default_value = "oracle-prod")]
         target: String,
     },
@@ -77,15 +71,6 @@ enum Command {
         #[arg(long, default_value_t = 8899)]
         port: u16,
     },
-    /// Backfill a past window into scenario.move_hist (bounded, throttled).
-    Backfill {
-        #[arg(long)]
-        from: String,
-        #[arg(long)]
-        to: String,
-        #[arg(long, default_value = "oracle-prod")]
-        target: String,
-    },
 }
 
 #[tokio::main]
@@ -103,7 +88,6 @@ async fn main() -> Result<()> {
         Command::Snapshot { target } => snapshot::run(&pool, &target).await?,
         Command::Enrich { target } => enrich::run(&pool, &target).await?,
         Command::YardMoves { target } => yard::run(&pool, &target).await?,
-        Command::CraneDeploy { target } => crane_deploy::run(&pool, &target).await?,
         Command::Gate { target } => gate::run(&pool, &target).await?,
         Command::ContainerSpec { target } => cont_spec::run(&pool, &target).await?,
         Command::QcPlan {} => qc_plan::run(&pool).await?,
@@ -111,9 +95,6 @@ async fn main() -> Result<()> {
         Command::YardBuild {} => yard::build(&pool).await?,
         Command::Assemble {} => assemble::run(&pool).await?,
         Command::Serve { port } => serve::run(pool, port).await?,
-        Command::Backfill { from, to, target } => {
-            tracing::info!(%from, %to, %target, "backfill: skeleton stub — not yet implemented");
-        }
     }
     Ok(())
 }
