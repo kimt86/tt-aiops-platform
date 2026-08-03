@@ -1,0 +1,12 @@
+[Unit]
+Description=wp-tt scenario container-size lookup (ISOLATED, non-critical): ISO code for gate containers we do not know yet -> scenario.container_spec, so landside volume can be reported in TEU. Index-seek by container number, batched. Fault here never affects dispatch/dashboard extraction.
+After=network-online.target
+
+[Service]
+# 폭발 반경 제한(2026-07-28 OOM 장애 재발방지).
+MemoryMax=2G
+MemorySwapMax=0
+Type=oneshot
+EnvironmentFile=%h/projects/tt-aiops-platform/.env
+ExecStart=%h/projects/tt-aiops-platform/target/release/scengen container-spec --target oracle-prod
+Nice=19
