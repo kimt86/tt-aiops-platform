@@ -117,6 +117,10 @@ struct QueueOut {
     /// frontend staggers per-container consistently (avoids reconstructing from deadline_ts with a
     /// mismatched move time). NULL if the vessel has no ESTDEP.
     work_eta_ts: Option<DateTime<Utc>>,
+    /// work_eta_ts 에 실제로 더해진 학습 보정 초. 원본예측 = work_eta_ts - eta_bias_s.
+    /// 이걸 함께 기록해야 보정을 되먹임 없이 추정할 수 있다(mig 0113): 예전에는 보정된 값으로
+    /// 잔차를 재고 그 잔차로 보정을 '교체'해서 L_new = R - L_old 라는 진동이 생겼다.
+    eta_bias_s: i64,
     /// SHADOW: this bay's total processing seconds (moves + transition overhead).
     proc_s: Option<i64>,
 }
@@ -282,6 +286,7 @@ pub(crate) async fn build_workpool(pool: PgPool) -> Result<WorkpoolOut, AppError
                     remaining: (total - done).max(0),
                     deadline_ts: None,
                     work_eta_ts: None,
+                    eta_bias_s: 0,
                     proc_s: None,
                 }
             })
@@ -363,18 +368,34 @@ pub(crate) async fn build_workpool(pool: PgPool) -> Result<WorkpoolOut, AppError
                 }
             }
         }
-        // learned work-ETA residual: median(actual − predicted) per (crane, jobtype) from the shadow
-        // validation, DISPATCH-BAND horizon only (5–45 min; far predictions are re-plan-polluted).
-        // mig 0083, refreshed ~20 min by the pred logger. Self-recalibrating: predictions embed this
-        // term, so the residual converges toward 0 (integral controller, damped by the 7-day window).
-        // Measured need: LD near-horizon ran +21 min optimistic with NO static correction, and the DS
-        // static +600s was tuned on top of the ghost-transition bug fixed alongside this.
+        // learned work-ETA residual: median(crane start − RAW prediction) per (crane, jobtype) from
+        // the shadow validation, DISPATCH-BAND horizon only (5–45 min; far predictions are
+        // re-plan-polluted). mig 0083, rebuilt by mig 0113, refreshed ~20 min by the pred logger.
+        //
+        // ⚠ NOT an integral controller — an earlier version of this comment claimed it was, and that
+        // claim WAS the bug. The residual is now measured against the **raw** prediction
+        // (pred − applied_bias_s), so this is a one-shot estimate of a fixed offset:
+        // L = median(truth − raw). It does not converge toward 0 and must not. The old form measured
+        // against the *corrected* prediction, giving L_new = R − L_old — an oscillator, not a
+        // controller (measured pair: bias 693 ↔ residual 589 for LD). See db/migrations/0113.
+        //
+        // Measured 2026-08-03 on the corrected truth (qc_move_log.st_ts), 5–45 min window:
+        //   DS n=565 median  −35s   p10 −1085 / p90 +1351   MAE 788s
+        //   LD n=188 median +391s   p10  −806 / p90 +1506   MAE 804s
+        // The median offset this term corrects is SMALL next to a ±20 min spread that is essentially
+        // identical for both job types — so a per-crane median off a few dozen rows is noise, not
+        // signal (σ≈1040s ⇒ SE(median) at n=50 is ≈185s). Hence the per-crane floor below.
         let bias_rows: Vec<(String, String, i32, Option<i32>)> =
             sqlx::query_as("SELECT qc, jobtype, n, med_err_s FROM learn_work_eta_bias")
                 .fetch_all(&pool).await.unwrap_or_default();
         let mut eta_bias: std::collections::HashMap<(String, char), i64> = std::collections::HashMap::new();
         for (bqc, jt, n, med) in bias_rows {
-            let min_n = if bqc.is_empty() { 100 } else { 30 }; // '' = global-jobtype fallback row
+            // '' = global-jobtype fallback row. Per-crane floor raised 30 → 150 on the 2026-08-03
+            // spread measurement above: at n=30 the median's standard error (~240s) is LARGER than
+            // the whole per-crane effect we would be trying to read, so it fits noise. n=150 puts
+            // SE near 105s. Cranes that never reach 150 in 7 days fall back to the global row —
+            // which is the correct behaviour, not a gap.
+            let min_n = if bqc.is_empty() { 100 } else { 150 };
             if n < min_n {
                 continue;
             }
@@ -554,6 +575,7 @@ pub(crate) async fn build_workpool(pool: PgPool) -> Result<WorkpoolOut, AppError
                     let raw = eta_anchor + chrono::Duration::seconds(before as i64 + bias + learned);
                     let brk = shift_breaks_between(eta_anchor, raw) * SHIFT_BREAK_S;
                     qc.queues[qi].work_eta_ts = Some(raw + chrono::Duration::seconds(brk));
+                    qc.queues[qi].eta_bias_s = learned;
                     qc.queues[qi].proc_s = Some(procs[k] as i64);
                     // 마감 = 출항 목표 − (이 베이 다음부터 '이 배의 마지막 베이'까지 크레인이 해야 할
                     // 일 전부). 사이에 낀 다른 배 작업도 그 배의 완료를 실제로 늦추므로 포함한다.
@@ -727,34 +749,48 @@ pub fn spawn_dispatch_pred_logger(pool: PgPool) {
                 .execute(&pool)
                 .await;
             }
-            // (1a) DS containers are "worked" the instant the QC discharges (actv_ts ≈ QC move
-            // complete, verified ~0s) — resolve those with their actv_ts (exact ground truth). LD
-            // has no such per-container signal, so it falls through to pool-leave (1b, ~lagged).
-            let (mut ds_c, mut ds_t): (Vec<String>, Vec<DateTime<Utc>>) = (Vec::new(), Vec::new());
-            for qc in &wp.qcs {
-                for m in &qc.moves {
-                    if m.jobtype.as_deref() == Some("DS") {
-                        if let (Some(c), Some(a)) = (&m.contno, m.actv_ts) {
-                            ds_c.push(c.clone());
-                            ds_t.push(a);
-                        }
-                    }
-                }
-            }
-            if !ds_c.is_empty() {
-                let _ = sqlx::query(
-                    "UPDATE dispatch_pred_sample d SET resolved_at = v.actv
-                       FROM (SELECT unnest($1::text[]) AS contno, unnest($2::timestamptz[]) AS actv) v
-                      WHERE d.contno = v.contno AND d.resolved_at IS NULL",
-                )
-                .bind(&ds_c)
-                .bind(&ds_t)
-                .execute(&pool)
-                .await;
-            }
-            // (1b) anything else that left the pool = worked (LD, or DS we missed) — now (≈ lagged)
+            // (1a) Resolve from the CRANE'S OWN RECORD. `qc_move_log.st_ts` is when the QC actually
+            // started this container — exactly the event `work_eta_ts` predicts.
+            //
+            // ⚠ This used to apply to DS only. The comment here said "LD has no such per-container
+            // signal", and that was simply wrong: qc_move_log carries 75,201 LD rows over 7 days with
+            // contno + st_ts + comp_ts, live, on par with DS's 69,399. The claim came from looking at
+            // ONE source (the live work-pool snapshot, which only carries actv_ts for DS) and
+            // concluding the signal did not exist anywhere.
+            //
+            // What that cost (measured 2026-08-03, 5 days, n=37k): scored against the crane's real
+            // start the LD prediction is off by only +105s, but pool-leave lands +567s AFTER that
+            // start, so the corrector saw ~10 minutes of phantom lateness and had pushed the learned
+            // bias to +693s. DS never showed it because its own truth sits +55s from the crane start.
+            //
+            // Overwrites a row already resolved as 'pool': the pool-leave tick can beat the extractor
+            // (90s vs ~2min), so the accurate value often arrives second and must win.
             let _ = sqlx::query(
-                "UPDATE dispatch_pred_sample SET resolved_at=now() WHERE resolved_at IS NULL AND contno <> ALL($1)",
+                "WITH pick AS (
+                   SELECT d.id, m.st_ts
+                     FROM dispatch_pred_sample d
+                     JOIN LATERAL (
+                       SELECT q.st_ts FROM qc_move_log q
+                        WHERE q.contno = d.contno AND q.jobtype = d.jobtype
+                          AND q.st_ts >= d.logged_at
+                          AND q.st_ts <  d.logged_at + interval '6 hours'
+                        ORDER BY q.st_ts LIMIT 1
+                     ) m ON true
+                    WHERE (d.resolved_at IS NULL OR d.resolved_src = 'pool')
+                      AND d.logged_at > now() - interval '12 hours'
+                 )
+                 UPDATE dispatch_pred_sample d
+                    SET resolved_at = p.st_ts, resolved_src = 'qc'
+                   FROM pick p WHERE d.id = p.id",
+            )
+            .execute(&pool)
+            .await;
+            // (1b) Left the pool but the crane record has not landed (or never will) — close the row
+            // with the lagged pool-leave time and TAG it, so mig 0113's matview can ignore it.
+            // Letting this value teach the corrector is precisely what produced the runaway above.
+            let _ = sqlx::query(
+                "UPDATE dispatch_pred_sample SET resolved_at=now(), resolved_src='pool'
+                  WHERE resolved_at IS NULL AND contno <> ALL($1)",
             )
             .bind(&present)
             .execute(&pool)
@@ -771,10 +807,13 @@ pub fn spawn_dispatch_pred_logger(pool: PgPool) {
             // (3) log the front (≤6 new) containers of each QC's primary vessel
             for qc in &wp.qcs {
                 let Some(prim) = qc.vessels.first() else { continue };
-                let mut bay: HashMap<(&str, &str), (DateTime<Utc>, i64, i32)> = HashMap::new();
+                #[allow(clippy::type_complexity)]
+                let mut bay: HashMap<(&str, &str), (DateTime<Utc>, i64, i32, i64)> = HashMap::new();
                 for b in &qc.queues {
                     if let (Some(eta), Some(p)) = (b.work_eta_ts, b.proc_s) {
-                        bay.insert((b.vessel.as_str(), b.queuename.as_str()), (eta, p, b.remaining.max(1)));
+                        // 4번째 = 이 예측에 실제로 들어간 학습 보정(mig 0113). 함께 적재해야
+                        // 매뷰가 원본예측을 복원해 되먹임 없는 잔차를 잴 수 있다.
+                        bay.insert((b.vessel.as_str(), b.queuename.as_str()), (eta, p, b.remaining.max(1), b.eta_bias_s));
                     }
                 }
                 // order by genuine work order (bay sequence, then ETW within a bay) so the "front"
@@ -810,7 +849,7 @@ pub fn spawn_dispatch_pred_logger(pool: PgPool) {
                     if open.contains(contno) {
                         continue;
                     }
-                    let Some(&(eta, p, rem)) = bay.get(&key) else { continue };
+                    let Some(&(eta, p, rem, bias_s)) = bay.get(&key) else { continue };
                     let lead: i64 = if m.jobtype.as_deref() == Some("LD") { LEAD_LD_S } else { LEAD_DS_S };
                     let work_eta = eta + chrono::Duration::seconds(((i as f64 / rem as f64) * p as f64) as i64);
                     let deadline = work_eta - chrono::Duration::seconds(lead);
@@ -820,8 +859,8 @@ pub fn spawn_dispatch_pred_logger(pool: PgPool) {
                         if assigned { (Some(Utc::now()), Some(tick as i64), m.upd_ts) } else { (None, None, None) };
                     let _ = sqlx::query(
                         "INSERT INTO dispatch_pred_sample
-                           (qc, vessel, contno, queuename, jobtype, pred_work_eta_ts, dispatch_deadline_ts, assigned, slack_s, lead_s, became_assigned_at, became_assigned_tick, tos_upd_dt, etw_qc_ts)
-                         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)",
+                           (qc, vessel, contno, queuename, jobtype, pred_work_eta_ts, dispatch_deadline_ts, assigned, slack_s, lead_s, became_assigned_at, became_assigned_tick, tos_upd_dt, etw_qc_ts, applied_bias_s)
+                         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)",
                     )
                     .bind(&qc.qc)
                     .bind(&m.vessel)
@@ -839,6 +878,7 @@ pub fn spawn_dispatch_pred_logger(pool: PgPool) {
                     // accurate ETW (TOS RPC) snapshot at prediction time → enables the ETW-vs-pred
                     // horizon comparison once accumulated (mig 0084). NULL when the vessel/QC has none.
                     .bind(m.etw_accurate)
+                    .bind(bias_s as i32) // mig0113: 이 예측에 적용된 학습 보정(원본예측 복원용)
                     .execute(&pool)
                     .await;
                     logged += 1;
