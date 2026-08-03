@@ -793,6 +793,60 @@ pub async fn build(pool: &PgPool, ws: DateTime<Utc>, we: DateTime<Utc>) -> Resul
     Ok((scenario_out, emulator_out, summary))
 }
 
+/// The period a scenario can actually be assembled for, with the reason for each end.
+///
+/// This is NOT the same as "what we have rows for", and the difference used to be invisible. The
+/// landside streams reach back to June, so the download page — which derived its range from
+/// move_hist — offered nearly two months. But a scenario is a REPLAY, and a replay needs the crane
+/// work order, which lives in `qc_move_log.queuename` and only exists from 2026-07-30 10:12 MYT.
+/// Ask for a window before that and every quay move comes back without a bay, so `cranes[]` is
+/// empty and the file reads as a quiet terminal rather than as missing data.
+///
+/// The late end is bounded the same way: a window is only whole once EVERY stream has reached it.
+/// The gate stream is a catch-up walker rather than a live tail and normally trails by around an
+/// hour, so the last hour is not yet a complete scenario even though the quay rows are already in.
+///
+/// Both ends come from the collectors themselves — nothing is hardcoded, so the range widens on its
+/// own as collection continues.
+pub async fn usable_range(pool: &PgPool) -> Result<Value> {
+    let s: String = sqlx::query_scalar(
+        r#"
+        WITH floors(reason, ts) AS (
+          -- The binding one, by a wide margin. Without a bay label a quay move cannot enter the
+          -- work list at all, which is exactly what summary.queue_pct reports.
+          SELECT '크레인 작업 순서(queuename)', min(comp_ts) FROM qc_move_log WHERE queuename IS NOT NULL
+          UNION ALL
+          SELECT '선박 귀속', min(comp_ts) FROM scenario.move_hist
+          UNION ALL
+          SELECT '야드 이동', min(comp_ts) FROM scenario.yard_move
+        ),
+        -- Watermarks, not max(row): a watermark advances on every tick, so it says "collected up
+        -- to here" even through a quiet hour. max(row) would shrink the range every night simply
+        -- because no truck came through the gate.
+        ceils(reason, ts) AS (
+          SELECT source,
+                 CASE WHEN cursor_evt ~ '^[0-9]{14}'
+                      THEN (to_timestamp(substring(cursor_evt,1,14),'YYYYMMDDHH24MISS')::timestamp
+                            AT TIME ZONE 'Asia/Kuala_Lumpur')
+                      ELSE cursor_evt::timestamptz END
+            FROM scenario.watermark
+        ),
+        lo AS (SELECT reason, ts FROM floors WHERE ts IS NOT NULL ORDER BY ts DESC LIMIT 1),
+        hi AS (SELECT reason, ts FROM ceils  WHERE ts IS NOT NULL ORDER BY ts ASC  LIMIT 1)
+        SELECT jsonb_build_object(
+          'from', (SELECT ts FROM lo), 'from_reason', (SELECT reason FROM lo),
+          'to',   (SELECT ts FROM hi), 'to_reason',   (SELECT reason FROM hi),
+          'note', 'a scenario is a replay: it needs the crane work order, which starts when TOS began writing bay labels. the late end is where the slowest collector has reached — the newest work is real but not yet whole.',
+          'floors', (SELECT coalesce(jsonb_agg(jsonb_build_object('reason', reason, 'ts', ts) ORDER BY ts DESC), '[]'::jsonb) FROM floors),
+          'ceilings', (SELECT coalesce(jsonb_agg(jsonb_build_object('reason', reason, 'ts', ts) ORDER BY ts ASC), '[]'::jsonb) FROM ceils)
+        )::text
+        "#,
+    )
+    .fetch_one(pool)
+    .await?;
+    Ok(serde_json::from_str(&s)?)
+}
+
 /// Per-job-type mean of the per-crane median gap between consecutive quay-crane completions over
 /// `[from, to)`: (jobtype, mean median seconds, qualifying cranes, gaps). Cranes below
 /// QC_MIN_GAPS_PER_CRANE are dropped before averaging, so one busy crane cannot speak for the fleet.
