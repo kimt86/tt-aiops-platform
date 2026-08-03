@@ -58,9 +58,20 @@ const QC_MIN_GAPS_PER_CRANE: i64 = 30;
 /// Bay-change gap bounds (s) and the sample floor. 1800 drops shift breaks; 0 keeps the low end
 /// visible so a contaminated population shows itself rather than being trimmed into looking clean.
 const BAY_GAP_CAP_S: (f64, f64) = (0.0, 1800.0);
-/// Transitions needed before the window's own number is used. The estimator below is a densest-half
-/// mean, which needs a real population to find a peak in.
+/// Transitions needed before a measurement is used. The estimator below is a densest-half mean,
+/// which needs a real population to find a peak in.
 const BAY_MIN_SAMPLES: i64 = 100;
+/// Look-back lengths tried, in order, when the requested window is too short to clear
+/// BAY_MIN_SAMPLES on its own. Measured rate is ~7.6 bay transitions an hour, so an 8-hour window
+/// yields ~61 and cannot qualify while a day yields ~213 — the shortfall is the WINDOW, not the
+/// data, and dropping to a constant threw away a measurement that was there for the asking.
+///
+/// Each step ends at the requested window's end and reaches backwards, so the requested period is
+/// always inside the measured one and the answer never depends on data from after the scenario.
+/// Backwards is also the only direction always available: a window that ends now has no future.
+/// The first step that clears the floor wins, keeping the measurement as close to the window as it
+/// can be; 7 days is the stop, past which "recent" stops meaning anything.
+const BAY_WIDEN_DAYS: [i64; 3] = [1, 3, 7];
 /// Cranes that must qualify before the window's own number is used. This is a FLEET parameter, and
 /// one crane is not a fleet. Measured on a 1-hour window: only a single crane cleared the gap
 /// threshold for load, so its personal rhythm would have become the published fleet figure while the
@@ -526,28 +537,7 @@ pub async fn build(pool: &PgPool, ws: DateTime<Utc>, we: DateTime<Utc>) -> Resul
     // measured here it was worse than imprecise — capping dur_s to [1,300]s admitted 34% of
     // discharge moves but 0.91% of load moves (median 1396s), so the published "load move time"
     // was the median of a 0.9% selection-biased tail.
-    let qcw: Vec<(String, Option<f64>, i64, i64)> = sqlx::query_as(
-        "WITH g AS (
-           SELECT machno, jobtype,
-                  extract(epoch FROM comp_ts
-                          - lag(comp_ts) OVER (PARTITION BY machno ORDER BY comp_ts)) AS gap
-             FROM qc_move_log
-            WHERE comp_ts >= $1 AND comp_ts < $2
-              AND jobtype IN ('DS','LD') AND machno ~ '^[CMZ][0-9]+$'
-         ),
-         per_crane AS (
-           SELECT machno, jobtype,
-                  percentile_cont(0.5) WITHIN GROUP (ORDER BY gap) AS med, count(*) AS n
-             FROM g WHERE gap BETWEEN $3 AND $4
-            GROUP BY machno, jobtype HAVING count(*) >= $5
-         )
-         SELECT jobtype, avg(med)::float8, count(*)::bigint, coalesce(sum(n),0)::bigint
-           FROM per_crane GROUP BY jobtype",
-    )
-    .bind(ws).bind(we)
-    .bind(QC_GAP_CAP_S.0).bind(QC_GAP_CAP_S.1).bind(QC_MIN_GAPS_PER_CRANE)
-    .fetch_all(pool)
-    .await?;
+    let qcw = qc_gap_medians(pool, ws, we).await?;
 
     // bay_change_s — measured, from the gap between one crane finishing a bay and completing its
     // first container in the next one.
@@ -578,40 +568,35 @@ pub async fn build(pool: &PgPool, ws: DateTime<Utc>, we: DateTime<Utc>) -> Resul
     // deck↔hold transitions puts the densest half at 16..389s, and 16s cannot contain a lift plus a
     // hatch-cover operation. That population is contaminated by label changes that are not physical
     // hatch work, and nothing here separates them.
-    let bay_gap: Option<(Option<f64>, i64)> = sqlx::query_as(
-        r#"
-        WITH m AS (
-          SELECT machno, vessel, comp_ts,
-                 regexp_replace(queuename, '^([0-9]+[HD]-[DL])[0-9]+$', '\1') AS qk
-            FROM qc_move_log
-           WHERE comp_ts >= $1 AND comp_ts < $2 AND jobtype IN ('DS','LD')
-             AND queuename IS NOT NULL AND vessel IS NOT NULL AND machno ~ '^[CMZ][0-9]+$'
-        ),
-        b AS (SELECT *, CASE WHEN lag(qk) OVER w IS DISTINCT FROM qk
-                               OR lag(vessel) OVER w IS DISTINCT FROM vessel THEN 1 ELSE 0 END brk
-                FROM m WINDOW w AS (PARTITION BY machno ORDER BY comp_ts)),
-        r AS (SELECT *, sum(brk) OVER (PARTITION BY machno ORDER BY comp_ts) g FROM b),
-        v AS (SELECT machno, vessel, qk, g, min(comp_ts) st, max(comp_ts) en, count(*) n
-                FROM r GROUP BY 1,2,3,4),
-        t AS (SELECT *, lag(qk) OVER w pq, lag(en) OVER w pe, lag(n) OVER w pn
-                FROM v WINDOW w AS (PARTITION BY machno ORDER BY st)),
-        gap AS (
-          SELECT extract(epoch FROM st - pe) AS s FROM t
-           WHERE pe IS NOT NULL AND n >= 2 AND pn >= 2
-             AND substring(qk FROM '^[0-9]+') IS DISTINCT FROM substring(pq FROM '^[0-9]+')
-             AND extract(epoch FROM st - pe) BETWEEN $3 AND $4
-        ),
-        o AS (SELECT s, row_number() OVER (ORDER BY s) i, count(*) OVER () n FROM gap),
-        w2 AS (SELECT i, s lo, lead(s, (n/2)::int) OVER (ORDER BY s) hi FROM o),
-        best AS (SELECT i i0 FROM w2 WHERE hi IS NOT NULL ORDER BY hi - lo LIMIT 1)
-        SELECT avg(o.s)::float8, (SELECT max(n) FROM o)::bigint
-          FROM o, best
-         WHERE o.i BETWEEN best.i0 AND best.i0 + (SELECT max(n)/2 FROM o)
-        "#,
-    )
-    .bind(ws).bind(we).bind(BAY_GAP_CAP_S.0).bind(BAY_GAP_CAP_S.1)
-    .fetch_optional(pool)
-    .await?;
+    //
+    // WHEN THE WINDOW IS TOO SHORT, WIDEN THE MEASUREMENT — do not fall back to the constant. The
+    // gantry does not change speed because the caller asked for eight hours instead of a day, so a
+    // short window is a sampling problem and reaching further back solves it. Falling back threw
+    // away a real number in favour of a research constant, and did it silently enough that the two
+    // looked alike. What is NOT negotiable is saying which period the number came from, so the
+    // widened span is reported in provenance and the requested window is always inside it.
+    let bay_gap = {
+        let mut got = None;
+        for extra in std::iter::once(None).chain(BAY_WIDEN_DAYS.iter().map(|d| Some(*d))) {
+            let from = match extra {
+                None => ws,
+                Some(d) => we - chrono::Duration::days(d),
+            };
+            // A widening step that does not actually reach further back than the request is the
+            // request; skip it rather than paying for the same query twice.
+            if extra.is_some() && from >= ws {
+                continue;
+            }
+            let r = bay_gap_shorth(pool, from, we).await?;
+            let n = r.map_or(0, |(_, n)| n);
+            got = Some((from, r));
+            if n >= BAY_MIN_SAMPLES {
+                break;
+            }
+        }
+        got.unwrap_or((ws, None))
+    };
+    let (bay_from, bay_gap) = bay_gap;
 
     let qc_row = |jt: &str| qcl.iter().find(|r| r.0 == jt);
     let qcw_row = |jt: &str| {
@@ -638,11 +623,32 @@ pub async fn build(pool: &PgPool, ws: DateTime<Utc>, we: DateTime<Utc>) -> Resul
     // Subtract one container cycle — the interval ends at a completion, so it carries the first
     // lift in the new bay. Floored at 30s: a gantry move plus spotting cannot be quicker, and a
     // number below that means the population was contaminated, not that the crane was fast.
-    let one_cycle = (qc_move_s("DS", QC_MOVE_S_FALLBACK.0) + qc_move_s("LD", QC_MOVE_S_FALLBACK.1)) as f64 / 2.0;
+    //
+    // The cycle is measured over THE SAME SPAN as the gaps it is subtracted from. When the bay
+    // measurement widened, taking the cycle from the requested window instead would subtract a lift
+    // that was never inside the intervals being averaged — a small error (~4s, 2%) but a sourcing
+    // mistake, and this file's whole claim is that every number says where it came from.
+    let one_cycle = if bay_from < ws {
+        let w = qc_gap_medians(pool, bay_from, we).await?;
+        let m = |jt: &str, fb: i64| {
+            w.iter()
+                .find(|r| r.0 == jt && r.1.is_some() && r.2 >= QC_MIN_CRANES)
+                .and_then(|r| r.1)
+                .map_or(fb, |v| v.round() as i64)
+        };
+        (m("DS", QC_MOVE_S_FALLBACK.0) + m("LD", QC_MOVE_S_FALLBACK.1)) as f64 / 2.0
+    } else {
+        (qc_move_s("DS", QC_MOVE_S_FALLBACK.0) + qc_move_s("LD", QC_MOVE_S_FALLBACK.1)) as f64 / 2.0
+    };
+    // "window" only when the requested period carried the sample on its own; otherwise the number is
+    // real but describes a longer span, and that difference is the consumer's to know.
     let (bay_change_s, bay_scope, bay_n, bay_shorth) = match bay_gap {
-        Some((Some(shorth), n)) if n >= BAY_MIN_SAMPLES && shorth - one_cycle >= 30.0 => {
-            ((shorth - one_cycle).round() as i64, "window", n, Some(shorth.round() as i64))
-        }
+        Some((Some(shorth), n)) if n >= BAY_MIN_SAMPLES && shorth - one_cycle >= 30.0 => (
+            (shorth - one_cycle).round() as i64,
+            if bay_from >= ws { "window" } else { "widened look-back" },
+            n,
+            Some(shorth.round() as i64),
+        ),
         Some((s, n)) => (BAY_CHANGE_S, "constant fallback", n, s.map(|v| v.round() as i64)),
         None => (BAY_CHANGE_S, "constant fallback", 0, None),
     };
@@ -691,6 +697,13 @@ pub async fn build(pool: &PgPool, ws: DateTime<Utc>, we: DateTime<Utc>) -> Resul
                 "source": "densest half of crane bay-to-bay gaps, minus one container cycle",
                 "scope": bay_scope,
                 "transitions": bay_n,
+                // The period the transitions were counted over. Equal to the requested window when
+                // that alone cleared the sample floor; otherwise it reaches further BACK from the
+                // same end, so the requested window is always inside it and no value ever depends on
+                // data from after the scenario. Read this, not `window`, when asking what the number
+                // describes.
+                "measured_window": [bay_from.to_rfc3339(), we.to_rfc3339()],
+                "min_transitions": BAY_MIN_SAMPLES,
                 "gap_shorth_s": bay_shorth,      // before the cycle subtraction
                 "cycle_subtracted_s": one_cycle.round() as i64,
                 // The median of the same gaps is far higher because it carries truck wait; the
@@ -780,8 +793,129 @@ pub async fn build(pool: &PgPool, ws: DateTime<Utc>, we: DateTime<Utc>) -> Resul
     Ok((scenario_out, emulator_out, summary))
 }
 
+/// Per-job-type mean of the per-crane median gap between consecutive quay-crane completions over
+/// `[from, to)`: (jobtype, mean median seconds, qualifying cranes, gaps). Cranes below
+/// QC_MIN_GAPS_PER_CRANE are dropped before averaging, so one busy crane cannot speak for the fleet.
+async fn qc_gap_medians(
+    pool: &PgPool,
+    from: DateTime<Utc>,
+    to: DateTime<Utc>,
+) -> Result<Vec<(String, Option<f64>, i64, i64)>> {
+    Ok(sqlx::query_as(
+        "WITH g AS (
+           SELECT machno, jobtype,
+                  extract(epoch FROM comp_ts
+                          - lag(comp_ts) OVER (PARTITION BY machno ORDER BY comp_ts)) AS gap
+             FROM qc_move_log
+            WHERE comp_ts >= $1 AND comp_ts < $2
+              AND jobtype IN ('DS','LD') AND machno ~ '^[CMZ][0-9]+$'
+         ),
+         per_crane AS (
+           SELECT machno, jobtype,
+                  percentile_cont(0.5) WITHIN GROUP (ORDER BY gap) AS med, count(*) AS n
+             FROM g WHERE gap BETWEEN $3 AND $4
+            GROUP BY machno, jobtype HAVING count(*) >= $5
+         )
+         SELECT jobtype, avg(med)::float8, count(*)::bigint, coalesce(sum(n),0)::bigint
+           FROM per_crane GROUP BY jobtype",
+    )
+    .bind(from).bind(to)
+    .bind(QC_GAP_CAP_S.0).bind(QC_GAP_CAP_S.1).bind(QC_MIN_GAPS_PER_CRANE)
+    .fetch_all(pool)
+    .await?)
+}
+
+/// Densest-half mean of crane bay-to-bay gaps over `[from, to)`, with the transition count.
+///
+/// Split out of `build` so the same measurement can be retried over a longer look-back when a short
+/// window does not yield enough transitions — see BAY_WIDEN_DAYS. Returns the shorth in seconds
+/// (still including one container cycle; the caller subtracts it) and the population size, or None
+/// when the window holds no qualifying transition at all.
+async fn bay_gap_shorth(
+    pool: &PgPool,
+    from: DateTime<Utc>,
+    to: DateTime<Utc>,
+) -> Result<Option<(Option<f64>, i64)>> {
+    let r: Option<(Option<f64>, i64)> = sqlx::query_as(
+        r#"
+        WITH m AS (
+          SELECT machno, vessel, comp_ts,
+                 regexp_replace(queuename, '^([0-9]+[HD]-[DL])[0-9]+$', '\1') AS qk
+            FROM qc_move_log
+           WHERE comp_ts >= $1 AND comp_ts < $2 AND jobtype IN ('DS','LD')
+             AND queuename IS NOT NULL AND vessel IS NOT NULL AND machno ~ '^[CMZ][0-9]+$'
+        ),
+        b AS (SELECT *, CASE WHEN lag(qk) OVER w IS DISTINCT FROM qk
+                               OR lag(vessel) OVER w IS DISTINCT FROM vessel THEN 1 ELSE 0 END brk
+                FROM m WINDOW w AS (PARTITION BY machno ORDER BY comp_ts)),
+        r AS (SELECT *, sum(brk) OVER (PARTITION BY machno ORDER BY comp_ts) g FROM b),
+        v AS (SELECT machno, vessel, qk, g, min(comp_ts) st, max(comp_ts) en, count(*) n
+                FROM r GROUP BY 1,2,3,4),
+        t AS (SELECT *, lag(qk) OVER w pq, lag(en) OVER w pe, lag(n) OVER w pn
+                FROM v WINDOW w AS (PARTITION BY machno ORDER BY st)),
+        gap AS (
+          SELECT extract(epoch FROM st - pe) AS s FROM t
+           WHERE pe IS NOT NULL AND n >= 2 AND pn >= 2
+             AND substring(qk FROM '^[0-9]+') IS DISTINCT FROM substring(pq FROM '^[0-9]+')
+             AND extract(epoch FROM st - pe) BETWEEN $3 AND $4
+        ),
+        o AS (SELECT s, row_number() OVER (ORDER BY s) i, count(*) OVER () n FROM gap),
+        w2 AS (SELECT i, s lo, lead(s, (n/2)::int) OVER (ORDER BY s) hi FROM o),
+        best AS (SELECT i i0 FROM w2 WHERE hi IS NOT NULL ORDER BY hi - lo LIMIT 1)
+        SELECT avg(o.s)::float8, (SELECT max(n) FROM o)::bigint
+          FROM o, best
+         WHERE o.i BETWEEN best.i0 AND best.i0 + (SELECT max(n)/2 FROM o)
+        "#,
+    )
+    .bind(from).bind(to).bind(BAY_GAP_CAP_S.0).bind(BAY_GAP_CAP_S.1)
+    .fetch_optional(pool)
+    .await?;
+    Ok(r)
+}
+
+/// How long a finished job's output is kept. Each is tens of megabytes of jsonb in a LIVE database,
+/// so this table is the one part of the subsystem that can grow without bound if left alone. A week
+/// is long enough to come back for a file and short enough that a busy month cannot bloat the DB.
+const JOB_KEEP_DAYS: i64 = 7;
+/// A 'running' row older than this had its worker die under it. Only one worker runs at a time
+/// (systemd will not start a oneshot that is still active), so nothing else can be building it.
+const JOB_STALE_MIN: i64 = 60;
+
 /// Worker: claim pending assembly_job rows and materialize their output (async path).
+///
+/// Runs from a timer, one instance at a time. Three things happen per tick: orphans are failed,
+/// old outputs are pruned, and every pending job is built.
 pub async fn run(pool: &PgPool) -> Result<()> {
+    // Orphans first. A job that was 'running' when this tick started cannot be in flight — and the
+    // likeliest reason it died is that the build exceeded the unit's memory cap. It is FAILED, not
+    // requeued, on purpose: automatically retrying a job that just killed its own worker is how a
+    // single oversized window turns into a loop that keeps killing it. Re-queue it by hand, or with
+    // a smaller window.
+    let orphaned = sqlx::query(
+        "UPDATE scenario.assembly_job
+            SET state='error', finished_at=now(),
+                error_text='worker died mid-build (most likely the memory cap) — re-queue, or ask for a shorter window'
+          WHERE state='running' AND requested_at < now() - make_interval(mins => $1)",
+    )
+    .bind(JOB_STALE_MIN as i32)
+    .execute(pool)
+    .await?
+    .rows_affected();
+    if orphaned > 0 {
+        tracing::warn!(orphaned, "assemble: failed stale running jobs");
+    }
+    let pruned = sqlx::query(
+        "DELETE FROM scenario.assembly_job
+          WHERE finished_at IS NOT NULL AND finished_at < now() - make_interval(days => $1)",
+    )
+    .bind(JOB_KEEP_DAYS as i32)
+    .execute(pool)
+    .await?
+    .rows_affected();
+    if pruned > 0 {
+        tracing::info!(pruned, keep_days = JOB_KEEP_DAYS, "assemble: pruned old job output");
+    }
+
     let mut done = 0u32;
     loop {
         let claimed: Option<(i64, DateTime<Utc>, DateTime<Utc>)> = sqlx::query_as(
@@ -796,7 +930,14 @@ pub async fn run(pool: &PgPool) -> Result<()> {
         let run_id = state::start_run(pool, "assemble").await?;
         state::set_phase(pool, run_id, "assemble").await.ok();
         match build(pool, ws, we).await {
-            Ok((scenario_out, emulator_out, summary)) => {
+            Ok((mut scenario_out, emulator_out, summary)) => {
+                // Fold the summary into meta, exactly as the synchronous download does. The two
+                // paths serve the same file under the same name, so a file that came out of the
+                // queue must not silently be missing the block that says how trustworthy it is —
+                // that block is the only thing separating a thin window from a healthy one.
+                if let Some(m) = scenario_out.get_mut("meta").and_then(Value::as_object_mut) {
+                    m.insert("summary".into(), summary.clone());
+                }
                 sqlx::query(
                     "UPDATE scenario.assembly_job SET state='done', scenario_out=$2::jsonb,
                         emulator_out=$3::jsonb, summary=$4::jsonb, finished_at=now() WHERE job_id=$1",
