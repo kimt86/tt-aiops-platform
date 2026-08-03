@@ -1,0 +1,13 @@
+[Unit]
+Description=배차 마감 두 축 비교를 2026-08-04 07:30 (KST) 에 1회 실행
+
+[Timer]
+# 1회성. 시스템 시간대가 KST 이므로 그대로 적는다.
+OnCalendar=2026-08-04 07:30:00
+# 서버가 그 시각에 꺼져 있었다면 부팅 후 곧바로 실행(놓치지 않게).
+Persistent=true
+AccuracySec=1min
+Unit=tt-deadline-compare.service
+
+[Install]
+WantedBy=timers.target

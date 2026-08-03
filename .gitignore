@@ -8,3 +8,4 @@ web/.vite
 data/
 !kc/data/
 
+data/reports/
