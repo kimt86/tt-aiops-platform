@@ -3974,6 +3974,15 @@ const LD_MOVE_S: i64 = 132;
 // tracks actual starvation) is still unmeasured. Shipping it on that balance would be exactly the
 // "measurement-free improvement" the A/B harness above exists to prevent. Turn on with
 // `STAGE2_NEED_HORIZON=1`, or `=ab` once the harness carries this arm.
+//
+// ⚠⚠ PRECONDITION FOR ANY A/B ON THIS ARM — do not measure it while the bias matview is empty.
+// The one live window this ran in (2026-08-03) showed LD feasible_crane = 0.0% across every sample
+// with crane slack ≈ −1,200s, which looks like "the horizon does nothing". That reading is
+// CONFOUNDED: learn_work_eta_bias was still refilling after the mig 0115/0117 truth+version change,
+// so the LD correction sat at its bootstrap 0 while the true residual is ~+1,474s. work_eta was
+// therefore ~25 min early and `eta_ms.max(now)` pinned every LD deadline into the past — no horizon
+// could have helped. Gate the run on `SELECT count(*) FROM learn_work_eta_bias WHERE jobtype='LD'`
+// being non-zero first, or both arms just measure the transition.
 static NEED_HORIZON_MODE: AtomicU8 = AtomicU8::new(0);
 const NEED_HORIZON_BASE_S: i64 = 900;   // floor = the old constant; never shrink below it
 const NEED_HORIZON_PAD_S: i64 = 300;    // free-time prediction slack (cycle_pred_shadow |err| p50 ~303s)
