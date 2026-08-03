@@ -108,7 +108,22 @@ pub async fn build(pool: &PgPool, ws: DateTime<Utc>, we: DateTime<Utc>) -> Resul
                    'move_ts', q.comp_ts, 'start_ts', q.st_ts, 'service_s', q.dur_s,
                    'crane', q.machno, 'crane_seq', q.crane_seq,
                    'twin_group', q.machno || '/' || q.seqno, 'lift_size', q.lift_size, 'is_twin', (q.lift_size > 1),
-                   'iso', c.iso, 'size', c.size, 'height', c.height, 'family', c.family, 'fill', c.fill,
+                   -- Size falls back to the yard. The manifest is the authority, but it is a SHIP
+                   -- manifest: BAPLIE lands for discharge before berthing, MOVINS (load) only ~1-2
+                   -- days before departure — after we enrich the call — so loading boxes carried no
+                   -- attributes at all. Measured on a 2h window before this change: discharge 475 of
+                   -- 478 enriched, load 0 of 1,201. The yard knows anyway, because an export box gets
+                   -- its ISO at gate-in and sits in the stack until it is loaded; scenario.container_spec
+                   -- covered 813 of those same 1,201 (67.7%) the whole time and was simply not read here.
+                   -- Vocabularies are identical (verified: size is twenty/forty/forty_five on both,
+                   -- iso is the same ISO 6346 code), so this is a coalesce, not a mapping.
+                   'iso', COALESCE(c.iso, cs.iso), 'size', COALESCE(c.size, cs.size),
+                   -- Which source answered. Everything below this line comes from the manifest ALONE
+                   -- and stays null without it, so a box with a size but no weight is a yard-sourced
+                   -- one, not a data error — say so rather than leaving the reader to infer it.
+                   'size_source', CASE WHEN COALESCE(c.iso, c.size) IS NOT NULL THEN 'manifest'
+                                       WHEN COALESCE(cs.iso, cs.size) IS NOT NULL THEN 'yard' END,
+                   'height', c.height, 'family', c.family, 'fill', c.fill,
                    'gross_kg', c.gross_kg, 'reefer_temp', c.reefer_temp, 'imdg', c.imdg, 'un_no', c.un_no, 'oog', c.oog,
                    'pod', c.pod, 'pol', c.pol, 'operator', c.operator,
                    'ship_cell', CASE WHEN c.ship_bay IS NOT NULL THEN jsonb_build_object(
@@ -125,6 +140,9 @@ pub async fn build(pool: &PgPool, ws: DateTime<Utc>, we: DateTime<Utc>) -> Resul
             LEFT JOIN scenario.container c
               ON c.vessel = vv.vessel AND c.voyage = vv.voyage AND c.contno = q.contno
              AND c.disload = CASE q.jobtype WHEN 'DS' THEN 'D' WHEN 'LD' THEN 'L' ELSE q.jobtype END
+            -- Keyed on the box alone: a container has one physical size regardless of which call it
+            -- is on, which is exactly why this source survives the manifest's timing problem.
+            LEFT JOIN scenario.container_spec cs ON cs.contno = q.contno
         )
         SELECT coalesce(jsonb_agg(vobj ORDER BY sp NULLS LAST), '[]'::jsonb)::text FROM (
           SELECT vc.startpos_m AS sp, jsonb_build_object(
@@ -716,7 +734,7 @@ pub async fn build(pool: &PgPool, ws: DateTime<Utc>, we: DateTime<Utc>) -> Resul
     });
 
     // Summary mirrors the vessels spine: qc_move_log (window) ⨝ move_hist (vessel) ⨝ container.
-    let (nc, nds, nld, ncr, ntw, nv, nenr): (i64, i64, i64, i64, i64, i64, i64) = sqlx::query_as(
+    let (nc, nds, nld, ncr, ntw, nv, nenr, nsz_m, nsz_y): (i64, i64, i64, i64, i64, i64, i64, i64, i64) = sqlx::query_as(
         r#"WITH q AS (
              SELECT machno, contno, seqno, jobtype,
                     count(*) OVER (PARTITION BY machno, seqno) AS lift_size
@@ -736,16 +754,31 @@ pub async fn build(pool: &PgPool, ws: DateTime<Utc>, we: DateTime<Utc>) -> Resul
                   count(DISTINCT q.machno),
                   count(*) FILTER (WHERE q.lift_size > 1),
                   count(DISTINCT vv.vessel || '/' || vv.voyage),
-                  count(c.contno)
+                  count(c.contno),
+                  -- Size provenance, counted the same way the container objects resolve it. Split
+                  -- because the blended enriched_pct hides the thing that matters: it sat near 50%
+                  -- while discharge was ~100% and load was 0%, so the one number that was supposed to
+                  -- flag the gap was the reason nobody saw it.
+                  count(*) FILTER (WHERE COALESCE(c.iso, c.size) IS NOT NULL),
+                  count(*) FILTER (WHERE COALESCE(c.iso, c.size) IS NULL
+                                     AND COALESCE(cs.iso, cs.size) IS NOT NULL)
              FROM q
              LEFT JOIN vv ON vv.contno = q.contno AND vv.jobtype = q.jobtype
              LEFT JOIN scenario.container c
                ON c.vessel = vv.vessel AND c.voyage = vv.voyage AND c.contno = q.contno
-              AND c.disload = CASE q.jobtype WHEN 'DS' THEN 'D' WHEN 'LD' THEN 'L' ELSE q.jobtype END"#,
+              AND c.disload = CASE q.jobtype WHEN 'DS' THEN 'D' WHEN 'LD' THEN 'L' ELSE q.jobtype END
+             LEFT JOIN scenario.container_spec cs ON cs.contno = q.contno"#,
     ).bind(ws).bind(we).fetch_one(pool).await?;
     let summary = json!({
         "vessels": nv, "containers": nc, "ds": nds, "ld": nld, "cranes": ncr, "twin_moves": ntw,
+        // enriched_pct is MANIFEST coverage — weight, hazmat, discharge port, ship cell. It is
+        // structurally low for load because MOVINS arrives after we enrich the call, and that is a
+        // real limit of what is known at the time, not a collection gap.
         "enriched": nenr, "enriched_pct": if nc > 0 { nenr * 100 / nc } else { 0 },
+        // SIZE is a different question and has a second source. Reported separately, with where each
+        // answer came from, because one blended number is what let load sit at zero unnoticed.
+        "size_manifest": nsz_m, "size_yard": nsz_y,
+        "size_known_pct": if nc > 0 { (nsz_m + nsz_y) * 100 / nc } else { 0 },
         // Emulator backing samples. qc_* counts the LEARNER's samples (a snapshot, not this
         // window); yc_* counts this window's yard-crane services.
         "qc_learn_sample": qc_n("DS") + qc_n("LD"), "yc_sample": yc_n("DS") + yc_n("LD"),
