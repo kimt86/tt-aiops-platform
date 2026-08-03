@@ -4605,14 +4605,25 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                 (cr, cem)
             };
             // (work index, pickup lat, pickup lon, work-ETA ms) — only those with a coord + ETA
+            // ⚠ 여기서 후보가 **조용히 빠진다**. 좌표가 없거나 작업시작 시각이 없으면 그대로 사라지고
+            // 아무도 세지 않았다 — 오늘 발견한 결함들이 전부 이런 식으로 숨어 있었으므로 센다(mig 0121).
+            // 작업시작 시각이 없으면 배차 마감도 만들 수 없으니 새 규칙에서도 똑같이 빠진다.
+            let mut works_no_coord: i32 = 0;
+            let mut works_no_eta: i32 = 0;
             let works: Vec<(usize, f64, f64, i64)> = work.iter().enumerate().filter_map(|(i, w)| {
                 let coord = if w.jobtype == "LD" {
                     w.src_block.as_ref().and_then(|b| centroids_now.get(b).copied())
                 } else {
                     cranes_now.get(&w.qc).copied().or_else(|| centroids_now.get(&w.qc).copied())
-                }?;
-                Some((i, coord.0, coord.1, w.work_eta_ts?.timestamp_millis()))
+                };
+                let Some(coord) = coord else { works_no_coord += 1; return None };
+                let Some(eta) = w.work_eta_ts else { works_no_eta += 1; return None };
+                Some((i, coord.0, coord.1, eta.timestamp_millis()))
             }).collect();
+            if works_no_coord + works_no_eta > 0 && tick % 10 == 0 {
+                tracing::info!(no_coord = works_no_coord, no_eta = works_no_eta, kept = works.len(),
+                    "Stage-2 후보에서 제외된 작업");
+            }
             if works.is_empty() {
                 continue;
             }
@@ -4799,6 +4810,49 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                 }
                 order = kept;
             }
+            // ── 설계 ③ 1단계 (mig 0121) — 마감 기준 풀을 **계산만** 한다 ────────────────────────
+            // 규칙: 모든 작업을 `마감 − 여유` 가 이른 순으로 줄 세우고, 그 시각이 지난 것만 담는다.
+            // 담을 게 트럭보다 적으면 트럭을 남긴다(억지로 채우지 않는다).
+            //
+            // 묶음 하나에 컨테이너가 여럿이면 슬롯마다 마감이 다르다 —
+            //     슬롯 j 마감 = 베이시작 + j×무브시간 − 준비시간 = (묶음 마감) + j×무브시간
+            // 크레인은 베이 안을 차례로 처리하므로(실측 88% 계획순서·물량기준 위반 6%) 이 근사가 선다.
+            //
+            // ⚠ 여유(POOL_MARGIN_S)는 잠정값이다. "우리가 우리 예측을 못 믿는 만큼"이 정의인데,
+            //   작업도달 예측의 퍼짐이 IQR ~1,400초라 그 절반도 안 되는 보수적 값에서 출발한다.
+            //   1단계에서 마감이 지난 슬롯(pool_overdue_n)이 계속 나오면 늘려야 한다.
+            const POOL_MARGIN_S: i64 = 300;
+            let (pool_new, pool_overdue_n, trucks_held_n) = {
+                // (works 인덱스, 이 틱에 마감이 도래한 슬롯 수, 가장 이른 슬롯의 마감 ms)
+                let mut due: Vec<(usize, i64, i64)> = Vec::new();
+                let mut overdue: i32 = 0;
+                for (oi, &(wi, _, _, _)) in works.iter().enumerate() {
+                    let w = &work[wi];
+                    let Some(dd) = w.dispatch_deadline_ts else { continue };
+                    let move_s = if w.jobtype == "LD" { LD_MOVE_S } else { DS_MOVE_S };
+                    let base = dd.timestamp_millis();
+                    let cutoff = now + POOL_MARGIN_S * 1000;
+                    let mut slots = 0i64;
+                    for j in 0..w.n.max(0) as i64 {
+                        let slot = base + j * move_s * 1000;
+                        if slot <= cutoff { slots += 1; if slot < now { overdue += 1; } } else { break }
+                    }
+                    if slots > 0 { due.push((oi, slots, base)); }
+                }
+                due.sort_by_key(|&(_, _, d)| d); // 마감이 이른 순
+                let truck_n = vehicles.len() as i64;
+                let mut acc = 0i64;
+                let mut kept_new: Vec<usize> = Vec::new();
+                for &(oi, slots, _) in &due {
+                    if acc >= truck_n { break }
+                    acc += slots.min(truck_n - acc);
+                    kept_new.push(oi);
+                }
+                (kept_new, overdue, (truck_n - acc).max(0) as i32)
+            };
+            let pool_new_set: std::collections::HashSet<usize> = pool_new.iter().copied().collect();
+            let pool_cur_set: std::collections::HashSet<usize> = order.iter().copied().collect();
+            let pool_overlap_n = pool_new_set.intersection(&pool_cur_set).count() as i32;
             // 로깅용 집계는 예산 '판정'과 분리한다(굶주림 면제·강등 때문에 판정 카운터는 최종 풀의
             // 구성과 다르다). 이 값 = 최종 풀에서 티어0·1 버킷이 실제로 가져간 슬롯 = 레버의 실세기.
             // dep_on이 꺼져 있어도 티어는 계산되므로 그대로 반사실 베이스라인이 된다.
@@ -4957,8 +5011,8 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
             }
             let gap_pct = if opt_cost > 0 { 100.0 * (greedy_cost - opt_cost) as f64 / opt_cost as f64 } else { 0.0 };
             let solver_ins = sqlx::query(
-                "INSERT INTO stage2_solver_shadow (ts,tick,n_trucks,n_works,greedy_n,greedy_cost_s,optimal_n,optimal_cost_s,gap_pct,greedy_miss,optimal_miss,dep_tier_on,dep_tier0_n,dep_urgent_slots,dep_null_n,dep_demoted_n,ab_block,ab_warmup,works_raw,need_horizon_on)
-                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20) ON CONFLICT (ts) DO NOTHING",
+                "INSERT INTO stage2_solver_shadow (ts,tick,n_trucks,n_works,greedy_n,greedy_cost_s,optimal_n,optimal_cost_s,gap_pct,greedy_miss,optimal_miss,dep_tier_on,dep_tier0_n,dep_urgent_slots,dep_null_n,dep_demoted_n,ab_block,ab_warmup,works_raw,need_horizon_on,works_no_eta,works_no_coord,pool_new_n,pool_overlap_n,trucks_held_n,pool_overdue_n)
+                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26) ON CONFLICT (ts) DO NOTHING",
             )
             .bind(ts).bind(tick as i64).bind(vehicles.len() as i32).bind(order.len() as i32)
             .bind(greedy_n).bind(greedy_cost).bind(assign.len() as i32).bind(opt_cost).bind(gap_pct as f32)
@@ -4972,7 +5026,39 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
             .bind(dep_demoted_n)                                                          // dep_demoted_n
             .bind(ab_block).bind(ab_warmup).bind(works_raw)                                // A/B 하네스
             .bind(horizon_on)                                                             // mig 0119: 지평 팔
+            .bind(works_no_eta).bind(works_no_coord)                                      // mig 0121: 조용히 빠진 작업
+            .bind(pool_new.len() as i32).bind(pool_overlap_n)
+            .bind(trucks_held_n).bind(pool_overdue_n)
             .execute(&pool).await;
+            // mig 0121 — 두 풀 중 한쪽에라도 든 묶음의 상세. 왜 다르게 뽑혔는지 진단용.
+            {
+                let rank_cur: HashMap<usize, i32> = order.iter().enumerate().map(|(r, &oi)| (oi, r as i32)).collect();
+                let rank_new: HashMap<usize, i32> = pool_new.iter().enumerate().map(|(r, &oi)| (oi, r as i32)).collect();
+                for &oi in pool_cur_set.union(&pool_new_set) {
+                    let w = &work[works[oi].0];
+                    let dd = w.dispatch_deadline_ts;
+                    let due = dd.map(|d| {
+                        let move_s = if w.jobtype == "LD" { LD_MOVE_S } else { DS_MOVE_S };
+                        let cutoff = now + POOL_MARGIN_S * 1000;
+                        (0..w.n.max(0) as i64)
+                            .take_while(|j| d.timestamp_millis() + j * move_s * 1000 <= cutoff)
+                            .count() as i32
+                    });
+                    let _ = sqlx::query(
+                        "INSERT INTO stage2_pool_shadow
+                           (ts,qc,vessel,queuename,jobtype,n,work_eta_ts,dispatch_deadline_ts,dd_slack_s,
+                            due_slots,in_current_pool,in_new_pool,rank_current,rank_new)
+                         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) ON CONFLICT DO NOTHING",
+                    )
+                    .bind(ts).bind(&w.qc).bind(&w.vessel).bind(&w.queuename).bind(&w.jobtype).bind(w.n)
+                    .bind(w.work_eta_ts).bind(dd)
+                    .bind(dd.map(|d| ((d.timestamp_millis() - now) / 1000).clamp(-2_000_000_000, 2_000_000_000) as i32))
+                    .bind(due)
+                    .bind(pool_cur_set.contains(&oi)).bind(pool_new_set.contains(&oi))
+                    .bind(rank_cur.get(&oi).copied()).bind(rank_new.get(&oi).copied())
+                    .execute(&pool).await;
+                }
+            }
             if let Err(e) = solver_ins {
                 tracing::warn!(error = %e, "stage2_solver_shadow insert failed — 0104 마이그레이션 적용 여부 확인");
             }
