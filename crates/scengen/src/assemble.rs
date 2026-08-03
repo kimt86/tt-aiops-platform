@@ -82,13 +82,20 @@ const QC_MIN_CRANES: i64 = 3;
 /// Build (scenario_out, emulator_out, summary) for [ws, we). Pure — no job/run side effects.
 pub async fn build(pool: &PgPool, ws: DateTime<Utc>, we: DateTime<Utc>) -> Result<(Value, Value, Value)> {
     // ---- SCENARIO vessels: the QC WORK QUEUE (qc_move_log, window on comp_ts = physical quay
-    // handover) attributed to a vessel via move_hist (99.5%) and enriched with container attrs.
-    // twin_group/is_twin come from qc_move_log rows sharing (machno,seqno); crane_seq is the
-    // crane's move order. Ordered by (crane, crane_seq) so per-crane queues are reconstructable.
+    // handover), attributed to a vessel from the move log's OWN columns and falling back to
+    // move_hist. twin_group/is_twin come from qc_move_log rows sharing (machno,seqno); crane_seq is
+    // the crane's move order. Ordered by (crane, crane_seq) so per-crane queues are reconstructable.
+    //
+    // The log carries vessel/voyage itself since mig 0109, and cranes[] already reads it — vessels[]
+    // was left on the older move_hist detour alone, which is why an unattributed bucket kept
+    // appearing. Measured over a recent 2h window: the log's own column resolved 1,550 of 1,550
+    // moves, the move_hist path only 1,493 — so 57 moves collapsed into a nameless vessel that a
+    // consumer would read as one more ship. move_hist stays as the fallback because it still covers
+    // windows older than the columns.
     let vessels_txt: Option<String> = sqlx::query_scalar(
         r#"
         WITH q AS (
-          SELECT machno, contno, seqno, jobtype, st_ts, comp_ts, dur_s,
+          SELECT machno, contno, seqno, jobtype, st_ts, comp_ts, dur_s, vessel, voyage,
                  count(*) OVER (PARTITION BY machno, seqno) AS lift_size,
                  row_number() OVER (PARTITION BY machno ORDER BY comp_ts, seqno) AS crane_seq
             FROM qc_move_log
@@ -102,7 +109,9 @@ pub async fn build(pool: &PgPool, ws: DateTime<Utc>, we: DateTime<Utc>) -> Resul
            ORDER BY contno, jobtype, comp_ts
         ),
         cont AS (
-          SELECT q.machno, q.crane_seq, vv.vessel, vv.voyage, jsonb_build_object(
+          SELECT q.machno, q.crane_seq,
+                 COALESCE(q.vessel, vv.vessel) AS vessel,
+                 COALESCE(q.voyage, vv.voyage) AS voyage, jsonb_build_object(
                    'container_id', q.contno,
                    'move_type', CASE q.jobtype WHEN 'DS' THEN 'discharge' WHEN 'LD' THEN 'load' ELSE q.jobtype END,
                    'move_ts', q.comp_ts, 'start_ts', q.st_ts, 'service_s', q.dur_s,
@@ -138,7 +147,8 @@ pub async fn build(pool: &PgPool, ws: DateTime<Utc>, we: DateTime<Utc>) -> Resul
             FROM q
             LEFT JOIN vv ON vv.contno = q.contno AND vv.jobtype = q.jobtype
             LEFT JOIN scenario.container c
-              ON c.vessel = vv.vessel AND c.voyage = vv.voyage AND c.contno = q.contno
+              ON c.vessel = COALESCE(q.vessel, vv.vessel) AND c.voyage = COALESCE(q.voyage, vv.voyage)
+             AND c.contno = q.contno
              AND c.disload = CASE q.jobtype WHEN 'DS' THEN 'D' WHEN 'LD' THEN 'L' ELSE q.jobtype END
             -- Keyed on the box alone: a container has one physical size regardless of which call it
             -- is on, which is exactly why this source survives the manifest's timing problem.
@@ -337,10 +347,16 @@ pub async fn build(pool: &PgPool, ws: DateTime<Utc>, we: DateTime<Utc>) -> Resul
            ORDER BY contno, jobtype, comp_ts
         ),
         qm AS (
-          SELECT q.machno, q.comp_ts, q.jobtype, vv.vessel, vv.voyage
+          -- Same attribution as vessels[]: the log's own columns first, move_hist as the fallback
+          -- for windows older than them. An INNER JOIN here would silently drop the very moves the
+          -- log can attribute but move_hist cannot, shortening the crane deployment spans.
+          SELECT q.machno, q.comp_ts, q.jobtype,
+                 COALESCE(q.vessel, vv.vessel) AS vessel,
+                 COALESCE(q.voyage, vv.voyage) AS voyage
             FROM qc_move_log q
-            JOIN vv ON vv.contno = q.contno AND vv.jobtype = q.jobtype
+            LEFT JOIN vv ON vv.contno = q.contno AND vv.jobtype = q.jobtype
            WHERE q.comp_ts >= $1 AND q.comp_ts < $2 AND q.jobtype IN ('DS','LD')
+             AND COALESCE(q.vessel, vv.vessel) IS NOT NULL
         ),
         qb AS (
           SELECT *, CASE WHEN lag(comp_ts) OVER w IS NULL
@@ -736,7 +752,7 @@ pub async fn build(pool: &PgPool, ws: DateTime<Utc>, we: DateTime<Utc>) -> Resul
     // Summary mirrors the vessels spine: qc_move_log (window) ⨝ move_hist (vessel) ⨝ container.
     let (nc, nds, nld, ncr, ntw, nv, nenr, nsz_m, nsz_y): (i64, i64, i64, i64, i64, i64, i64, i64, i64) = sqlx::query_as(
         r#"WITH q AS (
-             SELECT machno, contno, seqno, jobtype,
+             SELECT machno, contno, seqno, jobtype, vessel, voyage,
                     count(*) OVER (PARTITION BY machno, seqno) AS lift_size
                FROM qc_move_log
               WHERE comp_ts >= $1 AND comp_ts < $2 AND jobtype IN ('DS','LD')
@@ -753,7 +769,10 @@ pub async fn build(pool: &PgPool, ws: DateTime<Utc>, we: DateTime<Utc>) -> Resul
                   count(*) FILTER (WHERE q.jobtype='LD'),
                   count(DISTINCT q.machno),
                   count(*) FILTER (WHERE q.lift_size > 1),
-                  count(DISTINCT vv.vessel || '/' || vv.voyage),
+                  -- Same COALESCE as vessels[], so the summary's vessel count cannot disagree with
+                  -- the array it is summarising — the mismatch that made the unattributed bucket
+                  -- look like an extra ship in the first place.
+                  count(DISTINCT COALESCE(q.vessel, vv.vessel) || '/' || COALESCE(q.voyage, vv.voyage)),
                   count(c.contno),
                   -- Size provenance, counted the same way the container objects resolve it. Split
                   -- because the blended enriched_pct hides the thing that matters: it sat near 50%
@@ -765,7 +784,8 @@ pub async fn build(pool: &PgPool, ws: DateTime<Utc>, we: DateTime<Utc>) -> Resul
              FROM q
              LEFT JOIN vv ON vv.contno = q.contno AND vv.jobtype = q.jobtype
              LEFT JOIN scenario.container c
-               ON c.vessel = vv.vessel AND c.voyage = vv.voyage AND c.contno = q.contno
+               ON c.vessel = COALESCE(q.vessel, vv.vessel) AND c.voyage = COALESCE(q.voyage, vv.voyage)
+              AND c.contno = q.contno
               AND c.disload = CASE q.jobtype WHEN 'DS' THEN 'D' WHEN 'LD' THEN 'L' ELSE q.jobtype END
              LEFT JOIN scenario.container_spec cs ON cs.contno = q.contno"#,
     ).bind(ws).bind(we).fetch_one(pool).await?;
