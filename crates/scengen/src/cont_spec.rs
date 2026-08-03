@@ -87,9 +87,34 @@ async fn tick(pool: &PgPool, run_id: i64, target: &str, cfg: &Config) -> Result<
              FROM rtg_move_log r
             WHERE r.comp_ts > now() - make_interval(hours => $1)
               AND r.jobtype IN ('GI','GO')
+           UNION ALL
+           -- Third source: boxes queued for work. This closes the one gap the other two cannot,
+           -- because both of them find a box only through OUR yard reconstruction or a recent gate
+           -- crossing — and a box that has been standing in the yard since before that
+           -- reconstruction began (2026-07-22) is invisible to both while being perfectly real.
+           -- Measured 2026-08-03: with the standing yard fully known (88,317 of 88,317), a
+           -- post-sweep window still had 48 of 258 loading boxes with no size, all of them
+           -- long-dwell. live_workpool holds 712 queued boxes of which 124 were unknown, and they
+           -- are still in the yard by definition of being queued, so the lookup answers.
+           -- ★'-infinity', NOT now(). The suppression below compares a recorded miss against the
+           -- box's newest sighting, so a timestamp that advances every tick un-suppresses the box
+           -- every tick — on the one source that has no natural bound and therefore needs the miss
+           -- table most. Measured: with now() the second run still asked 24 and missed 17 again.
+           -- Being queued is not new evidence about whether the box is in the yard; only a yard or
+           -- gate sighting is, and those two sources carry their own real timestamps. So a
+           -- workpool-only candidate is asked once, and again only if it genuinely reappears.
+           SELECT w.contno, '-infinity'::timestamptz
+             FROM public.live_workpool w
+            WHERE w.contno IS NOT NULL
          ) c
           WHERE NOT EXISTS (SELECT 1 FROM scenario.container_spec s WHERE s.contno = c.contno)
           GROUP BY contno
+         HAVING NOT EXISTS (
+                  -- Suppress only until the box shows FRESH activity. A miss recorded before the
+                  -- newest sighting still stands; anything newer makes it a candidate again, which
+                  -- is what keeps a returning container from being permanently blinded.
+                  SELECT 1 FROM scenario.container_spec_miss m
+                   WHERE m.contno = c.contno AND m.last_asked >= max(c.ts))
           ORDER BY max(ts) DESC
           LIMIT $2",
     )
@@ -149,7 +174,47 @@ async fn tick(pool: &PgPool, run_id: i64, target: &str, cfg: &Config) -> Result<
             no_size += 1;
         }
     }
+    // Record what the yard did not answer for. Without this the queued-work source would put the
+    // same unanswerable numbers back in the batch on every tick, and because the batch is capped
+    // they would crowd out boxes that CAN answer — the batch fills with questions that never
+    // resolve. Upsert so a repeat is counted rather than duplicated; last_asked moves forward, which
+    // is what re-suppresses it until the box is seen again more recently than this.
+    let answered: std::collections::HashSet<String> = rows
+        .iter()
+        .filter_map(|r| jstr(r, "CONTNO").map(|c| c.trim().to_string()))
+        .collect();
+    let mut missed = 0u64;
+    for (c,) in &todo {
+        if answered.contains(c.trim()) {
+            continue;
+        }
+        sqlx::query(
+            "INSERT INTO scenario.container_spec_miss (contno) VALUES ($1)
+             ON CONFLICT (contno) DO UPDATE
+               SET last_asked = now(), attempts = scenario.container_spec_miss.attempts + 1",
+        )
+        .bind(c.trim())
+        .execute(&mut *tx)
+        .await?;
+        missed += 1;
+    }
     tx.commit().await?;
+
+    // A miss only does work while it is suppressing a question, and it suppresses by being NEWER
+    // than the box's last sighting. Once the box has been quiet longer than the widest lookback the
+    // row can never suppress anything again, so drop it here rather than leaving another scenario
+    // table with no retention at all.
+    match sqlx::query("DELETE FROM scenario.container_spec_miss WHERE last_asked < now() - make_interval(hours => $1)")
+        .bind((LOOKBACK_H * 4) as i32)
+        .execute(pool)
+        .await
+    {
+        Ok(r) if r.rows_affected() > 0 => tracing::debug!(pruned = r.rows_affected(), "container_spec_miss aged out"),
+        Ok(_) => {}
+        // Loud, not swallowed: a prune that silently fails is the same blindness as one that
+        // silently does nothing, and this table only grows.
+        Err(e) => tracing::warn!(error = %e, "CONTAINER_SPEC_MISS PRUNE FAILED"),
+    }
 
     let missing = todo.len() - found;
     state::merge_json(pool, run_id, "load_stats", json!({
@@ -157,7 +222,7 @@ async fn tick(pool: &PgPool, run_id: i64, target: &str, cfg: &Config) -> Result<
     })).await?;
     state::merge_json(pool, run_id, "collection", json!({
         "asked": todo.len(), "found": found, "stored": stored,
-        "not_in_yard": missing, "unmapped_iso": no_size,
+        "not_in_yard": missing, "unmapped_iso": no_size, "misses_recorded": missed,
     })).await?;
     // An ISO code we cannot map is worth hearing about: it means the mapping in mig 0114 has met a
     // code the manifest data never contained, and those boxes drop out of the TEU total silently.
