@@ -14,6 +14,7 @@
 
 pub mod assemble;
 pub mod collect;
+pub mod cont_spec;
 pub mod crane_deploy;
 pub mod db;
 pub mod enrich;

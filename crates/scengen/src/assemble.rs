@@ -204,8 +204,14 @@ pub async fn build(pool: &PgPool, ws: DateTime<Utc>, we: DateTime<Utc>) -> Resul
         ),
         m AS (
           SELECT g.*, yb.block, y.bay_idx, y.row_idx, y.tier,
-                 gi.event_ts AS gate_ts, gi.clerk AS gate_clerk, gx.event_ts AS exit_ts
+                 gi.event_ts AS gate_ts, gi.clerk AS gate_clerk, gx.event_ts AS exit_ts,
+                 cs.size, scenario.size_teu(cs.size) AS teu
             FROM g
+            -- Box size, so road volume can be stated in TEU and not only in moves. Keyed by
+            -- container number alone: an ISO type is a permanent property of the box, so one lookup
+            -- ever (mig 0114). NULL where we have not met the box yet, which is why the header
+            -- publishes how many moves the TEU total actually covers.
+            LEFT JOIN scenario.container_spec cs ON cs.contno = g.contno
             LEFT JOIN scenario.yard_move y
               ON y.machno = g.machno AND y.contno = g.contno AND y.seqno = g.seqno
             LEFT JOIN scenario.yard_block yb ON yb.block_id = y.block_id
@@ -235,12 +241,21 @@ pub async fn build(pool: &PgPool, ws: DateTime<Utc>, we: DateTime<Utc>) -> Resul
           'slot_known',    count(tier),
           'gate_ts_known', count(gate_ts),
           'exit_ts_known', count(exit_ts),
+          -- TEU over the moves whose box size is known. size_known is NOT decoration: read the TEU
+          -- total without it and a half-covered window looks like a quiet one.
+          'teu_in',        coalesce(sum(teu) FILTER (WHERE jobtype = 'GI'), 0),
+          'teu_out',       coalesce(sum(teu) FILTER (WHERE jobtype = 'GO'), 0),
+          'size_known',    count(size),
+          'size_mix',      (SELECT coalesce(jsonb_object_agg(size, n), '{}'::jsonb)
+                              FROM (SELECT size, count(*) n FROM m WHERE size IS NOT NULL
+                                     GROUP BY size) z),
           'moves', coalesce(jsonb_agg(jsonb_build_object(
               'container_id', contno,
               'move_type', CASE jobtype WHEN 'GI' THEN 'gate_in' ELSE 'gate_out' END,
               'move_ts', comp_ts, 'start_ts', st_ts, 'service_s', dur_s,
               'yard_crane', machno, 'truck', trk_id,
               'fill', CASE status WHEN 'F' THEN 'full' WHEN 'M' THEN 'empty' END,
+              'size', size, 'teu', teu,
               -- The road truck's own clock: cleared the gate, waited, was served, left.
               'gate_ts', gate_ts,
               'gate_wait_s', CASE WHEN gate_ts IS NOT NULL
@@ -726,6 +741,13 @@ pub async fn build(pool: &PgPool, ws: DateTime<Utc>, we: DateTime<Utc>) -> Resul
         // Share of gate moves that carry the truck's own gate-transaction time (the collector
         // walks the local stream forward, so older windows fill in as it catches up).
         "gate_time_pct": if gate_in + gate_out > 0 { gate_ts_known * 100 / (gate_in + gate_out) } else { 0 },
+        // Road volume in TEU, and the share of moves it is computed over. A TEU total read without
+        // this coverage understates the window by exactly the boxes we have not met yet, and looks
+        // like a quiet shift rather than a partial answer. Windows before the size collector started
+        // sit near 50% (the manifest seed); after it, ~95%.
+        "teu_in": landside.get("teu_in").cloned().unwrap_or(json!(0)),
+        "teu_out": landside.get("teu_out").cloned().unwrap_or(json!(0)),
+        "teu_known_pct": if gate_in + gate_out > 0 { lnd("size_known") * 100 / (gate_in + gate_out) } else { 0 },
         // Equipment deployment — how much machinery the window actually used.
         "qc_spans": qc_spans, "rtg_spans": rtg_spans, "peak_trucks": peak_trucks,
         // ★Trust signal for cranes[]. A quay move can only enter the work list if it carries a bay

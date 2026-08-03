@@ -7,7 +7,7 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
-use scengen::{assemble, collect, crane_deploy, db, enrich, gate, qc_plan, serve, snapshot, yard};
+use scengen::{assemble, collect, cont_spec, crane_deploy, db, enrich, gate, qc_plan, serve, snapshot, yard};
 
 #[derive(Parser)]
 #[command(
@@ -49,6 +49,12 @@ enum Command {
     /// Landside gate transactions (intake/exit for the GI/GO containers we already have)
     /// -> scenario.gate_event.
     Gate {
+        #[arg(long, default_value = "oracle-prod")]
+        target: String,
+    },
+    /// Look up the ISO size of gate containers we do not know yet -> scenario.container_spec.
+    /// Small and frequent on purpose: the yard inventory only holds a box while it is there.
+    ContainerSpec {
         #[arg(long, default_value = "oracle-prod")]
         target: String,
     },
@@ -99,6 +105,7 @@ async fn main() -> Result<()> {
         Command::YardMoves { target } => yard::run(&pool, &target).await?,
         Command::CraneDeploy { target } => crane_deploy::run(&pool, &target).await?,
         Command::Gate { target } => gate::run(&pool, &target).await?,
+        Command::ContainerSpec { target } => cont_spec::run(&pool, &target).await?,
         Command::QcPlan {} => qc_plan::run(&pool).await?,
         Command::PlanBackfill { target } => qc_plan::backfill(&pool, &target).await?,
         Command::YardBuild {} => yard::build(&pool).await?,
