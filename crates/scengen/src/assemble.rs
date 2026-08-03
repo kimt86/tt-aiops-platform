@@ -55,6 +55,12 @@ const QC_GAP_CAP_S: (f64, f64) = (1.0, 300.0);
 /// Gaps a crane needs before its median counts, also the learner's threshold. A window too short or
 /// too quiet to clear this simply falls back — reported per job type, not silently averaged in.
 const QC_MIN_GAPS_PER_CRANE: i64 = 30;
+/// Bay-change gap bounds (s) and the sample floor. 1800 drops shift breaks; 0 keeps the low end
+/// visible so a contaminated population shows itself rather than being trimmed into looking clean.
+const BAY_GAP_CAP_S: (f64, f64) = (0.0, 1800.0);
+/// Transitions needed before the window's own number is used. The estimator below is a densest-half
+/// mean, which needs a real population to find a peak in.
+const BAY_MIN_SAMPLES: i64 = 100;
 /// Cranes that must qualify before the window's own number is used. This is a FLEET parameter, and
 /// one crane is not a fleet. Measured on a 1-hour window: only a single crane cleared the gap
 /// threshold for load, so its personal rhythm would have become the published fleet figure while the
@@ -526,6 +532,70 @@ pub async fn build(pool: &PgPool, ws: DateTime<Utc>, we: DateTime<Utc>) -> Resul
     .fetch_all(pool)
     .await?;
 
+    // bay_change_s — measured, from the gap between one crane finishing a bay and completing its
+    // first container in the next one.
+    //
+    // THE PROBLEM WITH THAT GAP is that it is not purely the gantry move: it also contains whatever
+    // truck wait followed. Publishing the median (361s over 1,025 clean transitions) would fold
+    // dispatch performance INTO an equipment constant, and then a better policy could never show an
+    // improvement — the delay it should remove is already baked into the machine.
+    //
+    // THE ESCAPE is the shape of the distribution. Observed gap = physical transition + a
+    // non-negative wait, so the waits only ever push right. The histogram bears that out — a single
+    // peak near 210s with a long right tail — which makes the DENSEST REGION, not the median, the
+    // estimate closest to the physical floor. This takes the shortest interval containing half the
+    // transitions and averages inside it: robust to the tail, and it uses averaging within the peak
+    // to cancel noise rather than across the whole contaminated range.
+    //
+    // Then subtract one container cycle, because the interval ends at a COMPLETION — it contains the
+    // full lift of the first container in the new bay. Measured over 2026-07-28 onward: densest half
+    // 267s (band 132..423) minus a ~100s cycle = ~167s, against the research constant of 180s. The two
+    // methods landing within 7% of each other is the reason this is trusted enough to ship.
+    //
+    // Runs of a single move are excluded on both sides. 45% of raw "visits" are one container, and
+    // 2,473 of those sit between two visits to the SAME bay with a ~116s gap — one container cycle,
+    // i.e. a stray box handled mid-bay, not a gantry move at all. Counting them would halve the
+    // estimate.
+    //
+    // hatch_s gets NO such treatment and stays a constant: the same measurement on same-bay
+    // deck↔hold transitions puts the densest half at 16..389s, and 16s cannot contain a lift plus a
+    // hatch-cover operation. That population is contaminated by label changes that are not physical
+    // hatch work, and nothing here separates them.
+    let bay_gap: Option<(Option<f64>, i64)> = sqlx::query_as(
+        r#"
+        WITH m AS (
+          SELECT machno, vessel, comp_ts,
+                 regexp_replace(queuename, '^([0-9]+[HD]-[DL])[0-9]+$', '\1') AS qk
+            FROM qc_move_log
+           WHERE comp_ts >= $1 AND comp_ts < $2 AND jobtype IN ('DS','LD')
+             AND queuename IS NOT NULL AND vessel IS NOT NULL AND machno ~ '^[CMZ][0-9]+$'
+        ),
+        b AS (SELECT *, CASE WHEN lag(qk) OVER w IS DISTINCT FROM qk
+                               OR lag(vessel) OVER w IS DISTINCT FROM vessel THEN 1 ELSE 0 END brk
+                FROM m WINDOW w AS (PARTITION BY machno ORDER BY comp_ts)),
+        r AS (SELECT *, sum(brk) OVER (PARTITION BY machno ORDER BY comp_ts) g FROM b),
+        v AS (SELECT machno, vessel, qk, g, min(comp_ts) st, max(comp_ts) en, count(*) n
+                FROM r GROUP BY 1,2,3,4),
+        t AS (SELECT *, lag(qk) OVER w pq, lag(en) OVER w pe, lag(n) OVER w pn
+                FROM v WINDOW w AS (PARTITION BY machno ORDER BY st)),
+        gap AS (
+          SELECT extract(epoch FROM st - pe) AS s FROM t
+           WHERE pe IS NOT NULL AND n >= 2 AND pn >= 2
+             AND substring(qk FROM '^[0-9]+') IS DISTINCT FROM substring(pq FROM '^[0-9]+')
+             AND extract(epoch FROM st - pe) BETWEEN $3 AND $4
+        ),
+        o AS (SELECT s, row_number() OVER (ORDER BY s) i, count(*) OVER () n FROM gap),
+        w2 AS (SELECT i, s lo, lead(s, (n/2)::int) OVER (ORDER BY s) hi FROM o),
+        best AS (SELECT i i0 FROM w2 WHERE hi IS NOT NULL ORDER BY hi - lo LIMIT 1)
+        SELECT avg(o.s)::float8, (SELECT max(n) FROM o)::bigint
+          FROM o, best
+         WHERE o.i BETWEEN best.i0 AND best.i0 + (SELECT max(n)/2 FROM o)
+        "#,
+    )
+    .bind(ws).bind(we).bind(BAY_GAP_CAP_S.0).bind(BAY_GAP_CAP_S.1)
+    .fetch_optional(pool)
+    .await?;
+
     let qc_row = |jt: &str| qcl.iter().find(|r| r.0 == jt);
     let qcw_row = |jt: &str| {
         qcw.iter().find(|r| r.0 == jt && r.1.is_some() && r.2 >= QC_MIN_CRANES)
@@ -548,6 +618,18 @@ pub async fn build(pool: &PgPool, ws: DateTime<Utc>, we: DateTime<Utc>) -> Resul
     let qc_n = |jt: &str| qcw_row(jt).map_or_else(|| qc_row(jt).map_or(0, |r| r.3), |r| r.3);
     let qc_as_of = qcl.iter().filter_map(|r| r.4).max();
 
+    // Subtract one container cycle — the interval ends at a completion, so it carries the first
+    // lift in the new bay. Floored at 30s: a gantry move plus spotting cannot be quicker, and a
+    // number below that means the population was contaminated, not that the crane was fast.
+    let one_cycle = (qc_move_s("DS", QC_MOVE_S_FALLBACK.0) + qc_move_s("LD", QC_MOVE_S_FALLBACK.1)) as f64 / 2.0;
+    let (bay_change_s, bay_scope, bay_n, bay_shorth) = match bay_gap {
+        Some((Some(shorth), n)) if n >= BAY_MIN_SAMPLES && shorth - one_cycle >= 30.0 => {
+            ((shorth - one_cycle).round() as i64, "window", n, Some(shorth.round() as i64))
+        }
+        Some((s, n)) => (BAY_CHANGE_S, "constant fallback", n, s.map(|v| v.round() as i64)),
+        None => (BAY_CHANGE_S, "constant fallback", 0, None),
+    };
+
     // Keyed by lowercased job type so a consumer can look up exactly the service it needs.
     let mut yc_service = serde_json::Map::new();
     let mut yc_sample = serde_json::Map::new();
@@ -565,7 +647,7 @@ pub async fn build(pool: &PgPool, ws: DateTime<Utc>, we: DateTime<Utc>) -> Resul
         },
         "yc_service": yc_service,   // per job type: [p10, p50, p90] seconds
         "hatch_s": { "ds": HATCH_S_DS, "ld": HATCH_S_LD },
-        "bay_change_s": BAY_CHANGE_S,
+        "bay_change_s": bay_change_s,
         "drive_speed_ms": DRIVE_SPEED_MS,
         // Every value says where it came from and, crucially, whether it describes THIS window.
         "_provenance": {
@@ -588,7 +670,16 @@ pub async fn build(pool: &PgPool, ws: DateTime<Utc>, we: DateTime<Utc>) -> Resul
                 "samples": yc_sample,
             },
             "hatch_s": { "source": "research-log measurement", "scope": "constant" },
-            "bay_change_s": { "source": "research-log measurement", "scope": "constant" },
+            "bay_change_s": {
+                "source": "densest half of crane bay-to-bay gaps, minus one container cycle",
+                "scope": bay_scope,
+                "transitions": bay_n,
+                "gap_shorth_s": bay_shorth,      // before the cycle subtraction
+                "cycle_subtracted_s": one_cycle.round() as i64,
+                // The median of the same gaps is far higher because it carries truck wait; the
+                // densest region is used precisely to keep dispatch delay OUT of an equipment number.
+                "excludes": "single-move visits on either side (45% of raw visits; a stray box mid-bay is not a gantry move)",
+            },
             "drive_speed_ms": { "source": "GPS motion split, stopped segments excluded", "scope": "constant", "kmh": 22.8 },
             "note": "twin lifts are per-move in the work list (twin_group/is_twin), not an emulator ratio. containers[].service_s is the raw observed COMP-ST and is a record of what happened, not this model parameter.",
         },
