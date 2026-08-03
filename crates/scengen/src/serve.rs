@@ -38,6 +38,14 @@ pub async fn run(pool: PgPool, port: u16) -> Result<()> {
         .route("/api/scenario/status", get(status))
         .route("/api/scenario/runs", get(runs))
         .route("/api/scenario/download/:kind", get(download))
+        // Async path. `download` assembles inline and holds one of the pool's two connections for
+        // the whole build — measured 1.5s for 8 hours but 22s for a day, and the cap is a week. A
+        // long window on the sync path is therefore a request that may outlive the client's patience
+        // (or its proxy) while occupying half this service's database capacity. Queue it instead:
+        // the worker builds it out of process, under its own memory limit, and the result waits.
+        .route("/api/scenario/jobs", get(jobs).post(enqueue))
+        .route("/api/scenario/jobs/:job_id", get(job))
+        .route("/api/scenario/jobs/:job_id/download/:kind", get(job_download))
         .route("/api/scenario/config", post(set_config))
         .with_state(pool);
 
@@ -117,21 +125,14 @@ async fn download(
     Path(kind): Path<String>,
     Query(r): Query<Range>,
 ) -> Result<Response, AppErr> {
-    let ws = DateTime::from_timestamp(r.start, 0).ok_or_else(|| anyhow::anyhow!("bad start"))?;
-    let we = DateTime::from_timestamp(r.end, 0).ok_or_else(|| anyhow::anyhow!("bad end"))?;
     // Bound the request. build() runs synchronously and materializes the whole scenario in memory,
     // so an unbounded window from a stray (or hostile) query string could hang or OOM this service.
-    // Real scenarios are a few shifts; a week is already generous.
-    if we <= ws {
-        return Ok((StatusCode::BAD_REQUEST, "end must be after start").into_response());
-    }
-    if (we - ws).num_days() > MAX_WINDOW_DAYS {
-        return Ok((
-            StatusCode::BAD_REQUEST,
-            format!("window too large (max {MAX_WINDOW_DAYS} days)"),
-        )
-            .into_response());
-    }
+    // Real scenarios are a few shifts; a week is already generous. Past a few hours prefer the
+    // queue (POST /api/scenario/jobs), which builds out of process under its own memory cap.
+    let (ws, we) = match check_window(r.start, r.end) {
+        Ok(v) => v,
+        Err(resp) => return Ok(resp),
+    };
     // Validate `kind` BEFORE assembling. build() is synchronous and materializes the whole window
     // in memory, so answering an unknown kind only AFTER that work would let a stray path burn a
     // full assembly (and one of the pool's two connections) to then return 404.
@@ -149,6 +150,140 @@ async fn download(
     }
     let val = if kind == "scenario" { scenario } else { emulator };
     let body = serde_json::to_string_pretty(&val)?;
+    Ok((
+        [
+            (header::CONTENT_TYPE, "application/json".to_string()),
+            (header::CONTENT_DISPOSITION, format!("attachment; filename=\"{fname}\"")),
+        ],
+        body,
+    )
+        .into_response())
+}
+
+/// Validate a requested window once, for both the sync and the async path.
+fn check_window(start: i64, end: i64) -> Result<(DateTime<chrono::Utc>, DateTime<chrono::Utc>), Response> {
+    let bad = |m: &str| (StatusCode::BAD_REQUEST, m.to_string()).into_response();
+    let ws = DateTime::from_timestamp(start, 0).ok_or_else(|| bad("bad start"))?;
+    let we = DateTime::from_timestamp(end, 0).ok_or_else(|| bad("bad end"))?;
+    if we <= ws {
+        return Err(bad("end must be after start"));
+    }
+    if (we - ws).num_days() > MAX_WINDOW_DAYS {
+        return Err(bad(&format!("window too large (max {MAX_WINDOW_DAYS} days)")));
+    }
+    Ok((ws, we))
+}
+
+/// Queue a window for background assembly. Returns the job id immediately.
+///
+/// Deliberately idempotent on (window, state): asking twice for the same period while the first
+/// request is still pending or running returns the SAME job rather than building it twice. A 22 MB
+/// assembly is expensive enough that an impatient double-click should not cost two of them, and
+/// two workers racing on one window would produce two identical rows for no gain.
+async fn enqueue(State(pool): State<PgPool>, Query(r): Query<Range>) -> Result<Response, AppErr> {
+    let (ws, we) = match check_window(r.start, r.end) {
+        Ok(v) => v,
+        Err(resp) => return Ok(resp),
+    };
+    let existing: Option<(i64, String)> = sqlx::query_as(
+        "SELECT job_id, state FROM scenario.assembly_job
+          WHERE window_start = $1 AND window_end = $2 AND state IN ('pending','running')
+          ORDER BY requested_at LIMIT 1",
+    )
+    .bind(ws).bind(we)
+    .fetch_optional(&pool)
+    .await?;
+    if let Some((job_id, state)) = existing {
+        return Ok(Json(serde_json::json!({
+            "job_id": job_id, "state": state, "note": "already queued for this window"
+        }))
+        .into_response());
+    }
+    let (job_id,): (i64,) = sqlx::query_as(
+        "INSERT INTO scenario.assembly_job (window_start, window_end) VALUES ($1, $2) RETURNING job_id",
+    )
+    .bind(ws).bind(we)
+    .fetch_one(&pool)
+    .await?;
+    tracing::info!(job_id, %ws, %we, "assembly job queued");
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(serde_json::json!({ "job_id": job_id, "state": "pending" })),
+    )
+        .into_response())
+}
+
+/// Recent jobs, newest first. The output columns are deliberately NOT selected — each is tens of
+/// megabytes, and a list endpoint that drags them along would be unusable at exactly the moment the
+/// queue is busiest.
+async fn jobs(State(pool): State<PgPool>) -> Result<Response, AppErr> {
+    let s: String = sqlx::query_scalar(
+        "SELECT coalesce(jsonb_agg(jsonb_build_object(
+                  'job_id', job_id, 'state', state,
+                  'window', jsonb_build_array(window_start, window_end),
+                  'requested_at', requested_at, 'finished_at', finished_at,
+                  'error', error_text, 'summary', summary,
+                  'bytes', coalesce(pg_column_size(scenario_out), 0)
+                            + coalesce(pg_column_size(emulator_out), 0))
+                ORDER BY job_id DESC), '[]'::jsonb)::text
+           FROM (SELECT * FROM scenario.assembly_job ORDER BY job_id DESC LIMIT 50) t",
+    )
+    .fetch_one(&pool)
+    .await?;
+    Ok(json_body(s))
+}
+
+/// One job's state. Poll this after enqueue; `state` goes pending -> running -> done | error.
+async fn job(State(pool): State<PgPool>, Path(job_id): Path<i64>) -> Result<Response, AppErr> {
+    let s: Option<String> = sqlx::query_scalar(
+        "SELECT jsonb_build_object(
+                  'job_id', job_id, 'state', state,
+                  'window', jsonb_build_array(window_start, window_end),
+                  'requested_at', requested_at, 'finished_at', finished_at,
+                  'error', error_text, 'summary', summary,
+                  'bytes', coalesce(pg_column_size(scenario_out), 0)
+                            + coalesce(pg_column_size(emulator_out), 0))::text
+           FROM scenario.assembly_job WHERE job_id = $1",
+    )
+    .bind(job_id)
+    .fetch_optional(&pool)
+    .await?;
+    match s {
+        Some(s) => Ok(json_body(s)),
+        None => Ok((StatusCode::NOT_FOUND, "no such job").into_response()),
+    }
+}
+
+/// Fetch a finished job's output. Streams the stored jsonb straight out as text — the process never
+/// parses it back into a Value, so serving a large result costs a copy rather than a second build.
+async fn job_download(
+    State(pool): State<PgPool>,
+    Path((job_id, kind)): Path<(i64, String)>,
+) -> Result<Response, AppErr> {
+    let col = match kind.as_str() {
+        "scenario" => "scenario_out",
+        "emulator" => "emulator_out",
+        _ => return Ok((StatusCode::NOT_FOUND, "unknown kind (scenario|emulator)").into_response()),
+    };
+    // state is fetched with the body so a job that is still running gets told so, instead of
+    // receiving an empty 404 that reads like the job never existed.
+    let row: Option<(String, Option<String>, DateTime<chrono::Utc>)> = sqlx::query_as(&format!(
+        "SELECT state, {col}::text, window_start FROM scenario.assembly_job WHERE job_id = $1"
+    ))
+    .bind(job_id)
+    .fetch_optional(&pool)
+    .await?;
+    let Some((state, body, ws)) = row else {
+        return Ok((StatusCode::NOT_FOUND, "no such job").into_response());
+    };
+    let Some(body) = body else {
+        return Ok((
+            StatusCode::CONFLICT,
+            format!("job is '{state}', not done — poll /api/scenario/jobs/{job_id}"),
+        )
+            .into_response());
+    };
+    let fname = format!("{kind}-{}.json", ws.timestamp());
     Ok((
         [
             (header::CONTENT_TYPE, "application/json".to_string()),

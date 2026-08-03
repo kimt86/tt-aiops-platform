@@ -1,0 +1,15 @@
+[Unit]
+Description=wp-tt scenario assembly worker every 2min (drains the queue; idle ticks cost one indexed SELECT)
+
+[Timer]
+# 2분. 사람이 큐에 넣고 기다리는 작업이라 지연이 그대로 체감된다. 빈 큐일 때 비용은
+# state='pending' 인덱스 조회 한 번(scenario_assembly_state_idx)이라 놀리는 값이 사실상 0이고,
+# Oracle 은 애초에 건드리지 않는다(전부 로컬 조립).
+# systemd 는 아직 돌고 있는 oneshot 을 다시 띄우지 않으므로, 긴 창을 조립하는 중이면
+# 다음 틱은 조용히 넘어간다 = 워커 동시 실행 없음(assemble.rs 의 고아 판정이 이걸 전제한다).
+OnBootSec=4min
+OnUnitActiveSec=120s
+AccuracySec=15s
+
+[Install]
+WantedBy=timers.target
