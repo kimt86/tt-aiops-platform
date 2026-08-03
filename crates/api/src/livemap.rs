@@ -4620,6 +4620,11 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                 let Some(eta) = w.work_eta_ts else { works_no_eta += 1; return None };
                 Some((i, coord.0, coord.1, eta.timestamp_millis()))
             }).collect();
+            // 현행 Stage-1 은 **종전 우주**(TOS 미배차)만 본다 — 동작을 바꾸지 않기 위해서다.
+            // 새 규칙(아래)만 전체를 본다. 1단계가 끝나면 이 구분이 사라진다.
+            let works_unassigned: Vec<usize> = works.iter().enumerate()
+                .filter(|(_, &(wi, _, _, _))| !work[wi].tos_assigned)
+                .map(|(oi, _)| oi).collect();
             if works_no_coord + works_no_eta > 0 && tick % 10 == 0 {
                 tracing::info!(no_coord = works_no_coord, no_eta = works_no_eta, kept = works.len(),
                     "Stage-2 후보에서 제외된 작업");
@@ -4704,7 +4709,7 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
             // work pool by urgency HERE — starving cranes first, then the DEPARTURE tier (vessel-deadline
             // risk), then work-ETA (when the crane reaches the bay) — so urgency is decided in SELECTION,
             // not leaked into the matching cost.
-            let mut order: Vec<usize> = (0..works.len()).collect();
+            let mut order: Vec<usize> = works_unassigned.clone();
             order.sort_by_key(|&i| {
                 let qc = &work[works[i].0].qc;
                 (if starving.contains(qc) { 0u8 } else { 1u8 },   // ① 굶주림(살아있는 신호) — 불변·최상위
@@ -4718,7 +4723,7 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
             // 티어 '없는' 기본 순서 = 레버가 꺼져 있을 때의 바로 그 순서(①③만). 아래 슬롯 예산에
             // 밀린 긴급 버킷을 버리지 않고 '원래 자리'로 되돌리는 데 쓴다 — 마감이 더 급한 버킷이
             // 레버 때문에 되레 풀 꼬리로 밀리는 역전을 막는 안전망.
-            let mut base_order: Vec<usize> = (0..works.len()).collect();
+            let mut base_order: Vec<usize> = works_unassigned.clone(); // 현행과 같은 우주
             base_order.sort_by_key(|&i| {
                 (if starving.contains(&work[works[i].0].qc) { 0u8 } else { 1u8 }, works[i].3)
             });
@@ -4847,6 +4852,18 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                     if acc >= truck_n { break }
                     acc += slots.min(truck_n - acc);
                     kept_new.push(oi);
+                }
+                if tick % 5 == 0 {
+                    let with_dd = works.iter().filter(|&&(wi, _, _, _)| work[wi].dispatch_deadline_ts.is_some()).count();
+                    let min_slack = works.iter()
+                        .filter_map(|&(wi, _, _, _)| work[wi].dispatch_deadline_ts)
+                        .map(|d| (d.timestamp_millis() - now) / 1000)
+                        .min();
+                    let assigned_n = work.iter().filter(|w| w.tos_assigned).count();
+                    tracing::info!(works = works.len(), unassigned = works_unassigned.len(),
+                        assigned_rows = assigned_n, with_deadline = with_dd,
+                        min_slack_s = ?min_slack, due_buckets = due.len(),
+                        "설계③ 새 규칙 진단");
                 }
                 (kept_new, overdue, (truck_n - acc).max(0) as i32)
             };

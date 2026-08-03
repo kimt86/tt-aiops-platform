@@ -963,6 +963,13 @@ pub(crate) struct Stage2Work {
     pub(crate) dispatch_deadline_ts: Option<DateTime<Utc>>,
     /// 위에서 실제로 뺀 준비시간(초). 학습값(learn_dispatch_lead) 우선, 없으면 LEAD_*_S 상수.
     pub(crate) dd_lead_s: Option<i64>,
+    /// TOS 가 이미 트럭을 붙여 둔 작업인가(live_workpool 유래). mig 0121 1단계용.
+    /// ⚠ 우리 시스템은 TOS 배차와 무관하게 돌아야 하므로 **새 규칙 풀은 이 값을 무시**한다.
+    /// 현행 Stage-1 은 종전 동작 보존을 위해 false 인 것만 담는다(= 옛 live_candidate 집합).
+    /// 왜 이게 필요한가: TOS 는 크레인 필요 ~25분 전에 트럭을 붙인다. 그래서 '미배차'만 보면
+    /// 우리 목록에는 **항상 25분 이상 남은 작업만** 남고, 배차 마감이 임박하는 일이 영원히 없다.
+    /// 실측(2026-08-03): 마감까지 남은 시간의 최소가 829초에서 잘려 0 에 닿지 않았다.
+    pub(crate) tos_assigned: bool,
 }
 
 /// Build the Stage-2 work-demand list from the same engine the dispatch page uses (build_workpool):
@@ -1020,6 +1027,47 @@ pub(crate) async fn stage2_work_candidates(pool: PgPool) -> Result<Vec<Stage2Wor
             proc_s: row.and_then(|r| r.2),
             dispatch_deadline_ts: row.map(|r| r.0 - chrono::Duration::seconds(lead)),
             dd_lead_s: Some(lead),
+            tos_assigned: false,
+        });
+    }
+    // ── TOS 가 이미 배차한 작업도 담는다 (mig 0121) ──────────────────────────────────────────
+    // 우리 시스템은 TOS 배차와 무관하게 "지금 배차해야 할 것"을 계산한다. 그런데 지금까지 작업
+    // 소스가 live_candidate(= TOS 미배차)뿐이라, TOS 가 ~25분 전에 가져간 작업은 우리 눈에
+    // 들어오기 전에 사라졌다. 그래서 배차 마감이 임박하는 작업이 구조적으로 존재하지 않았다.
+    //
+    // 추가 추출은 없다 — 같은 Oracle 질의가 A(배차됨)·Q(미배차)를 이미 둘 다 가져와
+    // live_workpool / live_candidate 로 나눠 담고 있었고, 우리는 Q 만 쓰고 A 를 버리고 있었다.
+    //
+    // 트럭 수요 환산: 배차된 행은 ytno(트럭)가 있으므로 **트럭 대수 = distinct ytno** 가 정확하다
+    // (live_candidate 쪽이 twinkey 로 트윈을 합치는 것과 같은 의미). 야드 블록은 미배차 쪽과
+    // 똑같이 yt_topos 앞자리에서 얻는다(실측 채워짐 적하 99.6% / 양하 100%).
+    let assigned: Vec<(String, String, String, String, Option<String>, i64)> = sqlx::query_as(
+        "SELECT w.qc, w.vessel, w.queuename, w.jobtype,
+                CASE WHEN w.jobtype = 'LD' THEN NULLIF(left(w.yt_topos, 3), '') END AS src_block,
+                count(DISTINCT w.ytno)::int8 AS n
+           FROM live_workpool w
+          WHERE w.jobtype IN ('DS','LD') AND w.qc IS NOT NULL AND w.qc <> ''
+            AND w.ytno IS NOT NULL AND w.ytno <> ''
+          GROUP BY 1,2,3,4,5",
+    )
+    .fetch_all(&pool_for_lead).await.unwrap_or_default();
+    for (qc, vessel, queuename, jt, src_block, n) in assigned {
+        let lead = lead_realized.get(&jt).copied()
+            .unwrap_or(if jt == "LD" { LEAD_LD_S } else { LEAD_DS_S });
+        let row = eta.get(&(qc.clone(), vessel.clone(), queuename.clone())).copied();
+        out.push(Stage2Work {
+            qc,
+            vessel,
+            queuename,
+            jobtype: jt,
+            src_block,
+            n: n as i32,
+            work_eta_ts: row.map(|r| r.0),
+            deadline_ts: row.and_then(|r| r.1),
+            proc_s: row.and_then(|r| r.2),
+            dispatch_deadline_ts: row.map(|r| r.0 - chrono::Duration::seconds(lead)),
+            dd_lead_s: Some(lead),
+            tos_assigned: true,
         });
     }
     Ok(out)
