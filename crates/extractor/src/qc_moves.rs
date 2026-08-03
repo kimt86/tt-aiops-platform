@@ -4,6 +4,15 @@
 //! truck (TRK_ID 100%), so comp_ts is the physical handover completion — the Phase-2 ground truth
 //! that backfills/corrects the websocket-estimated cycle timestamps. Incremental via etl_watermark
 //! (stream='qc_move'). See architecture/cycle-decomposition (§5) and rtg_moves.
+//!
+//! ⚠⚠ `st_ts` (ST_DT) IS THE DISPATCH INSTANT, NOT A PHYSICAL START. It equals
+//! JOB_ORDER_HISTORY.YT_DIS_DT to the second (measured 2026-08-03: 98.9% of DS rows, 99.6% of LD),
+//! is written retroactively when the move completes, and consecutive same-crane [st_ts, comp_ts]
+//! intervals OVERLAP 90.6% of the time — impossible for a crane that lifts one box at a time.
+//! Only `comp_ts` is a physical event here. Never use st_ts as a truth label for "when did the
+//! crane work this container"; mig 0113 did and had to be reverted by mig 0115.
+//! ⚠ This is a QC-only property. In `rtg_moves` the same ST_DT column IS a physical start
+//! (intervals overlap 1.3%, comp−st median ~60s). Do not carry this warning over to the yard.
 
 use anyhow::{Context, Result};
 use chrono::{NaiveDate, NaiveDateTime};
@@ -111,7 +120,14 @@ pub async fn tick_qc_moves(pool: &PgPool, target: &str) -> Result<()> {
             };
             let Some(comp_ts) = parse_etw(comp_dt) else { continue };
             let st_ts = r.st_dt.as_deref().and_then(parse_etw);
-            let dur_s = st_ts.map(|st| (comp_ts - st).num_seconds()).filter(|&d| (0..=3600).contains(&d));
+            // comp − st on a QC row is the TOS DISPATCH LEAD (dispatch → handover), NOT crane service
+            // time — median DS ~466s / LD ~1654s vs a real lift cycle of ~85s. Kept because the
+            // lead is exactly what Stage-2 feasibility needs (learn_dispatch_lead, mig 0116).
+            // The cap was 3600s, which silently NULLed 9.32% of LD rows — and every dropped row was a
+            // LONG one, so the surviving median read 1530s instead of 1654s. Raised to 4h; consumers
+            // still window it themselves. Rows already NULLed keep comp_ts/st_ts, so anything that
+            // needs the true value should subtract the two columns rather than trust dur_s.
+            let dur_s = st_ts.map(|st| (comp_ts - st).num_seconds()).filter(|&d| (0..=14_400).contains(&d));
             let bdate = NaiveDate::parse_from_str(comp_dt.get(..8).unwrap_or(""), "%Y%m%d").unwrap_or(run_date);
             let res = sqlx::query(
                 "INSERT INTO qc_move_log

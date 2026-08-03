@@ -18,7 +18,7 @@
   <div class="kc-tablewrap"><table>
     <thead><tr><th>핵심 질문</th><th>선적(LD) — 안벽 QC</th><th>양하(DS) — 야드 RTG</th></tr></thead>
     <tbody>
-      <tr><td><strong>(1) 핸드오버 "시작 시점"</strong></td><td>권위(사후) <code>MCH_OPERATION.ST_DT</code> · 라이브 임박 QC PLC load 전이(~1초) · 예측 <code>JOB_ODR_ETW_DT</code></td><td><strong>TOS 라이브 직접 관측</strong> <code>JOB_ODR_ACTV_DT</code>(=QC 양하 완료·트럭 적재) · 권위 <code>JOB_HIST_ACTV_DT</code> · 웹소켓 보조 RTG GPS ≤30m. 단 ACTV=QC 적재이지 RTG 물리집기 아님(+~11분)</td></tr>
+      <tr><td><strong>(1) 핸드오버 "시작 시점"</strong></td><td>권위(사후) <code>MCH_OPERATION.COMPDATE||COMPTIME</code>(물리 핸드오버 완료) · 라이브 임박 QC PLC load 전이(~1초) · 예측 <code>JOB_ODR_ETW_DT</code><br><strong>⚠ 2026-08-03 정정:</strong> 여기 원래 <code>ST_DT</code>가 권위 정답지로 적혀 있었으나 <strong>틀렸다</strong>. QC의 <code>ST_DT</code>는 크레인 착수가 아니라 <strong>배차 시각</strong>(= <code>YT_DIS_DT</code>와 초 단위 일치, DS 98.9%/LD 99.6%)이고 핸드오버보다 중앙 25분 이르다. 같은 크레인 <code>[ST_DT, COMP]</code> 구간이 90.6% 겹친다 — 한 번에 하나만 드는 크레인에서 불가능. 이 줄을 근거로 <code>db/migrations/0113</code>이 정답지를 잘못 골랐다가 <code>0115</code>에서 되돌렸다.</td><td><strong>TOS 라이브 직접 관측</strong> <code>JOB_ODR_ACTV_DT</code>(=QC 양하 완료·트럭 적재) · 권위 <code>JOB_HIST_ACTV_DT</code> · 웹소켓 보조 RTG GPS ≤30m. 단 ACTV=QC 적재이지 RTG 물리집기 아님(+~11분)</td></tr>
       <tr><td><strong>(2) 핸드오버 "대상 차량"</strong></td><td>사후 <code>TRK_ID</code> · 라이브 <code>JOB_ODR_YTNO</code>(GPS device id와 동일)</td><td>라이브 <code>JOB_ODR_YTNO</code> · 이력 <code>JOB_HIST_YTNO</code>(DS 87% 채움) · 담당 RTG <code>ARMGC</code></td></tr>
     </tbody>
   </table></div>
@@ -53,7 +53,7 @@
   <div class="kc-tablewrap"><table>
     <thead><tr><th></th><th>테이블</th><th>구분 키</th><th>시작/완료</th></tr></thead>
     <tbody>
-      <tr><td>QC(안벽)</td><td><code>MCH_OPERATION</code>(권위·사후)</td><td><code>MACHNO ^C[0-9]+$</code></td><td><code>ST_DT</code>+<code>COMP</code> 쌍 ○</td></tr>
+      <tr><td>QC(안벽)</td><td><code>MCH_OPERATION</code>(권위·사후)</td><td><code>MACHNO ^C[0-9]+$</code></td><td><code>COMP</code>만 물리 이벤트 ○ / <code>ST_DT</code>=배차시각 ✕ (쌍이 아니다)</td></tr>
       <tr><td>RTG(블록)</td><td><code>JOB_ORDER_HISTORY</code>(대기 기반·사후)</td><td><code>ARMGC</code>(RTG/ES)</td><td><code>YT_DIS_DT→ACTV_DT</code> 대기만</td></tr>
     </tbody>
   </table></div>

@@ -4663,6 +4663,18 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
             // switch penalty). No urgency/starve/load-balance terms and no QC layer — those are Stage-1.
             let mut caps: Vec<i64> = Vec::with_capacity(order.len()); // per-bucket demand (Stage-1 capped)
             let mut deadlines: Vec<i64> = Vec::with_capacity(order.len()); // feasibility deadline ms per wpos
+            // mig 0116 — seconds between REACHING THE PICKUP POINT and the crane handover that our
+            // travel model does not count. For DS the pickup point IS the crane, so this is small
+            // (~74s of queue). For LD the pickup point is the YARD BLOCK while the deadline is the
+            // QC at the quay, so the entire laden leg (RTG service + block→quay drive + quay queue)
+            // was missing — measured ~1,014s. Comparing "time to reach the block" against "when the
+            // QC needs it" is what drove LD feasibility to 30.9% while real crane starvation was
+            // only 6–16%. Feasibility ONLY — never the edge cost (Stage-2 stays pure empty travel).
+            let lead_extra: HashMap<String, i64> = sqlx::query_as::<_, (String, i32)>(
+                "SELECT jobtype, extra_s FROM learn_dispatch_lead",
+            )
+            .fetch_all(&pool).await.unwrap_or_default()
+            .into_iter().map(|(j, e)| (j, (e as i64).clamp(0, 2400))).collect();
             // 출항 축 로깅용(정렬 후 wpos 인덱스로 재배열). 기존 deadlines[]와 '별개 축'이다 —
             // 절대 교체/융합하지 않는다(현행 지평 p50 1043s는 실제 도착 p90 538s와 같은 스케일이라
             // 진짜 물리는 지표인데, 출항 마감 p50 17041s로 바꾸면 전 구간 88% 평평한 상수가 된다).
@@ -4763,6 +4775,11 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                 if !feasible {
                     opt_miss += 1;
                 }
+                // mig 0116 — the crane-referenced axis, logged ALONGSIDE the two above. The old pair
+                // keeps its exact meaning on purpose: 19 days of series sit behind it at 21-day
+                // retention, so redefining in place would blend two meanings with no discriminator.
+                let extra_s = lead_extra.get(&w.jobtype).copied().unwrap_or(0);
+                let crane_slack = (deadline - (arrival_at + extra_s * 1000)) / 1000;
                 opt_cost += arr;
                 let v = &vehicles[vi];
                 // deadline_slack_s / feasible = 크레인 필요 시각(work-ETA) 기준 — 정의 불변(19일치
@@ -4770,8 +4787,8 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                 // 컬럼(dep_slack_s / dep_tier)으로만 추가한다.
                 let ins = sqlx::query(
                     "INSERT INTO stage2_match_shadow
-                       (ts,tick,ytno,qc,vessel,queuename,jobtype,src_block,veh_state,arrival_s,od_p90_s,deadline_slack_s,feasible,cost_tier,switched,dest_lat,dest_lon,src_lat,src_lon,dep_slack_s,dep_tier)
-                     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21) ON CONFLICT (ts,ytno) DO NOTHING",
+                       (ts,tick,ytno,qc,vessel,queuename,jobtype,src_block,veh_state,arrival_s,od_p90_s,deadline_slack_s,feasible,cost_tier,switched,dest_lat,dest_lon,src_lat,src_lon,dep_slack_s,dep_tier,lead_extra_s,crane_slack_s,feasible_crane)
+                     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24) ON CONFLICT (ts,ytno) DO NOTHING",
                 )
                 .bind(ts).bind(tick as i64).bind(&v.0).bind(&w.qc).bind(&w.vessel).bind(&w.queuename)
                 .bind(&w.jobtype).bind(&w.src_block).bind(v.4)
@@ -4779,6 +4796,9 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                 .bind(wlat).bind(wlon).bind(v.1).bind(v.2)
                 .bind(dep_slack_w[wpos].map(|v| v.clamp(-2_000_000_000, 2_000_000_000) as i32))
                 .bind(dep_tier_w[wpos] as i16)
+                .bind(extra_s as i32)
+                .bind(crane_slack.clamp(-2_000_000_000, 2_000_000_000) as i32)
+                .bind(crane_slack >= 0)
                 .execute(&pool).await;
                 if let Err(e) = ins {
                     ins_err_n += 1;
