@@ -829,14 +829,21 @@ async fn qc_gap_medians(
 ///
 /// Split out of `build` so the same measurement can be retried over a longer look-back when a short
 /// window does not yield enough transitions — see BAY_WIDEN_DAYS. Returns the shorth in seconds
-/// (still including one container cycle; the caller subtracts it) and the population size, or None
-/// when the window holds no qualifying transition at all.
+/// (still including one container cycle; the caller subtracts it) and the population size.
+///
+/// ★BOTH columns are nullable and the count MUST be decoded as an Option. The statement is an
+/// ungrouped aggregate, so it returns exactly one row even when its FROM matches nothing — a row of
+/// all NULLs, not zero rows. Binding the count as a plain i64 therefore turned "this window has no
+/// bay transitions" into a decode error that surfaced as HTTP 500, which is what every scenario
+/// download for a window before the 2026-07-30 queuename epoch used to do: no queuename, no
+/// transitions, no row to decode. An empty window is a normal answer and belongs in the fallback
+/// path, not in an error.
 async fn bay_gap_shorth(
     pool: &PgPool,
     from: DateTime<Utc>,
     to: DateTime<Utc>,
 ) -> Result<Option<(Option<f64>, i64)>> {
-    let r: Option<(Option<f64>, i64)> = sqlx::query_as(
+    let r: Option<(Option<f64>, Option<i64>)> = sqlx::query_as(
         r#"
         WITH m AS (
           SELECT machno, vessel, comp_ts,
@@ -870,7 +877,8 @@ async fn bay_gap_shorth(
     .bind(from).bind(to).bind(BAY_GAP_CAP_S.0).bind(BAY_GAP_CAP_S.1)
     .fetch_optional(pool)
     .await?;
-    Ok(r)
+    // A NULL count means no transitions; report it as the zero it is.
+    Ok(r.map(|(shorth, n)| (shorth, n.unwrap_or(0))))
 }
 
 /// How long a finished job's output is kept. Each is tens of megabytes of jsonb in a LIVE database,
