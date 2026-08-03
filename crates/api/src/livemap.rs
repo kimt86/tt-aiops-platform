@@ -4355,6 +4355,52 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                 "SELECT DISTINCT qc FROM qc_wait_qc_sample WHERE ts > now() - interval '90 seconds' AND starving_real",
             )
             .fetch_all(&pool).await.unwrap_or_default().into_iter().collect();
+            // ── move-log in-flight anchor ────────────────────────────────────────────────────
+            // A truck is provably still working the moment a crane hands it a box: DS pickup is a
+            // qc_move_log row, LD pickup an rtg_move_log row, and the trip closes with tt_move_log
+            // .free_ts. That chain is TOS-authoritative, so it sees trucks the GPS cannot.
+            //
+            // Measured 2026-08-03 — this is ONLY used where GPS is blind, and the numbers say why.
+            // Scored head-to-head against the one authoritative truth (tt_move_log.free_ts), on the
+            // SAME snapshots, "how many seconds until this truck frees":
+            //     DS  GPS |err| 424s (bias +288)   move-log |err| 311s (bias −106)
+            //     LD  GPS |err| 240s (bias −240)   move-log |err| 659s (bias −641)
+            // So the note further down — "retire the GPS duration and take it from the move-log
+            // predictor" — is right for DS and WRONG for LD: a blanket swap would make the LD
+            // estimate ~2.7× worse. GPS re-estimates every snapshot; the move-log prediction is
+            // fixed at pickup and cannot track a truck that is running late.
+            //
+            // What GPS actually lacks is COVERAGE, not accuracy: 30.5% of in-flight DS trucks and
+            // 35.4% of LD ones have had no fix for over 10 minutes (the units only report on
+            // movement, so a truck queueing at a crane goes quiet). Those are exactly the trucks
+            // about to free. So: GPS where it can see, this anchor where it cannot.
+            let inflight: HashMap<String, i64> = sqlx::query_as::<_, (String, i64)>(
+                "WITH pick AS (
+                   SELECT trk_id AS ytno, 'DS'::text jt, comp_ts pk FROM qc_move_log
+                    WHERE jobtype='DS' AND status='F' AND comp_ts > now()-interval '3 hours' AND trk_id IS NOT NULL
+                   UNION ALL
+                   SELECT trk_id, 'LD', comp_ts FROM rtg_move_log
+                    WHERE jobtype='LD' AND status='F' AND comp_ts > now()-interval '3 hours' AND trk_id IS NOT NULL
+                 ), latest AS (
+                   SELECT DISTINCT ON (ytno) ytno, jt, pk FROM pick ORDER BY ytno, pk DESC
+                 ), freed AS (
+                   SELECT ytno, max(free_ts) f FROM tt_move_log WHERE free_ts > now()-interval '3 hours' GROUP BY 1
+                 )
+                 SELECT l.ytno,
+                        GREATEST(0, lr.remaining_p50 - EXTRACT(epoch FROM now() - l.pk))::int8
+                   FROM latest l
+                   LEFT JOIN freed fr ON fr.ytno = l.ytno
+                   JOIN learn_cycle_remaining lr
+                     ON lr.jobtype = l.jt AND lr.n_containers = 1 AND lr.dest_inflight_bucket = -1
+                  WHERE fr.f IS NULL OR fr.f < l.pk",
+            )
+            .fetch_all(&pool).await
+            .inspect_err(|e| tracing::warn!(error = %e, "in-flight anchor query failed — silent trucks fall back to the constant"))
+            .unwrap_or_default()
+            .into_iter().map(|(y, s)| (y, s.clamp(0, 3600))).collect();
+            if tick % 10 == 0 {
+                tracing::info!(n = inflight.len(), "move-log in-flight anchor");
+            }
             // candidate vehicles: idle (free now) + soon-free; committed/moving (delivering/empty) skipped
             let vehicles: Vec<(String, f64, f64, i64, &'static str)> = {
                 let map = lm.devices.read().await;
@@ -4383,7 +4429,13 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                         // loaded + last position near its drop + silent = it stopped waiting to be served
                         // (the unit only reports on movement). Key it on the DROP location (where it frees),
                         // robust to the stale GPS. Without this we miss ~25% of about-to-free trucks.
-                        if age > SILENT_HOLD_S { continue; }
+                        //
+                        // SILENT_HOLD_S is a belief, not an observation: past 20 min of silence we ASSUME
+                        // the truck went off-shift. The move-log anchor replaces that assumption with TOS
+                        // evidence — a crane loaded it and no free_ts has landed, so it is still working.
+                        // Hold those to twice the blind limit. Trucks with no anchor keep the old cutoff.
+                        let anchored = inflight.get(id).copied();
+                        if age > if anchored.is_some() { SILENT_HOLD_S * 2 } else { SILENT_HOLD_S } { continue; }
                         let jt = match p.jobtype.as_deref().or(p.latched_jobtype.as_deref()) { Some(j @ ("LD" | "DS")) => j, _ => continue };
                         let loaded = p.container1.as_deref().is_some_and(|s| !s.is_empty())
                             || p.latched_container.as_deref().is_some_and(|s| !s.is_empty());
@@ -4395,8 +4447,17 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                                    else { centroids.get(code).or_else(|| centroids.get(block_prefix(code))).map(|c| (c.lat, c.lon)) };
                         let Some((dlat, dlon)) = dpos else { continue };
                         if dist_m((p.lat, p.lon), (dlat, dlon)) > HELD_NEAR_DROP_M { continue; }
-                        let base = st_free.get(jt).map(|&(m, _)| m).unwrap_or(300).clamp(30, 3600);
-                        v.push((id.clone(), dlat, dlon, base, "soon_idle_held"));
+                        // Time-to-free for a truck the GPS cannot see. The old value here was a learned
+                        // per-jobtype CONSTANT (st_free) — the same number for every silent truck
+                        // regardless of when it actually picked up. The anchor knows that: it counts
+                        // down from this trip's own pickup. Only a constant is being replaced, so this
+                        // cannot regress the GPS estimate — that path is untouched (see the head-to-head
+                        // above: GPS wins on LD and must keep its own duration).
+                        let (base, state) = match anchored {
+                            Some(rem) => (rem.clamp(0, 3600), "soon_idle_anchored"),
+                            None => (st_free.get(jt).map(|&(m, _)| m).unwrap_or(300).clamp(30, 3600), "soon_idle_held"),
+                        };
+                        v.push((id.clone(), dlat, dlon, base, state));
                         continue;
                     }
                     let c = classify_tt(p, assigned_pool.get(id), &rtgs, &plc, &cranes, &centroids, now);

@@ -391,11 +391,12 @@ pub(crate) async fn build_workpool(pool: PgPool) -> Result<WorkpoolOut, AppError
         // against dispatch. Expect the spread to stay wide (the pre-correction MAE was ~790s = 13 min
         // and nothing about that came from the bias term), so a per-crane median off a few dozen rows
         // is still noise, not signal. Hence the per-crane floor below.
-        let bias_rows: Vec<(String, String, i32, Option<i32>)> =
-            sqlx::query_as("SELECT qc, jobtype, n, med_err_s FROM learn_work_eta_bias")
+        let bias_rows: Vec<(String, String, i32, i32, Option<i32>)> =
+            sqlx::query_as("SELECT qc, jobtype, horizon_bucket, n, med_err_s FROM learn_work_eta_bias")
                 .fetch_all(&pool).await.unwrap_or_default();
-        let mut eta_bias: std::collections::HashMap<(String, char), i64> = std::collections::HashMap::new();
-        for (bqc, jt, n, med) in bias_rows {
+        // key = (crane or "", jobtype, horizon bucket; -1 = horizon-agnostic)
+        let mut eta_bias: std::collections::HashMap<(String, char, i32), i64> = std::collections::HashMap::new();
+        for (bqc, jt, bucket, n, med) in bias_rows {
             // '' = global-jobtype fallback row. Per-crane floor raised 30 → 150 on the 2026-08-03
             // spread measurement above: at n=30 the median's standard error (~240s) is LARGER than
             // the whole per-crane effect we would be trying to read, so it fits noise. n=150 puts
@@ -407,7 +408,7 @@ pub(crate) async fn build_workpool(pool: PgPool) -> Result<WorkpoolOut, AppError
             }
             if let Some(med) = med {
                 let j = if jt == "LD" { 'L' } else { 'D' };
-                eta_bias.insert((bqc, j), (med as i64).clamp(-900, 1800));
+                eta_bias.insert((bqc, j, bucket), (med as i64).clamp(-900, 2400));
             }
         }
         let now = Utc::now();
@@ -577,9 +578,19 @@ pub(crate) async fn build_workpool(pool: PgPool) -> Result<WorkpoolOut, AppError
                     // two hand-entangled sources for one physical quantity. It is now the bootstrap
                     // FALLBACK only: it applies while no learned value exists and disappears the
                     // moment one does. applied_bias_s therefore equals the entire correction.
+                    // mig 0118 — the correction is keyed on HOW FAR AHEAD this prediction reaches,
+                    // because that is where the error actually lives. Measured on the corrected truth:
+                    // the spread is FLAT across horizon (~1,400s IQR at 5 min and at 50 min alike), but
+                    // the bias swings from +2,145s at 10–20 min to −623s at 50–60 min for LD. One
+                    // constant cannot represent that, and the dispatch band (5–45 min) sits right where
+                    // the swing is largest. Bucket = 10 min of the RAW horizon — bucketing on the
+                    // corrected value would move a prediction between buckets as the bias grows, which
+                    // is the same feedback trap mig 0113 fell into with its sample window.
+                    let bucket = ((before as i64) / 600).clamp(0, 4) as i32;
                     let learned = eta_bias
-                        .get(&(qc_id.clone(), job))
-                        .or_else(|| eta_bias.get(&(String::new(), job)))
+                        .get(&(qc_id.clone(), job, bucket))       // per-crane, per-horizon (rarely has n)
+                        .or_else(|| eta_bias.get(&(String::new(), job, bucket))) // ← this is the one that works
+                        .or_else(|| eta_bias.get(&(String::new(), job, -1)))     // horizon-agnostic fallback
                         .copied()
                         .unwrap_or(if job == 'L' { 0 } else { DS_WORK_ETA_BIAS_S });
                     let raw = eta_anchor + chrono::Duration::seconds(before as i64 + learned);
