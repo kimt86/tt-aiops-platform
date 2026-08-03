@@ -1,19 +1,31 @@
-//! Container size lookup -> scenario.container_spec, so landside volume can be reported in TEU.
+//! Container size lookup -> scenario.container_spec, so volume can be reported in TEU.
 //!
-//! Asks TOSADM.CYY_CONTAINER for the ISO code of boxes we have just seen cross the gate and do not
-//! already know. Lookups go by container number (the PK's leading column), so each is an index seek:
-//! 200 numbers came back in 2.08s including the ~0.9s SSH round trip.
+//! Asks TOSADM.CYY_CONTAINER for the ISO code of boxes we do not already know. Lookups go by
+//! container number (the PK's leading column), so each is an index seek: 200 numbers came back in
+//! 2.08s including the ~0.9s SSH round trip.
 //!
-//! ★WHY IT MUST RUN PROMPTLY. CYY_CONTAINER is CURRENT yard inventory — a box that has left is
-//! simply not there. Measured hit rate: 91.4% for containers seen within 3 hours, 77% within 3 days.
-//! So this is deliberately a small, frequent job rather than a big catch-up one, and it does NOT
-//! backfill: chasing old unknowns would spend Oracle on exactly the population least likely to
-//! answer. Windows predating this collector keep whatever the manifest seed gave them, and the
-//! scenario publishes a coverage percentage so a partial total is never read as the whole.
+//! ★WHAT WE ASK ABOUT, AND WHY IT IS THE YARD AND NOT A MOVE STREAM. CYY_CONTAINER *is* the current
+//! yard inventory, so the question "is this box in the yard right now" and the question "will this
+//! lookup answer" are the same question. Asking from `scenario.yard_cell` (our reconstruction of
+//! that same inventory) therefore hits by construction — measured 200/200. Asking from a move
+//! stream does not: a load move is the box LEAVING, and probing 140 containers seen in an `LD` move
+//! within the previous 30 minutes answered for only 57 (40.7%), because the rest were already
+//! aboard. A miss is not free either — with no miss table the box is re-asked every tick until it
+//! ages out, so a low-hit source silently fills the batch with questions that can never answer.
 //!
-//! Volume, measured: ~9,000 gate moves a day covering ~8,000 distinct boxes, of which ~4,000 are
-//! unknown — four or five batches a day, and falling, because a box only ever has to be asked about
-//! once in its life.
+//! A box therefore gets its size while it SITS, not while it moves, which is also the earliest we
+//! can ask and the longest window we have to ask in. Gate arrivals are covered because a gated-in
+//! box is in the yard; ship arrivals were already covered by the BAPLIE manifest; and export boxes
+//! are covered long before the crane comes for them. The recent-gate clause is kept as a second
+//! source only so a box that gates straight back out between two ticks is not missed.
+//!
+//! It still does NOT backfill history. The yard is a present-tense fact: every box in it is one a
+//! FUTURE window will contain. Windows predating this collector keep whatever the manifest seed
+//! gave them, and the scenario publishes a coverage percentage so a partial total is never read as
+//! the whole.
+//!
+//! Volume: the standing yard is ~101,000 slots and drains to zero unknowns once, after which only
+//! genuinely new arrivals are asked about — a box is asked about exactly once in its life.
 
 use anyhow::Result;
 use serde_json::{json, Value};
@@ -27,10 +39,11 @@ use crate::util::jstr;
 /// Containers per Oracle round trip. Same shape the gate collector uses against the same kind of
 /// IN-list seek.
 const BATCH: i64 = 1000;
-/// How far back to consider gate moves. This bound is also the retry policy: a box that was already
-/// gone from the yard when we asked stays unknown and gets a few more chances while it is inside the
-/// window, then falls out on its own — no miss table, no permanent re-asking. Wide enough that a
-/// short outage self-heals, narrow enough that it can never turn into a historical sweep.
+/// How far back to consider gate moves for the secondary source. This bound is also its retry
+/// policy: a box that had already left when we asked stays unknown and gets a few more chances
+/// while it is inside the window, then falls out on its own — no miss table, no permanent
+/// re-asking. Wide enough that a short outage self-heals, narrow enough that it can never turn into
+/// a historical sweep. The yard source needs no such bound: leaving the yard removes the row.
 const LOOKBACK_H: i64 = 12;
 
 pub async fn run(pool: &PgPool, target: &str) -> Result<()> {
@@ -54,16 +67,30 @@ pub async fn run(pool: &PgPool, target: &str) -> Result<()> {
 async fn tick(pool: &PgPool, run_id: i64, target: &str, cfg: &Config) -> Result<()> {
     state::set_phase(pool, run_id, "extract").await?;
 
-    // Newest first: a box seen minutes ago is far more likely to still be in the yard than one from
-    // this morning, and when a batch cannot hold everything the fresh end is the half worth spending
-    // the round trip on.
+    // Two sources, deduped: the standing yard (hits by construction) plus boxes that crossed the
+    // gate recently (catches one that arrives and leaves between two ticks, so is never in a yard
+    // snapshot we take).
+    //
+    // ★The LIMIT must cut by RECENCY, which is why the ordering happens outside the dedup. The
+    // previous form was `DISTINCT ON (contno) ... ORDER BY contno, ts DESC LIMIT`, and DISTINCT ON
+    // forces contno to lead the sort — so the batch was actually the alphabetically first 1,000,
+    // not the newest 1,000, contrary to its own comment. Harmless while there were ~30 candidates;
+    // a landmine the moment there are more than a batch of them, because every tick would re-ask
+    // the same head of the alphabet and never reach the rest.
     let todo: Vec<(String,)> = sqlx::query_as(
-        "SELECT DISTINCT ON (r.contno) r.contno
-           FROM rtg_move_log r
-          WHERE r.comp_ts > now() - make_interval(hours => $1)
-            AND r.jobtype IN ('GI','GO')
-            AND NOT EXISTS (SELECT 1 FROM scenario.container_spec s WHERE s.contno = r.contno)
-          ORDER BY r.contno, r.comp_ts DESC
+        "SELECT contno FROM (
+           SELECT y.contno, coalesce(y.updated_ts, now()) AS ts
+             FROM scenario.yard_cell y
+            WHERE y.contno IS NOT NULL
+           UNION ALL
+           SELECT r.contno, r.comp_ts
+             FROM rtg_move_log r
+            WHERE r.comp_ts > now() - make_interval(hours => $1)
+              AND r.jobtype IN ('GI','GO')
+         ) c
+          WHERE NOT EXISTS (SELECT 1 FROM scenario.container_spec s WHERE s.contno = c.contno)
+          GROUP BY contno
+          ORDER BY max(ts) DESC
           LIMIT $2",
     )
     .bind(LOOKBACK_H as i32)

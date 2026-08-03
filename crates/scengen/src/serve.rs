@@ -56,9 +56,10 @@ async fn status(State(pool): State<PgPool>) -> Result<Response, AppErr> {
              'move_hist', (SELECT jsonb_build_object('rows',count(*),'min',min(comp_ts),'max',max(comp_ts))
                              FROM scenario.move_hist),
              -- `scheduled` = a systemd timer drives this stream, so a stale watermark really does
-             -- mean the feed stopped. Streams without a timer (crane_deploy is collected by hand;
-             -- it is the plan log, kept only for plan-vs-actual comparison) are expected to sit
-             -- still and must not raise the silence alarm.
+             -- mean the feed stopped. A stream without a timer is expected to sit still and must
+             -- not raise the silence alarm — but it is also, by now, a sign that the stream was
+             -- retired and its cursor row outlived it (that is how the dead crane_deploy collector
+             -- was found: an unscheduled row that had not moved in eleven days).
              -- KEEP IN SYNC with deploy/systemd/tt-scenario-*.timer: a stream that gains a timer but
              -- not an entry here is monitored by nobody.
              'watermarks', (SELECT coalesce(jsonb_agg(jsonb_build_object(
