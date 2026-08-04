@@ -53,7 +53,9 @@
   <p>산출식 전체 → <a href="/kc/data/kpi-computation.html">KPI 산출</a>.</p>
   <dl class="kc-gloss">
     <dt id="cycle-time">사이클타임</dt><dd>TT 작업 1건이 도는 시간. KPI는 <strong>중위값</strong>·<strong>DS/LD 분리</strong>. 실측 TT 사이클 약 13–14분.</dd>
-    <dt id="four-phase">4단계 사이클</dt><dd><strong>공차이동</strong>(배정→픽업 도착) → <strong>받기</strong> → <strong>부하이동</strong> → <strong>주기</strong>(도착→drop). ARRIVED 의존이라 관측 못 한 단계는 추정 없이 NULL(<a href="#faq-phases">FAQ</a>).</dd>
+    <dt id="four-phase">트럭 작업 4단계</dt><dd><strong>무부하주행</strong>(빈 차로 감) → <strong>픽업</strong>(실음) → <strong>부하주행</strong>(싣고 감) → <strong>드랍오프</strong>(내림). <strong>2026-08-04부터 이 이름으로 통일</strong>합니다(옛 이름: 공차이동·받기·부하이동·주기). ARRIVED 의존이라 관측 못 한 단계는 추정 없이 NULL(<a href="#faq-phases">FAQ</a>).<br>
+      ★ <strong>안벽크레인이 끼어드는 단계가 작업 종류마다 반대입니다</strong> — 적하는 안벽크레인이 <strong>드랍오프</strong>(마지막), 양하는 <strong>픽업</strong>(둘째). → <a href="/kc/dispatch/dispatch-deadline.html#준비시간">배차 마감</a></dd>
+    <dt id="truck-prep">트럭 준비시간</dt><dd>트럭을 그 일에 정한 순간부터 <strong>안벽크레인이 그 컨테이너를 다룰 수 있게 되기까지</strong>. 적하 = 무부하주행 + 픽업 + 부하주행, 양하 = 무부하주행(+ 픽업 대기). 실측 7일 <strong>양하 455초 · 적하 1,448초</strong>. <strong>배차 마감 = 크레인이 그 컨테이너를 다루는 시각 − 이 값</strong>(2026-08-04~).</dd>
     <dt id="leg-decomp">공차 레그 분해 <span class="kc-badge stale">retire · mig 0081</span></dt><dd>공차 레그를 30초 GPS로 움직임/정지 분해한 진단(<code>learn_leg_decomp</code>). 비용 라벨(순수주행=구간시간)은 <code>learn_travel_sample</code>로 이관돼 제거. 당시 규명: 구간 속도 ≈13km/h(움직인 순간만 ~22.8), "6.9km/h"는 착시, 같은 OD CV 0.758.</dd>
     <dt id="crane-approach">크레인 접근 대기 <span class="kc-badge stale">폐기 · 2026-07-01</span></dt><dd>크레인 앞 진입 대기를 1단계 신호로 쓰려 했으나 폐기. 일관 측정 시 중앙 ≈0, "중앙 67초"는 선택편향. 진짜 큐는 도착 이후(크레인 스케줄).</dd>
     <dt id="pure-drive-cost">2단계 이동비용 · 순수주행</dt><dd>배차 2단계 이동비용 = free_in + 이동시간. 이동시간 = <strong>순수주행(주행 구간 시간)</strong>, <strong>추론 도로망 최단시간 경로를 실측 "실제시간 곡선"으로 변환</strong>(2026-07-02, <code>roadgraph.rs</code>). 라우팅 불능 ~3%만 맨해튼→실제 곡선 폴백. 225m 격자 폐기(mig 0082). → <a href="/kc/learn/travel-time.html">이동시간 모델</a>.</dd>

@@ -39,6 +39,7 @@ const NAV = [
   ]},
   { id: "dispatch", label: "배차 (2단계)", items: [
     { page: "dispatch/index",           title: "배차 로직 — 2단계" },
+    { page: "dispatch/dispatch-deadline", title: "배차 마감 — '언제' 보낼지" },
     { page: "dispatch/amr-allocation",  title: "요구사항 (R1–R6)" },
     { page: "dispatch/service2-overview", title: "WP AI Service 2 개요" },
     { page: "dispatch/stage2-design",   title: "2단계 매칭 설계" },
