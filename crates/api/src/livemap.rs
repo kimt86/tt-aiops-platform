@@ -4868,6 +4868,14 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                     acc += slots.min(truck_n - acc);
                     kept_new.push(oi);
                 }
+                if tick % 3 == 0 {
+                    let due_slots_total: i64 = due.iter().map(|&(_, s, _)| s).sum();
+                    let kept_slots: i64 = kept_new.iter()
+                        .map(|&oi| work[works[oi].0].n.max(0) as i64).sum();
+                    tracing::info!(truck_n, acc, held = (truck_n - acc).max(0),
+                        due_buckets = due.len(), due_slots_total, kept_buckets = kept_new.len(), kept_slots,
+                        "설계③ 트럭 배분");
+                }
                 if tick % 5 == 0 {
                     let with_dd = works.iter().filter(|&&(wi, _, _, _)| work[wi].dispatch_deadline_ts.is_some()).count();
                     let min_slack = works.iter()
@@ -5097,8 +5105,8 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                     let _ = sqlx::query(
                         "INSERT INTO stage2_pool_shadow
                            (ts,qc,vessel,queuename,jobtype,n,work_eta_ts,dispatch_deadline_ts,dd_slack_s,
-                            due_slots,in_current_pool,in_new_pool,rank_current,rank_new)
-                         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) ON CONFLICT DO NOTHING",
+                            due_slots,in_current_pool,in_new_pool,rank_current,rank_new,slot_idx)
+                         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) ON CONFLICT DO NOTHING",
                     )
                     .bind(ts).bind(&w.qc).bind(&w.vessel).bind(&w.queuename).bind(&w.jobtype).bind(w.n)
                     .bind(w.work_eta_ts).bind(dd)
@@ -5106,6 +5114,7 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                     .bind(due)
                     .bind(pool_cur_set.contains(&oi)).bind(pool_new_set.contains(&oi))
                     .bind(rank_cur.get(&oi).copied()).bind(rank_new.get(&oi).copied())
+                    .bind(w.slot_idx)   // mig 0126 — 없으면 같은 구역 상자들이 한 줄로 뭉개진다
                     .execute(&pool).await;
                 }
             }
