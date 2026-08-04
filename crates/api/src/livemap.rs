@@ -4897,9 +4897,20 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                 let move_s = if w.jobtype == "LD" { LD_MOVE_S } else { DS_MOVE_S };
                 let cap_j = *cap_by_oi.get(&oi).unwrap_or(&0); // Stage-1 capped demand (truck-loads)
                 caps.push(cap_j);
-                // feasibility deadline: bucket served from max(eta,now) over its near slots — midpoint.
-                let spread_ms = (cap_j / 2) * move_s * 1000;
-                deadlines.push(eta_ms.max(now) + spread_ms);
+                // 마감 = 크레인이 이 컨테이너를 다루는 시각. **더하는 항 없음**(mig 0122).
+                //
+                // 옛 식은 `max(eta, now) + (크레인당 트럭 상한 ÷ 2) × 무브시간` 이었다. 설계는
+                // "크레인 시각에서 트럭 준비시간을 **뺀다**" 인데 반대로 더하고 있었고, 게다가 그
+                // 상한(NEED_HORIZON_S)은 트럭을 여러 크레인에 흩뿌리려고 둔 값이라 마감과 무관한
+                // 설정이 마감을 정하고 있었다. 실측 2026-08-04(16시간·51,856행, 정답=그 큐의 다음
+                // 크레인 핸드오버): 절대오차 양하 1,344 → 642초(52.2% 개선·위약 953초보다 우세·
+                // 13개 시간대 전원 승). 옛 식은 설계상 틀렸고 실측에서도 져서 폐기한다.
+                //
+                // 준비시간은 여기서 빼지 않는다 — 트럭마다 다르므로 **아래 pair 단위 판정**에서
+                // 그 트럭의 p90 도착 + 안 세는 구간(learn_dispatch_lead)으로 뺀다. 작업유형 평균을
+                // 쓰는 버킷 단위 축은 dispatch_deadline_ts 로 따로 있다(mig 0120·후보 풀 선정용).
+                let _ = cap_j; // spread 항 폐기로 더는 마감에 쓰이지 않는다(캡은 매칭 용량으로 유지)
+                deadlines.push(eta_ms);
                 dep_slack_w.push(dep_slack[oi]);
                 dep_tier_w.push(dep_tier[oi]);
                 let this_key = (w.qc.clone(), w.vessel.clone(), w.queuename.clone());
@@ -4953,7 +4964,10 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                         break;
                     }
                     let (arr, p90, _t, _s) = matrix[wpos][vi];
-                    if now + p90 * 1000 > deadline {
+                    // mig 0122 — 마감이 work_eta 그 자체가 됐으므로, 판정에는 그 트럭의 준비시간
+                    // (p90 도착 + 안 세는 구간)을 빼서 비교한다. 아래 최적 매칭 쪽과 같은 식이다.
+                    let g_extra = lead_extra.get(&work[works[order[wpos]].0].jobtype).copied().unwrap_or(0);
+                    if now + (p90 + g_extra) * 1000 > deadline {
                         greedy_miss += 1;
                     }
                     used.insert(vi);
@@ -4978,17 +4992,20 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                 let w = &work[wi];
                 let deadline = deadlines[wpos];
                 let (arr, arr_p90, tier, switched) = matrix[wpos][vi];
-                let arrival_at = now + arr_p90 * 1000;
+                // mig 0122 — 설계 ②로 전환. 마감(= work_eta)에서 **이 트럭의 준비시간**을 뺀다:
+                //   준비시간 = p90 도착(픽업 지점까지) + 안 세는 구간(learn_dispatch_lead)
+                // 적하는 픽업 지점이 야드 블록이고 마감은 안벽 QC 시각이라 그 사이 적재 구간이
+                // 통째로 빠져 있었다 — extra 가 그 몫이다(실측 양하 +75초 / 적하 +1,084초).
+                let extra_s = lead_extra.get(&w.jobtype).copied().unwrap_or(0);
+                let arrival_at = now + (arr_p90 + extra_s) * 1000;
                 let slack = (deadline - arrival_at) / 1000;
                 let feasible = arrival_at <= deadline;
                 if !feasible {
                     opt_miss += 1;
                 }
-                // mig 0116 — the crane-referenced axis, logged ALONGSIDE the two above. The old pair
-                // keeps its exact meaning on purpose: 19 days of series sit behind it at 21-day
-                // retention, so redefining in place would blend two meanings with no discriminator.
-                let extra_s = lead_extra.get(&w.jobtype).copied().unwrap_or(0);
-                let crane_slack = (deadline - (arrival_at + extra_s * 1000)) / 1000;
+                // mig 0116 축. mig 0122 전환 후로는 위 slack 과 **같은 값**이다 — 지우지 않는 이유는
+                // 전환 이전 구간을 소급 비교할 수 있는 유일한 계열이기 때문이다.
+                let crane_slack = slack;
                 opt_cost += arr;
                 let v = &vehicles[vi];
                 // deadline_slack_s / feasible = 크레인 필요 시각(work-ETA) 기준 — 정의 불변(19일치
@@ -4996,8 +5013,8 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                 // 컬럼(dep_slack_s / dep_tier)으로만 추가한다.
                 let ins = sqlx::query(
                     "INSERT INTO stage2_match_shadow
-                       (ts,tick,ytno,qc,vessel,queuename,jobtype,src_block,veh_state,arrival_s,od_p90_s,deadline_slack_s,feasible,cost_tier,switched,dest_lat,dest_lon,src_lat,src_lon,dep_slack_s,dep_tier,lead_extra_s,crane_slack_s,feasible_crane,dispatch_deadline_ts,dd_slack_s,dd_lead_s)
-                     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27) ON CONFLICT (ts,ytno) DO NOTHING",
+                       (ts,tick,ytno,qc,vessel,queuename,jobtype,src_block,veh_state,arrival_s,od_p90_s,deadline_slack_s,feasible,cost_tier,switched,dest_lat,dest_lon,src_lat,src_lon,dep_slack_s,dep_tier,lead_extra_s,crane_slack_s,feasible_crane,dispatch_deadline_ts,dd_slack_s,dd_lead_s,deadline_ver)
+                     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,2) ON CONFLICT (ts,ytno) DO NOTHING",
                 )
                 .bind(ts).bind(tick as i64).bind(&v.0).bind(&w.qc).bind(&w.vessel).bind(&w.queuename)
                 .bind(&w.jobtype).bind(&w.src_block).bind(v.4)
