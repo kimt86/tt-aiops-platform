@@ -391,6 +391,8 @@ pub(crate) async fn build_workpool(pool: PgPool) -> Result<WorkpoolOut, AppError
         // against dispatch. Expect the spread to stay wide (the pre-correction MAE was ~790s = 13 min
         // and nothing about that came from the bias term), so a per-crane median off a few dozen rows
         // is still noise, not signal. Hence the per-crane floor below.
+        // 보정 끄기 레버 — 성능 층을 잠시 내려놓고 구조가 도는지 보기 위한 것.
+        let bias_off = std::env::var("WORK_ETA_BIAS").as_deref() == Ok("off");
         let bias_rows: Vec<(String, String, i32, i32, Option<i32>)> =
             sqlx::query_as("SELECT qc, jobtype, horizon_bucket, n, med_err_s FROM learn_work_eta_bias")
                 .fetch_all(&pool).await.unwrap_or_default();
@@ -593,12 +595,20 @@ pub(crate) async fn build_workpool(pool: PgPool) -> Result<WorkpoolOut, AppError
                     // corrected value would move a prediction between buckets as the bias grows, which
                     // is the same feedback trap mig 0113 fell into with its sample window.
                     let bucket = ((before as i64) / 600).clamp(0, 4) as i32;
-                    let learned = eta_bias
+                    // ⚠ 보정 킬스위치 (`WORK_ETA_BIAS=off`). 보정은 예측을 다듬는 **성능** 층인데,
+                    // 2026-08-04 현재 그 값이 +1,667~2,547초까지 커져 **구조를 삼켰다**: 각 크레인의
+                    // 첫 큐는 앞에 밀린 작업이 0이라 남는 게 보정값뿐이고, 그래서 크레인이 달라도
+                    // 전부 같은 값(≈36분 뒤)이 나온다. 결과적으로 "가장 급한 일"이 영원히 36분 뒤라
+                    // 설계 ③(마감으로 후보 풀 구성)이 아무것도 담지 못한다.
+                    // 끄면 work_eta = 앵커 + 앞에 밀린 작업 이 되어 첫 큐가 "지금"이 된다
+                    // (크레인이 실제로 거기 있으므로 사실에 더 가깝다). 정확도는 떨어지지만 그건
+                    // 성능 검사에서 다룰 문제이고, 먼저 구현이 도는 것을 봐야 한다.
+                    let learned = if bias_off { 0 } else { eta_bias
                         .get(&(qc_id.clone(), job, bucket))       // per-crane, per-horizon (rarely has n)
                         .or_else(|| eta_bias.get(&(String::new(), job, bucket))) // ← this is the one that works
                         .or_else(|| eta_bias.get(&(String::new(), job, -1)))     // horizon-agnostic fallback
                         .copied()
-                        .unwrap_or(if job == 'L' { 0 } else { DS_WORK_ETA_BIAS_S });
+                        .unwrap_or(if job == 'L' { 0 } else { DS_WORK_ETA_BIAS_S }) };
                     let raw = eta_anchor + chrono::Duration::seconds(before as i64 + learned);
                     let brk = shift_breaks_between(eta_anchor, raw) * SHIFT_BREAK_S;
                     qc.queues[qi].work_eta_ts = Some(raw + chrono::Duration::seconds(brk));

@@ -23,6 +23,11 @@ SELECT
   l.JOB_ODR_ETW_DT     AS etw_dt,
   l.JOB_ODR_ACTV_DT    AS actv_dt,
   TO_CHAR(l.UPD_DT, 'YYYYMMDDHH24MISS') AS upd_dt,  -- row last-update ≈ dispatch time (D_tos); DATE→string for parse_etw
+  TO_CHAR(l.CRE_DT, 'YYYYMMDDHH24MISS') AS cre_dt,  -- 작업지시가 만들어진 시각. 이미 아래 WHERE 절이
+                                                    -- 쓰는 컬럼이라 조회 부하는 늘지 않는다. '지시 생성 →
+                                                    -- 실제 작업'을 추정이 아니라 실측하려고 값으로도 뽑는다.
+                                                    -- ⚠ DATE 를 그대로 두면 툴박스가 JSON 숫자로 바꿔
+                                                    --   Option<String> 디코드가 배치째 실패한다 → TO_CHAR 필수.
   SUBSTR(l.JOB_ODR_CONTNO, 1, 11) AS contno,
   l.JOB_ODR_MSNSEQ     AS msnseq,
   l.JOB_ODR_YT_TOPOS   AS yt_topos,
