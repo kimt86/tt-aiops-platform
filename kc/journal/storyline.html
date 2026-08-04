@@ -1,0 +1,436 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>연구 흐름 지도 — TT AIOps 지식센터</title>
+  <meta name="description" content="이 프로젝트가 무엇을 묻고 어디까지 왔는가 — 줄기별로 확정된 것·모르는 것·철회된 것.">
+  <link rel="stylesheet" href="/kc/assets/kc.css">
+  <script defer src="/kc/assets/kc.js"></script>
+</head>
+<body>
+<main class="kc-article" data-page="journal/storyline">
+  <h1>연구 흐름 지도</h1>
+  <p class="kc-lede">개발일지가 <strong>시간순</strong>이라면 이 문서는 <strong>줄기순</strong>입니다. 이 프로젝트가 지금까지 무엇을 묻고 있고, 어디까지 확정됐고, 무엇이 아직 열려 있고, <strong>무엇을 한때 사실로 알았다가 거뒀는지</strong>를 한 장에서 봅니다.</p>
+  <div class="kc-meta">
+    <span class="kc-badge kind">연구 흐름</span>
+    <span class="kc-badge living">리빙 문서</span>
+  </div>
+
+  <div class="kc-cal note">
+    <span class="h">각 줄기를 읽는 법</span>
+    <p><strong>확정</strong>은 서로 독립된 근거가 둘 이상이라 쉽게 뒤집히지 않는 것입니다. <strong>가설</strong>은 근거가 하나뿐인 것이고, 그렇게 표시했습니다. <strong>철회</strong> 칸이 이 문서에서 가장 값어치 있습니다 — 이 프로젝트에서 반복된 실패는 산수가 아니라 <strong>분모와 비교 대상을 잘못 고르는 것</strong>이었고, 그 목록이 다음 사람을 실제로 구합니다.</p>
+    <p>기준 시점 <strong>2026-08-04</strong>. 날짜순 기록은 <a href="/kc/journal/index.html">개발일지</a>에 있습니다.</p>
+  </div>
+
+  <h2>전체 그림 — 이 시스템은 무엇을 결정하는가</h2>
+  <div class="kc-flow">
+    <div class="node">크레인이 이 상자를<br>다루는 시각<span class="sub">줄기 ②</span></div>
+    <div class="arw">−<span class="lbl">빼기</span></div>
+    <div class="node">트럭 준비시간<span class="sub">작업 종류별</span></div>
+    <div class="arw">=</div>
+    <div class="node accent">배차 마감<span class="sub">줄기 ① · 언제 보낼까</span></div>
+    <div class="arw">▶<span class="lbl">지난 것부터</span></div>
+    <div class="node">후보 작업 풀<span class="sub">1단계</span></div>
+    <div class="arw">×</div>
+    <div class="node">후보 차량<span class="sub">줄기 ④</span></div>
+    <div class="arw">▶<span class="lbl">최소 비용</span></div>
+    <div class="node accent">배차 추천<span class="sub">2단계 · 줄기 ③이 비용</span></div>
+  </div>
+  <p>이 사슬의 각 칸이 아래 줄기 하나씩입니다. 그 밑에 <strong>정답지(줄기 ⑤)</strong>가 깔려 있고 — 무엇을 정답으로 삼느냐가 위 전부를 좌우합니다 — 옆에 <strong>성과 측정(줄기 ⑥)</strong>과 <strong>안정성(줄기 ⑦)</strong>이 붙습니다.</p>
+
+  <h2>줄기 ① 배차 마감 — 트럭을 언제 보낼까</h2>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th style="width:16%">칸</th><th>내용</th></tr></thead>
+    <tbody>
+      <tr><td><strong>묻고 있는 것</strong></td><td>이 컨테이너를 위해 트럭을 <strong>몇 시에</strong> 출발시켜야 하는가?</td></tr>
+      <tr><td><strong>확정된 것</strong></td>
+        <td>
+          <ul>
+            <li><strong>마감 = 크레인이 이 상자를 다루는 시각 − 트럭 준비시간</strong>(2026-08-04 전환). 옛 식은 빼야 할 것을 <em>더하고</em> 있었고, 더하던 값은 원래 트럭을 여러 크레인에 흩뿌리려던 설정이라 마감과 무관했습니다.</li>
+            <li><strong>양하는 새 축이 확실히 낫습니다</strong> — 16시간·51,856건, 절대오차 1,344 → <strong>642초</strong>(52% 개선), 가짜 대조군 953초, 13개 시간대 전원 승.</li>
+            <li><strong>준비시간이 작업 종류마다 세 배 넘게 다릅니다</strong>(양하 ~455초 / 적하 ~1,448초, 실측 7일). 원인은 <strong>안벽 크레인이 끼어드는 자리가 반대</strong>이기 때문입니다 — 적하는 크레인이 드랍오프(사슬 끝), 양하는 픽업(사슬 중간). "적하만 실행가능률 0%"라는 오래된 문제가 전부 이 비대칭이었습니다.</li>
+            <li><strong>마감은 컨테이너 한 개 단위</strong>입니다. 구역 안 순번은 <strong>작업지시가 만들어진 순서</strong>가 실제 처리 순서와 82.5% 일치합니다(양하 451쌍, 배 안 위치 순서는 46.3%로 동전 던지기보다 나빠 기각).</li>
+            <li><strong>배 출항 시각은 마감의 기준이 아니라 급한 배를 앞세우는 용도</strong>입니다. 마감 티어로 연결해 A/B로 판정·채택했습니다(마감 초과율 −2.63%p, 효율 대가 사실상 0).</li>
+            <li><strong>담을 게 트럭보다 적으면 트럭을 남깁니다.</strong> 마감에 이미 이동시간이 들어 있으므로 더 일찍 보내면 트럭이 크레인 앞에서 기다리는 시간만 늘어납니다.</li>
+          </ul>
+        </td></tr>
+      <tr><td><strong>아직 모르는 것</strong></td>
+        <td>
+          <ul>
+            <li><strong>적하 마감이 새 축으로 나아졌는지 아직 판정 불가</strong>입니다(1,540 → 1,508초 = 2.1%). 그때 예측이 상수로 붕괴해 있었으므로 <strong>보정을 끈 지금 다시 재야</strong> 합니다.</li>
+            <li><strong>"마감 지났다"가 과다 계상되는 것 같습니다.</strong> 한 번에 390개로 세는데 그때 트럭은 39대이고, 정말 그만큼 모자랐다면 크레인이 줄줄이 멈춰야 하는데 현장 기아는 9~11%뿐입니다. 원인 미확인.</li>
+            <li><strong>마감 티어의 비용이 하나 미확인</strong>입니다 — 재배정률이 26.3 → 29.1%로 올랐는데 그게 얼마나 나쁜지 모릅니다.</li>
+            <li>트럭 흩뿌리기 상한(지평)을 넓히면 어떤 이득이 있는지 <strong>미측정</strong>입니다. <strong>비용만 실측</strong>됐습니다(크레인 커버리지 14.1 → 11.9%). 그래서 기본 꺼짐.</li>
+          </ul>
+        </td></tr>
+      <tr><td><strong>철회된 것</strong></td>
+        <td>
+          <ul>
+            <li><strong>"마감 = 크레인 시작 + 트럭 상한의 절반 × 처리시간"</strong>(2026-08-03 폐기) — 설계와 부호가 반대였고, 마감과 무관한 설정이 마감을 정하고 있었습니다. 실측으로도 옛 마감이 24분 늦었습니다.</li>
+            <li><strong>"진짜 병목은 트럭 흩뿌리기 상한이다"</strong>(08-03) → 하루 만에 대체됐습니다. 설계대로 마감을 만들면 그 레버의 존재 이유가 사라지고, 진짜 원인은 <strong>4단계 비대칭</strong>이었습니다(08-04).</li>
+            <li><strong>"TOS가 21분 전에 이미 배차해 두므로 우리 후보 풀이 낡았다"</strong> → 철회. <strong>크레인의 다음 작업을 본 오독</strong>이었습니다. 같은 기준으로 다시 재면 TOS 배차의 88~92%가 우리 판정 <em>이후</em>에 일어납니다 — 풀은 정상입니다.</li>
+            <li><strong>"트럭 남기는 규칙이 고장났다"</strong>(08-04, 두 번) → 둘 다 철회. 첫 번째는 <strong>단위를 섞은 것</strong>(작업 묶음 수 vs 트럭 대수), 두 번째는 기록 표가 <strong>한 구역의 첫 상자만 남기고 57%를 조용히 버려</strong> 생긴 과소집계였습니다.</li>
+            <li><strong>선박 일정을 배 이름만으로 조회</strong>(07-27) — 같은 배의 여러 항차 중 어느 것이 이기는지 비결정적이라, <strong>가장 급한 배가 "여유 8~10일"로</strong> 계산되고 있었습니다. 우선순위를 정확히 거꾸로 뒤집는 오류.</li>
+            <li><strong>크레인마다 배별로 독립된 시계</strong>(07-27) — 크레인 67대 중 41대가 2척 이상을 맡는데 다른 배 작업이 안 보였습니다. 물리적으로 불가능한 모델.</li>
+          </ul>
+        </td></tr>
+    </tbody>
+  </table></div>
+  <p class="kc-src">자세히: <a href="/kc/dispatch/dispatch-deadline.html">배차 마감 — '언제' 보낼지</a> · <a href="/kc/dispatch/index.html">배차 로직 — 2단계</a></p>
+
+  <h2>줄기 ② 작업 도달 예측 — 크레인이 이 상자를 언제 다루나</h2>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th style="width:16%">칸</th><th>내용</th></tr></thead>
+    <tbody>
+      <tr><td><strong>묻고 있는 것</strong></td><td>지금 저 크레인은 <strong>몇 분 뒤에</strong> 이 컨테이너 차례에 도달하는가?</td></tr>
+      <tr><td><strong>확정된 것</strong></td>
+        <td>
+          <ul>
+            <li>계산은 <strong>구역 시작 + (구역 안 순번 × 무브시간)</strong>. 크레인 하나에 <strong>시간축 하나</strong>를 씁니다(그 크레인이 맡은 다른 배 작업도 앞에 세움).</li>
+            <li><strong>보정 없이가 더 정확합니다</strong>(크레인 26대 대조): 예측 vs 실제 다음 작업 차이 <strong>201초(3.4분)</strong>, "어느 구역을 할지" <strong>80.8%</strong> 적중. 보정을 켰을 때 같은 구간은 28~46분 틀렸습니다.</li>
+            <li><strong>오차의 퍼짐은 평평합니다</strong> — 5분 앞이나 50분 앞이나 약 ±1,400초. 무브마다의 오차가 쌓여서 생기는 게 아니므로 <strong>무브 시간 상수를 손봐도 얻을 게 없습니다</strong>(실측 크레인 사이클 99/126초로 상수와 근접).</li>
+            <li>남는 ±1,400초는 <strong>관측 신호로 줄일 수 없습니다</strong>(의사결정 기록 0002). 대기를 만드는 크레인 큐가 우리 신호에 안 보이기 때문입니다. 마감은 보수적으로 방어합니다.</li>
+          </ul>
+        </td></tr>
+      <tr><td><strong>아직 모르는 것</strong></td>
+        <td>
+          <ul>
+            <li>★ <strong>예측이 늘 이르고, 그 양이 거리와 무관하게 일정합니다</strong> — 양하 +12~20분 / 적하 +19~37분(7,104건). 1.6분 뒤를 예측할 때나 53분 뒤를 예측할 때나 비슷하게 틀립니다. ⇒ <strong>어느 상자에나 붙는 일정량을 놓치고 있다</strong>는 <strong>가설</strong>(근거 한 갈래). 후보 셋: 컨테이너 사이 부수작업(덮개·재취급) 미계상 / 구역 옮기는 시간 과소 / 처리시간 자체 과소.</li>
+            <li>구역 안 순번을 <strong>지시 생성 순서</strong>로 보는 근거가 <strong>양하로만</strong> 잰 값입니다(451쌍). 적하 미검증.</li>
+          </ul>
+        </td></tr>
+      <tr><td><strong>철회된 것</strong></td>
+        <td>
+          <ul>
+            <li>★★ <strong>정답지가 틀렸습니다</strong>(2026-08-03) — 크레인 작업 기록의 한 시각 컬럼을 "크레인이 시작한 순간"으로 읽었으나 실제로는 <strong>"트럭을 배차한 순간"</strong>(완료 시 소급 기입)이었습니다. 정답은 <strong>완료 시각</strong>입니다. <a href="#철회-모음">근거 네 갈래는 아래</a>.</li>
+            <li>★ <strong>"스스로 배운 보정이 예측을 다듬는다"</strong>(08-04 폐기) — 보정값이 +1,667~2,547초까지 커지자 크레인이 무엇을 하든 <strong>전부 "약 36분 뒤"</strong>라는 같은 답이 나왔습니다. <strong>보정이 없어서 부정확했던 게 아니라 보정이 있어서 부정확</strong>했습니다.</li>
+            <li><strong>"보정을 꺼서 예측이 너무 이르다"</strong>(08-04) → 정반대였습니다.</li>
+            <li><strong>"보정의 90%가 트럭 지연이라 순환 참조다"</strong> → 철회. <strong>층화 변수가 정답지 그 자체에서 파생</strong>돼 있었습니다 — 잔차를 자기 부호로 갈라놓고 음수 쪽이 작다고 보고한 것(동어반복). ★ 이 오보 때문에 정상 동작하던 실험이 중지됐습니다.</li>
+            <li><strong>"보정은 누적이 아니라 교체이므로 수렴한다"</strong>(08-03) — 사실은 <strong>진동</strong>이었습니다. 새 보정 = 정답 − 예측인데 그 예측에 이미 이전 보정이 들어 있어 서로를 밀어냅니다. 주석의 "적분 제어기"라는 설명이 곧 그 버그였습니다.</li>
+            <li><strong>"적하에는 컨테이너별 신호가 없다"</strong>(코드 주석의 단언) → 있었습니다. 크레인 작업 기록에 적하 75,201건이 컨테이너 번호까지 채워집니다. <strong>한 소스에 없다고 전체에 없다고 결론지은 것.</strong></li>
+            <li><strong>보정을 (크레인, 작업 종류)당 숫자 하나로</strong> → 치우침이 예측 거리에 따라 2,768초 폭으로 움직이는데 숫자 하나로는 못 담습니다. 거리 구간별로 나눴다가, 결국 보정 자체를 폐기했습니다.</li>
+          </ul>
+        </td></tr>
+    </tbody>
+  </table></div>
+
+  <h2>줄기 ③ 트럭 이동시간 — 2단계 비용의 재료</h2>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th style="width:16%">칸</th><th>내용</th></tr></thead>
+    <tbody>
+      <tr><td><strong>묻고 있는 것</strong></td><td>이 트럭이 저 지점까지 <strong>몇 초</strong> 걸리는가? (2단계 짝짓기의 간선 비용)</td></tr>
+      <tr><td><strong>확정된 것</strong></td>
+        <td>
+          <ul>
+            <li><strong>큰 그림</strong>: 이동시간은 <strong>학습 모델</strong>이 냅니다. 라벨은 실제 걸린 구간 시간, 피처는 <strong>추론된 도로망의 경로 거리</strong>·격자 거리·날씨·혼잡·시간대. <strong>추론 도로망은 비용 그 자체가 아니라 그 피처를 공급하는 역할</strong>입니다.</li>
+            <li><strong>도로망은 GPS 궤적에서 스스로 추론</strong>합니다(방향 포함). 건강 신호: 총연장이 정상 범위(장애 이전 164~172km, 경계 수정 후 187.6km)이고 터미널 중심에서 최대 3.17km 안에 닫혀 있을 것.</li>
+            <li><strong>2단계 비용에는 순수 효율만 넣습니다.</strong> 긴급도·기아·부하분산은 1단계에서만 결정합니다(2026-06-27 확정, 지금까지 유효).</li>
+            <li><strong>거리를 직선으로 재면 안 됩니다</strong> — 터미널 도로가 안벽을 따라 나 있어 <strong>안벽 축으로 돌린 격자 거리</strong>가 낫습니다(도로망이 없을 때의 폴백).</li>
+            <li><strong>딥러닝은 이 데이터에서 얻을 게 없습니다</strong>(2026-07-13 벤치마크). 통계 중앙값 → 기계학습은 오차 57 → 49%로 8%p 개선되지만 <strong>신경망은 그와 동률</strong>입니다.</li>
+          </ul>
+        </td></tr>
+      <tr><td><strong>아직 모르는 것</strong></td>
+        <td>
+          <ul>
+            <li>도로망 정상 범위 수치가 <strong>경계 수정 전 기준</strong>이라 갱신이 필요합니다(수정 후 187.6km는 오염이 아니라 실제 도로가 더 살아난 결과).</li>
+            <li>비용 곡선에서 오염 기간을 <strong>날짜로</strong> 제외하고 있습니다. 행 단위 물리 필터를 시도했으나 <strong>두 집단이 안 갈렸습니다</strong>(임계 1.5에서 오염 30.7% 제거 / 정상 21.3% 손실, 분포가 겹침). 더 나은 방법 미발견.</li>
+          </ul>
+        </td></tr>
+      <tr><td><strong>철회된 것</strong></td>
+        <td>
+          <ul>
+            <li><strong>225m 격자로 출발·도착을 묶는 방식</strong>(06-29 폐기) — 야드 블록은 고정이라 직접 기억하면 되고 크레인은 움직이므로 길찾기가 맞습니다. 지형이 다른 둘을 같은 격자로 묶을 이유가 없었습니다. (그 격자 표는 2026-08-03까지 <strong>읽는 코드가 하나도 없는데 5분마다 갱신</strong>되고 있었습니다 — 하루 약 11분의 낭비.)</li>
+            <li><strong>"순수 주행 = 트럭이 움직인 시간"</strong>(07-01 정정) → <strong>구간 전체 시간</strong>이 맞습니다(경로상 정체 포함). 그리고 <strong>"진입 정지"라는 구간은 폐기</strong>했습니다 — 실측 중앙값이 사실상 0이었고, 처음 본 72초는 선택 편향이었습니다.</li>
+            <li><strong>계층 폴백(기록 → 길찾기 → 격자)</strong>(06-30) → <strong>피처 학습 모델</strong>로 대체.</li>
+            <li><strong>오염된 도로망 기간이 비용 곡선에 섞여 있었습니다</strong>(08-03 발견) — 부풀린 경로 거리와 실제 시간이 짝지어져 곡선에 "이 경로면 실제는 더 짧다"고 가르쳤습니다. <strong>낙관적 비용은 매처가 못 대는 트럭을 댈 수 있다고 보게 만듭니다.</strong> 오염분 25%(2,904/11,501행), 제외 시 중거리 비용 +2.4~5.8%.</li>
+          </ul>
+        </td></tr>
+    </tbody>
+  </table></div>
+  <p class="kc-src">자세히: <a href="/kc/learn/travel-time.html">이동시간 모델</a> · <a href="/kc/dispatch/stage2-design.html">2단계 매칭 설계</a></p>
+
+  <h2>줄기 ④ 후보 차량 — 곧 자유로워질 트럭</h2>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th style="width:16%">칸</th><th>내용</th></tr></thead>
+    <tbody>
+      <tr><td><strong>묻고 있는 것</strong></td><td>지금 배차 대상이 되는 트럭은 누구이고, 각각 <strong>몇 초 뒤</strong>에 자유로워지는가?</td></tr>
+      <tr><td><strong>확정된 것</strong></td>
+        <td>
+          <ul>
+            <li><strong>선정은 TOS 작업 기록의 픽업 지점으로</strong> 합니다 — 놓치는 비율이 GPS 53% → <strong>99%</strong>로 줄어듭니다. GPS는 트럭이 멈추면 단말이 침묵하기 때문입니다.</li>
+            <li><strong>완료 시각 예측은 (작업 종류 × 상자 수)의 중앙값</strong>. 라이브 절대오차 중앙값 약 <strong>4~5분</strong>.</li>
+            <li><strong>위치는 정밀도의 지렛대가 아닙니다</strong> — 그래서 도로망을 여기에 결합하려던 계획을 폐기했습니다.</li>
+            <li><strong>GPS와 작업 기록은 서로를 대체하지 않고 보완합니다</strong>(08-03 실측): 양하는 작업 기록이 우세(오차 311초 vs GPS 424초), <strong>적하는 GPS가 우세</strong>(240초 vs 659초). 통째로 교체하면 적하가 약 2.7배 나빠집니다. ⇒ <strong>GPS가 보이면 GPS, 눈감은 곳에만 작업 기록 앵커.</strong></li>
+            <li><strong>트윈 판별은 TOS의 권위 있는 묶음 값</strong>으로 합니다(5분 이내 묶기는 적하 트윈을 다수 오분류해 기각).</li>
+            <li><strong>유휴 리드타임은 예측하지 않습니다</strong>(2026-07-15 의사결정 기록 0002). 상태별 개별 예측을 명시적으로 중단했습니다.</li>
+          </ul>
+        </td></tr>
+      <tr><td><strong>아직 모르는 것</strong></td>
+        <td>
+          <ul>
+            <li>후보 풀을 <strong>실제 배차 경로에 배선</strong>하는 일이 남아 있습니다(현재 그림자).</li>
+            <li>GPS가 눈감은 트럭의 비율이 큽니다(미완 트럭 중 10분 넘게 무보고: 양하 30.5% / 적하 35.4%). 앵커로 메우고 있으나 <strong>채택률을 관측 중</strong>입니다.</li>
+          </ul>
+        </td></tr>
+      <tr><td><strong>철회된 것</strong></td>
+        <td>
+          <ul>
+            <li>★ <strong>"GPS 추정이 낫다"</strong>(07-31) → 철회. <strong>GPS를 GPS 자신의 학습 목표로 채점</strong>했고, 그 정답지는 GPS가 틀렸을 사건 33%를 빼고 채점하며, 서로 다른 사건을 강제로 짝지어 겉보기 불일치까지 만들어냈습니다.</li>
+            <li><strong>"작업 기록 예측기로 통째로 교체한다"</strong>(코드에 결정으로 적혀 있던 계획) → 실측해 보니 <strong>절반만 맞았습니다</strong>(적하는 GPS가 우세).</li>
+            <li><strong>목적지 크레인 혼잡도 레버</strong>(07-25 적재 → 07-27 철회) — 오프라인에서 기대한 −16%가 라이브에서 <strong>−4%</strong>였고, 표본 42%를 차지하는 중·고혼잡 구간은 오히려 악화. 단일 우승안이 없어 채택하지 않았습니다.</li>
+            <li><strong>후보를 상태 세 갈래로 나눠 표시</strong>(07-27, 하루 만에 되돌림) — 시스템이 이미 중단한 구분을 화면에서 되살린 것이었고, 실측으로 그 구분의 효과가 절반 이상의 차량에서 0이었습니다.</li>
+          </ul>
+        </td></tr>
+    </tbody>
+  </table></div>
+  <p class="kc-src">자세히: <a href="/kc/learn/candidate-completion-eval.html">후보 차량 예측 — 검정 결과</a> · <a href="/kc/dispatch/leadtime-adr.html">ADR — 유휴 리드타임 예측불가</a></p>
+
+  <h2>줄기 ⑤ 정답지와 데이터 품질 — 무엇을 기준으로 채점하는가</h2>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th style="width:16%">칸</th><th>내용</th></tr></thead>
+    <tbody>
+      <tr><td><strong>묻고 있는 것</strong></td><td>우리 예측이 맞았는지 <strong>무엇과 견줘</strong> 판정하는가? 그 기준은 믿을 만한가?</td></tr>
+      <tr><td><strong>확정된 것</strong></td>
+        <td>
+          <ul>
+            <li><strong>작업 도달 시각의 정답 = 크레인 작업의 완료 시각.</strong> ⚠ 같은 표의 다른 시각 컬럼은 크레인 시작이 아니라 <strong>배차 시각</strong>입니다. ⚠⚠ <strong>야드 크레인의 같은 이름 컬럼은 반대로 진짜 물리적 시작</strong>입니다 — 이름이 같다고 함께 고치면 그게 새 오류입니다.</li>
+            <li><strong>트럭이 자유로워진 시각의 정답 = TOS 기록.</strong> GPS 하차 추정은 <strong>33%를 놓치므로</strong> 채점에 쓰지 않습니다.</li>
+            <li><strong>GPS의 근본 한계는 "움직일 때만 보고하고 멈추면 침묵한다"</strong>입니다(6차원 감사로 확정). 크레인 근처 신호 소실은 <strong>구조물 차폐가 아니라 멈춤 침묵</strong>입니다.</li>
+            <li><strong>새 정답지를 채택하기 전 지식센터 문서를 먼저 읽습니다.</strong> 2026-08-03 오류 때 저장소는 이미 <strong>세 곳에 정답을 적어두고 있었는데</strong> 읽지 않았습니다.</li>
+          </ul>
+        </td></tr>
+      <tr><td><strong>아직 모르는 것</strong></td>
+        <td>
+          <ul>
+            <li>정답지 오염이 <strong>KPI 추출기 2건에 잔존</strong>한다고 기록돼 있습니다. 확인·정리 필요.</li>
+            <li>손상 GPS가 애초에 들어오는 것을 막는 <strong>상류 게이트</strong>는 야드 트랙터에만 있습니다. 다른 기기 종류는 <strong>활동 범위를 측정 중</strong>이라 아직 상한을 못 겁니다(버리지 않고 세기만 합니다).</li>
+          </ul>
+        </td></tr>
+      <tr><td><strong>철회된 것</strong></td>
+        <td>
+          <ul>
+            <li>★★ <strong>"이 컬럼은 크레인 작업 시작 시각"</strong> → <strong>배차 시각</strong>이었습니다(08-03).</li>
+            <li><strong>"±27~44초로 검증됨 = 커버리지 보증"</strong> → 그 문구는 <strong>짝지어진 부분집합의 중앙값 진술</strong>일 뿐 커버리지에 대해 아무 말도 하지 않습니다.</li>
+            <li><strong>"작업 목록의 근간"이 무브 로그가 아니라 상태 하트비트 로그</strong>였습니다(07-21) — 물리 작업 1건당 여러 행이라 목록이 평균 1.2배, 트윈은 최대 6배 부풀었습니다.</li>
+            <li><strong>어떤 시각 컬럼을 "야드 크레인 활성"으로 읽음</strong>(06-16, 두 번 정정) → 실제로는 <strong>안벽 크레인이 양하를 마쳐 트럭에 실린 순간</strong>. 이 프로젝트의 <strong>같은 유형 첫 사례</strong>입니다.</li>
+            <li><strong>갑판/선창 경계 80</strong>(07-30) → 실제 갑판 최소 층은 66. <strong>갑판의 33.6%가 선창으로</strong> 라벨되고 있었습니다. 50이면 두 밴드 사이 빈 구간이라 오분류 0.</li>
+            <li><strong>"상자 크기는 무브 기록에서 물으면 된다"</strong>(08-03) → 적하 무브는 상자가 <em>나가는</em> 사건이라 물어볼 때는 이미 배 위입니다(적중 40.7%). <strong>상자는 '움직일 때'가 아니라 '놓여 있을 때' 크기를 얻습니다</strong>(야드에 물으면 100%).</li>
+            <li><strong>크레인 작업시간을 완료−시작 차이로</strong>(07-27) → 연구가 이미 기각한 소스였고, 상한이 표본을 난도질했습니다 — 적하 4,188건 중 <strong>25건(0.60%)만</strong> 통과해 그 중앙값이 발표되고 있었습니다. <strong>부정확한 게 아니라 선택 편향 꼬리의 중앙값</strong>이었습니다.</li>
+          </ul>
+        </td></tr>
+    </tbody>
+  </table></div>
+  <p class="kc-src">자세히: <a href="/kc/data/tos-db-reference.html">TOS DB 레퍼런스</a> · <a href="/kc/data/websocket-coverage.html">신호 품질·커버리지 감사</a></p>
+
+  <h2>줄기 ⑥ 성과 측정 — 얼마나 좋아졌는가</h2>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th style="width:16%">칸</th><th>내용</th></tr></thead>
+    <tbody>
+      <tr><td><strong>묻고 있는 것</strong></td><td>우리 배차가 TOS보다 나은가? <strong>무엇을 근거로</strong> 그렇게 말하는가?</td></tr>
+      <tr><td><strong>확정된 것</strong></td>
+        <td>
+          <ul>
+            <li><strong>TOS는 이미 개선 여지의 약 74.7%를 잡고 있습니다</strong>(무작위 대조군 대비, 3틱 실측 71.8~77.3%). 남은 4분의 1이 실제로 노려볼 몫입니다.</li>
+            <li><strong>레버는 A/B로만 채택합니다.</strong> 관측 단위는 <strong>틱이 아니라 30분 블록</strong>이어야 합니다 — 같은 블록 안의 틱은 독립이 아니라 틱으로 세면 표본이 30배로 부풀어 <strong>없는 유의성이 생깁니다</strong>.</li>
+            <li><strong>배정 해시는 최상위 비트를 쓰는 좋은 섞기</strong>여야 합니다. 순차 입력의 최하위 비트를 쓰면 <strong>6시간 주기로 패턴이 반복</strong>돼 두 팔이 교대 근무 리듬에 정렬됩니다(실측).</li>
+            <li><strong>정확도는 대리 지표입니다.</strong> 더 나은 방법은 실제 배차 결과(마감 미스·재배정률·도착시간)를 A/B로 비교하는 것입니다.</li>
+          </ul>
+        </td></tr>
+      <tr><td><strong>아직 모르는 것</strong></td>
+        <td>
+          <ul>
+            <li>마감 티어 A/B의 유의성이 <strong>사후에 고른 지표</strong>에서 나왔습니다(미리 정한 1차 지표는 미달). 다시 확인이 필요합니다.</li>
+            <li>재배정률 상승(26.3 → 29.1%)의 비용이 <strong>미확인</strong>입니다.</li>
+            <li>배차 개선이 <strong>배가 얼마나 일찍 끝나는가</strong>로 나타나야 하는데, 그 채점은 시나리오 쪽이 완성돼야 가능합니다.</li>
+          </ul>
+        </td></tr>
+      <tr><td><strong>철회된 것</strong></td>
+        <td>
+          <ul>
+            <li>★★ <strong>"빈 차 이동 18% 절감"</strong>(07-31) → 이 값은 <strong>음수가 나올 수 없습니다.</strong> TOS의 실제 배정이 항상 가능한 답 중 하나이므로 최소 비용은 정의상 그보다 비쌀 수 없습니다(7일 1,924틱 중 음수 0건·최솟값 +0.0274%). 그런데 개별 짝만 보면 <strong>20%에서 우리가 집니다.</strong> 정직한 이름은 <strong>"개선 여지의 상한"</strong>입니다.</li>
+            <li>같은 비교기에서: 표본 상한을 <strong>정렬 순서 그대로 앞에서 잘라</strong> 알파벳 뒤쪽 크레인이 매번 통째로 빠졌고(1,924틱 중 <strong>91%가 상한 도달</strong> — 드문 경계가 아니라 정상 상태), 5분마다 도는데 15분 창을 읽어 <strong>같은 배차를 최대 3번</strong> 셌습니다.</li>
+            <li><strong>틱 번호로 조인</strong>(07-31) — 그 번호는 프로세스 카운터라 <strong>서버 재시작마다 0부터 다시</strong> 시작합니다. 조인이 26배로 부풀었고, 시각 조인으로 고치니 값 자체가 바뀌었습니다.</li>
+            <li><strong>"TOS는 바쁜 트럭을 붙인다"</strong>(06-25) → 실제로는 안벽의 빈 트럭이 먼 야드로 적하 픽업을 가는 진짜 사례였습니다.</li>
+            <li><strong>크레인 굶주림 경보가 40배 과검출</strong>(06-23~24) → "쓸 수 있는 트럭이 0대"와 "지금 실제로 작업 중"을 함께 봐야 진짜 굶주림입니다.</li>
+          </ul>
+        </td></tr>
+    </tbody>
+  </table></div>
+  <p class="kc-src">자세히: <a href="/kc/dashboard/stage2-match.html">MATCH (2단계 매칭)</a></p>
+
+  <h2>줄기 ⑦ 안정성 — 터지지 않게, 터지면 알게</h2>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th style="width:16%">칸</th><th>내용</th></tr></thead>
+    <tbody>
+      <tr><td><strong>묻고 있는 것</strong></td><td>어떤 입력 하나가 <strong>시스템 전체</strong>를 멈출 수 있는가? 멈추면 우리가 <strong>알 수 있는가</strong>?</td></tr>
+      <tr><td><strong>확정된 것</strong></td>
+        <td>
+          <ul>
+            <li>★ <strong>이 프로젝트의 사고 유형은 하나입니다 — "검증 안 된 입력이 크기를 정한다".</strong> 2026-07-28에 두 갈래로 동시에 나타났습니다: 메모리 쪽(가장 먼 GPS로 배열 크기를 정함 → 서버 다운)과 <strong>데이터베이스 쓰기 쪽</strong>(TOS 값 하나로 삽입 행수를 정함).</li>
+            <li>★ <strong>프로세스 메모리 상한은 데이터베이스 쓰기를 못 막습니다</strong> — 삽입을 실행하는 건 우리 프로그램이 아니라 데이터베이스이고 다른 그룹입니다. 피해는 디스크와 로그로 갑니다. <strong>물리 상한은 코드가 아니라 스키마가 알고 있어야 합니다.</strong></li>
+            <li><strong>쿼리 시간 제한은 이 유형을 못 잡습니다</strong> — 손상 값 하나가 만드는 10만 행 삽입이 68ms입니다. 느린 게 아니라 그냥 큰 것입니다.</li>
+            <li><strong>읽은 지점(워터마크)에는 반드시 상한이 필요합니다.</strong> 미래 날짜 키 1건이 들어오면 그 스트림이 <strong>손으로 고치기 전까지 영영</strong> 새 행을 못 읽습니다.</li>
+            <li><strong>작업 기록 표에는 값 검사 제약을 걸지 않습니다.</strong> 배치 전체가 한 트랜잭션이라 위반 행 하나면 스트림이 자가 회복 불가능하게 영구 정지합니다.</li>
+            <li><strong>조용한 실패를 조용한 로그로 바꾸는 것은 해결이 아닙니다.</strong> 저장소 전체에 외부 알림 연동이 0건이었고, 어떤 평가기가 사흘간 0행이어도 아무도 몰랐습니다.</li>
+            <li><strong>안전장치를 넣을 때 적대 검토를 붙입니다.</strong> 2026-07-28과 08-02 두 번 모두 <strong>검토가 찾은 것 전부가 그때 내가 넣은 안전장치의 회귀</strong>였습니다.</li>
+          </ul>
+        </td></tr>
+      <tr><td><strong>아직 모르는 것</strong></td>
+        <td>
+          <ul>
+            <li><strong>데이터베이스 쓰기의 디스크 증가를 막는 상한은 존재하지 않습니다.</strong> 여전히 쓰기 지점 제약과 감시로만 막힙니다.</li>
+            <li>알림은 <strong>보고 있어야 받는</strong> 방식입니다. 진짜 호출은 외부 연동이고 승인 사안입니다.</li>
+            <li>안전장치들이 <strong>슈퍼유저 권한으로는 한 줄로 되돌려집니다.</strong> 앱 전용 비-슈퍼유저 역할은 별개 과제.</li>
+          </ul>
+        </td></tr>
+      <tr><td><strong>철회된 것</strong></td>
+        <td>
+          <ul>
+            <li>★ <strong>"25km 게이트는 진짜 트래픽을 자를 수 없다"</strong>(07-28) → <strong>사실과 반대</strong>였습니다. 그 25km는 <strong>야드 트랙터 전용 표</strong>로 잰 값인데 모든 기기에 적용해, 25.66km에서 정상 보고하던 외부 하울리어를 버렸습니다. 게이트를 뺀 뒤 재보니 그 차량들은 <strong>한 스냅샷에 최대 620대</strong>였습니다. ⇒ <strong>측정된 활동 범위가 없는 대상에 상한을 추측해 걸지 않습니다.</strong></li>
+            <li><strong>"기계학습 그림자 작업이 서버 다운의 범인"</strong> → 같은 그룹에 살던 <strong>피해자</strong>였습니다.</li>
+            <li><strong>"실측 최고치 14M이니 1G면 충분"</strong> → 그 14M은 <strong>재부팅 40분 시점</strong> 값이고 데워진 실측은 <strong>559M(40배)</strong>였습니다. 하드닝이 오히려 그 서비스를 죽일 수 있었습니다.</li>
+            <li><strong>격자 칸 상한 60M</strong> → 자기 반경이 허용하는 최대치(44.4M)보다 커서 <strong>영원히 발화할 수 없는 장식</strong>이었습니다. 같은 유형이 08-02에 한 번 더 반복됐습니다(바이트 상한이 비율 상한보다 뒤에 있어 죽은 코드).</li>
+            <li>★ <strong>새 방어 장치가 감시 장치를 껐습니다</strong>(08-02) — 감시의 켜짐/꺼짐을 특정 표의 최신 행 나이로 정하는데, 새 쓰기 상한이 바로 그 표의 쓰기를 멈춥니다. <strong>상류는 멀쩡한데 감시만 눈을 감는</strong> 구조.</li>
+            <li><strong>"격리 주석대로 프로세스 간 직렬화가 되고 있다"</strong>(07-22) → <strong>그런 장치가 없었습니다.</strong></li>
+            <li><strong>"이 평가기가 멈췄다"</strong>(08-03) → 오탐. 밀린 작업을 소진하는 방식이라 소진할 게 없으면 0건이 정상입니다.</li>
+            <li><strong>"요청 하나가 23만 행을 적재한다"</strong>(07-28) → 오탐. 조사 때 쓴 검색의 문맥 창이 <strong>다른 쿼리의 일부를 끌어와</strong> 생긴 것이었습니다.</li>
+          </ul>
+        </td></tr>
+    </tbody>
+  </table></div>
+
+  <h2>줄기 ⑧ 시나리오 · 시뮬레이터 재료 <span style="font-weight:400;font-size:.8em;color:var(--dim)">(다른 담당)</span></h2>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th style="width:16%">칸</th><th>내용</th></tr></thead>
+    <tbody>
+      <tr><td><strong>묻고 있는 것</strong></td><td>과거 한 시간대를 <strong>그대로 재현</strong>해 "배차를 다르게 했으면 어땠을까"를 물을 수 있는가?</td></tr>
+      <tr><td><strong>확정된 것</strong></td>
+        <td>
+          <ul>
+            <li>★ <strong>크레인은 의사결정 대상이 아니라 경계 조건입니다.</strong> 안벽 크레인은 작업을 고르지 않고 받은 적부계획을 수행합니다. 관측된 순서를 그대로 쓰는 것은 타협이 아니라 <strong>이 기계에 대한 올바른 모델</strong>입니다.</li>
+            <li>★ <strong>배는 계획을 다 못 하고 떠납니다</strong>(41항차 실측 미실행 805개). 계획을 시뮬레이터에 넘기면 <strong>일어나지 않은 작업</strong>을 시키고 남긴 몫을 배차 탓으로 돌립니다.</li>
+            <li><strong>큐는 합계가 아니라 '방문' 단위</strong>입니다 — 크레인이 같은 구역으로 되돌아가는 것은 이동 비용이 드는 실제 사건입니다.</li>
+            <li><strong>야드 초기 상태는 스냅샷 없이 복원 가능합니다</strong> — 이동 기록을 되짚으며 관측된 상자 밑에 "미상" 자리표시자를 깝니다.</li>
+            <li><strong>신뢰도 지표를 파일 안에 함께 냅니다.</strong> 이 서브시스템 최악의 실패는 <strong>조용히 반쪽인 파일</strong>입니다 — 자료 없는 창은 오류가 아니라 "한산한 터미널"로 보입니다.</li>
+            <li><strong>쓸 수 있는 기간은 2026-07-30 이후</strong>입니다(구역 이름표가 그때 생겼습니다). 그 이전 창은 요청 자체를 <strong>이유와 함께 거절</strong>합니다.</li>
+          </ul>
+        </td></tr>
+      <tr><td><strong>아직 모르는 것</strong></td>
+        <td>
+          <ul>
+            <li><strong>반사실이 여전히 제한적</strong>입니다 — 무엇을·어느 순서로는 고정이고 자유는 '언제'뿐이라, 답할 수 있는 건 "몇 시간 일찍 끝나나"이지 "처리량이 느나"가 아닙니다.</li>
+            <li><strong>기간 천장이 셋</strong> 있습니다(구역 이름표 07-30 · 트럭 위치 2일 · 야드 이력 9일). 계획을 과거로 끌어와도 넘지 못합니다.</li>
+            <li><strong>소비자가 아직 0</strong>입니다.</li>
+          </ul>
+        </td></tr>
+      <tr><td><strong>철회된 것</strong></td>
+        <td>
+          <ul>
+            <li><strong>"계획 로그로 크레인→선박을 귀속한다"</strong>(07-27) → <strong>안벽 작업의 27%가 틀린 배</strong>에 붙습니다. 항차만 어긋난 경우는 0건이고 <strong>크레인 교대 단위로 통째로</strong> 어긋납니다.</li>
+            <li><strong>"계획은 90초마다 지워지니 놓치면 영원히 없다"</strong>(07-30) → 우리 사본에 대해서만 참이었습니다. TOS 원장은 6개월 넘게 보관하고, 지정 조회는 라이브보다 <strong>쌉니다</strong>(출항 74.7시간 지난 항차까지 12/12 정확 회수).</li>
+            <li><strong>"떠난 배는 남은 일이 0"</strong>(07-31) → 배는 계획을 전부 해내지 않습니다. 검사 기준을 결합률로 바꿨습니다.</li>
+            <li><strong>계획 커버리지를 크레인 행마다 합산</strong>(08-03) → 재배정된 구역을 <strong>크레인 수만큼 다시 셌습니다</strong>(80항차 중 26개가 105% 초과, 최악 316%). ★ 접는 규칙은 <strong>다른 두 곳이 이미 쓰고 있었고 이 화면만 빠져</strong> 있어, "99%로 봉인된 항차가 같은 화면에서 300%"라는 모순이 났습니다. <strong>감시 대상과 다르게 세는 감시기는 사람에게 "저건 무시해도 된다"를 가르칩니다.</strong></li>
+            <li><strong>"계획 초과 경보는 결함이다"</strong>(08-04) → 배가 일을 남기고 떠난 것이었습니다. 임계값으로도 못 가릅니다 — <strong>"안 끝난 배"와 "부풀려진 계획"이 같은 모양</strong>이기 때문입니다.</li>
+            <li><strong>"계획 수량 = 트럭 통행 수"</strong> → 컨테이너 수입니다(트윈 18.2%). 통행 수로 쓰면 야드 왕복 수요를 최대 20% 부풀립니다.</li>
+          </ul>
+        </td></tr>
+    </tbody>
+  </table></div>
+  <p class="kc-src">자세히: <a href="/kc/data/scenario-collection.html">시나리오 수집</a> · <a href="/kc/dispatch/simulator-spec.html">배차 시뮬레이터</a></p>
+
+  <h2>줄기별 타임라인</h2>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th>시기</th><th>배차 마감 ①</th><th>작업 도달 ②</th><th>이동시간 ③</th><th>정답지 ⑤</th><th>안정성 ⑦</th></tr></thead>
+    <tbody>
+      <tr><td><strong>06월 중</strong></td><td>착수 — 출항에서 거꾸로 빼기</td><td>—</td><td>격자 OD</td><td>시각 컬럼 뜻 2회 정정</td><td>—</td></tr>
+      <tr><td><strong>06월 말</strong></td><td>2단계=순수효율 규율 확정</td><td>—</td><td>격자 폐기 → 도로망 추론</td><td>—</td><td>—</td></tr>
+      <tr><td><strong>07월 초</strong></td><td>—</td><td>스스로 보정 도입</td><td>비용=도로망 경로시간 곡선</td><td>순수주행 정의 정정</td><td>—</td></tr>
+      <tr><td><strong>07월 중</strong></td><td>—</td><td>—</td><td>딥러닝 이득 0 확인</td><td>유휴 리드타임 예측 중단</td><td>—</td></tr>
+      <tr><td><strong>07-28</strong></td><td>—</td><td>—</td><td>도로망 오염 → 복원</td><td>—</td><td>★ 서버 4시간 다운</td></tr>
+      <tr><td><strong>07-31</strong></td><td>마감 티어 A/B 시작</td><td>—</td><td>—</td><td>GPS 하차 기준 철회</td><td>—</td></tr>
+      <tr><td><strong>08-03</strong></td><td>설계대로 배선</td><td>★ 정답지 정정</td><td>오염 기간 제외</td><td>★ 완료 시각으로 확정</td><td>—</td></tr>
+      <tr><td><strong>08-04</strong></td><td>★ 새 축 전환·상자 단위</td><td>★ 보정 폐기</td><td>—</td><td>4단계 용어 확정</td><td>—</td></tr>
+    </tbody>
+  </table></div>
+
+  <h2 id="철회-모음">★ 철회 모음 — 왜 틀렸는지가 핵심이다</h2>
+  <p>이 프로젝트에서 반복된 실패는 <strong>산수가 아니라 분모와 비교 대상 선정</strong>이었습니다. 아래는 전부 <strong>코드를 돌려서 얻은 틀린 숫자</strong>입니다.</p>
+
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th style="width:30%">틀린 판단</th><th style="width:32%">왜 틀렸나</th><th>같은 함정을 피하는 법</th></tr></thead>
+    <tbody>
+      <tr>
+        <td><strong>"보정의 90%가 트럭 지연이다"</strong></td>
+        <td><strong>층화 변수가 정답지 그 자체에서 파생</strong>돼 있었습니다. 잔차를 자기 부호로 갈라놓고 음수 쪽이 작다고 보고한 <strong>동어반복</strong>.</td>
+        <td>층화 변수와 결과 부호의 <strong>일치율을 재고</strong>, 그 변수를 안 쓰는 <strong>위약으로도 같은 결과</strong>가 나오는지 봅니다. 30초면 확인됩니다.</td>
+      </tr>
+      <tr>
+        <td><strong>"크레인 작업의 40%가 목록에 없다"</strong></td>
+        <td>완료된 구역이 <strong>현재 스냅샷에서 빠진</strong> 것을 누락으로 셌습니다.</td>
+        <td>현재 스냅샷 표와 과거 이력 표를 맞대면 착시가 납니다. <strong>시점이 같은지</strong> 확인하고 <strong>창을 좁혀 다시</strong> 재봅니다.</td>
+      </tr>
+      <tr>
+        <td><strong>"98%가 순서대로 한다"</strong> / <strong>"34.5%가 뒤로 간다"</strong></td>
+        <td>앞엣것은 <strong>이동하지 않은 경우를 분모에 포함</strong>, 뒤엣것은 <strong>같은 구역 안 이동을 되돌아감으로</strong> 셌습니다.</td>
+        <td>"X의 몇 %"에서 <strong>X를 한 문장으로 쓸 수 있어야</strong> 합니다.</td>
+      </tr>
+      <tr>
+        <td><strong>"GPS 추정이 낫다"</strong></td>
+        <td><strong>GPS를 GPS 자신의 학습 목표로</strong> 채점했고, 그 정답지는 GPS가 틀렸을 사건 33%를 이미 빼고 있었습니다.</td>
+        <td>예측기 비교는 <strong>권위 있는 정답지 하나를 먼저 정하고</strong> 시작합니다.</td>
+      </tr>
+      <tr>
+        <td><strong>"이 컬럼은 크레인 시작 시각"</strong></td>
+        <td>이름으로 의미를 추정했습니다. 게다가 성공 신호로 삼은 <strong>"양하와 적하가 같아졌다"가 오류의 증상</strong>이었습니다 — 둘 다 배차 시각으로 재고 있었으니 종류와 무관하게 비슷해진 것.</td>
+        <td><strong>"두 갈래가 같아졌다"는 정답지가 옳다는 증거가 아닙니다.</strong> 그리고 새 정답지를 채택하기 전 <strong>기존 문서를 먼저 읽습니다</strong>(저장소가 이미 세 곳에 적어뒀습니다).</td>
+      </tr>
+      <tr>
+        <td><strong>"빈 차 이동 18% 절감"</strong></td>
+        <td>비교 대상이 <strong>구조적으로 질 수 없는 상대</strong>였습니다(실제 배정이 항상 가능한 답 중 하나이므로 최소 비용은 정의상 그보다 싸다).</td>
+        <td><strong>음수가 나올 수 있는 값인지</strong> 먼저 묻습니다. 나올 수 없다면 그건 성능이 아니라 <strong>상한</strong>입니다. 무작위 대조군을 함께 둡니다.</td>
+      </tr>
+      <tr>
+        <td><strong>"트럭 남기는 규칙이 고장났다"</strong> (2회)</td>
+        <td>① <strong>단위를 섞음</strong>(묶음 수 vs 대수) ② 기록 표가 <strong>57%를 조용히 버려서</strong> 생긴 과소집계.</td>
+        <td><strong>가공된 숫자로 추론하지 말고</strong> 원본 값을 직접 찍습니다. <strong>조용히 버려지는 행을 세지 않으면 집계가 거짓말을 합니다.</strong></td>
+      </tr>
+      <tr>
+        <td><strong>"25km 게이트는 안전하다"</strong></td>
+        <td>야드 트랙터로 잰 활동 범위를 <strong>표본에 없던 기기 종류에</strong> 적용해 그들에게 없는 한계를 발명했습니다.</td>
+        <td>측정된 범위가 <strong>어느 모집단의 것인지</strong> 확인합니다. 없는 모집단에는 <strong>버리지 말고 세기만</strong> 합니다.</td>
+      </tr>
+      <tr>
+        <td><strong>"지평을 켜도 효과가 없다"</strong></td>
+        <td><strong>전환기에 오염된 측정</strong>이었습니다. 정답지와 보정 판이 바뀐 직후라 보정이 0에 앉아 있었습니다.</td>
+        <td>판을 바꾼 직후에는 재지 않습니다. 전제조건(학습표가 찼는가)을 <strong>상수 주석에 못박아</strong> 둡니다.</td>
+      </tr>
+      <tr>
+        <td><strong>"이 평가기/스트림이 멈췄다"</strong> (여러 번)</td>
+        <td>주기 작업이라 가정했으나 <strong>소진 방식</strong>이었습니다(소진할 게 없으면 0건이 정상).</td>
+        <td>정지 판정 전에 <strong>그 작업이 무엇에 반응해 도는지</strong>를 봅니다.</td>
+      </tr>
+    </tbody>
+  </table></div>
+
+  <div class="kc-cal danger">
+    <span class="h">★ 이 목록에서 뽑은 규칙</span>
+    <ol>
+      <li><strong>비율을 보고하기 전 분모를 한 문장으로 씁니다.</strong> 못 쓰면 아직 재지 않은 것입니다.</li>
+      <li><strong>두 자료의 시점이 같은지 확인합니다.</strong> 같은 질의를 시간 창을 좁혀 한 번 더 돌려 값이 안정적인지 봅니다.</li>
+      <li><strong>층화 변수가 결과에서 파생됐는지 확인합니다.</strong> 잔차를 잔차의 함수로 가르면 동어반복입니다.</li>
+      <li><strong>측정 사실과 원인 해석은 문장을 나눕니다.</strong> "X초로 측정됐다"까지가 사실이고 "그래서 Y가 원인이다"는 별도 문장입니다.</li>
+      <li><strong>근거가 하나면 가설, 독립된 근거가 둘 이상일 때만 단정합니다.</strong></li>
+      <li><strong>"중대 사항"이라는 표현은 반증을 한 번 시도해 통과한 뒤에만</strong> 씁니다 — 사람이 그 말에 반응해 실제로 행동합니다(2026-08-03에 그 표현 때문에 정상 동작하던 실험이 중지됐고, 진단은 틀린 것으로 드러났습니다).</li>
+    </ol>
+  </div>
+
+  <h2>지금 가장 중요한 열린 질문 셋</h2>
+  <ol>
+    <li><strong>왜 예측이 거리와 무관하게 일정하게 이른가?</strong> 이게 풀리면 마감 과다 계상(390개 vs 트럭 39대)도 같이 설명될 가능성이 큽니다. <em>줄기 ②</em></li>
+    <li><strong>적하 마감은 새 축이 나은가?</strong> 보정을 끈 지금 다시 재야 판정됩니다. <em>줄기 ①</em></li>
+    <li><strong>후보 풀을 실제 배차 경로에 언제 배선하는가?</strong> 지금은 전부 그림자이고, 우리 출력이 실제 지시가 되는 순간 "이미 배차됨"의 출처가 <strong>우리 자신의 직전 추천</strong>이 되어야 합니다. <em>줄기 ④</em></li>
+  </ol>
+</main>
+</body>
+</html>

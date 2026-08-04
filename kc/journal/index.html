@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>개발일지 — TT AIOps 지식센터</title>
+  <meta name="description" content="이 프로젝트가 날마다 무엇을 했고 무엇을 알아냈고 무엇이 틀렸는지 — 날짜순 기록의 입구.">
+  <link rel="stylesheet" href="/kc/assets/kc.css">
+  <script defer src="/kc/assets/kc.js"></script>
+</head>
+<body>
+<main class="kc-article" data-page="journal/index">
+  <h1>개발일지</h1>
+  <p class="kc-lede">이 프로젝트가 날마다 <strong>무엇을 했고, 무엇을 알아냈고, 무엇이 틀렸다고 밝혀졌는지</strong>를 그대로 쌓아둡니다. 성공만 남긴 기록은 다음 사람을 돕지 못하므로 <strong>오판과 철회를 지우지 않습니다.</strong></p>
+  <div class="kc-meta">
+    <span class="kc-badge kind">개발일지</span>
+    <span class="kc-badge living">리빙 문서</span>
+  </div>
+
+  <div class="kc-cal tip">
+    <span class="h">어디로 갈까</span>
+    <p><strong>주제별로 어디까지 왔는지</strong> 알고 싶다 → <a href="/kc/journal/storyline.html">연구 흐름 지도</a>(줄기 8개 · 확정/미해결/철회)<br>
+    <strong>날짜순으로 따라가고</strong> 싶다 → 아래 월별 기록<br>
+    <strong>배차 주제만 깊게</strong> 보고 싶다 → <a href="/kc/dispatch/research-log.html">차량 배차 — 조사 기록</a></p>
+  </div>
+
+  <h2>최근 2주 (2026-07-21 ~ 08-04)</h2>
+  <ol>
+    <li><strong>배차 마감을 설계대로 다시 세웠습니다</strong>(08-03~04). "크레인이 이 상자를 다루는 시각 − 트럭 준비시간"이 처음으로 실제 판정에 들어갔습니다. 옛 식은 빼야 할 것을 <em>더하고</em> 있었습니다. 양하 절대오차 1,344 → <strong>642초</strong>(16시간·51,856건).</li>
+    <li><strong>채점의 정답지가 틀렸다는 것이 드러났습니다</strong>(08-03). 크레인 작업 기록의 한 시각 컬럼을 "작업 시작"으로 읽었는데 실제로는 <strong>"배차 시각"</strong>이었습니다. 서로 독립된 네 갈래가 모두 같은 곳을 가리켰습니다.</li>
+    <li><strong>스스로 배운 보정을 폐기했습니다</strong>(08-04). 보정값이 28~42분까지 커지면서 <strong>크레인이 무엇을 하든 전부 "약 36분 뒤"</strong>라는 답이 나왔습니다. 보정 없이가 더 정확했습니다(차이 201초 vs 28~46분).</li>
+    <li><strong>적하가 왜 그렇게 어려웠는지 답이 나왔습니다</strong>(08-04). 트럭 일 4단계 중 <strong>안벽 크레인이 끼어드는 자리가 작업 종류마다 반대</strong>여서, 필요한 준비시간이 양하 455초 / 적하 1,448초로 세 배 넘게 다릅니다.</li>
+    <li><strong>화면의 "18% 절감"이 성능 지표가 아니었습니다</strong>(07-31). 음수가 나올 수 없는 값이라 정직한 이름은 <strong>"개선 여지의 상한"</strong>입니다. 무작위 대조군을 붙이니 <strong>TOS가 이미 74.7%를 잡고 있었습니다.</strong></li>
+    <li><strong>서버가 4시간 멈췄습니다</strong>(07-28). 쓰레기 GPS 20건이 도로망 격자를 3,374배로 부풀렸습니다. 이후 같은 유형을 전수 조사하고, 안전장치·감시·알림 도달 경로를 만들었습니다. ⚠ 두 번 모두 <strong>적대 검토가 찾은 것이 전부 그때 넣은 안전장치의 회귀</strong>였습니다.</li>
+    <li><strong>시나리오 재료가 '한 일'에서 '할 일'로 넘어갔습니다</strong>(07-30~08-03). 안벽 작업계획을 시간순으로 아카이브하고, 크레인이 실제로 한 작업 순서를 출력에 담았습니다. ★ 크레인은 <strong>의사결정 대상이 아니라 경계 조건</strong>이고, <strong>배는 계획을 다 못 하고 떠납니다.</strong></li>
+    <li><strong>작업 기록이 구역 이름표와 배 이름을 직접 들고 오게</strong> 했습니다(07-30, TOS 부하 0). 그 전에는 하류 전체가 이 사실을 만료되는 우회로로 재구성하고 있었습니다.</li>
+  </ol>
+
+  <div class="kc-cal warn">
+    <span class="h">지금 가장 큰 미해결</span>
+    <p><strong>예측이 늘 이르고, 그 양이 예측 거리와 무관하게 일정합니다</strong>(양하 +12~20분 / 적하 +19~37분, 7,104건). 1.6분 뒤를 예측할 때나 53분 뒤를 예측할 때나 비슷하게 틀립니다. 세는 방식이 틀렸다면 멀리 볼수록 오차가 커져야 하므로 <strong>어느 상자에나 붙는 일정량을 놓치고 있다</strong>고 봅니다 — 근거가 한 갈래뿐이라 <strong>가설</strong>입니다.</p>
+  </div>
+
+  <h2>월별 기록</h2>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th style="width:18%">기간</th><th>그 달의 이야기</th></tr></thead>
+    <tbody>
+      <tr>
+        <td><a href="/kc/journal/2026-08.html"><strong>2026년 8월</strong></a></td>
+        <td>배차 마감을 설계대로 다시 세운 달. 정답지 정정 → 마감 축 전환 → 상자 단위 마감 → <strong>스스로 배운 보정 폐기</strong>. 그리고 적하가 왜 어려웠는지에 대한 답(4단계 비대칭).</td>
+      </tr>
+      <tr>
+        <td><a href="/kc/journal/2026-07.html"><strong>2026년 7월</strong></a></td>
+        <td>두 사건이 이 달을 갈랐습니다 — <strong>07-28 서버 4시간 다운</strong>이 "무엇이 터질 수 있나"를 전부 다시 보게 했고, <strong>07-31 성과 지표 정직화</strong>가 "얼마나 좋아졌나"를 재는 방법 자체를 고쳤습니다. 시나리오 생성기도 이 달에 착수했습니다.</td>
+      </tr>
+      <tr>
+        <td><a href="/kc/journal/2026-06.html"><strong>2026년 6월</strong></a> <span style="color:var(--dim);font-size:.9em">(요약)</span></td>
+        <td>프로젝트가 시작된 달. 3주 만에 대시보드 → 지표 정의 → 학습 모델 → <strong>2단계 배차 설계</strong>까지 갔습니다. 지금까지 유효한 설계 규율("2단계는 순수 효율만")도 여기서 정해졌습니다.</td>
+      </tr>
+    </tbody>
+  </table></div>
+
+  <h2>이 일지를 쓰는 규칙</h2>
+  <ul>
+    <li><strong>커밋이 없는 날은 항목을 만들지 않습니다.</strong> 빈 칸을 채우려고 지어내지 않습니다.</li>
+    <li><strong>숫자에는 분모와 측정 창을 같이 적습니다.</strong> 요약문에서 옮겨 적지 않고 커밋·마이그레이션 기록에서 직접 읽어옵니다.</li>
+    <li><strong>확인한 것과 짐작한 것을 문장으로 나눕니다.</strong> 근거가 하나면 "~로 보인다 / 가설이다", 독립된 근거가 둘 이상일 때만 단정합니다.</li>
+    <li><strong>정정·철회는 지우지 않습니다.</strong> 무엇이 틀렸는지보다 <strong>왜 틀렸는지</strong>가 다음 사람에게 값어치 있습니다.</li>
+    <li>커밋 메시지만으로 무슨 일인지 모르겠으면 <strong>"(내용 불명 — 커밋 abc1234)"</strong>라고 적습니다. 추측으로 채우지 않습니다.</li>
+    <li>시각은 터미널 현지(말레이시아, UTC+8) 기준입니다.</li>
+  </ul>
+</main>
+</body>
+</html>

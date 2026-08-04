@@ -50,6 +50,13 @@ const NAV = [
     { page: "dispatch/research-log",    title: "배차 조사 기록 (연구 일지)" },
     { page: "dispatch/leadtime-adr",    title: "ADR — 유휴 리드타임 예측불가" },
   ]},
+  { id: "journal", label: "개발일지 · 연구 흐름", items: [
+    { page: "journal/index",     title: "개발일지" },
+    { page: "journal/storyline", title: "연구 흐름 지도" },
+    { page: "journal/2026-08",   title: "2026년 8월" },
+    { page: "journal/2026-07",   title: "2026년 7월" },
+    { page: "journal/2026-06",   title: "2026년 6월 (요약)" },
+  ]},
   { id: "learn", label: "학습 · 예측 & 리서치", items: [
     { page: "learn/learning-center",   title: "학습 센터 기획" },
     { page: "learn/travel-time",       title: "이동시간 모델 (명세 + 이력)" },
