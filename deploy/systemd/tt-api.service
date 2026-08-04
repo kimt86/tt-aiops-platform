@@ -33,8 +33,6 @@ Environment=RUST_LOG=info,tt_api=info
 Environment=STAGE2_DEP_TIER=1
 # mig0119: 지평 레버 A/B. 판정 끝나면 1(채택) 또는 제거(기각).
 Environment=STAGE2_NEED_HORIZON=0
-# 보정 끔 — 성능 층을 내려놓고 설계 ③ 구조가 도는지 확인(2026-08-04). 검증 후 제거.
-Environment=WORK_ETA_BIAS=off
 ExecStart=%h/projects/tt-aiops-platform/target/release/api
 Restart=always
 RestartSec=3

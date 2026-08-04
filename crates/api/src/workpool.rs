@@ -391,34 +391,20 @@ pub(crate) async fn build_workpool(pool: PgPool) -> Result<WorkpoolOut, AppError
         // against dispatch. Expect the spread to stay wide (the pre-correction MAE was ~790s = 13 min
         // and nothing about that came from the bias term), so a per-crane median off a few dozen rows
         // is still noise, not signal. Hence the per-crane floor below.
-        // 보정 끄기 레버 — 성능 층을 잠시 내려놓고 구조가 도는지 보기 위한 것.
-        let bias_off = std::env::var("WORK_ETA_BIAS").as_deref() == Ok("off");
-        let bias_rows: Vec<(String, String, i32, i32, Option<i32>)> =
-            sqlx::query_as("SELECT qc, jobtype, horizon_bucket, n, med_err_s FROM learn_work_eta_bias")
-                .fetch_all(&pool).await.unwrap_or_default();
-        // key = (crane or "", jobtype, horizon bucket; -1 = horizon-agnostic)
-        let mut eta_bias: std::collections::HashMap<(String, char, i32), i64> = std::collections::HashMap::new();
-        for (bqc, jt, bucket, n, med) in bias_rows {
-            // '' = global-jobtype fallback row. Per-crane floor raised 30 → 150 on the 2026-08-03
-            // spread measurement above: at n=30 the median's standard error (~240s) is LARGER than
-            // the whole per-crane effect we would be trying to read, so it fits noise. n=150 puts
-            // SE near 105s. Cranes that never reach 150 in 7 days fall back to the global row —
-            // which is the correct behaviour, not a gap.
-            // Global rows: 100 → 50. Adding the horizon dimension (mig 0118) splits the same sample
-            // across 5 buckets, so a 100-row bar keeps the whole term at ZERO for hours after any
-            // change to the truth or the bias version — and zero is not neutral here, it is wrong by
-            // the full residual (LD +1,474s measured). A median off n=50 carries SE ≈ 250s against a
-            // σ≈1,400s spread; being 250s noisy beats being 1,474s wrong. Per-crane stays at 150 for
-            // the reason above — there the competing estimate is the global row, not zero.
-            let min_n = if bqc.is_empty() { 50 } else { 150 };
-            if n < min_n {
-                continue;
-            }
-            if let Some(med) = med {
-                let j = if jt == "LD" { 'L' } else { 'D' };
-                eta_bias.insert((bqc, j, bucket), (med as i64).clamp(-900, 2400));
-            }
-        }
+        // ⚠⚠ 작업도달 **보정은 폐기했다**(2026-08-04 사용자 지시). 예측에 더하지 않는다.
+        //
+        // 왜: 보정이 예측을 다듬는 게 아니라 **삼켰다**. 값이 +1,667~2,547초까지 커지자 각 크레인의
+        // 첫 구역은 앞에 밀린 작업이 0이라 남는 게 보정값뿐이 되어, 크레인이 달라도 전부 같은
+        // 값(≈36분 뒤)이 나왔다. 그 결과 "가장 급한 일"이 영원히 36분 뒤라 설계 ③이 아무것도
+        // 담지 못했다.
+        //
+        // 그리고 보정 없이가 **더 정확했다**. 크레인 26대 대조(2026-08-04): 예측 vs 실제 다음 무브
+        // 차이 **201초**, 어느 구역을 할지 **80.8%** 적중. 보정을 켰을 때는 28~46분씩 틀렸다.
+        // ⇒ 보정이 없어서 부정확한 게 아니라 보정이 있어서 부정확했다.
+        //
+        // `learn_work_eta_bias` 매뷰는 **지우지 않는다** — 이제 보정기가 아니라 **정확도 계기**다.
+        // median(정답 − 예측)을 계속 재므로 예측이 나빠지면 거기서 먼저 드러난다. 되살리려면
+        // 이 자리에 조회를 되돌리면 되지만, 위 실측을 뒤집을 근거가 먼저 있어야 한다.
         let now = Utc::now();
         // work-ETA is a FIXED future instant (when the QC reaches a bay); anchor it to the data
         // snapshot (as_of), NOT now — else every poll re-anchors to a later "now" and the countdown
@@ -430,14 +416,6 @@ pub(crate) async fn build_workpool(pool: PgPool) -> Result<WorkpoolOut, AppError
         const HATCH_DS_S: f64 = 340.0;     // discharge deck→hold cover removal (extra)
         const HATCH_LD_S: f64 = 390.0;     // load hold→deck cover placement (extra)
         const FINISH_BUFFER_S: i64 = 1800; // work should finish ~30 min before departure
-        // Empirical work-ETA calibration: the active crane's CURRENT in-progress operation is not
-        // modeled at the bay anchor, so DS work-ETAs ran ~+10 min optimistic vs actual in the near
-        // (dispatch-relevant) range — confirmed by shadow validation (resolved_at − pred). Shift DS
-        // work-ETA by this. The departure-based deadline_ts and slack_s use `total` and are
-        // UNAFFECTED. Far-out predictions remain limited by queue-order reliability (seq), not this.
-        // NB tuned while the ghost-transition bug inflated ETAs — the learned residual layer
-        // (eta_bias, mig 0083) absorbs the recalibration automatically; keep this as a static prior.
-        const DS_WORK_ETA_BIAS_S: i64 = 600;
         // Scheduled crane stops: the terminal pauses at the MYT 00/08/16 shift/meal boundaries —
         // measured on the shadow validation as prediction-error spikes of +436..+608s exactly at
         // those three hours (the move-time cadence deliberately excludes gaps>300s, so work-ETA
@@ -579,36 +557,7 @@ pub(crate) async fn build_workpool(pool: PgPool) -> Result<WorkpoolOut, AppError
                     // when the QC starts this bay = now + work scheduled before it (+ DS calibration).
                     // 앞선 작업 = 통합 타임라인의 procs[0..k] — **다른 배 작업 포함**이 이번 수정의 핵심.
                     let before = (suffix[0] - suffix[k]).max(0.0);
-                    let job = parse_q(&qc.queues[qi].queuename).map(|c| c.2).unwrap_or('D');
-                    // The learned residual (per-crane, else global-jobtype) is the WHOLE correction.
-                    // mig 0117: DS_WORK_ETA_BIAS_S used to be added on TOP of this and was left out of
-                    // applied_bias_s, so the "raw" the matview restored still carried +600 for DS —
-                    // two hand-entangled sources for one physical quantity. It is now the bootstrap
-                    // FALLBACK only: it applies while no learned value exists and disappears the
-                    // moment one does. applied_bias_s therefore equals the entire correction.
-                    // mig 0118 — the correction is keyed on HOW FAR AHEAD this prediction reaches,
-                    // because that is where the error actually lives. Measured on the corrected truth:
-                    // the spread is FLAT across horizon (~1,400s IQR at 5 min and at 50 min alike), but
-                    // the bias swings from +2,145s at 10–20 min to −623s at 50–60 min for LD. One
-                    // constant cannot represent that, and the dispatch band (5–45 min) sits right where
-                    // the swing is largest. Bucket = 10 min of the RAW horizon — bucketing on the
-                    // corrected value would move a prediction between buckets as the bias grows, which
-                    // is the same feedback trap mig 0113 fell into with its sample window.
-                    let bucket = ((before as i64) / 600).clamp(0, 4) as i32;
-                    // ⚠ 보정 킬스위치 (`WORK_ETA_BIAS=off`). 보정은 예측을 다듬는 **성능** 층인데,
-                    // 2026-08-04 현재 그 값이 +1,667~2,547초까지 커져 **구조를 삼켰다**: 각 크레인의
-                    // 첫 큐는 앞에 밀린 작업이 0이라 남는 게 보정값뿐이고, 그래서 크레인이 달라도
-                    // 전부 같은 값(≈36분 뒤)이 나온다. 결과적으로 "가장 급한 일"이 영원히 36분 뒤라
-                    // 설계 ③(마감으로 후보 풀 구성)이 아무것도 담지 못한다.
-                    // 끄면 work_eta = 앵커 + 앞에 밀린 작업 이 되어 첫 큐가 "지금"이 된다
-                    // (크레인이 실제로 거기 있으므로 사실에 더 가깝다). 정확도는 떨어지지만 그건
-                    // 성능 검사에서 다룰 문제이고, 먼저 구현이 도는 것을 봐야 한다.
-                    let learned = if bias_off { 0 } else { eta_bias
-                        .get(&(qc_id.clone(), job, bucket))       // per-crane, per-horizon (rarely has n)
-                        .or_else(|| eta_bias.get(&(String::new(), job, bucket))) // ← this is the one that works
-                        .or_else(|| eta_bias.get(&(String::new(), job, -1)))     // horizon-agnostic fallback
-                        .copied()
-                        .unwrap_or(if job == 'L' { 0 } else { DS_WORK_ETA_BIAS_S }) };
+                    let learned = 0i64;
                     let raw = eta_anchor + chrono::Duration::seconds(before as i64 + learned);
                     let brk = shift_breaks_between(eta_anchor, raw) * SHIFT_BREAK_S;
                     qc.queues[qi].work_eta_ts = Some(raw + chrono::Duration::seconds(brk));

@@ -4909,7 +4909,8 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
             for &oi in &order {
                 let (wi, wlat, wlon, eta_ms) = works[oi];
                 let w = &work[wi];
-                let move_s = if w.jobtype == "LD" { LD_MOVE_S } else { DS_MOVE_S };
+                // 무브시간은 마감 계산에서 빠졌다(mig 0122: spread 항 폐기). 상자별 시각은
+                // workpool 쪽에서 이미 매겨 넘어온다.
                 let cap_j = *cap_by_oi.get(&oi).unwrap_or(&0); // Stage-1 capped demand (truck-loads)
                 caps.push(cap_j);
                 // 마감 = 크레인이 이 컨테이너를 다루는 시각. **더하는 항 없음**(mig 0122).
