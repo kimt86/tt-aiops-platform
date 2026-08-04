@@ -4833,6 +4833,21 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                 let mut overdue: i32 = 0;
                 for (oi, &(wi, _, _, _)) in works.iter().enumerate() {
                     let w = &work[wi];
+                    // ★배차 대상은 **아직 배차 안 된 상자**만 (2026-08-04 사용자 지시).
+                    //
+                    // 시간 계산(앞에 얼마나 밀렸나)은 TOS 배차와 무관하게 **전부** 센다 — 그건 위
+                    // works/구역 카운터가 담당한다. 하지만 트럭을 실제로 **보낼 대상**은 다르다:
+                    // TOS 가 이미 트럭을 보낸 상자에 우리가 또 보내면 낭비다.
+                    //
+                    // 실측(2026-08-04): TOS 배차분은 지시 나이 중앙 54~70분으로 이미 처리 중이고,
+                    // 미배차분은 23~26분이다. 마감이 지난 것으로 세어지던 612개는 대부분 전자였다 —
+                    // 크레인이 지금 다루는 상자라 배차 마감이 준비시간만큼 전에 지난 게 당연하고,
+                    // 우리가 할 수 있는 일이 없다.
+                    //
+                    // ⚠ 이건 **시작 시점의 인수인계** 규칙이다. TOS 가 우리 결과로 배차하게 되면
+                    //   "이미 배차됨"의 출처가 TOS 가 아니라 우리 자신의 직전 추천이 되어야 한다.
+                    //   그때는 이 조건을 우리 배차 이력으로 바꾼다.
+                    if w.tos_assigned { continue }
                     let Some(dd) = w.dispatch_deadline_ts else { continue };
                     let move_s = if w.jobtype == "LD" { LD_MOVE_S } else { DS_MOVE_S };
                     let base = dd.timestamp_millis();

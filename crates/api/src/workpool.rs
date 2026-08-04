@@ -973,6 +973,14 @@ pub(crate) struct Stage2Work {
     pub(crate) dispatch_deadline_ts: Option<DateTime<Utc>>,
     /// 위에서 실제로 뺀 준비시간(초). 학습값(learn_dispatch_lead) 우선, 없으면 LEAD_*_S 상수.
     pub(crate) dd_lead_s: Option<i64>,
+    /// 이 상자가 구역 안에서 몇 번째인가(0-based). **지시 생성시각(cre_ts) 순**으로 매긴다.
+    /// 검증(2026-08-04·양하 n=451 짝): 생성순=처리순 **82.5%**(우연이면 50%). 선박 내 위치는
+    /// 46.3%로 동전 던지기보다 못해 기각했다. 적하는 QC 가 드랍오프라 지시가 그 순간 닫혀
+    /// 스냅샷에 안 남으므로 같은 방식으로 검증할 표본이 구조적으로 없다 — 양하 결과를 원용한다.
+    /// ⚠ 이 값이 없으면(집계 버킷 등) None → 종전처럼 구역 시작 시각을 그대로 쓴다.
+    pub(crate) slot_idx: Option<i32>,
+    /// 이 구역의 무브 하나 시간(초). 상자별 시각 = 구역 시작 + slot_idx × 이 값.
+    pub(crate) move_s: Option<i64>,
     /// TOS 가 이미 트럭을 붙여 둔 작업인가(live_workpool 유래). mig 0121 1단계용.
     /// ⚠ 우리 시스템은 TOS 배차와 무관하게 돌아야 하므로 **새 규칙 풀은 이 값을 무시**한다.
     /// 현행 Stage-1 은 종전 동작 보존을 위해 false 인 것만 담는다(= 옛 live_candidate 집합).
@@ -1018,10 +1026,23 @@ pub(crate) async fn stage2_work_candidates(pool: PgPool) -> Result<Vec<Stage2Wor
     )
     .fetch_all(&pool_for_lead).await.unwrap_or_default()
     .into_iter().map(|(j, v)| (j, (v as i64).clamp(60, 3600))).collect();
+    // ⚠ 아래 live_candidate(집계) 경로는 **상자 단위 경로가 못 덮는 것만** 담는다.
+    // live_workpool 은 배차됨(A)·미배차(Q) 를 모두 상자 단위로 갖고 있어 live_candidate 의
+    // 상위집합이다. 둘 다 담으면 미배차 상자가 이중 계상된다. 상자 단위가 있으면 그쪽이 우선이고
+    // (마감을 상자마다 매길 수 있으므로), 여기서는 상자 단위에 없는 (크레인,배,구역)만 보충한다.
+    let boxed_keys: std::collections::HashSet<(String, String, String)> = sqlx::query_as::<_, (String, String, String)>(
+        "SELECT DISTINCT qc, vessel, queuename FROM live_workpool
+          WHERE jobtype IN ('DS','LD') AND qc IS NOT NULL AND qc <> '' AND contno IS NOT NULL AND contno <> ''",
+    )
+    .fetch_all(&pool_for_lead).await.unwrap_or_default().into_iter().collect();
+
     let mut out = Vec::new();
     for c in &wp.candidates {
         let Some(qc) = c.qc.clone().filter(|s| !s.is_empty()) else { continue };
         let jt = c.jobtype.clone().unwrap_or_default();
+        if boxed_keys.contains(&(qc.clone(), c.vessel.clone(), c.queuename.clone())) {
+            continue;   // 상자 단위로 이미 담았다 — 이중 계상 방지
+        }
         let lead = lead_realized.get(&jt).copied()
             .unwrap_or(if jt == "LD" { LEAD_LD_S } else { LEAD_DS_S });
         let row = eta.get(&(qc.clone(), c.vessel.clone(), c.queuename.clone())).copied();
@@ -1037,6 +1058,8 @@ pub(crate) async fn stage2_work_candidates(pool: PgPool) -> Result<Vec<Stage2Wor
             proc_s: row.and_then(|r| r.2),
             dispatch_deadline_ts: row.map(|r| r.0 - chrono::Duration::seconds(lead)),
             dd_lead_s: Some(lead),
+            slot_idx: None,   // live_candidate 는 집계 버킷이라 상자 단위가 아니다
+            move_s: None,
             tos_assigned: false,
         });
     }
@@ -1051,33 +1074,81 @@ pub(crate) async fn stage2_work_candidates(pool: PgPool) -> Result<Vec<Stage2Wor
     // 트럭 수요 환산: 배차된 행은 ytno(트럭)가 있으므로 **트럭 대수 = distinct ytno** 가 정확하다
     // (live_candidate 쪽이 twinkey 로 트윈을 합치는 것과 같은 의미). 야드 블록은 미배차 쪽과
     // 똑같이 yt_topos 앞자리에서 얻는다(실측 채워짐 적하 99.6% / 양하 100%).
-    let assigned: Vec<(String, String, String, String, Option<String>, i64)> = sqlx::query_as(
-        "SELECT w.qc, w.vessel, w.queuename, w.jobtype,
-                CASE WHEN w.jobtype = 'LD' THEN NULLIF(left(w.yt_topos, 3), '') END AS src_block,
-                count(DISTINCT w.ytno)::int8 AS n
-           FROM live_workpool w
-          WHERE w.jobtype IN ('DS','LD') AND w.qc IS NOT NULL AND w.qc <> ''
-            AND w.ytno IS NOT NULL AND w.ytno <> ''
-          GROUP BY 1,2,3,4,5",
+    // 무브 하나 시간 — **구역 시작 시각을 계산할 때 쓰는 것과 같은 학습값**을 쓴다(일관성).
+    // 없으면 실측 중앙값으로 폴백(2026-08-04 연속 comp 간격: 양하 99초 / 적하 126초).
+    const BOX_MOVE_DS_S: i64 = 99;
+    const BOX_MOVE_LD_S: i64 = 126;
+    let move_time: HashMap<(String, char), i64> = sqlx::query_as::<_, (String, String, Option<i32>)>(
+        "SELECT qc, jobtype, med_sec FROM learn_qc_move_time WHERE med_sec IS NOT NULL",
+    )
+    .fetch_all(&pool_for_lead).await.unwrap_or_default()
+    .into_iter()
+    .filter_map(|(q, jt, m)| m.map(|m| ((q, if jt == "LD" { 'L' } else { 'D' }), (m as i64).clamp(30, 600))))
+    .collect();
+
+    // 상자 단위로 가져온다 — 구역 하나에 한 줄이 아니라 **상자 하나에 한 줄**.
+    // 그래야 "구역 j번째 상자가 언제 처리되나"를 각각 계산할 수 있다.
+    //
+    // 구역 안 순서(slot_idx)는 **지시 생성시각(cre_ts) 순**으로 매긴다(mig 0123 에서 수집 시작).
+    // 검증(2026-08-04·양하 n=451 짝): 생성순=처리순 82.5%(우연이면 50%). 선박 내 위치는 46.3%로
+    // 동전 던지기보다 못해 기각했다.
+    //
+    // ⚠ 트윈은 상자 2개·트럭 1대다. 여기서는 트럭 대수가 아니라 **크레인 무브 순서**를 매기는
+    //   것이므로 상자 단위가 맞다(크레인이 트윈을 한 번에 들면 두 상자가 같은 시각이 되는데,
+    //   그 오차는 무브 하나(약 100초)라 감수한다).
+    // ⚠ 양하의 배차된 지시 중 **이미 크레인을 지난 것**은 제외한다. 양하는 QC 가 픽업이라
+    //   크레인이 내리는 순간 지시가 아니라 구역 카운터가 오르고, 지시는 트럭이 야드에
+    //   드랍오프해야 닫힌다. 그 사이(중앙 11분) 상자는 "크레인은 끝났는데 지시는 열린" 상태다.
+    //   실측: 양하 배차분 196건이 100% 이 상태였고, 빼지 않으면 구역별 산술이 9곳에서 깨졌다.
+    // 트윈은 상자 2개·트럭 1대다. **트럭 한 대 몫**을 한 줄로 만들기 위해 twinkey 로 먼저 합친다
+    // (mig 0124). twinkey 가 빈 행은 그 자체가 한 대 몫이다.
+    let per_box: Vec<(String, String, String, String, Option<String>, i64, bool)> = sqlx::query_as(
+        "WITH loads AS (                            -- 트럭 한 대 몫 = 트윈 쌍 하나 또는 단독 상자 하나
+           SELECT w.qc, w.vessel, w.queuename, w.jobtype,
+                  min(CASE WHEN w.jobtype = 'LD' THEN NULLIF(left(w.yt_topos, 3), '') END) AS src_block,
+                  min(w.cre_ts)  AS cre_ts,
+                  min(w.contno)  AS contno,
+                  bool_or(w.ytno IS NOT NULL AND w.ytno <> '') AS tos_assigned
+             FROM live_workpool w
+            WHERE w.jobtype IN ('DS','LD') AND w.qc IS NOT NULL AND w.qc <> ''
+              AND w.contno IS NOT NULL AND w.contno <> ''
+              AND NOT EXISTS (                     -- 크레인이 이미 처리한 양하 지시 제외
+                SELECT 1 FROM qc_move_log m
+                 WHERE m.contno = w.contno AND m.jobtype = w.jobtype
+                   AND m.comp_ts > now() - interval '12 hours')
+            GROUP BY w.qc, w.vessel, w.queuename, w.jobtype,
+                     COALESCE(NULLIF(w.twinkey, ''), w.contno)   -- 트윈이면 한 줄로
+         )
+         SELECT qc, vessel, queuename, jobtype, src_block,
+                (row_number() OVER (PARTITION BY qc, vessel, queuename
+                                    ORDER BY cre_ts NULLS LAST, contno) - 1)::int8 AS slot_idx,
+                tos_assigned
+           FROM loads",
     )
     .fetch_all(&pool_for_lead).await.unwrap_or_default();
-    for (qc, vessel, queuename, jt, src_block, n) in assigned {
+    for (qc, vessel, queuename, jt, src_block, slot_idx, tos_assigned) in per_box {
         let lead = lead_realized.get(&jt).copied()
             .unwrap_or(if jt == "LD" { LEAD_LD_S } else { LEAD_DS_S });
+        let move_s = move_time.get(&(qc.clone(), if jt == "LD" { 'L' } else { 'D' })).copied()
+            .unwrap_or(if jt == "LD" { BOX_MOVE_LD_S } else { BOX_MOVE_DS_S });
         let row = eta.get(&(qc.clone(), vessel.clone(), queuename.clone())).copied();
+        // 상자별 시각 = 구역 시작 + slot_idx × 무브시간
+        let box_eta = row.map(|r| r.0 + chrono::Duration::seconds(slot_idx * move_s));
         out.push(Stage2Work {
             qc,
             vessel,
             queuename,
             jobtype: jt,
             src_block,
-            n: n as i32,
-            work_eta_ts: row.map(|r| r.0),
+            n: 1,                                   // 상자 하나 = 트럭 한 대 몫
+            work_eta_ts: box_eta,
             deadline_ts: row.and_then(|r| r.1),
             proc_s: row.and_then(|r| r.2),
-            dispatch_deadline_ts: row.map(|r| r.0 - chrono::Duration::seconds(lead)),
+            dispatch_deadline_ts: box_eta.map(|e| e - chrono::Duration::seconds(lead)),
             dd_lead_s: Some(lead),
-            tos_assigned: true,
+            slot_idx: Some(slot_idx as i32),
+            move_s: Some(move_s),
+            tos_assigned,   // ⚠ 행마다 정확히 — live_workpool 은 배차됨(A)·미배차(Q) 를 둘 다 담는다
         });
     }
     Ok(out)

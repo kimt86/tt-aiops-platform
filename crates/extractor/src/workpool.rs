@@ -289,13 +289,13 @@ async fn src_workpool(pool: &PgPool, target: &str, date: chrono::NaiveDate, as_o
                     sqlx::query(
                         "INSERT INTO live_workpool
                            (queuename, vessel, voyage, jobtype, jobstatus, yt_status, ytno, armgc,
-                            etw_ts, etw_raw, actv_ts, actv_raw, contno, msnseq, yt_topos, from_pos, to_pos, twintandem, as_of_ts, upd_ts, cre_ts)
-                         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)",
+                            etw_ts, etw_raw, actv_ts, actv_raw, contno, msnseq, yt_topos, from_pos, to_pos, twintandem, as_of_ts, upd_ts, cre_ts, twinkey)
+                         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)",
                     )
                     .bind(&r.queuename).bind(&r.vessel).bind(&r.voyage)
                     .bind(&r.jobtype).bind(&r.jobstatus).bind(&r.yt_status).bind(&r.ytno).bind(&r.armgc)
                     .bind(etw_ts).bind(&r.etw_dt).bind(actv_ts).bind(&r.actv_dt).bind(&r.contno).bind(&r.msnseq).bind(&r.yt_topos)
-                    .bind(&r.from_pos).bind(&r.to_pos).bind(&r.twintandem).bind(as_of).bind(upd_ts).bind(cre_ts)
+                    .bind(&r.from_pos).bind(&r.to_pos).bind(&r.twintandem).bind(as_of).bind(upd_ts).bind(cre_ts).bind(&r.twinkey)
                     .execute(&mut *tx).await.context("insert live_workpool")?;
                     active += 1;
                 }
@@ -329,13 +329,13 @@ async fn src_workpool(pool: &PgPool, target: &str, date: chrono::NaiveDate, as_o
                     sqlx::query(
                         "INSERT INTO live_workpool
                            (queuename, vessel, voyage, jobtype, jobstatus, yt_status, ytno, armgc,
-                            etw_ts, etw_raw, actv_ts, actv_raw, contno, msnseq, yt_topos, from_pos, to_pos, twintandem, as_of_ts, upd_ts, cre_ts)
-                         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)",
+                            etw_ts, etw_raw, actv_ts, actv_raw, contno, msnseq, yt_topos, from_pos, to_pos, twintandem, as_of_ts, upd_ts, cre_ts, twinkey)
+                         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)",
                     )
                     .bind(&r.queuename).bind(&r.vessel).bind(&r.voyage)
                     .bind(&r.jobtype).bind(&r.jobstatus).bind(&r.yt_status).bind(Option::<String>::None).bind(&r.armgc)
                     .bind(etw_ts).bind(&r.etw_dt).bind(actv_ts).bind(&r.actv_dt).bind(&r.contno).bind(&r.msnseq).bind(&r.yt_topos)
-                    .bind(&r.from_pos).bind(&r.to_pos).bind(&r.twintandem).bind(as_of).bind(upd_ts).bind(cre_ts)
+                    .bind(&r.from_pos).bind(&r.to_pos).bind(&r.twintandem).bind(as_of).bind(upd_ts).bind(cre_ts).bind(&r.twinkey)
                     .execute(&mut *tx).await.context("insert live_workpool (Q unassigned)")?;
                 }
                 _ => {}
