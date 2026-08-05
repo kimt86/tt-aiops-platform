@@ -10,10 +10,13 @@ MemoryMax=1G
 MemorySwapMax=0
 Type=oneshot
 WorkingDirectory=%h/projects/tt-aiops-platform
-Environment=PGPASSWORD=wp
+# 접속 정보는 .env 의 DATABASE_URL 에서 읽는다(gitignore 대상). 다른 tt-* 유닛과 같은 방식이고,
+# 저장소에 비밀번호를 남기지 않기 위해서다 — 처음엔 Environment=PGPASSWORD=... 로 박아뒀는데,
+# deploy/ 에 자격증명이 들어간 첫 사례가 될 뻔했다.
+EnvironmentFile=%h/projects/tt-aiops-platform/.env
 # SELECT 전용 스크립트. 결과는 파일로 남긴다 — 타이머가 판정까지 하지는 않는다.
 ExecStart=/bin/sh -c 'mkdir -p %h/projects/tt-aiops-platform/data/reports && \
-  psql -h 127.0.0.1 -p 5433 -U wp -d wp_tt \
+  psql "$DATABASE_URL" \
        -f %h/projects/tt-aiops-platform/scripts/deadline_axis_compare.sql \
   > %h/projects/tt-aiops-platform/data/reports/deadline_axis_$(date +%%Y%%m%%d_%%H%%M).txt 2>&1'
 Nice=10
