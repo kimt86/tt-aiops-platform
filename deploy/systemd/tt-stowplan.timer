@@ -1,0 +1,11 @@
+[Unit]
+Description=wp-tt 적부계획 순번 5분마다 (적하·미완료·작업중 항차로 좁힌 한 번의 VSP_SHIP 조회)
+
+[Timer]
+# 계획은 천천히 바뀐다. 90초짜리 워크풀과 달리 5분이면 충분하고, 그만큼 Oracle 이 편하다.
+OnBootSec=3min
+OnUnitActiveSec=5min
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target

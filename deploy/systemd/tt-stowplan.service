@@ -1,0 +1,12 @@
+[Unit]
+Description=tt-aiops-platform 적부계획 상자 순번 스냅샷 (VSP_SHIP -> live_stow_plan). 구역 안 작업 순서의 권위 값.
+After=network-online.target
+
+[Service]
+# 폭발 반경 제한(2026-07-28 OOM 장애 재발방지). 한 주기 페이로드가 ~0.5MB 라 넉넉하다.
+MemoryMax=1G
+MemorySwapMax=0
+Type=oneshot
+EnvironmentFile=%h/projects/tt-aiops-platform/.env
+ExecStart=%h/projects/tt-aiops-platform/target/release/extractor stowplan --target oracle-prod
+Nice=15

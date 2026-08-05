@@ -65,6 +65,13 @@ enum Command {
         #[arg(long, default_value = "oracle-prod")]
         target: String,
     },
+    /// 적부계획의 상자별 작업 순번(VSP_SHIP.VSP_SHP_PLANSEQ) → live_stow_plan.
+    /// 구역 안 순서의 권위 값 — 작업지시 표에는 순서가 없다. **적하 전용**(양하는 원천이 13.6%).
+    /// 계획은 천천히 바뀌므로 ~5분이면 충분하다. 실측 2.3초/4,725행.
+    Stowplan {
+        #[arg(long, default_value = "oracle-prod")]
+        target: String,
+    },
     /// Authoritative soon-idle labels: incrementally poll JOB_ORDER_HISTORY completions
     /// (JOBSTATUS='C') → tos_handover_label via etl_watermark. Run ~every 60s.
     Handover {
@@ -183,6 +190,10 @@ async fn main() -> Result<()> {
         Command::Workpool { target } => {
             let pool = db::pool().await?;
             tt_extractor::workpool::tick_workpool(&pool, &target).await?;
+        }
+        Command::Stowplan { target } => {
+            let pool = db::pool().await?;
+            tt_extractor::stowplan::tick_stowplan(&pool, &target).await?;
         }
         Command::Handover { target } => {
             let pool = db::pool().await?;
