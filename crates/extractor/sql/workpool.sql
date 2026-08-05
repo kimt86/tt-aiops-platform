@@ -29,7 +29,11 @@ SELECT
                                                     -- ⚠ DATE 를 그대로 두면 툴박스가 JSON 숫자로 바꿔
                                                     --   Option<String> 디코드가 배치째 실패한다 → TO_CHAR 필수.
   SUBSTR(l.JOB_ODR_CONTNO, 1, 11) AS contno,
-  l.JOB_ODR_MSNSEQ     AS msnseq,
+  l.JOB_ODR_MSNSEQ     AS msnseq,   -- ⚠ 항상 비어 있다(660/660). 순번처럼 보이지만 쓸 수 없다.
+  l.JOB_ODR_SEQNO      AS seqno,    -- ★크레인 작업 순번. 배치 발행시각 꼴 문자열이라 사전순=시간순.
+                                    -- 구역 안 순서의 권위 값이다(끝난 작업 298,074쌍에 100% 일치).
+                                    -- 동률 = 트윈(상자 2개·무브 1회). 개정되므로 "다음 하나"가 아니라
+                                    -- "앞에 몇 개"를 세는 데 쓴다. VARCHAR2 라 TO_CHAR 불필요. mig 0127.
   l.JOB_ODR_YT_TOPOS   AS yt_topos,
   l.CRNT_PSN_IDX_NO1   AS from_pos,
   l.YT_TO_PSN_IDX_NO1  AS to_pos,

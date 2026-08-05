@@ -72,6 +72,9 @@ pub struct MoveRow {
     pub cre_dt: Option<String>,  // CRE_DT (TO_CHAR'd): 작업지시 생성 시각. 재고 깊이를 실측하려고 뽑는다
     pub contno: Option<String>,
     pub msnseq: Option<String>,
+    /// JOB_ODR_SEQNO — 크레인 작업 순번(배치 발행시각 꼴 문자열, 사전순=시간순). 구역 안 순서의
+    /// 권위 값. 동률은 트윈(상자 2개·무브 1회)이다. msnseq 와 혼동 금지 — 그쪽은 항상 비어 있다.
+    pub seqno: Option<String>,
     pub yt_topos: Option<String>,
     pub from_pos: Option<String>,
     pub to_pos: Option<String>,
@@ -289,13 +292,13 @@ async fn src_workpool(pool: &PgPool, target: &str, date: chrono::NaiveDate, as_o
                     sqlx::query(
                         "INSERT INTO live_workpool
                            (queuename, vessel, voyage, jobtype, jobstatus, yt_status, ytno, armgc,
-                            etw_ts, etw_raw, actv_ts, actv_raw, contno, msnseq, yt_topos, from_pos, to_pos, twintandem, as_of_ts, upd_ts, cre_ts, twinkey)
-                         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)",
+                            etw_ts, etw_raw, actv_ts, actv_raw, contno, msnseq, yt_topos, from_pos, to_pos, twintandem, as_of_ts, upd_ts, cre_ts, twinkey, seqno)
+                         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)",
                     )
                     .bind(&r.queuename).bind(&r.vessel).bind(&r.voyage)
                     .bind(&r.jobtype).bind(&r.jobstatus).bind(&r.yt_status).bind(&r.ytno).bind(&r.armgc)
                     .bind(etw_ts).bind(&r.etw_dt).bind(actv_ts).bind(&r.actv_dt).bind(&r.contno).bind(&r.msnseq).bind(&r.yt_topos)
-                    .bind(&r.from_pos).bind(&r.to_pos).bind(&r.twintandem).bind(as_of).bind(upd_ts).bind(cre_ts).bind(&r.twinkey)
+                    .bind(&r.from_pos).bind(&r.to_pos).bind(&r.twintandem).bind(as_of).bind(upd_ts).bind(cre_ts).bind(&r.twinkey).bind(&r.seqno)
                     .execute(&mut *tx).await.context("insert live_workpool")?;
                     active += 1;
                 }
@@ -329,13 +332,13 @@ async fn src_workpool(pool: &PgPool, target: &str, date: chrono::NaiveDate, as_o
                     sqlx::query(
                         "INSERT INTO live_workpool
                            (queuename, vessel, voyage, jobtype, jobstatus, yt_status, ytno, armgc,
-                            etw_ts, etw_raw, actv_ts, actv_raw, contno, msnseq, yt_topos, from_pos, to_pos, twintandem, as_of_ts, upd_ts, cre_ts, twinkey)
-                         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)",
+                            etw_ts, etw_raw, actv_ts, actv_raw, contno, msnseq, yt_topos, from_pos, to_pos, twintandem, as_of_ts, upd_ts, cre_ts, twinkey, seqno)
+                         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)",
                     )
                     .bind(&r.queuename).bind(&r.vessel).bind(&r.voyage)
                     .bind(&r.jobtype).bind(&r.jobstatus).bind(&r.yt_status).bind(Option::<String>::None).bind(&r.armgc)
                     .bind(etw_ts).bind(&r.etw_dt).bind(actv_ts).bind(&r.actv_dt).bind(&r.contno).bind(&r.msnseq).bind(&r.yt_topos)
-                    .bind(&r.from_pos).bind(&r.to_pos).bind(&r.twintandem).bind(as_of).bind(upd_ts).bind(cre_ts).bind(&r.twinkey)
+                    .bind(&r.from_pos).bind(&r.to_pos).bind(&r.twintandem).bind(as_of).bind(upd_ts).bind(cre_ts).bind(&r.twinkey).bind(&r.seqno)
                     .execute(&mut *tx).await.context("insert live_workpool (Q unassigned)")?;
                 }
                 _ => {}

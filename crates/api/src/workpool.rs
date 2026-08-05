@@ -1038,9 +1038,26 @@ pub(crate) async fn stage2_work_candidates(pool: PgPool) -> Result<Vec<Stage2Wor
     // 상자 단위로 가져온다 — 구역 하나에 한 줄이 아니라 **상자 하나에 한 줄**.
     // 그래야 "구역 j번째 상자가 언제 처리되나"를 각각 계산할 수 있다.
     //
-    // 구역 안 순서(slot_idx)는 **지시 생성시각(cre_ts) 순**으로 매긴다(mig 0123 에서 수집 시작).
-    // 검증(2026-08-04·양하 n=451 짝): 생성순=처리순 82.5%(우연이면 50%). 선박 내 위치는 46.3%로
-    // 동전 던지기보다 못해 기각했다.
+    // 구역 안 순서(slot_idx)는 **TOS 작업 순번(seqno) 순**으로 매긴다(mig 0127).
+    // seqno 는 배치 발행시각 꼴 문자열이라 사전순 = 시간순이고, 끝난 작업 298,074쌍에서 처리
+    // 순서와 100.0% 일치한다. 값이 없으면 cre_ts 로 떨어진다.
+    //
+    // ⚠ 2026-08-05 이전에는 cre_ts 를 썼고, 근거는 "생성순=처리순 82.5%(n=451)" 였다.
+    //   그 값은 **재현되지 않는다** — 재검정 53.5%(n=159) · 예측 기반 52~54%(n=38,443).
+    //   같은 시험이 적하는 76.4% 를 잡아내므로(양성 대조) 시험이 아니라 그 축이 문제였다.
+    //   그래서 상자마다 실제보다 앞자리를 받아 작업 도달 예측이 예측 거리와 무관하게
+    //   일정하게 일렀다(양하 +16~26분 · 적하 +37~39분).
+    //
+    // ⚠ seqno 도 **개정된다**: 사후 100% 지만 사전으로는 양하 76.6% · 적하 66.7%(위약 53%).
+    //   두 가지가 겹친다. ① **미분화** — 발급 시점엔 배치 하나에 최대 26개가 같은 seqno 를
+    //   달고 있다가 나중에 쪼개진다(열린 지시의 20.5% 가 3개 이상 묶음, 끝난 작업은 0%).
+    //   ② **국소적 맞바꿈** — SEQNO 순위 차가 이웃이면 70.0%, 9자리 이상이면 82.8% 로 맞는다
+    //   (베이의 평평한 열은 순서가 무관해 바꿔도 된다). 그래서 **"다음 상자 하나"는 못 찍고**
+    //   (구역 50곳 중 5곳·10%) **"앞에 몇 개"만 센다**. 우리에게 필요한 것이 그것이다.
+    //   사전 실측(n=177/369): 치우침이 양하 +3.3분 · 적하 −6.5분 으로 붕괴하고 부호도 갈린다.
+    //
+    // ⚠ msnseq 로 착각하지 말 것 — 그 칸은 660/660 전부 비어 있다. "TOS 에 순번이 없다"는
+    //   결론이 거기서 나왔고, 그게 틀렸다(같은 표에 컬럼 92개, 우리가 뽑는 것은 20개뿐).
     //
     // ⚠ 트윈은 상자 2개·트럭 1대다. 여기서는 트럭 대수가 아니라 **크레인 무브 순서**를 매기는
     //   것이므로 상자 단위가 맞다(크레인이 트윈을 한 번에 들면 두 상자가 같은 시각이 되는데,
@@ -1055,6 +1072,7 @@ pub(crate) async fn stage2_work_candidates(pool: PgPool) -> Result<Vec<Stage2Wor
         "WITH loads AS (                            -- 트럭 한 대 몫 = 트윈 쌍 하나 또는 단독 상자 하나
            SELECT w.qc, w.vessel, w.queuename, w.jobtype,
                   min(CASE WHEN w.jobtype = 'LD' THEN NULLIF(left(w.yt_topos, 3), '') END) AS src_block,
+                  min(w.seqno)   AS seqno,     -- 트윈은 같은 seqno 를 공유한다(동률 = 트윈)
                   min(w.cre_ts)  AS cre_ts,
                   min(w.contno)  AS contno,
                   bool_or(w.ytno IS NOT NULL AND w.ytno <> '') AS tos_assigned
@@ -1070,7 +1088,8 @@ pub(crate) async fn stage2_work_candidates(pool: PgPool) -> Result<Vec<Stage2Wor
          )
          SELECT qc, vessel, queuename, jobtype, src_block,
                 (row_number() OVER (PARTITION BY qc, vessel, queuename
-                                    ORDER BY cre_ts NULLS LAST, contno) - 1)::int8 AS slot_idx,
+                                    ORDER BY NULLIF(seqno,'') NULLS LAST,
+                                             cre_ts NULLS LAST, contno) - 1)::int8 AS slot_idx,
                 tos_assigned
            FROM loads",
     )
