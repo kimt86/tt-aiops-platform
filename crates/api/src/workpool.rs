@@ -1038,26 +1038,31 @@ pub(crate) async fn stage2_work_candidates(pool: PgPool) -> Result<Vec<Stage2Wor
     // 상자 단위로 가져온다 — 구역 하나에 한 줄이 아니라 **상자 하나에 한 줄**.
     // 그래야 "구역 j번째 상자가 언제 처리되나"를 각각 계산할 수 있다.
     //
-    // 구역 안 순서(slot_idx)는 **TOS 작업 순번(seqno) 순**으로 매긴다(mig 0127).
-    // seqno 는 배치 발행시각 꼴 문자열이라 사전순 = 시간순이고, 끝난 작업 298,074쌍에서 처리
-    // 순서와 100.0% 일치한다. 값이 없으면 cre_ts 로 떨어진다.
+    // 구역 안 순서(slot_idx)는 **적부계획의 상자 순번**(live_stow_plan.planseq)으로 매긴다
+    // (mig 0128·0129). TOS 의 ITV 배차기도 이것으로 정렬한다 —
+    //   RANK() OVER (PARTITION BY 크레인 ORDER BY JOB_QUE_PLND_DATE||TIME, VSP_SHP_PLANSEQ)
+    //   (com.clt.tos.itv.supervisor-impl/.../LoadableJob.xml — 양하 444·499, 적하 757)
     //
-    // ⚠ 2026-08-05 이전에는 cre_ts 를 썼고, 근거는 "생성순=처리순 82.5%(n=451)" 였다.
-    //   그 값은 **재현되지 않는다** — 재검정 53.5%(n=159) · 예측 기반 52~54%(n=38,443).
-    //   같은 시험이 적하는 76.4% 를 잡아내므로(양성 대조) 시험이 아니라 그 축이 문제였다.
-    //   그래서 상자마다 실제보다 앞자리를 받아 작업 도달 예측이 예측 거리와 무관하게
-    //   일정하게 일렀다(양하 +16~26분 · 적하 +37~39분).
+    // ★이 배선의 핵심은 순서가 아니라 **분모**다. 우리 작업목록은 구역에 남은 일의 44% 만
+    //   담는데(TOS 가 지시를 작업 직전에 다 만들지 않는다) 순번을 그 안에서 0부터 다시 매기고
+    //   있었다. 그래서 어느 상자든 실제보다 앞자리를 받아, 작업 도달 예측이 **예측 거리와
+    //   무관하게 일정하게** 일렀다(양하 +16~26분 · 적하 +37~39분). 계획은 남은 일의 99% 를
+    //   덮으므로(실측: 계획 4,169 vs 큐 카운터 4,173) 그 안에서 세면 분모가 맞는다.
     //
-    // ⚠ seqno 도 **개정된다**: 사후 100% 지만 사전으로는 양하 76.6% · 적하 66.7%(위약 53%).
-    //   두 가지가 겹친다. ① **미분화** — 발급 시점엔 배치 하나에 최대 26개가 같은 seqno 를
-    //   달고 있다가 나중에 쪼개진다(열린 지시의 20.5% 가 3개 이상 묶음, 끝난 작업은 0%).
-    //   ② **국소적 맞바꿈** — SEQNO 순위 차가 이웃이면 70.0%, 9자리 이상이면 82.8% 로 맞는다
-    //   (베이의 평평한 열은 순서가 무관해 바꿔도 된다). 그래서 **"다음 상자 하나"는 못 찍고**
-    //   (구역 50곳 중 5곳·10%) **"앞에 몇 개"만 센다**. 우리에게 필요한 것이 그것이다.
-    //   사전 실측(n=177/369): 치우침이 양하 +3.3분 · 적하 −6.5분 으로 붕괴하고 부호도 갈린다.
+    // ⚠ 계획은 **상자** 단위, 무브시간은 **들어올림** 단위다(learn_qc_move_time = 연속 완료
+    //   간격의 중앙값). 트윈은 상자 2개에 들어올림 1회이므로 (1 − 트윈/2) 로 환산한다 —
+    //   구역 단위 계산이 쓰는 것과 같은 식이다.
     //
-    // ⚠ msnseq 로 착각하지 말 것 — 그 칸은 660/660 전부 비어 있다. "TOS 에 순번이 없다"는
-    //   결론이 거기서 나왔고, 그게 틀렸다(같은 표에 컬럼 92개, 우리가 뽑는 것은 20개뿐).
+    // ⚠ 작업지시 표에는 순서가 없다. 여기서 헤매지 말 것:
+    //   · `msnseq` : 660/660 전부 비어 있다. "TOS 에 순번이 없다"는 오판이 여기서 나왔다
+    //                (같은 표에 컬럼 92개인데 우리가 뽑는 것은 20개뿐이었다).
+    //   · `seqno`  : 열린 지시에서는 **발행 시각**(cre_ts 와 ±18초·순서 97.6% 동일), 완료되면
+    //                **완료 시각**으로 덮어쓰인다. 끝난 작업으로 채점하면 100% 로 보이는
+    //                함정이다(st_ts → ETW → SEQNO, 같은 함정 세 번째). 폴백으로만 남긴다.
+    //   · `point`  : 순서가 아니다(단독 49% = 무작위, 더해도 62.8→63.2%).
+    //
+    // 사전 검정(계획을 작업 **전에** 떠서 채점): 순서 78.6% vs 위약 47.2%(n=1,631),
+    // "앞에 몇 개" 치우침 +0.8자리(≈+1.5분·n=221). 종전 축은 같은 기간 적하 +37분이었다.
     //
     // ⚠ 트윈은 상자 2개·트럭 1대다. 여기서는 트럭 대수가 아니라 **크레인 무브 순서**를 매기는
     //   것이므로 상자 단위가 맞다(크레인이 트윈을 한 번에 들면 두 상자가 같은 시각이 되는데,
@@ -1070,9 +1075,9 @@ pub(crate) async fn stage2_work_candidates(pool: PgPool) -> Result<Vec<Stage2Wor
     // (mig 0124). twinkey 가 빈 행은 그 자체가 한 대 몫이다.
     let per_box: Vec<(String, String, String, String, Option<String>, i64, bool)> = sqlx::query_as(
         "WITH loads AS (                            -- 트럭 한 대 몫 = 트윈 쌍 하나 또는 단독 상자 하나
-           SELECT w.qc, w.vessel, w.queuename, w.jobtype,
+           SELECT w.qc, w.vessel, w.voyage, w.queuename, w.jobtype,
                   min(CASE WHEN w.jobtype = 'LD' THEN NULLIF(left(w.yt_topos, 3), '') END) AS src_block,
-                  min(w.seqno)   AS seqno,     -- 트윈은 같은 seqno 를 공유한다(동률 = 트윈)
+                  min(w.seqno)   AS seqno,
                   min(w.cre_ts)  AS cre_ts,
                   min(w.contno)  AS contno,
                   bool_or(w.ytno IS NOT NULL AND w.ytno <> '') AS tos_assigned
@@ -1083,15 +1088,34 @@ pub(crate) async fn stage2_work_candidates(pool: PgPool) -> Result<Vec<Stage2Wor
                 SELECT 1 FROM qc_move_log m
                  WHERE m.contno = w.contno AND m.jobtype = w.jobtype
                    AND m.comp_ts > now() - interval '12 hours')
-            GROUP BY w.qc, w.vessel, w.queuename, w.jobtype,
+            GROUP BY w.qc, w.vessel, w.voyage, w.queuename, w.jobtype,
                      COALESCE(NULLIF(w.twinkey, ''), w.contno)   -- 트윈이면 한 줄로
+         ),
+         pp AS (        -- 계획에서의 자리: 같은 구역에서 planseq 가 더 작은 상자가 몇 개인가.
+                        -- 우리 목록이 아니라 **계획 전체**를 세는 것이 이 배선의 핵심이다.
+           SELECT vessel, voyage, queuename, contno,
+                  (row_number() OVER (PARTITION BY vessel, voyage, queuename
+                                      ORDER BY planseq NULLS LAST, contno) - 1) AS pos
+             FROM live_stow_plan
+         ),
+         tw AS (        -- 선박별 트윈 비율: 계획은 **상자** 단위인데 무브시간은 **들어올림** 단위라
+                        -- 환산이 필요하다. 구역 단위 계산이 쓰는 것과 같은 식(1 − 트윈/2)이다.
+           SELECT vessel, avg(CASE WHEN NULLIF(twinkey,'') IS NOT NULL THEN 1.0 ELSE 0.0 END)::float8 AS f
+             FROM live_workpool GROUP BY vessel
          )
-         SELECT qc, vessel, queuename, jobtype, src_block,
-                (row_number() OVER (PARTITION BY qc, vessel, queuename
-                                    ORDER BY NULLIF(seqno,'') NULLS LAST,
-                                             cre_ts NULLS LAST, contno) - 1)::int8 AS slot_idx,
-                tos_assigned
-           FROM loads",
+         SELECT l.qc, l.vessel, l.queuename, l.jobtype, l.src_block,
+                COALESCE(
+                  floor(pp.pos * (1.0 - COALESCE(tw.f, 0.0) / 2.0))::int8,
+                  -- 계획에 없는 상자만 종전 축으로 떨어진다(작업지시 발행 순서).
+                  (row_number() OVER (PARTITION BY l.qc, l.vessel, l.queuename
+                                      ORDER BY NULLIF(l.seqno,'') NULLS LAST,
+                                               l.cre_ts NULLS LAST, l.contno) - 1)::int8
+                ) AS slot_idx,
+                l.tos_assigned
+           FROM loads l
+           LEFT JOIN pp ON pp.vessel = l.vessel AND pp.voyage = l.voyage
+                       AND pp.queuename = l.queuename AND pp.contno = l.contno
+           LEFT JOIN tw ON tw.vessel = l.vessel",
     )
     .fetch_all(&pool_for_lead).await.unwrap_or_default();
     for (qc, vessel, queuename, jt, src_block, slot_idx, tos_assigned) in per_box {
