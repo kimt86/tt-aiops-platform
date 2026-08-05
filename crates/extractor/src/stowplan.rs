@@ -9,12 +9,14 @@
 //! `ORDER BY JOB_QUE_PLND_DATE||TIME, VSP_SHP_PLANSEQ` (LoadableJob.xml). 순서는 작업지시가
 //! 아니라 적부계획에 있다.
 //!
-//! **알갱이(실측 2026-08-05).** 구역당 상자 중앙 35개 · 구역 안 서로 다른 순번값 중앙 35개
-//! ⇒ 값 하나당 1.0 상자. 진짜 상자 단위 순번이다.
+//! **알갱이(실측 2026-08-05).** 적·양하 합쳐 구역 164곳 **전부**에서 순번이 상자를 완전히
+//! 구별한다(값 하나당 1상자). 지금 쓰는 축(작업지시 seqno)은 17곳 중 1곳뿐이다.
 //!
-//! ⚠ **적하 전용.** 양하는 원천이 13.6% 만 채워져 있어 쓸 수 없다.
-//! ⚠ **부하는 질의의 세 조건이 전부다**(sql/stowplan.sql 참고). 좁히면 2.3초/4,725행,
-//!   적하 조건 하나만 빼도 16.4초/22,233행이 된다.
+//! ⚠ **`PLANST='P'` 인 행만 쓴다.** 'B'(BAPLIE 신고분)에는 순번이 없다. 그걸 분모에 넣으면
+//!   "양하는 13.6% 뿐"이라는 오판이 나온다 — mig0128 에서 내가 그렇게 틀렸고 0129 에서 정정했다.
+//!   P 행 수는 실측상 큐 카운터의 남은 일과 일치한다.
+//! ⚠ **부하는 질의의 세 조건이 전부다**(sql/stowplan.sql 참고). 좁히면 6.0초(중앙),
+//!   범위를 안 좁히면 16.4초/22,233행이 된다. 편차가 커서 단발 측정으로 판단하면 안 된다.
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
@@ -37,6 +39,8 @@ pub struct PlanRow {
     pub vessel: String,
     pub voyage: String,
     pub queuename: Option<String>,
+    /// 'D'=양하 · 'L'=적하. 구역 이름(38H-D 등)으로 유추하지 않고 값으로 구분한다.
+    pub disload: Option<String>,
     pub contno: Option<String>,
     /// NUMBER 라 툴박스가 JSON 숫자로 준다. `Option<String>` 으로 받으면 배치째 디코드가 깨진다.
     pub planseq: Option<i64>,
@@ -106,14 +110,16 @@ async fn src_stowplan(
                 continue;
             }
             sqlx::query(
-                "INSERT INTO live_stow_plan (vessel, voyage, queuename, contno, planseq, as_of_ts)
-                 VALUES ($1,$2,$3,$4,$5,$6)
+                "INSERT INTO live_stow_plan (vessel, voyage, queuename, disload, contno, planseq, as_of_ts)
+                 VALUES ($1,$2,$3,$4,$5,$6,$7)
                  ON CONFLICT (vessel, voyage, queuename, contno) DO UPDATE SET
-                   planseq = EXCLUDED.planseq, as_of_ts = EXCLUDED.as_of_ts",
+                   disload = EXCLUDED.disload, planseq = EXCLUDED.planseq,
+                   as_of_ts = EXCLUDED.as_of_ts",
             )
             .bind(&r.vessel)
             .bind(&r.voyage)
             .bind(q)
+            .bind(r.disload.as_deref())
             .bind(c)
             .bind(r.planseq.map(|v| v as i32))
             .bind(as_of)
