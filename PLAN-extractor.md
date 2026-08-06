@@ -217,22 +217,32 @@ psql: SELECT kpi_key, src, round(value::numeric,2), sample_n FROM kpi_parity_log
 
 ## CHUNK 4 — 핸드오버 확장 + scengen collect/yard 로컬화 (Oracle 중복 제거)
 
-### 4-1. mig — **다음 빈 번호** `NNNN_handover_vessel_rtg_pos.sql`
+### 4-1. mig — 0136은 적용됐으나 타입이 틀렸다. **후속 mig(다음 빈 번호)로 교정**
+★1차 실행에서 확정된 Oracle 실제 타입(ALL_TAB_COLUMNS 실측):
+`LNDN_TRV_RNG = NUMBER(8,1)`(소수 1자리 → JSON float), `CRNT_PSN_IDX_NO1~4 = VARCHAR2`(→ JSON string).
+0136이 만든 BIGINT 컬럼들은 한 번도 안 채워졌으므로 **ALTER TYPE(테이블 재작성·잠금) 금지** —
+DROP+ADD(메타데이터만·즉시)로 교정한다:
 ```sql
-ALTER TABLE tos_handover_label ADD COLUMN IF NOT EXISTS vessel TEXT;
-ALTER TABLE tos_handover_label ADD COLUMN IF NOT EXISTS voyage TEXT;
-ALTER TABLE tos_handover_label ADD COLUMN IF NOT EXISTS trv_rng BIGINT;  -- k_empty용(LNDN_TRV_RNG)
-ALTER TABLE rtg_move_log ADD COLUMN IF NOT EXISTS pos1 BIGINT;  -- CRNT_PSN_IDX_NO1(블록)
-ALTER TABLE rtg_move_log ADD COLUMN IF NOT EXISTS pos2 BIGINT;  -- NO2(베이)
-ALTER TABLE rtg_move_log ADD COLUMN IF NOT EXISTS pos3 BIGINT;  -- NO3(열)
-ALTER TABLE rtg_move_log ADD COLUMN IF NOT EXISTS pos4 BIGINT;  -- NO4(단)
+ALTER TABLE tos_handover_label DROP COLUMN IF EXISTS trv_rng;
+ALTER TABLE tos_handover_label ADD  COLUMN IF NOT EXISTS trv_rng DOUBLE PRECISION; -- NUMBER(8,1)
+ALTER TABLE rtg_move_log DROP COLUMN IF EXISTS pos1;
+ALTER TABLE rtg_move_log DROP COLUMN IF EXISTS pos2;
+ALTER TABLE rtg_move_log DROP COLUMN IF EXISTS pos3;
+ALTER TABLE rtg_move_log DROP COLUMN IF EXISTS pos4;
+ALTER TABLE rtg_move_log ADD COLUMN IF NOT EXISTS pos1 TEXT;  -- VARCHAR2 원형 보존(디코드는 scengen 몫)
+ALTER TABLE rtg_move_log ADD COLUMN IF NOT EXISTS pos2 TEXT;
+ALTER TABLE rtg_move_log ADD COLUMN IF NOT EXISTS pos3 TEXT;
+ALTER TABLE rtg_move_log ADD COLUMN IF NOT EXISTS pos4 TEXT;
 ```
-CHECK 금지(RULES 2). 적용 전 `pg_stat_activity`에서 두 표를 만지는 세션 확인(RULES 8).
+(vessel·voyage TEXT는 0136 그대로 유효.) CHECK 금지(RULES 2). 적용 전 pg_stat_activity 확인(RULES 8).
 
 ### 4-2. 본 추출기 SELECT 확장 (부하 0 전례: mig0109 3컬럼)
 - `crates/extractor/src/handover.rs`: SELECT에 `JOB_HIST_VESSEL AS vessel, JOB_HIST_VOYAGE AS voyage, LNDN_TRV_RNG AS trv_rng`
-  (trv_rng는 NUMBER → `Option<i64>`, RULES 3), 구조체·INSERT·바인딩 추가.
-- `crates/extractor/src/rtg_moves.rs`: SELECT에 `CRNT_PSN_IDX_NO1..4 AS pos1..pos4`(`Option<i64>`), 착지 추가.
+  — trv_rng는 **`Option<f64>`** (NUMBER(8,1)이 JSON float로 옴 — 544.3 실측. serde f64는 정수 JSON도 받는다).
+- `crates/extractor/src/rtg_moves.rs`: SELECT에 `CRNT_PSN_IDX_NO1..4 AS pos1..pos4` — **`Option<String>`**
+  (VARCHAR2가 JSON string으로 옴 — "446" 실측). trim 후 빈 문자열은 NULL로.
+★교훈(이 계획의 실책): 임계 SELECT를 넓히기 전 ALL_TAB_COLUMNS로 타입을 실측하라.
+  1차 시도는 타입 단정 → 두 스트림이 매 틱 파싱 실패 → 2분 정지(워터마크 자가복구·유실 0) 후 롤백됐다.
 빌드·배포·재시작 후 저널의 extract 소요가 직전과 ±20% 이내인지 확인.
 
 ### 4-3. scengen collect 로컬화 — `crates/scengen/src/collect.rs`
@@ -257,14 +267,54 @@ Toolbox 제거. `tt-scenario-yard.timer`는 유지(이제 Oracle 0).
 
 ---
 
-## CHUNK 5 — workpool 델타 (⚠ 보류 — UNRESOLVED 1 해소 후)
+## CHUNK 5 — workpool 델타 (승인됨 2026-08-06 — 배차 에이전트 작업 종료 확인)
 
-설계 확정분만 기록한다(구현 금지):
-JOB_ORDER_LIST를 UPD_DT 워터마크 델타(비인덱스지만 표가 작아 ~1s 유지)로 거울화,
-assigned는 거울에서 파생(별도 쿼리 폐지), workqueue도 같은 패턴, vessel_schedule은 5분 별도 유닛,
-본체 주기 90→60초, 시간당 화해, env `WORKPOOL_MODE=delta|snapshot`.
-**배차 에이전트가 workpool.rs를 활성 수정 중**(PLAN.md CHUNK A/B, 반나절 재측정 대기)이라
-파일 충돌 위험 — 사용자 승인 전 착수 금지.
+⚠ 이 청크의 파일은 `crates/extractor/src/workpool.rs`(Oracle 풀러)다.
+`crates/api/src/workpool.rs`(배차 로직·현재 워킹트리에 남의 미커밋 변경 있음)는 **절대 접근 금지** —
+이름만 같은 다른 파일이다. crates/api 전체 수정 금지(소비자는 읽기 조사만).
+
+### 5-1. 소비자 계약 조사 (코드 수정 전, 보고 포함)
+`crates/api/`에서 `live_workpool`·`live_workqueue`를 읽는 곳을 grep으로 찾아
+**per-row `as_of`(또는 유사 신선도 컬럼)로 행을 필터링하는지** 확인한다.
+- 필터링 안 하면: 델타 병합에서 갱신 행만 as_of 갱신 (기본).
+- 필터링 하면: 델타 틱마다 전 행 as_of를 로컬 UPDATE로 일괄 갱신(로컬이라 무해) — 소비자 코드는 불변.
+조사 결과(파일:행)를 보고에 담아라.
+
+### 5-2. mig (다음 빈 번호) — 거울 키
+- `live_workpool`·`live_workqueue`의 현 스키마를 해당 마이그레이션 파일에서 확인.
+- UPSERT 무결성 키 후보: workpool은 `(contno, jobtype)` — ⚠`seqno`는 완료 시 TOS가 덮어쓰는
+  가변 컬럼이라 키 금지(노트 실측). workqueue는 `(qc, queuename)`.
+- **키 유일성을 현재 데이터로 검사**(로컬 표에서 GROUP BY 중복 카운트). 중복이 나오면 멈추고
+  키 후보와 중복 예시를 보고(PLAN ERROR 처리). 유일하면 UNIQUE INDEX IF NOT EXISTS 생성.
+
+### 5-3. `crates/extractor/src/workpool.rs` 델타 모드
+- env `WORKPOOL_MODE=delta|snapshot` (기본 delta, `.env` 추가). snapshot = 기존 경로 무손 보존.
+- 델타 틱(본체+카운터, 한 틱에 Oracle 2회):
+  * pool: `SQL_WORKPOOL`의 WHERE에서 `COMPDATE IS NULL` 제거하고 `UPD_DT >= TO_DATE('{wm}',...)` 추가,
+    SELECT에 `JOB_ODR_COMPDATE`·`TO_CHAR(UPD_DT,...)` 포함. COMPDATE 차면 DELETE, 아니면 UPSERT.
+    jobtype 필터(DS,LD)는 유지 — assigned 는 5-4 참조.
+  * workqueue: 같은 패턴, `DELT_FLG='Y'` 또는 완료조건이면 DELETE. (원본 WHERE의 UPD_DT 절 참조.)
+  * 워터마크 2개(`workpool_delta`,`workqueue_delta`) — stowplan_delta 와 같은 취급(−120s 랙·GREATEST).
+  * 첫 틱은 스냅샷 경로 1회 + 시딩 (stowplan.rs 3-2 패턴 재사용).
+- assigned(`SQL_ASSIGNED`)는 **그대로 유지**(작고 싸다·MI/MO 트럭 포함 의미가 풀과 달라 병합 시
+  소비자 위험 — REJECTED 참조).
+- vessel_schedule 을 tick_workpool 에서 **분리**: 새 서브커맨드/플래그 + `tt-vessel-schedule.{service,timer}`
+  (5분·OnCalendar 초 분산·기존 유닛 본떠 작성). tick_workpool 에서는 호출 제거.
+- ETW(src_etw)는 로컬이므로 그대로.
+
+### 5-4. 주기·화해·배포
+- `tt-workpool.timer`: 90초 → `OnCalendar=*-*-* *:*:15`(60초·분산 초 :15), AccuracySec=1s.
+- `tt-workpool-recon.{service,timer}` 신설(1시간): 스냅샷 질의로 거울 diff → `drift=N fixed=N` 로그 후 교체
+  (stowplan recon 패턴). pool·workqueue 둘 다.
+- mig → 빌드 → 유닛 설치 → 재시작 순서.
+
+### 5-5. 검증 (전부 숫자로 보고)
+1. 저널: 델타 틱의 pool/workqueue rows — 평균 150행 미만(직전 스냅샷 1,270+1,111 대비).
+2. recon 수동 1회: drift=N 값.
+3. 행수 대조: 로컬 live_workpool count vs Oracle `SELECT COUNT(*) ... COMPDATE IS NULL AND JOBTYPE IN ('DS','LD') AND JOBSTATUS IN ('A','Q')` (프로브 1회) — 두 숫자, ±3% 기대.
+4. **배차 소비자 무손상**: ①`dispatch_pred_sample` max(logged_at) 5분 내 ②api 저널(`journalctl --user -u tt-api`) 최근 10분 error 0 ③live_workpool 행수가 정상 범위(900~1,600).
+5. vessel_schedule 분리 후: live_vessel_schedule 갱신 시각이 5분 주기로 전진.
+6. 60초 주기 확인: tt-workpool Starting 이 매분 :15.
 
 ---
 
@@ -274,15 +324,63 @@ assigned는 거울에서 파생(별도 쿼리 폐지), workqueue도 같은 패�
 - **KPI 즉시 절체(Oracle 경로 제거)** — 병산 1~2주 게이트 전 금지. 이 런은 병산까지.
 - **nightly 폐기·k_util_tt 삭제** — 병산 게이트 뒤의 일. 이 런 범위 밖.
 - **VSB_VOYAGE(선박스케줄) 델타화** — 228행뿐, 이득 없음. CHUNK 5에서 5분 스냅샷으로만.
+- **assigned를 pool 델타에 병합** — assigned 는 jobtype 무필터(MI/MO 트럭 포함)·B 상태 포함으로
+  풀(DS/LD·A/Q)과 모집단이 다르다. 병합하려면 풀 거울에 MI/MO 행을 넣어야 하는데 live_workpool
+  소비자(crates/api·수정 금지)가 DS/LD 전제일 위험 → 작고 싼(2s) 별도 쿼리 유지가 옳다.
 - **contspec 미스장부** — 이미 구현됨(mig0122·`scenario.container_spec_miss`). 손대지 마라.
 - **툴박스/브리지(Azure mcp-toolbox) 개선** — 공유 인프라. 접근 금지(ETW 게이트웨이와 동급).
 - **Oracle측 인덱스/힌트 변경** — 읽기 전용 계정.
 - **`DISTINCT ON`+`ORDER BY` 최신순 착각** — DISTINCT ON은 키 선두 정렬을 강제한다(1dcbcc2 교훈).
 - **빈 집계를 0행으로 가정** — GROUP BY 없는 집계는 전-NULL 1행을 돌려준다(8ed4ea9 교훈). COUNT류는 `Option<i64>`.
 
+## CHUNK 6 — KPI 절체 + nightly 로컬화 (★사용자 지시 2026-08-06: 병산 1~2주 게이트 면제 — "터무니없게 차이만 안 나면 바로 진행")
+
+절체 근거(당일 병산 실측): K_MPH −0.1% · K_QC_Q 0.0% · K_TT_CYCLE −0.1% (즉시 절체 합격)
+/ K_RTG_Q +6.0% = 원본 c08의 ~10중 계수 결함, 로컬이 옳음(게이트 판독 노트) — 절체하되 표시값 +6% 이동 고지
+/ K_CYCLE = tt_move_log 재정의(기존 41% 과소 교정) — 절체·고지
+/ ★K_EMPTY 만 예외: 재료 trv_rng 가 2026-08-06 15시(KST)부터만 착지 — 하루치가 차는 **08-08 이후** 전환,
+  그때까지 t2·nightly 에서 Oracle 유지(e4 쿼리 그대로).
+
+### 6-1. t1 절체 — `crates/extractor/src/shift.rs`
+- env `KPI_T1_SRC=local|oracle` (기본 local, `.env` 추가 — 킬스위치. oracle 이면 종전 경로 그대로).
+- local 모드: `src_mph_vessels`·`src_qcq`·`src_cycle` 이 Oracle fetch 를 **하지 않고** CHUNK 2 의 로컬 SQL
+  결과로 `upsert_shift` 를 채운다. 주의: `src_mph_vessels` 는 무브수 외에 선박 패널도 만들었다 —
+  선박 패널 재료가 Oracle 행에서만 나오는지 확인하고, 나온다면 로컬 대체가 가능한지(qc_move_log 의
+  vessel·voyage 컬럼) 확인해 같이 로컬화하라. 불가능한 재료가 있으면 멈추고 보고.
+- `voyage_plan`(VSS_STATISTICS)은 t1 에서 **t2 로 이동**(3분→15분).
+- 병산 로깅(KPI_PARITY)은 코드 유지 — local 절체 후 oracle 행이 자연 소멸할 뿐.
+
+### 6-2. t2 절체 — 같은 파일
+- `src_craneq`: Oracle fetch 제거, `l_crane_q` 계열 로컬 산출로 K_RTG_Q upsert.
+  k_crane_q_hour 도 같은 로컬 소스(tos_handover_label 시간 버킷)로.
+- `K_CYCLE`: `l_cycle`(tt_move_log) 산출로 upsert.
+- `src_empty`(K_EMPTY)는 **Oracle 그대로**(위 예외).
+
+### 6-3. nightly 로컬화 — `crates/extractor/src/main.rs::run_kpi` + `crates/extractor/src/kpis/*.rs`
+- `k_util_tt` — **제거**: 프론트 미사용 확인됨(App.tsx:402 "TOS session value not shown").
+  제거 전 raw 산출표 소비처를 저장소 전체 grep 으로 최종 확인(있으면 멈추고 보고).
+- `k_util_crane`(e1c) → qc_move_log+rtg_move_log 로컬(st_ts..comp_ts 병합 구간 — l_qc_q 의 병합 기법 재사용).
+- `k_mph_realtime`·`k_qc_q`·`k_tt_cycle` → CHUNK 2 로컬 SQL 재사용.
+- `qc_move_time`(학습기 — learn_qc_move_time 은 scengen·배차가 소비) → 같은 산식을 qc_move_log 로.
+- `k_cycle`·`k_crane_q`·`k_crane_q_hour` → 위 로컬 소스.
+- `k_empty` → Oracle 유지(예외).
+- 결과: nightly 의 Oracle 왕복 = k_empty 1회뿐(08-08 후속에서 0).
+
+### 6-4. 검증 (숫자 보고)
+1. **어제(08-05) 재계산 대조**: `extractor run --kpi <각각> 2026-08-05` 를 로컬 모드로 돌려
+   kpi 표에 저장된 기존(Oracle산) 값과 나란히 — KPI별 (old, new, 차이%). k_empty 제외.
+   이것이 절체의 최종 안전망이다. "터무니없는" 차이(설명 안 되는 >15%)가 나오면 절체 중단·보고.
+2. t1 수동 1회: 저널에 Oracle/toolbox 호출 로그 0 + kpi_shift 갱신 확인.
+3. t2 수동 1회: 동일 + K_RTG_Q·K_CYCLE 값이 로컬 계산과 일치.
+4. 프론트 무손상: 대시보드 KPI API 응답 200·값 존재(엔드포인트는 crates/api/src/routes.rs 에서 확인).
+5. 부하 장부 재실행: t1 이 Oracle 0 이 된 것을 왕복 수로 확인.
+
+### 6-5. 고지(보고서에 포함, 코드 아님)
+대시보드 표시값 이동 2건: K_RTG_Q +6%(계수 교정), K_CYCLE 재정의(41% 과소 교정). 사용자 인지 완료 상태.
+
 ## SCOPE — 이 런에서 하지 않는 것
 
-- KPI 절체·nightly 대조전용 전환·폐기 (시간 게이트: 병산 1~2주)
+- ~~KPI 절체·nightly 폐기~~ → CHUNK 6 으로 승격(사용자 지시). 단 **K_EMPTY 절체만 08-08 이후**(재료 부족)
 - CHUNK 5 구현 (사용자 결정 대기)
 - k_empty 병산 (4-1 컬럼이 차오른 뒤에나 의미 — 다음 런)
 - gate 15분화는 CHUNK 1-3의 OnCalendar 전환에 포함하지 **않는다** — 주기 자체는 5분 유지
