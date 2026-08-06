@@ -104,7 +104,7 @@ collect `*:0/10:40`, yard `*:0/5:10`, gate `*:0/5:30`, contspec `*:0/5:50`, plan
 
 절체 아님. Oracle 경로가 계속 권위값을 쓴다. 이 청크는 로컬 계산을 **추가**하고 둘을 기록만 한다.
 
-### 2-1. mig `0133_kpi_parity.sql`
+### 2-1. mig `0134_kpi_parity.sql` (0133은 배차 트랙이 선점)
 ```sql
 CREATE TABLE IF NOT EXISTS kpi_parity_log (
   kpi_key       TEXT NOT NULL,
@@ -126,13 +126,31 @@ MYT 창은 호출부(shift.rs)가 이미 계산한다(`shift::window` → `termi
 | 파일 | 원본(의미 기준) | 로컬 소스 | 핵심 |
 |---|---|---|---|
 | `l_mph.sql` | `sql/c07_k_mph_realtime.sql` | `qc_move_log` | machno `~'^C[0-9]+$'`, jobtype IN('LD','DS'), comp_ts ∈ 창. 크레인별 LD/DS 카운트+first/last → 호출부가 동일 집계 |
-| `l_qc_q.sql` | `sql/f2_k_qc_q.sql` | `qc_move_log` | 같은 필터. 크레인별 comp_ts 정렬 후 유휴갭 분포(원본의 idle_sec 버킷 재현) |
+| `l_qc_q.sql` | `sql/f2_k_qc_q.sql` | `qc_move_log` | ★정정(1차 실행에서 드러남): "연속 comp 갭" 단순화 금지 — 원본과 −20% 벌어진다. 원본의 **구간 병합**을 그대로 재현하라: `st_ts`(=원본 ST_DT의 사본)→`comp_ts` 구간을 크레인별로 겹침 병합(running max 섬-갭 기법)한 뒤 병합 블록 **사이의** 갭에 원본 버킷 적용 |
 | `l_tt_cycle.sql` | `sql/c10_k_tt_cycle.sql` | `qc_move_log` | trk_id별 연속 comp_ts 갭, 120~1200s만 |
 | `l_crane_q.sql` | `sql/c08_k_crane_q.sql` | `tos_handover_label` | dis_ts(=YT_DIS_DT)·actv_ts(=ACTV_DT) NOT NULL, 갭=actv−dis 상당 — **원본 SQL을 열어 산식을 그대로 옮길 것**(창은 comp_ts 기준) |
 | `l_cycle.sql` | `sql/e3b_k_cycle_refined_v2.sql` | `tt_move_log` | dispatch_ts→free_ts 사이클. **의미가 원본과 다름을 안다**(원본은 HISTORY 전이) — 병산 목적이 바로 그 차이 측정 |
 
 주의: 원본 SQL의 수치 산식(버킷 경계·캡·가중)을 임의 해석하지 말고 파일을 열어 옮긴다.
 k_crane_q_hour(e5)는 c08과 같은 소스라 이번엔 **c08만**(대표) 병산한다. k_empty는 CHUNK 4 뒤에만 가능(컬럼 없음) — 이번 런 제외.
+
+★병산 정렬 3원칙(1차 실행 후 추가 — 게이트에 쓰려면 필수):
+1. **창 기준을 Oracle쪽과 동일하게**: 병산의 로컬 창은 "shift.rs가 그 KPI의 Oracle 값에
+   실제로 쓴 창"과 같아야 한다. K_RTG_Q는 Oracle쪽이 하루 누적(DAY_STR 하루 스캔·표본
+   20,585)이므로 로컬도 같은 하루 기준으로 — 각 src_* 함수가 Oracle 결과에서 값을 만드는
+   방식을 읽고 맞춰라.
+2. **sample_n 의미를 미러**: oracle 행의 sample_n 파생(크레인 수든 갭 수든)을 로컬 행도
+   동일 의미로 기록. 다르면 게이트 질의가 오독한다.
+3. **oracle 값이 없으면 oracle 행을 넣지 않는다**(K_CYCLE의 당일 raw_k_cycle 부재처럼) —
+   NULL 행을 틱마다 쌓지 말 것. local 행은 넣는다.
+
+★게이트 판독 노트(2026-08-06 병산 결과 확정):
+- K_MPH/K_QC_Q/K_TT_CYCLE = 0.0~0.1% 일치. 게이트는 이 셋의 지속 일치로 판정.
+- **K_RTG_Q +6.0%는 영구적·설명된 차이** — Oracle 원본(c08)이 JOB_ORDER_HISTORY의
+  전이 행(컨테이너당 ~10행, dis/actv가 전 행에 복제)을 그대로 세어 상자를 ~10중 가중.
+  로컬(tos_handover_label, 작업당 1행)이 올바른 가중이다. 로컬을 중복에 맞추지 마라.
+  절체 시 표시값이 ~+6% 이동함을 사용자에게 고지할 것.
+- K_CYCLE은 nightly(raw_k_cycle)가 하루 뒤 착지하므로 business_date 기준으로 D+1에만 짝이 생긴다.
 
 ### 2-3. `crates/extractor/src/shift.rs` 병산 배선
 - env `KPI_PARITY=off|on` (기본 on, `.env`에 `KPI_PARITY=on` 추가).
@@ -161,7 +179,7 @@ psql: SELECT kpi_key, src, round(value::numeric,2), sample_n FROM kpi_parity_log
 
 최대 전송원(6,200행×5분)을 인덱스 있는 UPD_DT 델타로 바꾸고 주기를 2분으로 올린다(신선도↑).
 
-### 3-1. mig `0134_stow_plan_delta.sql`
+### 3-1. mig — 파일명은 `db/migrations/` 의 **다음 빈 번호**로 (0133·0134는 사용됨) `NNNN_stow_plan_delta.sql`
 - `live_stow_plan`의 현재 정의를 `db/migrations/0128_live_stow_plan.sql`·`0129_...`에서 확인.
 - UNIQUE 인덱스가 없으면: `CREATE UNIQUE INDEX IF NOT EXISTS live_stow_plan_key ON live_stow_plan (vessel, voyage, contno, disload);`
   ⚠ 만들기 전에 현재 데이터 중복 확인: 중복이 있으면 UNIQUE 대신 이 청크를 중단하고 보고(PLAN ERROR).
@@ -199,7 +217,7 @@ psql: SELECT kpi_key, src, round(value::numeric,2), sample_n FROM kpi_parity_log
 
 ## CHUNK 4 — 핸드오버 확장 + scengen collect/yard 로컬화 (Oracle 중복 제거)
 
-### 4-1. mig `0135_handover_vessel_rtg_pos.sql`
+### 4-1. mig — **다음 빈 번호** `NNNN_handover_vessel_rtg_pos.sql`
 ```sql
 ALTER TABLE tos_handover_label ADD COLUMN IF NOT EXISTS vessel TEXT;
 ALTER TABLE tos_handover_label ADD COLUMN IF NOT EXISTS voyage TEXT;
