@@ -371,6 +371,16 @@ pub(crate) async fn build_workpool(pool: PgPool) -> Result<WorkpoolOut, AppError
                 }
             }
         }
+        // 벽시계 리듬 오버레이 — learn_qc_move_time(활동만·300초 컷)은 낙관적이므로 learn_qc_wall_cadence
+        // (같은 구역 연속 간격의 진짜 벽시계 평균)가 있으면 그 값이 이긴다 (mig 0131).
+        let wall_rows: Vec<(String, String, Option<i32>)> = sqlx::query_as(
+            "SELECT qc, jobtype, wall_s FROM learn_qc_wall_cadence WHERE wall_s IS NOT NULL")
+            .fetch_all(&pool).await.unwrap_or_default();
+        for (qc, jt, wall_s) in &wall_rows {
+            if let Some(wall_s) = wall_s {
+                move_time.insert((qc.clone(), if jt == "LD" { 'L' } else { 'D' }), *wall_s as f64);
+            }
+        }
         // learned work-ETA residual: median(crane start − RAW prediction) per (crane, jobtype) from
         // the shadow validation, DISPATCH-BAND horizon only (5–45 min; far predictions are
         // re-plan-polluted). mig 0083, rebuilt by 0113, truth corrected by 0115; refreshed ~20 min here.
@@ -802,87 +812,86 @@ pub fn spawn_dispatch_pred_logger(pool: PgPool) {
             .unwrap_or_default()
             .into_iter()
             .collect();
-            // (3) log the front (≤6 new) containers of each QC's primary vessel
-            for qc in &wp.qcs {
-                let Some(prim) = qc.vessels.first() else { continue };
-                #[allow(clippy::type_complexity)]
-                let mut bay: HashMap<(&str, &str), (DateTime<Utc>, i64, i32, i64)> = HashMap::new();
-                for b in &qc.queues {
-                    if let (Some(eta), Some(p)) = (b.work_eta_ts, b.proc_s) {
-                        // 4번째 = 이 예측에 실제로 들어간 학습 보정(mig 0113). 함께 적재해야
-                        // 매뷰가 원본예측을 복원해 되먹임 없는 잔차를 잴 수 있다.
-                        bay.insert((b.vessel.as_str(), b.queuename.as_str()), (eta, p, b.remaining.max(1), b.eta_bias_s));
+            // (3) log a spread-out sample (≤6 per QC: front/middle/back) of the wired per-box
+            // Stage-2 prediction (Stage2Work.work_eta_ts) — replaces the old front-6 formula
+            // logger, which recorded a different, unwired legacy calculation (bay-ETA + i/rem×p,
+            // ETW order). Scoring already ran above (blocks 0/1a/1b/2); this only records new
+            // predictions. pred_ver=2 tags these rows so analysis never mixes them with the
+            // legacy population (mig 0130).
+            let cand = match stage2_work_candidates(pool.clone()).await { Ok(v) => v, Err(_) => continue };
+            // contno → upd_ts (TOS UPD_DT) seed for D_tos — same source/filter as block (0) above.
+            let upd_of: HashMap<String, Option<DateTime<Utc>>> = {
+                let mut m: HashMap<String, Option<DateTime<Utc>>> = HashMap::new();
+                for qc in &wp.qcs {
+                    for mv in &qc.moves {
+                        if mv.ytno.as_deref().map(|s| !s.trim().is_empty()).unwrap_or(false) {
+                            if let Some(c) = &mv.contno {
+                                m.insert(c.clone(), mv.upd_ts);
+                            }
+                        }
                     }
                 }
-                // order by genuine work order (bay sequence, then ETW within a bay) so the "front"
-                // is the next containers to be worked — stable across ticks (ETW alone is unstable
-                // when many near-term containers have no ETW yet, re-logging a different set each tick).
-                let seq_of: HashMap<&str, i32> = qc
-                    .queues
-                    .iter()
-                    .filter(|b| &b.vessel == prim)
-                    .map(|b| (b.queuename.as_str(), b.seq.unwrap_or(i32::MAX)))
-                    .collect();
-                let mut fronts: Vec<&MoveOut> = qc
-                    .moves
-                    .iter()
-                    .filter(|m| &m.vessel == prim && m.contno.is_some()
-                        && !(m.jobtype.as_deref() == Some("DS") && m.actv_ts.is_some()))
-                    .collect();
-                fronts.sort_by_key(|m| (
-                    seq_of.get(m.queuename.as_str()).copied().unwrap_or(i32::MAX),
-                    m.etw_ts.unwrap_or(DateTime::<Utc>::MAX_UTC),
-                    m.contno.as_deref().unwrap_or(""), // stable tiebreak so the front-6 is the SAME set each tick
-                ));
-                let mut idx: HashMap<(&str, &str), i32> = HashMap::new();
-                let mut logged = 0;
-                for m in fronts.into_iter().take(20) {
-                    if logged >= 6 {
-                        break;
-                    }
-                    let key = (m.vessel.as_str(), m.queuename.as_str());
-                    let i = *idx.get(&key).unwrap_or(&0);
-                    idx.insert(key, i + 1);
-                    let contno = m.contno.as_ref().unwrap();
+                m
+            };
+            let mut by_qc: HashMap<&str, Vec<&Stage2Work>> = HashMap::new();
+            for w in &cand {
+                if w.contno.is_none() || w.work_eta_ts.is_none() {
+                    continue;
+                }
+                by_qc.entry(w.qc.as_str()).or_default().push(w);
+            }
+            for (_, mut rows) in by_qc {
+                rows.sort_by_key(|w| w.work_eta_ts);
+                let n = rows.len();
+                // front + middle + back so the residual sample isn't front-biased. n≤6 → keep all
+                // (the {n/2-1, n-2, ...} formula underflows for tiny n, e.g. n=1).
+                let idxs: Vec<usize> = if n <= 6 {
+                    (0..n).collect()
+                } else {
+                    let mut v = vec![0, 1, n / 2 - 1, n / 2, n - 2, n - 1];
+                    v.sort_unstable();
+                    v.dedup();
+                    v
+                };
+                for i in idxs {
+                    let w = rows[i];
+                    let contno = w.contno.as_ref().unwrap(); // filtered above
                     if open.contains(contno) {
                         continue;
                     }
-                    let Some(&(eta, p, rem, bias_s)) = bay.get(&key) else { continue };
-                    let lead: i64 = if m.jobtype.as_deref() == Some("LD") { LEAD_LD_S } else { LEAD_DS_S };
-                    let work_eta = eta + chrono::Duration::seconds(((i as f64 / rem as f64) * p as f64) as i64);
-                    let deadline = work_eta - chrono::Duration::seconds(lead);
-                    let assigned = m.ytno.as_deref().map(|s| !s.trim().is_empty()).unwrap_or(false);
+                    // no default-guessing: skip the row rather than assume a lead time
+                    let Some(lead) = w.dd_lead_s else { continue };
+                    let assigned = w.tos_assigned;
                     // if already assigned at first log, seed D_tos now (else NULL → captured later by (0))
                     let (ba_at, ba_tick, ba_upd): (Option<DateTime<Utc>>, Option<i64>, Option<DateTime<Utc>>) =
-                        if assigned { (Some(Utc::now()), Some(tick as i64), m.upd_ts) } else { (None, None, None) };
+                        if assigned {
+                            (Some(Utc::now()), Some(tick as i64), upd_of.get(contno).copied().flatten())
+                        } else {
+                            (None, None, None)
+                        };
                     let _ = sqlx::query(
                         "INSERT INTO dispatch_pred_sample
-                           (qc, vessel, contno, queuename, jobtype, pred_work_eta_ts, dispatch_deadline_ts, assigned, slack_s, lead_s, became_assigned_at, became_assigned_tick, tos_upd_dt, etw_qc_ts, applied_bias_s, bias_ver)
-                         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,2)",
+                           (qc, vessel, contno, queuename, jobtype, pred_work_eta_ts, dispatch_deadline_ts, assigned, slack_s, lead_s, became_assigned_at, became_assigned_tick, tos_upd_dt, etw_qc_ts, applied_bias_s, bias_ver, pred_ver, slot_idx)
+                         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,2,2,$16)",
                     )
-                    .bind(&qc.qc)
-                    .bind(&m.vessel)
+                    .bind(&w.qc)
+                    .bind(&w.vessel)
                     .bind(contno)
-                    .bind(&m.queuename)
-                    .bind(&m.jobtype)
-                    .bind(work_eta)
-                    .bind(deadline)
+                    .bind(&w.queuename)
+                    .bind(&w.jobtype)
+                    .bind(w.work_eta_ts)
+                    .bind(w.dispatch_deadline_ts)
                     .bind(assigned)
-                    .bind(qc.slack_s.map(|v| v as i32))
+                    .bind(None::<i32>)
                     .bind(lead as i32)
                     .bind(ba_at)
                     .bind(ba_tick)
                     .bind(ba_upd)
-                    // accurate ETW (TOS RPC) snapshot at prediction time → enables the ETW-vs-pred
-                    // horizon comparison once accumulated (mig 0084). NULL when the vessel/QC has none.
-                    .bind(m.etw_accurate)
-                    // mig 0113 도입 · mig 0117 에서 의미 확정: 이 예측에 적용된 보정 **전부**
-                    // (정적 부트스트랩 폴백 포함). VALUES 의 bias_ver=2 가 그 판임을 표시한다 —
-                    // 옛 행은 학습항만 담고 있어, 매뷰가 섞으면 두 모집단 사이를 떠돈다.
-                    .bind(bias_s as i32)
+                    .bind(None::<DateTime<Utc>>)
+                    .bind(0i32)
+                    .bind(w.slot_idx)
                     .execute(&pool)
                     .await;
-                    logged += 1;
                 }
             }
             if tick % 30 == 0 {
@@ -891,6 +900,12 @@ pub fn spawn_dispatch_pred_logger(pool: PgPool) {
             // learned work-ETA residual layer (mig 0083): refit ~20 min from freshly resolved rows.
             if tick % 10 == 0 {
                 let _ = sqlx::query("REFRESH MATERIALIZED VIEW CONCURRENTLY learn_work_eta_bias")
+                    .execute(&pool)
+                    .await;
+                let _ = sqlx::query("REFRESH MATERIALIZED VIEW CONCURRENTLY learn_qc_wall_cadence")
+                    .execute(&pool)
+                    .await;
+                let _ = sqlx::query("REFRESH MATERIALIZED VIEW CONCURRENTLY learn_dispatch_lead")
                     .execute(&pool)
                     .await;
             }
@@ -937,6 +952,8 @@ pub(crate) struct Stage2Work {
     /// 우리 목록에는 **항상 25분 이상 남은 작업만** 남고, 배차 마감이 임박하는 일이 영원히 없다.
     /// 실측(2026-08-03): 마감까지 남은 시간의 최소가 829초에서 잘려 0 에 닿지 않았다.
     pub(crate) tos_assigned: bool,
+    /// 트윈 대표 상자 = min(contno). 채점 조인 키.
+    pub(crate) contno: Option<String>,
 }
 
 /// Build the Stage-2 work-demand list from the same engine the dispatch page uses (build_workpool):
@@ -1010,6 +1027,7 @@ pub(crate) async fn stage2_work_candidates(pool: PgPool) -> Result<Vec<Stage2Wor
             slot_idx: None,   // live_candidate 는 집계 버킷이라 상자 단위가 아니다
             move_s: None,
             tos_assigned: false,
+            contno: None,
         });
     }
     // ── TOS 가 이미 배차한 작업도 담는다 (mig 0121) ──────────────────────────────────────────
@@ -1027,13 +1045,22 @@ pub(crate) async fn stage2_work_candidates(pool: PgPool) -> Result<Vec<Stage2Wor
     // 없으면 실측 중앙값으로 폴백(2026-08-04 연속 comp 간격: 양하 99초 / 적하 126초).
     const BOX_MOVE_DS_S: i64 = 99;
     const BOX_MOVE_LD_S: i64 = 126;
-    let move_time: HashMap<(String, char), i64> = sqlx::query_as::<_, (String, String, Option<i32>)>(
+    let mut move_time: HashMap<(String, char), i64> = sqlx::query_as::<_, (String, String, Option<i32>)>(
         "SELECT qc, jobtype, med_sec FROM learn_qc_move_time WHERE med_sec IS NOT NULL",
     )
     .fetch_all(&pool_for_lead).await.unwrap_or_default()
     .into_iter()
     .filter_map(|(q, jt, m)| m.map(|m| ((q, if jt == "LD" { 'L' } else { 'D' }), (m as i64).clamp(30, 600))))
     .collect();
+    // 벽시계 리듬 오버레이 — build_workpool 과 동일한 원천/우선순위 (mig 0131).
+    let wall_rows: Vec<(String, String, Option<i32>)> = sqlx::query_as(
+        "SELECT qc, jobtype, wall_s FROM learn_qc_wall_cadence WHERE wall_s IS NOT NULL")
+        .fetch_all(&pool_for_lead).await.unwrap_or_default();
+    for (qc, jt, wall_s) in &wall_rows {
+        if let Some(wall_s) = wall_s {
+            move_time.insert((qc.clone(), if jt == "LD" { 'L' } else { 'D' }), *wall_s as i64);
+        }
+    }
 
     // 상자 단위로 가져온다 — 구역 하나에 한 줄이 아니라 **상자 하나에 한 줄**.
     // 그래야 "구역 j번째 상자가 언제 처리되나"를 각각 계산할 수 있다.
@@ -1073,7 +1100,7 @@ pub(crate) async fn stage2_work_candidates(pool: PgPool) -> Result<Vec<Stage2Wor
     //   실측: 양하 배차분 196건이 100% 이 상태였고, 빼지 않으면 구역별 산술이 9곳에서 깨졌다.
     // 트윈은 상자 2개·트럭 1대다. **트럭 한 대 몫**을 한 줄로 만들기 위해 twinkey 로 먼저 합친다
     // (mig 0124). twinkey 가 빈 행은 그 자체가 한 대 몫이다.
-    let per_box: Vec<(String, String, String, String, Option<String>, i64, bool)> = sqlx::query_as(
+    let per_box: Vec<(String, String, String, String, Option<String>, String, i64, bool)> = sqlx::query_as(
         "WITH loads AS (                            -- 트럭 한 대 몫 = 트윈 쌍 하나 또는 단독 상자 하나
            SELECT w.qc, w.vessel, w.voyage, w.queuename, w.jobtype,
                   min(CASE WHEN w.jobtype = 'LD' THEN NULLIF(left(w.yt_topos, 3), '') END) AS src_block,
@@ -1103,7 +1130,7 @@ pub(crate) async fn stage2_work_candidates(pool: PgPool) -> Result<Vec<Stage2Wor
            SELECT vessel, avg(CASE WHEN NULLIF(twinkey,'') IS NOT NULL THEN 1.0 ELSE 0.0 END)::float8 AS f
              FROM live_workpool GROUP BY vessel
          )
-         SELECT l.qc, l.vessel, l.queuename, l.jobtype, l.src_block,
+         SELECT l.qc, l.vessel, l.queuename, l.jobtype, l.src_block, l.contno,
                 COALESCE(
                   floor(pp.pos * (1.0 - COALESCE(tw.f, 0.0) / 2.0))::int8,
                   -- 계획에 없는 상자만 종전 축으로 떨어진다(작업지시 발행 순서).
@@ -1118,7 +1145,7 @@ pub(crate) async fn stage2_work_candidates(pool: PgPool) -> Result<Vec<Stage2Wor
            LEFT JOIN tw ON tw.vessel = l.vessel",
     )
     .fetch_all(&pool_for_lead).await.unwrap_or_default();
-    for (qc, vessel, queuename, jt, src_block, slot_idx, tos_assigned) in per_box {
+    for (qc, vessel, queuename, jt, src_block, contno, slot_idx, tos_assigned) in per_box {
         let lead = lead_realized.get(&jt).copied()
             .unwrap_or(if jt == "LD" { LEAD_LD_S } else { LEAD_DS_S });
         let move_s = move_time.get(&(qc.clone(), if jt == "LD" { 'L' } else { 'D' })).copied()
@@ -1141,6 +1168,7 @@ pub(crate) async fn stage2_work_candidates(pool: PgPool) -> Result<Vec<Stage2Wor
             slot_idx: Some(slot_idx as i32),
             move_s: Some(move_s),
             tos_assigned,   // ⚠ 행마다 정확히 — live_workpool 은 배차됨(A)·미배차(Q) 를 둘 다 담는다
+            contno: Some(contno),
         });
     }
     Ok(out)
