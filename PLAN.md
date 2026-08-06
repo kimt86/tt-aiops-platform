@@ -12,6 +12,17 @@
   ⚠ B 실행자의 정식 최종 보고는 미도착 — 오케스트레이터가 diff·journalctl로 직접 검증해 마감.
 - **CHUNK C: 완료.** 두 KC 문서에 전환 고지·굶주림 제외 사유·되돌리기 스위치·벽시계 재학습을
   쉬운 말로 반영. 검증: "2026-08-06" 존재, 내부 이름 노출 0줄.
+  ⚠ C가 쓴 "되돌릴 수 있는 스위치" 문장은 **D에서 스위치를 없앴으므로 사실과 어긋난다** — 다음
+  KC 손볼 때 "예전 방식은 제거했고 되돌리기는 코드 되돌리기로 한다"로 고칠 것(미처리).
+- **CHUNK D: 완료** (배포 2026-08-06 13:57:19 KST = 04:57:19Z). 레거시 풀·킬스위치·레버 2개·
+  A/B 하네스·굶주림 정렬 전부 제거. 삭제 확인(grep 0): POOL_MODE·NEED_HORIZON_MODE·
+  DEP_TIER_MODE·splitmix64·CAP_MOVE_*·AB_BLOCK_MIN·works_unassigned·take_bucket·base_order·
+  cap_by_oi. 보존 확인: dep_tier/prev_tier(게이지)·DEP_TIGHT_S·lead_extra·inflight·LD_MOVE_S.
+  유닛 파일에서 `STAGE2_DEP_TIER=1`·`STAGE2_NEED_HORIZON=0` 제거(경위 주석으로 대체).
+  라이브 2틱 실측: pool_mode=1, n_works=pool_new_n(27·36), due_buckets_n(58·66) ≥ n_works,
+  match_rows 동수(추천 생산 정상), works_raw·pool_overlap_n·dep_tier_on·ab_block **전부 NULL**,
+  dep_tier0_n(11·13)·dep_null_n(0)은 유지. 테스트 49개 통과·신규 경고 0
+  (scengen doctest 1건 실패는 기존·범위 밖).
 
 **다음 액션 (수동 체크포인트 2개, 반나절 뒤)**:
 1. 예측 치우침 재측정 — `pred_ver=2 AND resolved_src='qc_comp' AND logged_at > '2026-08-06 01:31:45+00'`
@@ -249,13 +260,142 @@ grep -n "pool_new\|STAGE2_POOL\|kept_new\|driving\|cap_by_oi" kc/dispatch/dispat
 **기대**: 첫 grep 두 파일 다 1 이상. 둘째 grep **출력 0줄**(내부 이름 미노출).
 브라우저 렌더 확인은 불필요(정적 HTML 부분 수정).
 
+## CHUNK D — 레거시 풀 제거 (2026-08-06 추가 지시)
+
+사용자 판단: **레거시 풀은 방법부터 틀렸으므로 되돌아갈 일이 없다. 재측정을 기다리지 말고
+정리한다.** 근거(둘 다 실측 기록): ①TOS 미배차만 담아 "마감이 임박한 작업"이 구조적으로
+존재할 수 없다(마감까지 남은 시간 최소가 829초에서 잘림) — CLAUDE.md 설계 원칙 위반이기도
+하다. ②크레인당 지평 캡 900초 고정이라 적하 요구 선행 p90 1,693초가 절대 안 들어가
+적하 실행가능률이 구조적으로 0.0%였다.
+
+⇒ 킬스위치·레거시 풀 구성·그 위에 얹힌 레버(지평·출항티어 A/B·긴급 슬롯 예산)를 전부
+제거한다. 되돌리기는 이제 `git revert`다(전부 그림자라 현장 영향 없음).
+
+**보존 원칙**: `dep_slack`/`dep_tier` **계산과 기록은 그대로 둔다**(출항 마감 위험도 게이지 —
+풀 선정과 무관한 별개 축이고, 임의로 없앨 설계 결정이 아니다). 없어지는 것은 그것이 풀 순서를
+바꾸던 **레버**뿐이다. 히스테리시스(`prev_tier`)도 유지 — 빼면 로그 컬럼의 의미가 바뀐다.
+
+**사전 확인 완료**: `dep_tier`·`dep_slack`·`works_raw`·`pool_overlap_n`·`in_current_pool`·
+`rank_current`는 프론트·API 소비처가 **0**이다(순수 그림자 진단). `splitmix64`는 A/B 하네스
+두 곳에서만 쓰인다. `starving` 셋은 이 타이머에선 레거시 정렬 전용(`/api/stage2/shadow`의
+비효율 지표는 workpool.rs가 `qc_wait_qc_sample`을 따로 질의하므로 무관).
+`stage2_pool_shadow.in_current_pool`·`rank_current`는 **NULL 허용**(확인함).
+
+### D1. 마이그레이션 0133 — 폐기 컬럼 표시 + 새 진단 컬럼
+파일 생성: `db/migrations/0133_retire_legacy_pool_columns.sql`
+```sql
+-- 0133: 레거시 풀(TOS 미배차 한정 + 크레인당 지평 캡) 제거에 따른 컬럼 정리.
+-- 레거시는 방법부터 틀렸다: ①미배차만 담아 마감 임박 작업이 구조적으로 존재할 수 없었고
+-- (남은 시간 최소가 829초에서 잘림) ②지평 캡 900초 고정이라 적하 요구 선행 p90 1,693초가
+-- 들어갈 수 없어 적하 실행가능률이 0.0%였다. 되돌리지 않으므로 킬스위치째 걷어낸다.
+-- 컬럼은 지우지 않는다 — 21일 보존 시계열의 과거 구간이 살아 있다. NULL 로 멈추고 경계를 적는다.
+ALTER TABLE stage2_solver_shadow ADD COLUMN IF NOT EXISTS due_buckets_n integer;
+COMMENT ON COLUMN stage2_solver_shadow.due_buckets_n IS
+  '이 틱에 배차 마감이 도래한 묶음 수(트럭 수로 자르기 **전**). 옛 works_raw 를 대신한다 — '
+  '수요가 적은 건지 트럭이 모자라 잘린 건지 구분하는 값 (mig 0133).';
+DO $$
+DECLARE c text;
+BEGIN
+  FOREACH c IN ARRAY ARRAY['dep_tier_on','dep_urgent_slots','dep_demoted_n','ab_block',
+                           'ab_warmup','need_horizon_on','works_raw','pool_overlap_n']
+  LOOP
+    EXECUTE format(
+      'COMMENT ON COLUMN stage2_solver_shadow.%I IS %L', c,
+      '⚠2026-08-06 폐기 — 레거시 풀 제거로 원천이 사라졌다. 그 이후 행은 항상 NULL. '
+      '과거 구간(pool_mode IS NULL)에서만 의미가 있다 (mig 0133).');
+  END LOOP;
+END $$;
+COMMENT ON COLUMN stage2_pool_shadow.in_current_pool IS
+  '⚠2026-08-06 폐기 — 레거시 풀이 사라져 비교 대상이 없다. 이후 행은 NULL (mig 0133).';
+COMMENT ON COLUMN stage2_pool_shadow.rank_current IS
+  '⚠2026-08-06 폐기 — 위와 같음. 이후 행은 NULL (mig 0133).';
+COMMENT ON COLUMN stage2_solver_shadow.pool_mode IS
+  '매칭을 구동한 풀. NULL=전환 전(레거시), 1=설계③ 마감 풀. 2026-08-06 레거시 제거 후로는 '
+  '항상 1 이다(0=레거시 킬스위치는 존재하지 않는다). 과거 구간과 가르는 데 계속 쓴다 (mig 0132·0133).';
+```
+적용: `PGPASSWORD=wp psql -h 127.0.0.1 -p 5433 -U wp -d wp_tt -X -f db/migrations/0133_retire_legacy_pool_columns.sql`
+**검증**: `... -X -c "\d stage2_solver_shadow" | grep due_buckets_n` → 1줄.
+그리고 `... -X -c "SELECT col_description('stage2_solver_shadow'::regclass, (SELECT attnum FROM pg_attribute WHERE attrelid='stage2_solver_shadow'::regclass AND attname='works_raw'));"` → '⚠2026-08-06 폐기'로 시작하는 문자열.
+
+### D2. 레거시 풀 구성·킬스위치·레버 제거
+파일: `crates/api/src/livemap.rs`, `spawn_stage2_shadow`.
+아래를 **삭제**한다(각각 인용 문자열로 찾을 것):
+1. `static POOL_MODE`·`static NEED_HORIZON_MODE`·`static DEP_TIER_MODE` 및 진입부의 세 `store(` 블록
+   (`STAGE2_POOL`/`STAGE2_NEED_HORIZON`/`STAGE2_DEP_TIER` env 읽기 전부)
+2. `starving` 질의 블록(`"SELECT DISTINCT qc FROM qc_wait_qc_sample ..."`)
+3. `need_horizon` 맵 구성 + `horizon_mode`/`horizon_block`/`horizon_on`
+4. `mode`/`minute`/`ab_block`/`ab_warmup`/`dep_on` (A/B 하네스). **`dep_slack`/`dep_tier`/`prev_tier`
+   계산 루프는 남긴다** — 단 티어 `raw` 계산은 그대로, `dep_on` 분기만 사라진다
+5. `works_unassigned`, `order`, `base_order`, `works_raw`, `cap_by_oi`, `dep_demoted_n`,
+   `take_bucket` 내부 함수, POINT 1 캡 블록 전체(`let truck_n = vehicles.len() as i64;`부터
+   `order = kept;`까지), `pool_cur_set`, `pool_overlap_n`, `dep_urgent_slots`, `rank_cur`
+6. 4886행 부근 tracing 의 `unassigned = works_unassigned.len(),` 필드
+7. `driving` 구성을 `let driving: Vec<(usize, i64)> = pool_new;`로 단순화
+   (`pool_new.clone()` 불필요 — 이후 `pool_new.len()`을 쓰는 자리는 `driving.len()`으로)
+8. `stage2_pool_shadow` INSERT 루프의 순회 대상을 `pool_cur_set.union(&pool_new_set)` →
+   `&pool_new_set`로, `rank_new` 는 `driving` 기준으로 유지
+**남기는 것**: `dep_slack`/`dep_tier`/`prev_tier`(게이지), `lead_extra`, `inflight`,
+`work[wi].tos_assigned` 필터(새 풀이 쓴다), `stage2_pool_shadow` 기록 자체.
+**검증**: `cargo build --release -p tt-api` — 이 단계에서는 컴파일 에러가 남아 있어도 된다(D3에서 닫는다).
+
+### D3. INSERT 두 개 정리
+같은 파일.
+- solver INSERT: 컬럼 목록에 `due_buckets_n` 추가($28), 바인딩 추가.
+  폐기 컬럼은 **NULL 바인딩**: `dep_tier_on`→`None::<bool>`, `dep_urgent_slots`·`dep_demoted_n`·
+  `works_raw`·`pool_overlap_n`→`None::<i32>`, `ab_block`→`None::<i64>`, `ab_warmup`→`None::<bool>`,
+  `need_horizon_on`→`None::<bool>`.
+  **계속 채우는 것**(모집단은 새 풀 = `driving`, `pool_mode`가 판별자):
+  `n_works`=`driving.len()`, `pool_new_n`=`driving.len()`, `pool_mode`=1,
+  `dep_tier0_n`=`driving` 중 `dep_tier[oi]==0` 개수, `dep_null_n`=`driving` 중 `dep_slack[oi].is_none()` 개수
+  (dep_null_n 은 선박 마감을 잃으면 드러나는 경보라 유지한다), `trucks_held_n`·`pool_overdue_n` 그대로,
+  `due_buckets_n`=`due.len()`(설계③ 블록에서 밖으로 내보낼 것 — 반환 튜플에 추가).
+- `stage2_pool_shadow` INSERT: `in_current_pool`→`None::<bool>`, `rank_current`→`None::<i32>`.
+**검증**: `cargo build --release -p tt-api` 성공.
+
+### D4. 죽은 상수·함수 정리 + 유닛 파일
+1. 사용처가 사라진 것 삭제: `NEED_HORIZON_BASE_S`/`_PAD_S`/`_MAX_S`, `CAP_MOVE_DS_S`/`CAP_MOVE_LD_S`,
+   `DEP_URGENT_SLOT_PCT`, `AB_BLOCK_MIN`, `AB_WARMUP_MIN`, `fn splitmix64`(+ 그 문서주석).
+   **`DEP_TIGHT_S`/`DEP_HYST_S`는 남긴다**(티어 계산이 쓴다). `LD_MOVE_S`/`DS_MOVE_S`도 남긴다
+   (설계③ 슬롯 마감 걸음이 쓴다).
+   ⚠ 위 목록 중 **다른 곳에서 아직 쓰이는 것이 있으면 삭제하지 말고 보고**할 것.
+2. 유닛 파일 `deploy/systemd/tt-api.service`에서 `Environment=STAGE2_DEP_TIER=1`·
+   `Environment=STAGE2_NEED_HORIZON=0` 두 줄 삭제(이제 읽는 코드가 없다).
+   ⚠ 유닛 파일은 심링크가 아니라 복사본이다:
+   `cp deploy/systemd/tt-api.service ~/.config/systemd/user/ && systemctl --user daemon-reload`
+3. 낡은 주석 정리: `NEED_HORIZON_MODE`/`DEP_TIER_MODE` 위의 긴 설명 블록 중 **사라진 레버를
+   설명하는 부분**을 지우되, 물리 실측(적하 요구 선행 p90 1,693초·DS 75s/LD 1,084s 등)은
+   `lead_extra`가 아직 쓰므로 해당 사실이 필요한 자리에 남길 것.
+**검증**: `cargo build --release -p tt-api` 성공 + 신규 경고 0 + `cargo test --workspace` 49개 통과.
+
+### D5. 배포 + 라이브 확인
+```
+cargo build --release -p tt-api && cp deploy/systemd/tt-api.service ~/.config/systemd/user/ \
+  && systemctl --user daemon-reload && systemctl --user restart tt-api && sleep 5 \
+  && systemctl --user is-active tt-api
+```
+`active` 확인 후 **3분 이상** 기다렸다가:
+```
+PGPASSWORD=wp psql -h 127.0.0.1 -p 5433 -U wp -d wp_tt -X -c "
+SELECT ts, pool_mode, n_trucks, n_works, pool_new_n, due_buckets_n, trucks_held_n, pool_overdue_n,
+       works_raw, pool_overlap_n, dep_tier_on, ab_block, dep_tier0_n, dep_null_n,
+       (SELECT count(*) FROM stage2_match_shadow m WHERE m.ts = s.ts) AS match_rows
+  FROM stage2_solver_shadow s ORDER BY ts DESC LIMIT 3;"
+```
+**기대**: `pool_mode=1`, `n_works=pool_new_n>0`, `match_rows>0`(추천이 계속 나온다),
+`due_buckets_n >= n_works`, `works_raw`·`pool_overlap_n`·`dep_tier_on`·`ab_block` 전부 **NULL**,
+`dep_tier0_n`·`dep_null_n`은 NULL 아님(게이지 유지 확인).
+`match_rows=0`이 3틱 연속이면 **STOP AND REPORT**(추천 생산이 죽은 것 — 즉시 알려야 한다).
+숫자를 그대로 보고서에 실을 것.
+
 ## REJECTED APPROACHES — 막히면 이쪽으로 가지 말 것
 
 - **굶주림 신호를 새 풀에 이식**: 사용자 결정으로 폐기(2026-08-06). 종전 풀(킬스위치 경로)에는 남는다.
 - **TOS/관제 소비 채널·자기 추천 이력 테이블**: TOS 협의 전 — 구현 금지.
 - **POOL_MARGIN_S(300초) 조정**: 반나절 재측정 결과가 나오기 전에는 근거가 없다.
-- **NEED_HORIZON/DEP_TIER 레버 제거·A/B**: 새 풀에서는 자연히 무력하고, 레거시 경로가 킬스위치로 남는 한 코드 제거는 별도 결정.
-- **`order`(레거시 풀) 계산 삭제**: 킬스위치·겹침 로깅·stage2_pool_shadow 상세가 쓴다. 삭제 금지.
+- ~~**NEED_HORIZON/DEP_TIER 레버 제거·A/B**~~ → **CHUNK D로 뒤집힘**(2026-08-06 사용자 지시). 레거시와 함께 제거한다.
+- ~~**`order`(레거시 풀) 계산 삭제 금지**~~ → **CHUNK D로 뒤집힘**. 되돌아가지 않으므로 삭제한다. 되돌리기는 `git revert`.
+- **`dep_slack`/`dep_tier` 게이지까지 제거**: 출항 마감 위험도는 풀 선정과 **별개 축**이다. 임의로 없앨 설계 결정이 아니므로 계산·기록을 유지한다(레버만 제거).
+- **폐기 컬럼을 DROP**: 21일 보존 시계열의 과거 구간이 살아 있다. NULL 로 멈추고 COMMENT로 경계를 적는다.
 - **stage2_match_shadow에 별도 pool 컬럼 추가**: 같은 ts의 solver 행 pool_mode로 가를 수 있다 — 중복 판별자 불필요.
 - **LD 시간-투-프리도 무브로그로 교체**: 실측 2.7배 악화(659s vs 240s). DS만.
 - **pool_new의 슬롯 마감 걸음(DS_MOVE_S=90/LD_MOVE_S=132 상수)을 벽시계 학습값으로 교체**: 상자 단위 행(n=1)에는 무영향이고 범위 밖. 이번에 손대지 않는다.
