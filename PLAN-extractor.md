@@ -403,3 +403,61 @@ K_CYCLE은 이 런에서 **바뀌지 않는다**(재정의는 별건). 나머지
 1. **CHUNK 5 착수 시점** — 배차 에이전트의 workpool.rs 재측정 체크포인트(PLAN.md) 종료 후? 사용자 결정.
 2. **stowplan 2분 주기** — 델타로 사실상 공짜지만 Oracle 왕복은 12→30회/h 증가(회당 무게는 1/20).
    총 왕복 감소분 안에서 흡수되나, "왕복 수 자체"가 민감하면 5분 유지로 변경 가능. 기본값: 2분.
+
+
+---
+
+## CHUNK 7 — 남은 4건 (사용자 승인 2026-08-06: "3가지 다 지금 진행" + workpool 재판정)
+
+⚠ 사용자 고지: **지금은 고객 서비스 단계가 아니라 데이터가 일부 비어도 무방**하다.
+따라서 08-08 대기 같은 시간 게이트는 해제한다. 단 라이브 배차·대시보드가 **죽는** 것은 여전히 불가.
+
+### 7-1. workpool 왕복 줄이기 (델타 아님 — 실측 재판정)
+★재판정 근거(2026-08-06 실측): workpool 전체 SELECT(1,270행·323KB) = **2.61초**,
+COUNT(*)만 = 2.01초 ⇒ **왕복 고정비 ~2초가 지배하고 payload 기여는 0.6초뿐**.
+그러므로 지렛대는 행 줄이기(델타)가 아니라 **왕복 수 줄이기**다. CHUNK 5 델타는 방향 자체가
+빗나갔고 병합 키 위험만 떠안았다 — 재시도하지 마라.
+
+(a) **assigned 를 본쿼리에 병합**: `sql/workpool.sql` 의 WHERE 를
+    `JOB_ODR_JOBSTATUS IN ('A','B','Q')` 로 넓히고 jobtype 필터를 제거(또는 DS/LD/MI/MO 포함),
+    SELECT 에 `JOB_ODR_YTNO` 유지. `SQL_ASSIGNED` 호출 제거.
+    ⚠**로컬에서 갈라 담는다**: `live_workpool` 은 지금과 **완전히 동일한 모집단**
+    (jobtype DS/LD + (status A 또는 (Q이고 ytno 빈))) 만 담고, `live_assigned_tt` 는
+    ytno 가 있는 모든 행(기존 assigned 의미)으로. 소비자가 보는 내용이 달라지면 실패다.
+    검증: 병합 전후 `live_workpool` 행수·jobtype 분포가 같은 범위인지 대조.
+(b) **vessel_schedule 분리**: `tick_workpool` 에서 제거 → 새 서브커맨드 +
+    `tt-vessel-schedule.{service,timer}`(5분·OnCalendar 초 분산). CHUNK 5 잔재 파일이
+    untracked 로 남아 있으니 **재사용하되 내용을 검토 후** 쓸 것.
+(c) 주기는 90초 유지(배차 신선도 — 60초로 당기는 것은 이번 범위 밖).
+검증: 틱당 Oracle 쿼리 2회(pool·workqueue)로 감소 확인(저널/코드), 틱 벽시계 전후 비교,
+`live_workpool` 행수 정상(±10%), `live_assigned_tt` 갱신 지속, dispatch_pred_sample 5분 내.
+
+### 7-2. K_EMPTY 로컬 전환 (08-08 대기 해제)
+`tos_handover_label.trv_rng` 는 2026-08-06 15시(KST)부터 착지 중.
+`sql/e4_k_empty_decomposition.sql` 의 산식을 `sql/local/l_empty.sql` 로 이식
+(원본 필터 `LNDN_TRV_RNG BETWEEN 0 AND 5000` 등 그대로).
+`kpis/k_empty.rs` + `shift.rs::src_empty` 를 `KPI_NIGHTLY_SRC`/`KPI_T1_SRC` 기존 게이트에 맞춰 분기.
+★검증은 **오늘 15시 이후 창**으로만 대조(그 이전은 재료가 NULL이라 비교 불가 — 정상).
+차이가 크면 원인을 밝히되, 재료 부족 구간이면 "데이터 공백"으로 보고하고 진행.
+
+### 7-3. K_CYCLE 표시 정의 재정의 + k_cycle 로컬화 (사용자 승인)
+`kpi_shift.K_CYCLE` 과 nightly `raw_k_cycle` 을 **tt_move_log 기반(`l_cycle`)으로 재정의**한다.
+근거: 기존 정의가 실제 사이클을 41% 과소 계상(노트 기록), 병산에서 두 값이 이미 관측됨
+(예: 749.50 vs 1201.80). 절체가 아니라 **의도된 재정의**이므로:
+- t1 `src_cycle` 의 K_CYCLE 쓰기를 `l_cycle` 산출로 교체(정의 변경). c10 기반 값은
+  **키 `K_TT_CYCLE` 로 계속 쓴다**(별도 지표로 보존 — 지우지 마라).
+- nightly `k_cycle`(e3b) → `l_cycle` 로컬 산출로 교체.
+- 이제 t1(3분)만 K_CYCLE 을 쓰므로 CHUNK 6 이 우려한 경합은 없다. t2 는 쓰지 않는다.
+검증: 어제 하루 old/new 대조(큰 차이가 **정상** — 재정의다), `/api/kpis` 200 + K_CYCLE 값 존재,
+프론트가 K_CYCLE 을 읽는 지점(crates/api, web/src grep·읽기만)이 단위 가정(초)을 깨지 않는지 확인.
+
+### 7-4. 잔재 정리
+CHUNK 5 철회로 남은 untracked 중 **7-1(b)에서 쓰지 않는 것**만 삭제:
+`crates/extractor/sql/workpool_delta.sql`, `workqueue_delta.sql`,
+`db/migrations/0138_workpool_delta.sql`, `deploy/systemd/tt-workpool-recon.*`.
+(`tt-vessel-schedule.*` 는 7-1(b)에서 사용.)
+또한 고아 SQL `sql/e3a_k_util_tt_merged.sql` 삭제(k_util_tt 제거로 참조 0).
+
+### 7-5. 최종 부하 측정
+`bash scripts/oracle_load_ledger.sh` + 25분 창 직접 집계로 왕복/h·Oracle 시간/h 를 내고,
+이 문서 "현재 부하 실측" 절의 기준선(522회/h)과 대조해 보고.
