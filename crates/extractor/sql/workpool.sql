@@ -1,11 +1,17 @@
 -- Live work pool: individual container moves still to do (JOB_ORDER_LIST is the live
 -- twin of JOB_ORDER_HISTORY, but also retains completed rows, so we MUST filter to
 -- live). JOBSTATUS: C=Complete A=Active Q=Queued P=Planned B=Blocked. ONE bounded scan
--- pulls BOTH (Oracle-load-conscious): A = dispatched in-flight moves (ETW + assigned
--- TT, the QC task cards); Q = the UNASSIGNED candidate demand (no truck yet). The
--- extractor splits them in Rust — A → live_workpool, Q (aggregated by QC for discharge
--- / by source block for load) → live_candidate. CRE_DT within ~2 days bounds the scan
--- and drops stale orphans.
+-- pulls THREE things at once (Oracle-load-conscious, PLAN-extractor CHUNK7 7-1(a) —
+-- this used to be two Oracle round-trips: this scan + a separate SQL_ASSIGNED call):
+--   A (any jobtype)              -> the "assigned" TT roster (any active job)
+--   B, Q (any jobtype)           -> also the "assigned" TT roster when YTNO present
+--   A + DS/LD                    -> live_workpool (dispatched in-flight moves, QC task cards)
+--   Q + DS/LD + YTNO empty       -> live_candidate (UNASSIGNED candidate demand, no truck yet)
+-- The extractor splits all of this in Rust: rows with a non-empty YTNO -> live_assigned_tt
+-- (any jobtype, status A/B/Q — same population SQL_ASSIGNED used to select); DS/LD rows
+-- with status A -> live_workpool; DS/LD rows with status Q and empty YTNO -> live_candidate
+-- (aggregated by QC for discharge / by source block for load). CRE_DT within ~2 days
+-- bounds the scan and drops stale orphans.
 --
 -- NO queue join here: queuenames (e.g. '02D-L') are reused across vessels/voyages over
 -- time, so joining JOB_QUEUE_SCHEDULE on (queuename, vessel) fans out against historic
@@ -41,7 +47,6 @@ SELECT
   l.JOB_ODR_TWINKEY    AS twinkey   -- twin pair grouping: same twinkey = 2 different containers, 1 truck
 FROM TOSADM.JOB_ORDER_LIST l
 WHERE l.JOB_ODR_COMPDATE IS NULL
-  AND l.JOB_ODR_JOBTYPE IN ('DS', 'LD')
-  AND l.JOB_ODR_JOBSTATUS IN ('A', 'Q')
+  AND l.JOB_ODR_JOBSTATUS IN ('A', 'B', 'Q')
   AND l.CRE_DT >= TRUNC(SYSDATE) - 2
 ORDER BY l.JOB_ODR_QUEUENAME, l.JOB_ODR_ETW_DT

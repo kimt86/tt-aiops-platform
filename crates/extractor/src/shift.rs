@@ -28,6 +28,10 @@ const SQL_LOCAL_QCQ: &str = include_str!("../sql/local/l_qc_q.sql");
 const SQL_LOCAL_TT_CYCLE: &str = include_str!("../sql/local/l_tt_cycle.sql");
 const SQL_LOCAL_CRANEQ: &str = include_str!("../sql/local/l_crane_q.sql");
 const SQL_LOCAL_CYCLE: &str = include_str!("../sql/local/l_cycle.sql");
+// K_EMPTY production local source (PLAN-extractor.md CHUNK7 7-2(d), same KPI_T1_SRC gate as
+// the other src_* below; K_EMPTY lives in the "want_heavy"/t2 branch but the switch name is
+// shared across all shift-tick sources, not just literal t1).
+const SQL_LOCAL_EMPTY: &str = include_str!("../sql/local/l_empty.sql");
 
 // KPI_T1_SRC kill switch (PLAN-extractor.md CHUNK6 6-1/6-2): local Postgres mirror
 // (vessel-grouped, same shape as SQL_MPH) for the PRODUCTION src_mph_vessels /
@@ -429,8 +433,14 @@ async fn src_qcq(pool: &PgPool, target: &str, date: NaiveDate, sh: Shift, start:
 
 async fn src_empty(pool: &PgPool, target: &str, date: NaiveDate, sh: Shift, start: NaiveDateTime, end: NaiveDateTime) -> Result<()> {
     run_logged(pool, "K_EMPTY_SHIFT", date, |_| async move {
-        let sql = params::render_shift(SQL_EMPTY, date, start, end, Some(TimeCol::JobHist))?;
-        let rows: Vec<crate::kpis::k_empty::Row> = fetch(target, &sql).await?;
+        let rows: Vec<crate::kpis::k_empty::Row> = if kpi_t1_src_local() {
+            let ws = tt_core::shift::terminal_to_utc(start);
+            let we = tt_core::shift::terminal_to_utc(end);
+            sqlx::query_as(SQL_LOCAL_EMPTY).bind(ws).bind(we).fetch_all(pool).await?
+        } else {
+            let sql = params::render_shift(SQL_EMPTY, date, start, end, Some(TimeCol::JobHist))?;
+            fetch(target, &sql).await?
+        };
         let jobs = sum(rows.iter().map(|r| r.jobs));
         let empty = sum(rows.iter().map(|r| r.total_empty_m));
         let laden = sum(rows.iter().map(|r| r.total_laden_m));
@@ -446,6 +456,10 @@ async fn src_empty(pool: &PgPool, target: &str, date: NaiveDate, sh: Shift, star
 async fn src_cycle(pool: &PgPool, target: &str, date: NaiveDate, sh: Shift, start: NaiveDateTime, end: NaiveDateTime) -> Result<()> {
     // Displayed K_CYCLE is the REAL TT cycle (MCH_OPERATION per-truck QC-move interval),
     // not the container handling span. One aggregate row; value = median, weight = samples.
+    // ★PLAN-extractor.md CHUNK7 7-3 철회(2026-08-06): 재정의를 시도했다가 되돌렸다 — 근거로
+    // 인용한 "41% 과소"는 crates/api/src/cycles.rs v1(다른 화면)에 관한 메모였다. agg.rs가
+    // 이미 raw_k_tt_cycle(c10)을 "the displayed K_CYCLE"로 명시 취급한다(raw_k_cycle은
+    // "kept internally, not displayed"). CHUNK 6의 판정(재정의 금지)으로 복귀.
     run_logged(pool, "K_CYCLE_SHIFT", date, |_| async move {
         let local = kpi_t1_src_local();
         let rows: Vec<crate::kpis::k_tt_cycle::Row> = if local {

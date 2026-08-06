@@ -1,9 +1,13 @@
-//! Live work-pool snapshot extract. Two bounded Oracle scans per ~90s tick:
+//! Live work-pool snapshot extract. Two bounded Oracle scans per ~90s tick
+//! (PLAN-extractor CHUNK7 7-1(a): down from four — SQL_ASSIGNED folded into the main
+//! JOB_ORDER_LIST scan, vessel_schedule moved to its own subcommand/timer in 7-1(b)):
 //!   1. JOB_QUEUE_SCHEDULE → live_workqueue (per-QC queue plan + progress).
-//!   2. JOB_ORDER_LIST (A + Q) → split in Rust into:
-//!        - live_workpool  (A = dispatched in-flight moves, the QC task cards)
-//!        - live_candidate (Q = UNASSIGNED demand, aggregated: discharge by QC,
-//!                          load by source block — the dispatch candidate pool)
+//!   2. JOB_ORDER_LIST (A + B + Q, any jobtype) → split in Rust into:
+//!        - live_assigned_tt (any row with a non-empty YTNO — the old SQL_ASSIGNED
+//!                            population: any jobtype, status A/B/Q)
+//!        - live_workpool  (DS/LD + A = dispatched in-flight moves, the QC task cards)
+//!        - live_candidate (DS/LD + Q + empty YTNO = UNASSIGNED demand, aggregated:
+//!                          discharge by QC, load by source block — dispatch candidate pool)
 //! This is the ONLY path that brings the work pool into Postgres; the API crate can't
 //! reach Oracle. "Live now" (no date window) — bounded by status + recent CRE_DT to
 //! keep the scan small and Oracle-friendly.
@@ -21,7 +25,6 @@ use crate::runner::Toolbox;
 
 const SQL_WORKQUEUE: &str = include_str!("../sql/workqueue.sql");
 const SQL_WORKPOOL: &str = include_str!("../sql/workpool.sql");
-const SQL_ASSIGNED: &str = include_str!("../sql/assigned_tt.sql");
 const SQL_VESSEL_SCHEDULE: &str = include_str!("../sql/vessel_schedule.sql");
 
 #[derive(Debug, Deserialize)]
@@ -58,7 +61,11 @@ pub struct QueueRow {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "UPPERCASE")]
 pub struct MoveRow {
-    pub queuename: String,
+    // Option: the widened WHERE (CHUNK7 7-1(a), any jobtype) also returns yard-only
+    // jobtypes (GO/RH/GI/MO/MI/AH/GC) that have no QUEUENAME (no vessel queue). DS/LD
+    // rows always carry one (verified: 0/683 null in a live probe) — the only rows that
+    // ever reach live_workpool/live_candidate below, so this doesn't change their meaning.
+    pub queuename: Option<String>,
     pub vessel: String,
     pub voyage: Option<String>,
     pub jobtype: Option<String>,
@@ -107,9 +114,7 @@ pub async fn tick_workpool(pool: &PgPool, target: &str) -> Result<()> {
         };
     }
     step!("workqueue", src_workqueue(pool, target, date, as_of));
-    step!("vessel_schedule", src_vessel_schedule(pool, target, date, as_of));
     step!("workpool", src_workpool(pool, target, date, as_of));
-    step!("assigned", src_assigned(pool, target, date, as_of));
     step!("etw", src_etw(pool, date));
     tracing::info!(%as_of, "workpool tick done");
     Ok(())
@@ -173,29 +178,6 @@ async fn src_etw(pool: &PgPool, date: chrono::NaiveDate) -> Result<()> {
     }).await.map(|_| ())
 }
 
-/// All TTs with an active assignment of ANY job type (for utilization). Refills
-/// live_assigned_tt each tick. Separate from live_workpool (DS/LD only, for dispatch).
-async fn src_assigned(pool: &PgPool, target: &str, date: chrono::NaiveDate, as_of: DateTime<Utc>) -> Result<()> {
-    run_logged(pool, "ASSIGNED_TT", date, |_| async move {
-        let raw = Toolbox::from_env(target)?.run_sql(SQL_ASSIGNED).await?;
-        #[derive(serde::Deserialize)]
-        #[serde(rename_all = "UPPERCASE")]
-        struct YtRow { ytno: String, jobstatus: Option<String> }
-        let rows: Vec<YtRow> = parse_rows(&raw).context("parsing assigned_tt rows")?;
-        let mut tx = pool.begin().await?;
-        sqlx::query("DELETE FROM live_assigned_tt").execute(&mut *tx).await?;
-        for r in &rows {
-            let yt = r.ytno.trim();
-            if yt.is_empty() { continue; }
-            sqlx::query("INSERT INTO live_assigned_tt (ytno, jobstatus, as_of_ts) VALUES ($1,$2,$3)")
-                .bind(yt).bind(r.jobstatus.as_deref().map(str::trim))
-                .bind(as_of).execute(&mut *tx).await.context("insert live_assigned_tt")?;
-        }
-        tx.commit().await?;
-        Ok(rows.len() as u64)
-    }).await.map(|_| ())
-}
-
 async fn src_workqueue(pool: &PgPool, target: &str, date: chrono::NaiveDate, as_of: DateTime<Utc>) -> Result<()> {
     run_logged(pool, "WORKQUEUE", date, |_| async move {
         let raw = Toolbox::from_env(target)?.run_sql(SQL_WORKQUEUE).await?;
@@ -227,6 +209,14 @@ async fn src_workqueue(pool: &PgPool, target: &str, date: chrono::NaiveDate, as_
 
 /// Vessel schedule (VSB_VOYAGE) → live_vessel_schedule. The deadline source: estimated
 /// work-complete / departure / berth / cut-off + actuals + planned discharge/load counts.
+/// Its own subcommand + 5min timer since PLAN-extractor CHUNK7 7-1(b) (out of the 90s
+/// workpool tick — 228 rows, no benefit from the 90s cadence).
+pub async fn tick_vessel_schedule(pool: &PgPool, target: &str) -> Result<()> {
+    let date = tt_core::shift::terminal_now().date_naive();
+    let as_of = Utc::now();
+    src_vessel_schedule(pool, target, date, as_of).await
+}
+
 async fn src_vessel_schedule(pool: &PgPool, target: &str, date: chrono::NaiveDate, as_of: DateTime<Utc>) -> Result<()> {
     run_logged(pool, "VESSEL_SCHEDULE", date, |_| async move {
         let raw = Toolbox::from_env(target)?.run_sql(SQL_VESSEL_SCHEDULE).await?;
@@ -276,14 +266,34 @@ async fn src_workpool(pool: &PgPool, target: &str, date: chrono::NaiveDate, as_o
         let mut cand: HashMap<(String, String, String, Option<String>), (i64, Option<String>, std::collections::HashSet<String>)> =
             HashMap::new();
 
+        // live_assigned_tt population (PLAN-extractor CHUNK7 7-1(a)): ANY row (any jobtype,
+        // status A/B/Q, the SQL WHERE already bounds this) with a non-empty YTNO — the exact
+        // population the old separate SQL_ASSIGNED scan (DISTINCT ytno,jobstatus) produced.
+        let mut assigned: std::collections::HashSet<(String, Option<String>)> = std::collections::HashSet::new();
+        for r in &rows {
+            let yt = r.ytno.as_deref().unwrap_or("").trim();
+            if yt.is_empty() { continue; }
+            assigned.insert((yt.to_string(), r.jobstatus.as_deref().map(str::trim).map(str::to_string)));
+        }
+
         let mut tx = pool.begin().await?;
         sqlx::query("DELETE FROM live_workpool").execute(&mut *tx).await?;
         sqlx::query("DELETE FROM live_candidate").execute(&mut *tx).await?;
+        sqlx::query("DELETE FROM live_assigned_tt").execute(&mut *tx).await?;
+        for (yt, status) in &assigned {
+            sqlx::query("INSERT INTO live_assigned_tt (ytno, jobstatus, as_of_ts) VALUES ($1,$2,$3)")
+                .bind(yt).bind(status)
+                .bind(as_of).execute(&mut *tx).await.context("insert live_assigned_tt")?;
+        }
 
+        // live_workpool / live_candidate: DS/LD only (unchanged population — the widened
+        // SQL WHERE above now also returns other jobtypes/status B, which feed ONLY
+        // live_assigned_tt above, never live_workpool/live_candidate).
         let mut active = 0u64;
         for r in &rows {
-            match r.jobstatus.as_deref() {
-                Some("A") => {
+            let is_ds_ld = matches!(r.jobtype.as_deref(), Some("DS") | Some("LD"));
+            match (is_ds_ld, r.jobstatus.as_deref()) {
+                (true, Some("A")) => {
                     let etw_ts = r.etw_dt.as_deref().and_then(parse_etw);
                     // ACTV_DT/UPD_DT share the ETW timestamp shape (YYYYMMDDHH24MISS[mmm], MYT).
                     let actv_ts = r.actv_dt.as_deref().and_then(parse_etw);
@@ -303,7 +313,7 @@ async fn src_workpool(pool: &PgPool, target: &str, date: chrono::NaiveDate, as_o
                     active += 1;
                 }
                 // unassigned demand → candidate pool (only truly unassigned: no truck yet)
-                Some("Q") if r.ytno.as_deref().unwrap_or("").is_empty() => {
+                (true, Some("Q")) if r.ytno.as_deref().unwrap_or("").is_empty() => {
                     let jt = r.jobtype.clone().unwrap_or_default();
                     let src_block = if jt == "LD" {
                         r.yt_topos.as_deref().map(|t| block_prefix(t).to_string()).filter(|s| !s.is_empty())
@@ -311,7 +321,7 @@ async fn src_workpool(pool: &PgPool, target: &str, date: chrono::NaiveDate, as_o
                         None // discharge: pickup is the QC, not a yard block
                     };
                     let e = cand
-                        .entry((r.queuename.clone(), r.vessel.clone(), jt, src_block))
+                        .entry((r.queuename.clone().unwrap_or_default(), r.vessel.clone(), jt, src_block))
                         .or_insert((0, None, std::collections::HashSet::new()));
                     // demand = TRUCK-LOADS, not containers: a twin lift (2 containers sharing a
                     // twinkey) needs ONE truck → count each twinkey once. Non-twin rows (no twinkey)
@@ -390,7 +400,7 @@ mod tests {
     fn parses_move_rows() {
         let raw = r#"{"result":"[{\"QUEUENAME\":\"34H-D\",\"VESSEL\":\"CLOA\",\"VOYAGE\":\"12E\",\"JOBTYPE\":\"DS\",\"JOBSTATUS\":\"A\",\"YT_STATUS\":\"F\",\"YTNO\":\"TT945\",\"ARMGC\":\"RTG122\",\"ETW_DT\":\"20260609101604681\",\"ACTV_DT\":\"20260609101536\",\"CONTNO\":\"EITU0580638\",\"MSNSEQ\":null,\"YT_TOPOS\":\"08T-1011\",\"FROM_POS\":\"208\",\"TO_POS\":\"208\",\"TWINTANDEM\":null}]"}"#;
         let rows: Vec<MoveRow> = parse_rows(raw).unwrap();
-        assert_eq!(rows[0].queuename, "34H-D");
+        assert_eq!(rows[0].queuename.as_deref(), Some("34H-D"));
         assert_eq!(rows[0].ytno.as_deref(), Some("TT945"));
         assert!(parse_etw(rows[0].etw_dt.as_deref().unwrap()).is_some());
         assert!(parse_etw(rows[0].actv_dt.as_deref().unwrap()).is_some());

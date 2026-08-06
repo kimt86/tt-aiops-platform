@@ -33,7 +33,10 @@ struct HistRow {
     topos: Option<String>,
     vessel: Option<String>,
     voyage: Option<String>,
-    trv_rng: Option<f64>, // LNDN_TRV_RNG = NUMBER(8,1) -> JSON float (544.3 measured)
+    trv_rng: Option<f64>,    // LNDN_TRV_RNG = NUMBER(8,1) -> JSON float (544.3 measured)
+    un_trv_rng: Option<f64>, // UN_LNDN_TRV_RNG = NUMBER(8,1) (same shape as LNDN_TRV_RNG, user-measured 2026-08-06)
+                             // -- CHUNK7 7-2(a) correction: K_EMPTY's actual subject (empty/unladen distance),
+                             // missing since CHUNK4 only pulled the laden side.
 }
 
 /// One incremental poll: upsert completed (C) DS/LD handovers since the watermark as
@@ -79,7 +82,7 @@ pub async fn tick_handover(pool: &PgPool, target: &str) -> Result<()> {
                     JOB_HIST_DATE||JOB_HIST_TIME AS evt, JOB_HIST_ACTV_DT AS actv_dt,
                     YT_DIS_DT AS dis_dt, SUBSTR(JOB_HIST_YT_TOPOS,1,40) AS topos,
                     JOB_HIST_VESSEL AS vessel, JOB_HIST_VOYAGE AS voyage,
-                    LNDN_TRV_RNG AS trv_rng
+                    LNDN_TRV_RNG AS trv_rng, UN_LNDN_TRV_RNG AS un_trv_rng
                FROM TOSADM.JOB_ORDER_HISTORY
               WHERE JOB_HIST_DATE||JOB_HIST_TIME >= '{wm}'
                 AND JOB_HIST_DATE||JOB_HIST_TIME <= '{until}'
@@ -104,8 +107,8 @@ pub async fn tick_handover(pool: &PgPool, target: &str) -> Result<()> {
             let res = sqlx::query(
                 "INSERT INTO tos_handover_label
                    (contno, point, seqno, ytno, armgc, jobtype, topos, dis_ts, actv_ts, comp_ts,
-                    vessel, voyage, trv_rng)
-                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+                    vessel, voyage, trv_rng, un_trv_rng)
+                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
                  ON CONFLICT (contno, point, seqno) DO NOTHING",
             )
             .bind(contno.trim())
@@ -121,6 +124,7 @@ pub async fn tick_handover(pool: &PgPool, target: &str) -> Result<()> {
             .bind(r.vessel.as_deref().map(str::trim).filter(|s| !s.is_empty()))
             .bind(r.voyage.as_deref().map(str::trim).filter(|s| !s.is_empty()))
             .bind(r.trv_rng)
+            .bind(r.un_trv_rng)
             .execute(&mut *tx)
             .await
             .context("insert tos_handover_label")?;

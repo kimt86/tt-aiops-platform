@@ -12,7 +12,12 @@ use crate::{params, runner::Toolbox};
 pub const KPI_KEY: &str = "K_EMPTY";
 const SQL: &str = include_str!("../../sql/e4_k_empty_decomposition.sql");
 
-#[derive(Debug, Clone, Deserialize)]
+// KPI_NIGHTLY_SRC kill switch (PLAN-extractor.md CHUNK7 7-2(d), same convention as CHUNK6
+// 6-3): local Postgres (tos_handover_label) instead of the Oracle JOB_ORDER_HISTORY day scan.
+// $1,$2 = the business day's terminal-local window, converted to UTC in extract() below.
+const SQL_LOCAL: &str = include_str!("../../sql/local/l_empty.sql");
+
+#[derive(Debug, Clone, Deserialize, sqlx::FromRow)]
 #[serde(rename_all = "UPPERCASE")]
 pub struct Row {
     pub jobtype: String,
@@ -64,6 +69,16 @@ pub async fn upsert(pool: &PgPool, date: NaiveDate, run_id: i64, rows: &[Row]) -
 }
 
 pub async fn extract(pool: &PgPool, date: NaiveDate, target: &str) -> Result<u64> {
+    if crate::kpis::common::nightly_src_local() {
+        // Full terminal-local business day -> UTC, same window shape the Oracle original
+        // scans via JOB_HIST_DATE = date (params::render_day).
+        let (ws, we) = crate::kpis::common::day_bounds_utc(date);
+        return run_logged(pool, KPI_KEY, date, |run_id| async move {
+            let rows: Vec<Row> = sqlx::query_as(SQL_LOCAL).bind(ws).bind(we).fetch_all(pool).await?;
+            upsert(pool, date, run_id, &rows).await
+        })
+        .await;
+    }
     let sql = params::render_day(SQL, date)?;
     run_logged(pool, KPI_KEY, date, |run_id| async move {
         let raw = Toolbox::from_env(target)?.run_sql(&sql).await?;

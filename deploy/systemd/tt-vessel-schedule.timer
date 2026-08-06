@@ -1,0 +1,10 @@
+[Unit]
+Description=tt-aiops-platform 선박 스케줄 5분마다 (PLAN-extractor CHUNK5 5-3 — workpool 틱에서 분리)
+
+[Timer]
+OnBootSec=2min
+OnCalendar=*:0/5:35
+AccuracySec=5s
+
+[Install]
+WantedBy=timers.target

@@ -65,6 +65,12 @@ enum Command {
         #[arg(long, default_value = "oracle-prod")]
         target: String,
     },
+    /// Vessel schedule (VSB_VOYAGE) → live_vessel_schedule. Split out of the 90s
+    /// workpool tick (PLAN-extractor CHUNK7 7-1(b) — small/slow-changing, run ~every 5min).
+    VesselSchedule {
+        #[arg(long, default_value = "oracle-prod")]
+        target: String,
+    },
     /// 적부계획의 상자별 작업 순번(VSP_SHIP.VSP_SHP_PLANSEQ) → live_stow_plan.
     /// 구역 안 순서의 권위 값 — 작업지시 표에는 순서가 없다. 적·양하 둘 다(mig0129).
     /// STOWPLAN_MODE=delta(기본)|snapshot. --reconcile 이면 전체 스냅샷으로 드리프트 점검+치유.
@@ -192,6 +198,10 @@ async fn main() -> Result<()> {
         Command::Workpool { target } => {
             let pool = db::pool().await?;
             tt_extractor::workpool::tick_workpool(&pool, &target).await?;
+        }
+        Command::VesselSchedule { target } => {
+            let pool = db::pool().await?;
+            tt_extractor::workpool::tick_vessel_schedule(&pool, &target).await?;
         }
         Command::Stowplan { target, reconcile } => {
             let pool = db::pool().await?;
