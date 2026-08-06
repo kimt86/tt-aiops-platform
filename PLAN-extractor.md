@@ -451,16 +451,28 @@ CHUNK 4 가 `LNDN_TRV_RNG`(적재거리)만 받아왔는데, e4 의 K_EMPTY 는 
   AND captured_at > now()-interval '10 min'` > 0. 그 뒤 로컬 산출이 값을 내는지, Oracle 산출과
   같은 창(배포 이후)으로 대조 가능하면 대조(불가하면 "재료 축적 중"으로 보고).
 
-### 7-3. K_CYCLE 표시 정의 재정의 + k_cycle 로컬화 (사용자 승인)
-`kpi_shift.K_CYCLE` 과 nightly `raw_k_cycle` 을 **tt_move_log 기반(`l_cycle`)으로 재정의**한다.
-근거: 기존 정의가 실제 사이클을 41% 과소 계상(노트 기록), 병산에서 두 값이 이미 관측됨
-(예: 749.50 vs 1201.80). 절체가 아니라 **의도된 재정의**이므로:
-- t1 `src_cycle` 의 K_CYCLE 쓰기를 `l_cycle` 산출로 교체(정의 변경). c10 기반 값은
-  **키 `K_TT_CYCLE` 로 계속 쓴다**(별도 지표로 보존 — 지우지 마라).
-- nightly `k_cycle`(e3b) → `l_cycle` 로컬 산출로 교체.
-- 이제 t1(3분)만 K_CYCLE 을 쓰므로 CHUNK 6 이 우려한 경합은 없다. t2 는 쓰지 않는다.
-검증: 어제 하루 old/new 대조(큰 차이가 **정상** — 재정의다), `/api/kpis` 200 + K_CYCLE 값 존재,
-프론트가 K_CYCLE 을 읽는 지점(crates/api, web/src grep·읽기만)이 단위 가정(초)을 깨지 않는지 확인.
+### 7-3. ★★철회 — K_CYCLE 재정의는 하지 않는다 (오케스트레이터 오판, 2026-08-06)
+
+이 항목을 지시한 근거("표시 K_CYCLE 이 실제 사이클을 41% 과소 계상")는 **다른 화면
+(`crates/api/src/cycles.rs` v1)에 관한 메모였고, 이 카드가 아니었다.** 실제 코드에는
+반대 의도가 두 곳에 명시돼 있다:
+- `crates/api/src/agg.rs:82-83` — "K_CYCLE (s): real TT cycle (raw_k_tt_cycle) ...
+  (The container handling span lives in raw_k_cycle, **kept internally, not displayed**.)"
+- `crates/extractor/src/shift.rs:414` — "Displayed K_CYCLE is the REAL TT cycle"
+
+즉 표시 K_CYCLE = c10(트럭별 QC무브 간격)이 **의도된 정의**이고, e3b/tt_move_log 계열
+컨테이너 취급 구간은 **일부러 표시하지 않는** 값이다. 재정의를 강행하면 `/api/live`(신정의)와
+`/api/kpis` 기간조회(구정의, `raw_k_tt_cycle` 에서 독립적으로 읽음)가 같은 카드 이름으로
+다른 수를 보이게 된다 — 실제로 1200.6 vs 802.0 으로 갈렸다.
+
+**되돌릴 것**: `shift.rs::src_cycle` 의 K_CYCLE 쓰기를 c10 기반 원래대로, 추가했던
+`K_TT_CYCLE` 쓰기 제거, `kpis/k_cycle.rs` 는 Oracle(e3b) 유지. 즉 **CHUNK 6 의 판정으로 복귀**한다.
+`l_cycle` 은 병산 전용으로만 남는다(kpi_parity_log). 이 지표를 정말 바꿀지는 **api 쪽 표시
+경로까지 함께 설계해야 하는 별건**이며, crates/api 는 다른 에이전트 담당이라 이 트랙 밖이다.
+
+★교훈: 같은 이름의 지표가 여러 표·여러 경로에 있을 때, **표시 경로(crates/api)를 먼저 읽고**
+정의를 바꿔라. 나는 CHUNK 6 에서 실행자에게 "재정의 금지"라고 옳게 판정해놓고 CHUNK 7 에서
+근거를 오독해 스스로 뒤집었다.
 
 ### 7-4. 잔재 정리
 CHUNK 5 철회로 남은 untracked 중 **7-1(b)에서 쓰지 않는 것**만 삭제:
