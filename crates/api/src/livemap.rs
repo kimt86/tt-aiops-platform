@@ -3984,6 +3984,9 @@ const LD_MOVE_S: i64 = 132;
 // could have helped. Gate the run on `SELECT count(*) FROM learn_work_eta_bias WHERE jobtype='LD'`
 // being non-zero first, or both arms just measure the transition.
 static NEED_HORIZON_MODE: AtomicU8 = AtomicU8::new(0);
+/// 매칭을 구동하는 풀. `STAGE2_POOL`: 미설정/그 외 = 1(설계③ 마감 풀·기본) · `legacy` = 0(종전 풀).
+/// 종전 풀은 되돌리기 전용으로 남긴다 — 굶주림 정렬·크레인당 캡 로직은 그 경로에만 있다.
+static POOL_MODE: AtomicU8 = AtomicU8::new(1);
 const NEED_HORIZON_BASE_S: i64 = 900;   // floor = the old constant; never shrink below it
 const NEED_HORIZON_PAD_S: i64 = 300;    // free-time prediction slack (cycle_pred_shadow |err| p50 ~303s)
 const NEED_HORIZON_MAX_S: i64 = 3_000;  // hard ceiling — this term sizes the solver, see works_raw
@@ -4383,6 +4386,13 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
             },
             Ordering::Relaxed,
         );
+        POOL_MODE.store(
+            match std::env::var("STAGE2_POOL").unwrap_or_default().as_str() {
+                "legacy" => 0,
+                _ => 1, // 기본 = 설계③ 마감 풀 (2026-08-06 사용자 결정)
+            },
+            Ordering::Relaxed,
+        );
         // 티어 히스테리시스 상태(틱마다 현재 키 집합으로 통째 교체 = 누수 없음)
         let mut prev_tier: HashMap<(String, String, String), u8> = HashMap::new();
         loop {
@@ -4507,6 +4517,7 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                 let fi_bias = lm.free_in_bias.read().await; // ⑥ learned soon_idle seconds-to-idle
                 let st_free = lm.stationary_free.read().await; // 정차 앵커 (mig 0091)
                 let mut v = Vec::new();
+                let mut n_ds_anchor: usize = 0; // 관측 카운터 — DS 앵커 duration이 실제로 쓰였는지(mig 0132·CHUNK B)
                 for (id, p) in map.iter() {
                     if p.cls != "TT" { continue; }
                     let age = (now - p.last_seen_ms) / 1000;
@@ -4565,21 +4576,31 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                             // (free_in_sample writer + near-miss logger), else a momentary None
                             // jobtype misses the learned bucket and collapses to the 30s floor.
                             let jt = p.jobtype.clone().or_else(|| p.latched_jobtype.clone()).unwrap_or_default();
-                            // 정차 앵커 (mig 0091): a truck genuinely STOPPED at its drop (arrived state
-                            // + speed<idle) frees in the GPS-stationary median (LD ~141/DS ~258) —
-                            // ~half the loose-arrival free_in estimate, correctly calibrated. Moving/
-                            // approaching trucks keep free_in_bias (they still have to reach + stop).
-                            let stopped = s != "approaching" && p.speed < IDLE_SPEED_KMH;
-                            if let Some(&(med, _p90)) = st_free.get(&jt).filter(|_| stopped) {
-                                med
+                            // DS 는 무브로그 앵커가 우세하다(실측 |err| 311s vs GPS 424s — 위
+                            // 헤드투헤드 주석). 이 duration 들(st_free/fi_bias)은 GPS 라벨
+                            // (dropped_at·33% 누락)로 학습된 값이라 DS 에서 앵커가 있으면 앵커가
+                            // 이긴다. LD 는 GPS 가 우세(240s vs 659s)라 종전 그대로(mig 0132·CHUNK B).
+                            let ds_anchor = if jt == "DS" { inflight.get(id).copied() } else { None };
+                            if let Some(rem) = ds_anchor {
+                                n_ds_anchor += 1;
+                                rem.clamp(0, 3600)
                             } else {
-                                let bin = dist_bin_of(c.nearest_rtg_m);
-                                fi_bias
-                                    .get(&(s.to_string(), jt.clone(), bin))
-                                    .or_else(|| fi_bias.get(&(s.to_string(), jt.clone(), -99)))
-                                    .copied()
-                                    .unwrap_or_else(|| free_in(s, (!jt.is_empty()).then_some(jt.as_str())).0.unwrap_or(0))
-                                    .clamp(30, 3600)
+                                // 정차 앵커 (mig 0091): a truck genuinely STOPPED at its drop (arrived state
+                                // + speed<idle) frees in the GPS-stationary median (LD ~141/DS ~258) —
+                                // ~half the loose-arrival free_in estimate, correctly calibrated. Moving/
+                                // approaching trucks keep free_in_bias (they still have to reach + stop).
+                                let stopped = s != "approaching" && p.speed < IDLE_SPEED_KMH;
+                                if let Some(&(med, _p90)) = st_free.get(&jt).filter(|_| stopped) {
+                                    med
+                                } else {
+                                    let bin = dist_bin_of(c.nearest_rtg_m);
+                                    fi_bias
+                                        .get(&(s.to_string(), jt.clone(), bin))
+                                        .or_else(|| fi_bias.get(&(s.to_string(), jt.clone(), -99)))
+                                        .copied()
+                                        .unwrap_or_else(|| free_in(s, (!jt.is_empty()).then_some(jt.as_str())).0.unwrap_or(0))
+                                        .clamp(30, 3600)
+                                }
                             }
                         }
                         _ => continue,
@@ -4588,6 +4609,9 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                 }
                 drop(fi_bias);
                 drop(st_free);
+                if tick % 10 == 0 {
+                    tracing::info!(n = n_ds_anchor, total = v.len(), "DS 보이는 트럭 앵커 duration 적용");
+                }
                 v
             };
             if vehicles.is_empty() {
@@ -4862,16 +4886,16 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                 due.sort_by_key(|&(_, _, d)| d); // 마감이 이른 순
                 let truck_n = vehicles.len() as i64;
                 let mut acc = 0i64;
-                let mut kept_new: Vec<usize> = Vec::new();
+                let mut kept_new: Vec<(usize, i64)> = Vec::new();
                 for &(oi, slots, _) in &due {
                     if acc >= truck_n { break }
-                    acc += slots.min(truck_n - acc);
-                    kept_new.push(oi);
+                    let alloc = slots.min(truck_n - acc); // 마감 도래 슬롯만큼, 남은 트럭 수로 절단
+                    acc += alloc;
+                    kept_new.push((oi, alloc));
                 }
                 if tick % 3 == 0 {
                     let due_slots_total: i64 = due.iter().map(|&(_, s, _)| s).sum();
-                    let kept_slots: i64 = kept_new.iter()
-                        .map(|&oi| work[works[oi].0].n.max(0) as i64).sum();
+                    let kept_slots: i64 = kept_new.iter().map(|&(_, alloc)| alloc).sum();
                     tracing::info!(truck_n, acc, held = (truck_n - acc).max(0),
                         due_buckets = due.len(), due_slots_total, kept_buckets = kept_new.len(), kept_slots,
                         "설계③ 트럭 배분");
@@ -4890,7 +4914,7 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                 }
                 (kept_new, overdue, (truck_n - acc).max(0) as i32)
             };
-            let pool_new_set: std::collections::HashSet<usize> = pool_new.iter().copied().collect();
+            let pool_new_set: std::collections::HashSet<usize> = pool_new.iter().map(|&(oi, _)| oi).collect();
             let pool_cur_set: std::collections::HashSet<usize> = order.iter().copied().collect();
             let pool_overlap_n = pool_new_set.intersection(&pool_cur_set).count() as i32;
             // 로깅용 집계는 예산 '판정'과 분리한다(굶주림 면제·강등 때문에 판정 카운터는 최종 풀의
@@ -4902,10 +4926,19 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
             let eta_by_key: HashMap<(String, String, String), i64> = work.iter()
                 .filter_map(|w| w.work_eta_ts.map(|e| ((w.qc.clone(), w.vessel.clone(), w.queuename.clone()), e.timestamp_millis())))
                 .collect();
+            // ── 구동 풀 선택 (mig 0132) ──────────────────────────────────────────────
+            // (works 인덱스, 이 버킷에 공급할 트럭 몫). 설계③ = 마감 도래 슬롯(트럭 수 절단),
+            // 종전 = POINT 1 캡. 두 풀 모두 위에서 항상 계산·기록되므로 이 선택은 소비만 가른다.
+            let pool_mode = POOL_MODE.load(Ordering::Relaxed);
+            let driving: Vec<(usize, i64)> = if pool_mode == 1 {
+                pool_new.clone()
+            } else {
+                order.iter().map(|&oi| (oi, *cap_by_oi.get(&oi).unwrap_or(&0))).collect()
+            };
             // STAGE 2 — PURE EFFICIENCY MATCHING. The work pool + per-crane demand caps are already
             // fixed by Stage 1; here each edge cost is just the truck's empty travel (+ anti-thrash
             // switch penalty). No urgency/starve/load-balance terms and no QC layer — those are Stage-1.
-            let mut caps: Vec<i64> = Vec::with_capacity(order.len()); // per-bucket demand (Stage-1 capped)
+            let mut caps: Vec<i64> = Vec::with_capacity(driving.len()); // per-bucket demand (Stage-1 capped)
             let mut deadlines: Vec<i64> = Vec::with_capacity(order.len()); // feasibility deadline ms per wpos
             // 출항 축 로깅용(정렬 후 wpos 인덱스로 재배열). 기존 deadlines[]와 '별개 축'이다 —
             // 절대 교체/융합하지 않는다(현행 지평 p50 1043s는 실제 도착 p90 538s와 같은 스케일이라
@@ -4914,12 +4947,12 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
             let mut dep_tier_w: Vec<u8> = Vec::with_capacity(order.len());
             let mut edges: Vec<(usize, usize, i64)> = Vec::new(); // (truck, work-pos, cost)
             let mut matrix: Vec<Vec<(i64, i64, &'static str, bool)>> = Vec::with_capacity(order.len()); // [wpos][vi]=(arr,p90,tier,switched)
-            for &oi in &order {
+            for &(oi, cap_j) in &driving {
                 let (wi, wlat, wlon, eta_ms) = works[oi];
                 let w = &work[wi];
                 // 무브시간은 마감 계산에서 빠졌다(mig 0122: spread 항 폐기). 상자별 시각은
                 // workpool 쪽에서 이미 매겨 넘어온다.
-                let cap_j = *cap_by_oi.get(&oi).unwrap_or(&0); // Stage-1 capped demand (truck-loads)
+                // cap_j = 구동 풀이 배정한 트럭 몫.
                 caps.push(cap_j);
                 // 마감 = 크레인이 이 컨테이너를 다루는 시각. **더하는 항 없음**(mig 0122).
                 //
@@ -4971,7 +5004,7 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
             let mut greedy_cost: i64 = 0;
             let mut greedy_n: i32 = 0;
             let mut greedy_miss: i32 = 0;
-            for (wpos, _oi) in order.iter().enumerate() {
+            for (wpos, _) in driving.iter().enumerate() {
                 let limit = caps[wpos]; // bucket demand (already Stage-1 per-crane capped)
                 if limit <= 0 {
                     continue;
@@ -4990,7 +5023,7 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                     let (arr, p90, _t, _s) = matrix[wpos][vi];
                     // mig 0122 — 마감이 work_eta 그 자체가 됐으므로, 판정에는 그 트럭의 준비시간
                     // (p90 도착 + 안 세는 구간)을 빼서 비교한다. 아래 최적 매칭 쪽과 같은 식이다.
-                    let g_extra = lead_extra.get(&work[works[order[wpos]].0].jobtype).copied().unwrap_or(0);
+                    let g_extra = lead_extra.get(&work[works[driving[wpos].0].0].jobtype).copied().unwrap_or(0);
                     if now + (p90 + g_extra) * 1000 > deadline {
                         greedy_miss += 1;
                     }
@@ -5012,7 +5045,7 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
             let mut ins_err: Option<String> = None;
             let mut ins_err_n: i32 = 0;
             for &(vi, wpos) in &assign {
-                let (wi, wlat, wlon, _eta) = works[order[wpos]];
+                let (wi, wlat, wlon, _eta) = works[driving[wpos].0];
                 let w = &work[wi];
                 let deadline = deadlines[wpos];
                 let (arr, arr_p90, tier, switched) = matrix[wpos][vi];
@@ -5069,10 +5102,10 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
             }
             let gap_pct = if opt_cost > 0 { 100.0 * (greedy_cost - opt_cost) as f64 / opt_cost as f64 } else { 0.0 };
             let solver_ins = sqlx::query(
-                "INSERT INTO stage2_solver_shadow (ts,tick,n_trucks,n_works,greedy_n,greedy_cost_s,optimal_n,optimal_cost_s,gap_pct,greedy_miss,optimal_miss,dep_tier_on,dep_tier0_n,dep_urgent_slots,dep_null_n,dep_demoted_n,ab_block,ab_warmup,works_raw,need_horizon_on,works_no_eta,works_no_coord,pool_new_n,pool_overlap_n,trucks_held_n,pool_overdue_n)
-                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26) ON CONFLICT (ts) DO NOTHING",
+                "INSERT INTO stage2_solver_shadow (ts,tick,n_trucks,n_works,greedy_n,greedy_cost_s,optimal_n,optimal_cost_s,gap_pct,greedy_miss,optimal_miss,dep_tier_on,dep_tier0_n,dep_urgent_slots,dep_null_n,dep_demoted_n,ab_block,ab_warmup,works_raw,need_horizon_on,works_no_eta,works_no_coord,pool_new_n,pool_overlap_n,trucks_held_n,pool_overdue_n,pool_mode)
+                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27) ON CONFLICT (ts) DO NOTHING",
             )
-            .bind(ts).bind(tick as i64).bind(vehicles.len() as i32).bind(order.len() as i32)
+            .bind(ts).bind(tick as i64).bind(vehicles.len() as i32).bind(driving.len() as i32)
             .bind(greedy_n).bind(greedy_cost).bind(assign.len() as i32).bind(opt_cost).bind(gap_pct as f32)
             .bind(greedy_miss).bind(opt_miss)
             // 티어가 꺼진 구간에서도 항상 기록 → 켜기 전 반사실 베이스라인(신규 컬럼이라 과거
@@ -5087,11 +5120,12 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
             .bind(works_no_eta).bind(works_no_coord)                                      // mig 0121: 조용히 빠진 작업
             .bind(pool_new.len() as i32).bind(pool_overlap_n)
             .bind(trucks_held_n).bind(pool_overdue_n)
+            .bind(pool_mode as i16)
             .execute(&pool).await;
             // mig 0121 — 두 풀 중 한쪽에라도 든 묶음의 상세. 왜 다르게 뽑혔는지 진단용.
             {
                 let rank_cur: HashMap<usize, i32> = order.iter().enumerate().map(|(r, &oi)| (oi, r as i32)).collect();
-                let rank_new: HashMap<usize, i32> = pool_new.iter().enumerate().map(|(r, &oi)| (oi, r as i32)).collect();
+                let rank_new: HashMap<usize, i32> = pool_new.iter().enumerate().map(|(r, &(oi, _))| (oi, r as i32)).collect();
                 for &oi in pool_cur_set.union(&pool_new_set) {
                     let w = &work[works[oi].0];
                     let dd = w.dispatch_deadline_ts;
