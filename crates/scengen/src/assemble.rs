@@ -58,20 +58,41 @@ const QC_MIN_GAPS_PER_CRANE: i64 = 30;
 /// Bay-change gap bounds (s) and the sample floor. 1800 drops shift breaks; 0 keeps the low end
 /// visible so a contaminated population shows itself rather than being trimmed into looking clean.
 const BAY_GAP_CAP_S: (f64, f64) = (0.0, 1800.0);
-/// Transitions needed before a measurement is used. The estimator below is a densest-half mean,
-/// which needs a real population to find a peak in.
-const BAY_MIN_SAMPLES: i64 = 100;
+/// Transitions needed before a measurement is used.
+///
+/// ★1,000, NOT the 100 this started at. The densest-half mean needs a real peak to find, and at a
+/// few hundred samples it does not reliably find one — a narrow cluster in the low tail can win the
+/// "shortest interval holding half the points" contest by chance. That is not a hypothesis; it is
+/// what a single day of data did. Same estimator, windows all ending 2026-08-05:
+///
+///     window   n      shorth        window ending   n      shorth (7-day)
+///     1 day    338    185           08-02          1019    268
+///     3 day    852    220           08-03          1231    266
+///     5 day  1,361    262           08-04          1531    257
+///     7 day  1,873    268           08-05          1873    268
+///                                   08-06          1933    267
+///
+/// Per-day values for 07-31..08-04 sat at 257..265 and then 08-05 alone read 185, on a day whose
+/// median gap (308s) was unremarkable — it simply carried 12.4% of its gaps under 105s where the
+/// other days carried 6..9%. A few points of extra low-tail mass moved the whole band. Above about
+/// a thousand samples the spread collapses to 257..268 regardless of where the window ends, which
+/// is the level at which this can be published as an equipment constant.
+///
+/// The cost of the higher floor is that short windows now measure over a longer look-back. That is
+/// the right trade: a gantry does not change speed by the hour, so a wider sample is a better
+/// estimate of the same quantity, and `measured_window` says which period it came from.
+const BAY_MIN_SAMPLES: i64 = 1000;
 /// Look-back lengths tried, in order, when the requested window is too short to clear
-/// BAY_MIN_SAMPLES on its own. Measured rate is ~7.6 bay transitions an hour, so an 8-hour window
-/// yields ~61 and cannot qualify while a day yields ~213 — the shortfall is the WINDOW, not the
-/// data, and dropping to a constant threw away a measurement that was there for the asking.
+/// BAY_MIN_SAMPLES on its own. Measured rate is ~300 bay transitions a day, so reaching the floor
+/// takes several days and no realistic scenario window supplies it alone — widening is the normal
+/// path here, not the exception.
 ///
 /// Each step ends at the requested window's end and reaches backwards, so the requested period is
 /// always inside the measured one and the answer never depends on data from after the scenario.
 /// Backwards is also the only direction always available: a window that ends now has no future.
 /// The first step that clears the floor wins, keeping the measurement as close to the window as it
-/// can be; 7 days is the stop, past which "recent" stops meaning anything.
-const BAY_WIDEN_DAYS: [i64; 3] = [1, 3, 7];
+/// can be; 14 days is the stop, past which "recent" stops meaning anything.
+const BAY_WIDEN_DAYS: [i64; 4] = [3, 7, 10, 14];
 /// Cranes that must qualify before the window's own number is used. This is a FLEET parameter, and
 /// one crane is not a fleet. Measured on a 1-hour window: only a single crane cleared the gap
 /// threshold for load, so its personal rhythm would have become the published fleet figure while the
