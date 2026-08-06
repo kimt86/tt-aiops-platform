@@ -32,6 +32,38 @@ fn json_body(s: String) -> Response {
     ([(header::CONTENT_TYPE, "application/json")], s).into_response()
 }
 
+/// Name a download after the TERMINAL-LOCAL period it covers, e.g. `scenario-2026-08-05-D.json`.
+///
+/// Scenarios are taken a whole day or a whole shift at a time, so the file name can say which one
+/// and a folder of them sorts and reads by itself. The old name carried the start epoch, which is
+/// correct and unreadable — telling two shifts of the same day apart meant opening them.
+/// Shift letters follow crates/core/src/shift.rs (N 00–08, D 08–16, E 16–24, MYT). A window that is
+/// not one of those shapes keeps an explicit hour range instead of being forced into a label.
+fn download_name(kind: &str, ws: DateTime<chrono::Utc>, we: DateTime<chrono::Utc>) -> String {
+    let myt = chrono::FixedOffset::east_opt(8 * 3600).unwrap();
+    let (a, b) = (ws.with_timezone(&myt), we.with_timezone(&myt));
+    let day = a.format("%Y-%m-%d");
+    let whole_hours = a.time() == chrono::NaiveTime::MIN
+        && b.time() == chrono::NaiveTime::MIN
+        && (b - a) == chrono::Duration::days(1);
+    use chrono::Timelike;
+    let same_day = a.date_naive() == b.date_naive();
+    let (h0, h1) = (a.hour(), if b.time() == chrono::NaiveTime::MIN { 24 } else { b.hour() });
+    let tag = if whole_hours {
+        "day".to_string()
+    } else if same_day || h1 == 24 {
+        match (h0, h1) {
+            (0, 8) => "N".into(),
+            (8, 16) => "D".into(),
+            (16, 24) => "E".into(),
+            _ => format!("{h0:02}-{h1:02}"),
+        }
+    } else {
+        format!("{}_{}", a.format("%H%M"), b.format("%m%d-%H%M"))
+    };
+    format!("{kind}-{day}-{tag}.json")
+}
+
 pub async fn run(pool: PgPool, port: u16) -> Result<()> {
     let app = Router::new()
         .route("/", get(index))
@@ -144,11 +176,10 @@ async fn download(
     // Validate `kind` BEFORE assembling. build() is synchronous and materializes the whole window
     // in memory, so answering an unknown kind only AFTER that work would let a stray path burn a
     // full assembly (and one of the pool's two connections) to then return 404.
-    let fname = match kind.as_str() {
-        "scenario" => format!("scenario-{}.json", r.start),
-        "emulator" => format!("emulator-{}.json", r.start),
-        _ => return Ok((StatusCode::NOT_FOUND, "unknown kind (scenario|emulator)").into_response()),
-    };
+    if kind != "scenario" && kind != "emulator" {
+        return Ok((StatusCode::NOT_FOUND, "unknown kind (scenario|emulator)").into_response());
+    }
+    let fname = download_name(&kind, ws, we);
     let (mut scenario, emulator, summary) = crate::assemble::build(&pool, ws, we).await?;
     // Ship the quality/provenance summary INSIDE the file. Dropping it made a download from an
     // empty warehouse look identical to a good one — vessels all NULL-attributed into one bucket,
@@ -308,13 +339,14 @@ async fn job_download(
     };
     // state is fetched with the body so a job that is still running gets told so, instead of
     // receiving an empty 404 that reads like the job never existed.
-    let row: Option<(String, Option<String>, DateTime<chrono::Utc>)> = sqlx::query_as(&format!(
-        "SELECT state, {col}::text, window_start FROM scenario.assembly_job WHERE job_id = $1"
-    ))
-    .bind(job_id)
-    .fetch_optional(&pool)
-    .await?;
-    let Some((state, body, ws)) = row else {
+    let row: Option<(String, Option<String>, DateTime<chrono::Utc>, DateTime<chrono::Utc>)> =
+        sqlx::query_as(&format!(
+            "SELECT state, {col}::text, window_start, window_end FROM scenario.assembly_job WHERE job_id = $1"
+        ))
+        .bind(job_id)
+        .fetch_optional(&pool)
+        .await?;
+    let Some((state, body, ws, we)) = row else {
         return Ok((StatusCode::NOT_FOUND, "no such job").into_response());
     };
     let Some(body) = body else {
@@ -324,7 +356,7 @@ async fn job_download(
         )
             .into_response());
     };
-    let fname = format!("{kind}-{}.json", ws.timestamp());
+    let fname = download_name(&kind, ws, we);
     Ok((
         [
             (header::CONTENT_TYPE, "application/json".to_string()),
@@ -384,6 +416,16 @@ input{background:#0f1216;border:1px solid #2a313a;color:#d7dee6;border-radius:7p
 .avail{background:#0f1f16;border:1px solid #1f7a45;border-radius:8px;padding:10px 12px;margin-bottom:14px}
 .avail b{color:#7ee0a0}
 .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+/* Shift picker. The terminal runs three 8h shifts (crates/core/src/shift.rs) and scenarios are
+   taken a whole day or a whole shift at a time, so those are the only shapes offered. */
+.seg{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px}
+.seg button{background:#0f1216;border:1px solid #2a313a;color:#d7dee6;border-radius:9px;
+  padding:10px 12px;text-align:left;line-height:1.35;cursor:pointer;font:inherit}
+.seg button:hover:not(:disabled){border-color:#3d4652}
+.seg button.on{border-color:#2563eb;background:#12203a}
+.seg button:disabled{opacity:.4;cursor:not-allowed}
+.seg b{display:block;font-size:14px;font-weight:600}
+.seg i{font-style:normal;font-size:11px;color:#8b98a5}
 .sw{margin-left:auto;display:flex;align-items:center;gap:8px}
 label.tog{position:relative;width:44px;height:24px;display:inline-block}
 label.tog input{display:none}
@@ -399,26 +441,27 @@ label.tog input:checked+.sl:before{transform:translateX(20px)}
 <main>
  <div class="card"><h2>다운로드</h2>
    <div class="avail" id="avail">다운로드 가능 기간을 불러오는 중…</div>
-   <div class="row" style="margin-bottom:10px">
-     <span class="tag">프리셋:</span>
-     <button class="gray" onclick="preset('cov')">가능 기간 전체</button>
-     <button class="gray" onclick="preset(8)">최근 8시간</button>
-     <button class="gray" onclick="preset(24)">최근 24시간</button>
-     <button class="gray" onclick="preset(72)">최근 3일</button>
+   <div class="row" style="margin-bottom:12px">
+     <button class="gray" onclick="day(-1)">◀ 전날</button>
+     <label class="tag">날짜(MYT) <input type="date" id="bd" onchange="fix()"></label>
+     <button class="gray" onclick="day(1)">다음날 ▶</button>
+     <span class="tag" style="margin-left:6px">빠른 선택:</span>
+     <button class="gray" onclick="jump(0)">최근 완결일</button>
+     <button class="gray" onclick="jump(-1)">그 전날</button>
    </div>
-   <div class="row">
-     <label class="tag">시작 <input type="datetime-local" id="ws" step="1"></label>
-     <label class="tag">끝 <input type="datetime-local" id="we" step="1"></label>
-     <button class="dl" onclick="dl('scenario')">시나리오 다운로드</button>
-     <button class="dl" onclick="dl('emulator')">에뮬 스펙 다운로드</button>
+   <div class="seg" id="seg"></div>
+   <div class="row" style="margin-top:12px">
+     <span class="tag" id="win"></span>
    </div>
-   <div class="tag" id="msg" style="margin-top:8px">기간을 고르면 그 기간의 데이터로 즉석 조립해 JSON을 내려받습니다(자동 생성 없음 · TOS 미접촉).</div>
    <div class="row" style="margin-top:10px">
-     <span class="tag">긴 기간은 큐로:</span>
-     <button class="gray" onclick="q()">작업큐에 넣기</button>
+     <button class="dl" id="b1" onclick="dl('scenario')">시나리오 받기</button>
+     <button class="dl" id="b2" onclick="dl('emulator')">에뮬 스펙 받기</button>
+     <span class="tag">·</span>
+     <button class="gray" id="b3" onclick="q()">작업큐에 넣기</button>
      <span class="tag" id="qmsg"></span>
    </div>
-   <div id="jobs" style="margin-top:10px"></div>
+   <div class="tag" id="msg" style="margin-top:8px">고른 기간의 데이터로 즉석 조립해 JSON을 내려받습니다(자동 생성 없음 · TOS 미접촉).</div>
+   <div id="jobs" style="margin-top:12px"></div>
  </div>
  <div class="card"><h2>수집 현황</h2><div class="grid" id="stat"></div></div>
  <div class="card"><h2>수집기 최근 실행</h2><div id="runs"></div></div>
@@ -427,33 +470,80 @@ label.tog input:checked+.sl:before{transform:translateX(20px)}
 const $=s=>document.querySelector(s), H=x=>x==null?'<span class=mut>–</span>':x;
 const pill=s=>`<span class="pill ${s}">${s}</span>`;
 let COV={min:null,max:null};
-// Mirrors MAX_WINDOW_DAYS in serve.rs — the largest single window the server will assemble.
-const MAXD=7;
+// No client-side window cap any more: a day is the longest thing this page can ask for, and the
+// server's limit is a week. The old free-form range picker needed one; the shift picker cannot
+// build a window that reaches it.
 async function j(u){const r=await fetch(u);return r.json()}
-function fmt(t){return t?new Date(t).toLocaleString():'–'}
-function loc(d){const p=n=>String(n).padStart(2,'0');return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`}
-function preset(k){if(!COV.min){msg('아직 조립 가능한 기간이 없습니다');return}
-  const lo=new Date(COV.min),hi=new Date(COV.max);
-  // The assemblable period grows by a day every day, so "전체" will eventually exceed the
-  // single-window cap. Clamp to the newest MAXD days rather than let the button start producing
-  // a request the server has to refuse.
-  let e=hi, s=(k==='cov')?lo:new Date(Math.max(lo,hi-k*3600e3));
-  if(hi-s>MAXD*86400e3){s=new Date(hi-MAXD*86400e3);
-    if(k==='cov')msg(`조립 가능 기간이 ${MAXD}일을 넘어 최근 ${MAXD}일로 맞췄습니다 — 더 이전은 시작 시각을 직접 지정하세요.`)}
-  $('#ws').value=loc(s);$('#we').value=loc(e)}
+// ★Every time shown or computed here is TERMINAL time (MYT, UTC+8), never the browser's. This
+// machine's own clock is KST, so using local Date getters would have silently shifted every shift
+// boundary by an hour — and a shift picker that is an hour off is worse than no picker.
+const TZ='Asia/Kuala_Lumpur';
+function fmt(t){return t?new Date(t).toLocaleString('ko-KR',{timeZone:TZ,hour12:false}):'–'}
+function hhmm(ep){return new Date(ep*1000).toLocaleString('ko-KR',{timeZone:TZ,hour12:false,
+  month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'})}
+// The MYT calendar date of an instant, as YYYY-MM-DD ('en-CA' yields exactly that shape).
+function myd(x){return new Date(x).toLocaleDateString('en-CA',{timeZone:TZ})}
+// Epoch seconds for a MYT wall-clock hour on a MYT calendar date. Built from Date.UTC minus the
+// fixed +08:00 offset, so it does not depend on where the browser thinks it is. MYT has no DST.
+function ep(dateStr,hour){const [y,m,d]=dateStr.split('-').map(Number);
+  return Date.UTC(y,m-1,d,hour,0,0)/1000-8*3600}
+
+// The terminal's three shifts (crates/core/src/shift.rs): Night 00–08, Day 08–16, Evening 16–24,
+// each belonging to the calendar day it STARTS on. A whole day is the fourth choice and the
+// default — those four are the only windows anyone asks for.
+const SHIFTS=[
+  {k:'all',n:'하루 전체',h:[0,24],t:'00:00 → 24:00'},
+  {k:'N',  n:'야간 N',   h:[0,8], t:'00:00 → 08:00'},
+  {k:'D',  n:'주간 D',   h:[8,16],t:'08:00 → 16:00'},
+  {k:'E',  n:'저녁 E',   h:[16,24],t:'16:00 → 24:00'},
+];
+let SEL='all';
 function msg(t){$('#msg').textContent=t}
-// Client-side guard mirroring the server's. The server refuses out-of-range windows anyway; this
-// exists so the answer is instant and phrased the same way, not so the check lives in one place.
+function bd(){return $('#bd').value}
+// Window for the current date+shift, as epoch seconds.
+function win(k){const d=bd(); if(!d)return null;
+  const s=SHIFTS.find(x=>x.k===(k||SEL)); return [ep(d,s.h[0]),ep(d,s.h[1])]}
+// Is that window wholly inside what the server will assemble?
+function ok(k){const w=win(k); if(!w||!COV.min)return false;
+  return w[0]>=Math.floor(new Date(COV.min).getTime()/1000)
+      && w[1]<=Math.floor(new Date(COV.max).getTime()/1000)}
+function sel(k){SEL=k;draw()}
+// After a DATE change only: if the chosen shift is not available on the new date, move to one that
+// is. The edge days are exactly where this matters — the first day offers only its evening and
+// today usually only its night — and leaving the selection on a greyed-out button would show a
+// dead download button with no hint that a neighbour works. Never called from sel(): an explicit
+// click on a shift must stand, refusal and all.
+function fix(){if(!ok()){const a=SHIFTS.find(s=>ok(s.k)); if(a)SEL=a.k} draw()}
+function day(n){const d=bd(); if(!d)return;
+  const [y,m,dd]=d.split('-').map(Number);
+  $('#bd').value=new Date(Date.UTC(y,m-1,dd+n)).toISOString().slice(0,10); fix()}
+// Jump to the newest business day whose chosen window is complete, then n days back.
+function jump(n){if(!COV.max)return;
+  let d=myd(COV.max);
+  // The late edge sits mid-day, so the newest day is usually only partly collected — step back
+  // until the whole selection fits rather than landing on a date every button refuses.
+  for(let i=0;i<14;i++){$('#bd').value=d; if(ok())break;
+    const [y,m,dd]=d.split('-').map(Number); d=new Date(Date.UTC(y,m-1,dd-1)).toISOString().slice(0,10)}
+  if(n)day(n); else fix()}
+function draw(){
+  $('#seg').innerHTML=SHIFTS.map(s=>{
+    const w=win(s.k), good=ok(s.k);
+    return `<button class="${s.k===SEL?'on':''}" ${good?'':'disabled'} onclick="sel('${s.k}')"
+      title="${good?'':'조립 가능 기간을 벗어납니다'}"><b>${s.n}</b><i>${s.t}${w?' · '+((w[1]-w[0])/3600)+'시간':''}</i></button>`}).join('');
+  const w=win();
+  const good=ok();
+  $('#win').innerHTML=w
+    ?(good?`선택: <b>${hhmm(w[0])} ~ ${hhmm(w[1])}</b> MYT`
+          :`<b style="color:#f09aa8">이 기간은 조립할 수 없습니다</b> — ${hhmm(w[0])} ~ ${hhmm(w[1])} MYT`)
+    :'날짜를 고르세요';
+  for(const b of ['#b1','#b2','#b3'])$(b).disabled=!good;
+}
+// The server refuses out-of-range windows anyway; this is here so the answer is instant.
 function pick(){
-  const ws=$('#ws').value,we=$('#we').value;
-  if(!ws||!we){msg('기간을 설정하세요');return null}
-  const s=Math.floor(new Date(ws).getTime()/1000),e=Math.floor(new Date(we).getTime()/1000);
-  if(e<=s){msg('끝이 시작보다 뒤여야 합니다');return null}
-  if(COV.min&&s<Math.floor(new Date(COV.min).getTime()/1000)){
-    msg('조립 가능 기간보다 이릅니다 — 그 이전은 크레인 작업 순서가 없어 빈 안벽이 재생됩니다.');return null}
-  if(COV.max&&e>Math.floor(new Date(COV.max).getTime()/1000)){
-    msg('조립 가능 기간보다 늦습니다 — 가장 느린 수집기가 아직 거기까지 못 갔습니다.');return null}
-  return [s,e];
+  const w=win();
+  if(!w){msg('날짜를 고르세요');return null}
+  if(!ok()){msg('고른 기간이 조립 가능 범위를 벗어납니다 — 회색이 아닌 쉬프트를 고르세요.');return null}
+  return w;
 }
 function dl(kind){
   const p=pick(); if(!p)return;
@@ -477,6 +567,22 @@ async function loadJobs(){
       ?`<a href="/api/scenario/jobs/${r.job_id}/download/scenario">시나리오</a> · <a href="/api/scenario/jobs/${r.job_id}/download/emulator">에뮬</a>`
       :(r.error?`<span class=mut title="${(r.error+'').replace(/"/g,'&quot;')}">실패</span>`:'<span class=mut>대기</span>')]):'';
 }
+// Whole business days, and whole shifts, that fit inside the assemblable range. Walks MYT calendar
+// dates so a partly-collected edge day contributes only the shifts it can actually serve.
+function wholeDays(ur){
+  const out={days:[],shifts:0};
+  if(!ur.from||!ur.to)return out;
+  const lo=Math.floor(new Date(ur.from).getTime()/1000), hi=Math.floor(new Date(ur.to).getTime()/1000);
+  let d=myd(ur.from);
+  for(let i=0;i<400;i++){
+    if(ep(d,0)>hi)break;
+    if(ep(d,0)>=lo&&ep(d,24)<=hi)out.days.push(d);
+    for(const s of SHIFTS)if(s.k!=='all'&&ep(d,s.h[0])>=lo&&ep(d,s.h[1])<=hi)out.shifts++;
+    const [y,m,dd]=d.split('-').map(Number);
+    d=new Date(Date.UTC(y,m-1,dd+1)).toISOString().slice(0,10);
+  }
+  return out;
+}
 let first=true;
 async function load(){
   const s=await j('/api/scenario/status');
@@ -487,16 +593,24 @@ async function load(){
   // Those differ by weeks: the landside streams reach back to June, but a replay needs the crane
   // work order, which starts when TOS began writing bay labels.
   COV={min:ur.from,max:ur.to};
-  $('#ws').min=$('#we').min=ur.from?loc(new Date(ur.from)):'';
-  $('#ws').max=$('#we').max=ur.to?loc(new Date(ur.to)):'';
-  const days=ur.from&&ur.to?((new Date(ur.to)-new Date(ur.from))/86400e3).toFixed(1):null;
+  // Bound the date box to the business days that can actually yield a window. Both edges land
+  // mid-day, so the first and last dates only offer some of their shifts — the segment buttons
+  // grey out the rest.
+  if(ur.from){$('#bd').min=myd(ur.from)}
+  if(ur.to){$('#bd').max=myd(ur.to)}
+  // Say it in the unit the work is actually taken in. "6.9일" is the raw span; what a person
+  // needs to know before picking is how many WHOLE days and shifts are on offer, because a
+  // half-collected day at either edge cannot be downloaded at all.
+  const whole=wholeDays(ur);
   $('#avail').innerHTML=ur.from
-    ?`조립 가능 기간: <b>${fmt(ur.from)}</b> ~ <b>${fmt(ur.to)}</b> <span class=tag>(${days}일)</span><br>
-      <span class=tag>시작은 <b>${H(ur.from_reason)}</b>가 정합니다 — 그 이전에는 크레인 작업 순서가 없어 안벽이 빈 채로 재생됩니다.
-      끝은 <b>${H(ur.to_reason)}</b>가 수집한 지점입니다 — 그 뒤 데이터는 실재하지만 아직 완결이 아닙니다.
-      이 범위 밖은 다운로드가 거부됩니다. 보유 이동 데이터 자체는 ${fmt(mh.min)}부터 ${H(mh.rows)}건.</span>`
+    ?`받을 수 있는 <b>하루</b>: ${whole.days.length?`<b>${whole.days.length}일</b> <span class=tag>(${whole.days[0]} ~ ${whole.days[whole.days.length-1]})</span>`:'<b>없음</b>'}
+      · 받을 수 있는 <b>쉬프트</b>: <b>${whole.shifts}개</b><br>
+      <span class=tag>정합 구간 ${fmt(ur.from)} ~ ${fmt(ur.to)} (MYT). 시작은 <b>${H(ur.from_reason)}</b>가 정합니다 —
+      그 이전에는 크레인 작업 순서가 없어 안벽이 빈 채로 재생됩니다.
+      끝은 <b>${H(ur.to_reason)}</b>가 수집한 지점이라 오늘 하루는 대개 아직 완결이 아닙니다.
+      범위 밖은 서버가 거부합니다. 보유 이동 데이터 자체는 ${fmt(mh.min)}부터 ${H(mh.rows)}건.</span>`
     :'아직 조립 가능한 기간이 없습니다. (수집기가 돌면 여기 범위가 표시됩니다)';
-  if(first&&ur.from){preset('cov');first=false;loadJobs()}
+  if(first&&ur.from){jump(0);first=false;loadJobs()}
   $('#stat').innerHTML=[
     ['이동 데이터',H(mh.rows)+'건'],['watermark',H(s.watermark)],
     ['야드 블록맵',H(ym.blocks)+'개'+(ym.unresolved>0?' <b style="color:#f87171">⚠미해석 '+ym.unresolved+'</b>':'')],
