@@ -1,0 +1,12 @@
+[Unit]
+Description=tt-aiops-platform 적부계획 델타 화해(reconcile) — 전체 스냅샷으로 드리프트 점검+치유 (PLAN-extractor CHUNK3)
+After=network-online.target
+
+[Service]
+# 폭발 반경 제한(2026-07-28 OOM 장애 재발방지). tt-stowplan.service 와 같은 상한.
+MemoryMax=1G
+MemorySwapMax=0
+Type=oneshot
+EnvironmentFile=%h/projects/tt-aiops-platform/.env
+ExecStart=%h/projects/tt-aiops-platform/target/release/extractor stowplan --target oracle-prod --reconcile
+Nice=15

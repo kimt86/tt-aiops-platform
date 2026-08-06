@@ -1,0 +1,10 @@
+[Unit]
+Description=tt-aiops-platform 적부계획 델타 화해 1시간마다 (델타 병합 드리프트 자가치유)
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=1h
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

@@ -1,11 +1,11 @@
 [Unit]
-Description=wp-tt 적부계획 순번 5분마다 (적하·미완료·작업중 항차로 좁힌 한 번의 VSP_SHIP 조회)
+Description=tt-aiops-platform 적부계획 순번 2분마다 (델타 스트림·UPD_DT 워터마크, PLAN-extractor CHUNK3)
 
 [Timer]
-# 계획은 천천히 바뀐다. 90초짜리 워크풀과 달리 5분이면 충분하고, 그만큼 Oracle 이 편하다.
+# 델타로 바뀌어 5분→2분(신선도 향상). 분산 초 :15 (1-2 청크의 초 분산과 겹치지 않게).
 OnBootSec=3min
-OnUnitActiveSec=5min
-AccuracySec=30s
+OnCalendar=*:0/2:15
+AccuracySec=5s
 
 [Install]
 WantedBy=timers.target
