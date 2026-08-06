@@ -337,7 +337,7 @@ Toolbox 제거. `tt-scenario-yard.timer`는 유지(이제 Oracle 0).
 
 절체 근거(당일 병산 실측): K_MPH −0.1% · K_QC_Q 0.0% · K_TT_CYCLE −0.1% (즉시 절체 합격)
 / K_RTG_Q +6.0% = 원본 c08의 ~10중 계수 결함, 로컬이 옳음(게이트 판독 노트) — 절체하되 표시값 +6% 이동 고지
-/ K_CYCLE = tt_move_log 재정의(기존 41% 과소 교정) — 절체·고지
+/ K_CYCLE = **이 런에서 손대지 않음**(표시값은 c10 정의 유지 — 재정의는 별건 결정)
 / ★K_EMPTY 만 예외: 재료 trv_rng 가 2026-08-06 15시(KST)부터만 착지 — 하루치가 차는 **08-08 이후** 전환,
   그때까지 t2·nightly 에서 Oracle 유지(e4 쿼리 그대로).
 
@@ -353,8 +353,14 @@ Toolbox 제거. `tt-scenario-yard.timer`는 유지(이제 Oracle 0).
 ### 6-2. t2 절체 — 같은 파일
 - `src_craneq`: Oracle fetch 제거, `l_crane_q` 계열 로컬 산출로 K_RTG_Q upsert.
   k_crane_q_hour 도 같은 로컬 소스(tos_handover_label 시간 버킷)로.
-- `K_CYCLE`: `l_cycle`(tt_move_log) 산출로 upsert.
 - `src_empty`(K_EMPTY)는 **Oracle 그대로**(위 예외).
+- ★★삭제된 지시(1차 실행이 잡은 계획 오류): ~~`K_CYCLE`을 `l_cycle`로 upsert~~ — **하지 마라.**
+  `kpi_shift.K_CYCLE`은 t1 `src_cycle`이 c10 정의(MCH_OPERATION 트럭별 QC무브 간격)로 쓰는
+  값이고, 그게 의도된 설계다(shift.rs 주석 "Displayed K_CYCLE is the REAL TT cycle").
+  t2에서 다른 정의(tt_move_log)로 같은 키를 쓰면 3분/15분 두 writer가 서로 덮는 경합이 된다.
+  **절체(원천 교체)와 재정의(지표 변경)는 다른 일이다.** 이 런은 절체만 한다.
+  `l_cycle`은 **병산 전용으로 유지**(kpi_parity_log의 K_CYCLE 키 — 상대는 nightly raw_k_cycle).
+  표시 지표 재정의는 별건으로 사용자 결정 사항.
 
 ### 6-3. nightly 로컬화 — `crates/extractor/src/main.rs::run_kpi` + `crates/extractor/src/kpis/*.rs`
 - `k_util_tt` — **제거**: 프론트 미사용 확인됨(App.tsx:402 "TOS session value not shown").
@@ -362,9 +368,13 @@ Toolbox 제거. `tt-scenario-yard.timer`는 유지(이제 Oracle 0).
 - `k_util_crane`(e1c) → qc_move_log+rtg_move_log 로컬(st_ts..comp_ts 병합 구간 — l_qc_q 의 병합 기법 재사용).
 - `k_mph_realtime`·`k_qc_q`·`k_tt_cycle` → CHUNK 2 로컬 SQL 재사용.
 - `qc_move_time`(학습기 — learn_qc_move_time 은 scengen·배차가 소비) → 같은 산식을 qc_move_log 로.
-- `k_cycle`·`k_crane_q`·`k_crane_q_hour` → 위 로컬 소스.
-- `k_empty` → Oracle 유지(예외).
-- 결과: nightly 의 Oracle 왕복 = k_empty 1회뿐(08-08 후속에서 0).
+- `k_crane_q`·`k_crane_q_hour` → 위 로컬 소스.
+- **`k_cycle`(e3b→raw_k_cycle) → Oracle 유지**: 로컬 대체는 tt_move_log 기반이라 raw_k_cycle의
+  의미가 바뀐다(= 재정의, 위 참조). nightly 하루 1회뿐이라 부하 기여가 무시할 수준이므로
+  재정의 결정 전까지 그대로 둔다.
+- `k_empty` → Oracle 유지(trv_rng 재료 부족 — 08-08 후속).
+- 결과: nightly 의 Oracle 왕복 = **2회/일**(k_empty·k_cycle). 08-08에 k_empty가 빠지고,
+  K_CYCLE 재정의를 채택하면 k_cycle도 빠져 0이 된다.
 
 ### 6-4. 검증 (숫자 보고)
 1. **어제(08-05) 재계산 대조**: `extractor run --kpi <각각> 2026-08-05` 를 로컬 모드로 돌려
@@ -376,7 +386,8 @@ Toolbox 제거. `tt-scenario-yard.timer`는 유지(이제 Oracle 0).
 5. 부하 장부 재실행: t1 이 Oracle 0 이 된 것을 왕복 수로 확인.
 
 ### 6-5. 고지(보고서에 포함, 코드 아님)
-대시보드 표시값 이동 2건: K_RTG_Q +6%(계수 교정), K_CYCLE 재정의(41% 과소 교정). 사용자 인지 완료 상태.
+대시보드 표시값 이동 **1건**: K_RTG_Q ~+6%(원본 c08의 ~10중 계수 결함 교정 — 로컬이 옳음).
+K_CYCLE은 이 런에서 **바뀌지 않는다**(재정의는 별건). 나머지 KPI는 0.0~0.1% 동일.
 
 ## SCOPE — 이 런에서 하지 않는 것
 
