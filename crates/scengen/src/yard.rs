@@ -1,21 +1,27 @@
 //! Yard-crane (RTG + ES) move stream WITH decoded stack position -> scenario.yard_move. The event
-//! source for the incremental yard-state model. Watermark-incremental over MCH_OPERATION, SEEKing
-//! the PK on MCH_OPER_SEQNO (see the query comment). CRNT_PSN_IDX decode (verified vs CYY.CLOCATION):
+//! source for the incremental yard-state model. Watermark-incremental, SEEKing on seqno (see the
+//! query comment). CRNT_PSN_IDX decode (verified vs CYY.CLOCATION):
 //!   block_id=NO1 · bay_idx=NO2 · row_idx=NO3(A=0) · tier=NO4+1
 //! Isolated + kill-switch, like the other collectors.
+//!
+//! ★2026-08-06 (CHUNK 4-4) localized: source is now the local mirror `public.rtg_move_log`
+//! (landed by extractor::rtg_moves every 60s, pos1..4 added in mig0136/0137 + rtg_moves.rs
+//! CHUNK 4-2) instead of Oracle MCH_OPERATION directly. Zero Oracle queries here now. Decode,
+//! MAX_TIER gate, REJECTED logging, seqno watermark format, and yard_cell derivation are all
+//! unchanged — downstream (yard-build/assemble/status) sees no difference. pos1..4 arrive as TEXT
+//! (Oracle CRNT_PSN_IDX_NO1..4 is VARCHAR2, not NUMBER — measured in CHUNK 4-1/4-2), so this parses
+//! them the same tolerant way the old Oracle-JSON-string path did (util::parse_num).
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use serde_json::{json, Value};
+use serde_json::json;
 use sqlx::PgPool;
-use tt_core::parse::parse_rows;
 
 use crate::state::{self, Config};
-use crate::toolbox::Toolbox;
-use crate::util::{jstr, parse_myt};
+use crate::util::{parse_myt, parse_num};
 
 const STREAM: &str = "yard_move";
-const FETCH_CAP: u32 = 8000;
+const FETCH_CAP: i64 = 8000;
 /// Watermark safety lag (s) — covers TOS out-of-order row visibility. See util::wm_minus_secs.
 const LAG_S: i64 = 120;
 /// PHYSICAL stacking limit of an RTG/ES block — not a limit derived from what TOS sends.
@@ -46,7 +52,20 @@ pub async fn run(pool: &PgPool, target: &str) -> Result<()> {
     Ok(())
 }
 
-async fn tick(pool: &PgPool, run_id: i64, target: &str, cfg: &Config) -> Result<()> {
+#[derive(Debug, sqlx::FromRow)]
+struct MoveRow {
+    machno: String,
+    contno: String,
+    seqno: String,
+    jt: Option<String>,
+    comp: DateTime<Utc>,
+    b: Option<String>,
+    y: Option<String>,
+    rr: Option<String>,
+    tt: Option<String>,
+}
+
+async fn tick(pool: &PgPool, run_id: i64, _target: &str, _cfg: &Config) -> Result<()> {
     state::set_phase(pool, run_id, "extract").await?;
 
     // Seek from (watermark − LAG_S), not from the watermark itself — see util::wm_minus_secs.
@@ -56,14 +75,13 @@ async fn tick(pool: &PgPool, run_id: i64, target: &str, cfg: &Config) -> Result<
     // by the cap and self-catching-up, but a needless rescan) — don't delete it.
     let now = tt_core::shift::terminal_now();
     let day = now.format("%Y%m%d").to_string();
-    // Upper edge of this poll's window. It bounds the Oracle read AND, by construction, whatever can
+    // Upper edge of this poll's window. It bounds the read AND, by construction, whatever can
     // become the next watermark — without it a single future-dated SEQNO stalls this stream for good:
     // set_watermark advances with GREATEST and scenario.watermark holds one row per source, so there
     // is no earlier sane value left to fall back to. Clamping the READ is what heals it: a poisoned
     // value is ignored, the seek restarts from day start, and ON CONFLICT makes that re-read free.
     // Nothing is dropped — the bound follows the wall clock, so a key merely ahead of us arrives on a
-    // later tick. Same guard commit 4a7c53a gave the critical extractor's qc_moves/rtg_moves; this
-    // collector reads the same table and the same column, and was missed.
+    // later tick.
     let until = now.format("%Y%m%d%H%M%S").to_string();
     let wm = state::get_watermark(pool, STREAM)
         .await?
@@ -73,58 +91,53 @@ async fn tick(pool: &PgPool, run_id: i64, target: &str, cfg: &Config) -> Result<
         .and_then(|w| crate::util::wm_minus_secs(w, LAG_S))
         .unwrap_or_else(|| format!("{day}000000"));
 
-    // SEEK, not rescan (mirrors extractor::rtg_moves). MCH_OPER_SEQNO ("YYYYMMDDHHMMSS", globally
-    // monotonic completion order) is the LEADING column of PK MCH_PK_OPERATION, so `SEQNO >= wm`
-    // seeks via the PK — the INDEX hint pins it, ORDER BY SEQNO is then free, and FETCH stops early
-    // (so backlog catch-up is safe too). The previous form (COMPDATE = today AND the concatenated
-    // COMPDATE||COMPTIME > wm) could only range-scan the whole elapsed day and filter, and it lost
-    // rows two ways: `>` skipped same-second rows whenever the cap truncated (same second holds up
-    // to 6 moves here), and `COMPDATE = today` dropped the pre-midnight tail every night. `>=` plus
-    // ON CONFLICT dedups the tiny re-read losslessly. REGEXP '^(RTG|ES)' covers BOTH yard-crane
-    // families — the old LIKE 'RTG%' silently missed all 18 ES machines.
-    let sql = format!(
-        "SELECT /*+ INDEX(MCH_OPERATION MCH_PK_OPERATION) */
-                MCH_OPER_MACHNO AS machno, SUBSTR(MCH_OPER_CONTNO,1,11) AS contno,
-                MCH_OPER_SEQNO AS seqno, MCH_OPER_JOBTYPE AS jt,
-                MCH_OPER_COMPDATE||MCH_OPER_COMPTIME AS comp,
-                CRNT_PSN_IDX_NO1 AS b, CRNT_PSN_IDX_NO2 AS y,
-                CRNT_PSN_IDX_NO3 AS rr, CRNT_PSN_IDX_NO4 AS tt
-           FROM TOSADM.MCH_OPERATION
-          WHERE MCH_OPER_SEQNO >= '{wm}'
-            AND MCH_OPER_SEQNO <= '{until}'
-            AND REGEXP_LIKE(MCH_OPER_MACHNO, '^(RTG|ES)')
-            AND CRNT_PSN_IDX_NO1 IS NOT NULL
-            AND LENGTH(MCH_OPER_COMPTIME) >= 6
-          ORDER BY MCH_OPER_SEQNO
-          FETCH FIRST {FETCH_CAP} ROWS ONLY"
-    );
-
+    // CHUNK 4-4: local mirror instead of Oracle. rtg_move_log is landed every 60s by
+    // extractor::rtg_moves and already carries the decoded-position columns (pos1..4). The seqno
+    // format/ordering is unchanged (same 14-digit "YYYYMMDDHHMMSS" global-completion-order key,
+    // still the tiebreaker within a comp_ts second), so watermark handling is byte-identical to the
+    // Oracle-direct version. The range bound is expressed BOTH on comp_ts (indexed via
+    // rtg_move_log_comp_idx, so this seeks instead of scanning) and on seqno (the actual watermark
+    // semantics) — seqno and comp_ts are the same instant by construction (rtg_moves.rs derives both
+    // from MCH_OPER_SEQNO/COMPDATE||COMPTIME), so the two bounds agree; comp_ts just makes it fast.
+    let wm_ts = parse_myt(&wm)
+        .unwrap_or_else(|| (now - chrono::Duration::hours(24)).with_timezone(&Utc));
+    let until_ts = parse_myt(&until).unwrap_or(now.with_timezone(&Utc));
     let t0 = std::time::Instant::now();
-    let raw = Toolbox::from_env(target, cfg.oracle_timeout_s as u64)?
-        .run_sql(&sql)
-        .await?;
+    let rows: Vec<MoveRow> = sqlx::query_as(
+        "SELECT machno, contno, seqno, jobtype AS jt, comp_ts AS comp,
+                pos1 AS b, pos2 AS y, pos3 AS rr, pos4 AS tt
+           FROM rtg_move_log
+          WHERE comp_ts >= $1 AND comp_ts <= $2
+            AND seqno >= $3 AND seqno <= $4
+            AND pos1 IS NOT NULL
+          ORDER BY seqno
+          LIMIT $5",
+    )
+    .bind(wm_ts)
+    .bind(until_ts)
+    .bind(&wm)
+    .bind(&until)
+    .bind(FETCH_CAP)
+    .fetch_all(pool)
+    .await?;
     let query_ms = t0.elapsed().as_millis() as i64;
-    let rows: Vec<Value> = parse_rows(&raw)?;
     let fetched = rows.len();
-
-    let num = |r: &Value, k: &str| jstr(r, k).and_then(|s| s.parse::<i32>().ok());
 
     let mut tx = pool.begin().await?;
     let mut max_seq: Option<String> = None;
     let (mut inserted, mut rejected) = (0u64, 0u64);
     for r in &rows {
-        let (Some(machno), Some(contno), Some(seqno), Some(comp)) =
-            (jstr(r, "MACHNO"), jstr(r, "CONTNO"), jstr(r, "SEQNO"), jstr(r, "COMP"))
-        else {
+        let (machno, contno, seqno, comp_ts) =
+            (r.machno.clone(), r.contno.clone(), r.seqno.clone(), r.comp);
+        let (Some(b), Some(y), Some(ri), Some(tt)) = (
+            parse_num(r.b.as_deref()),
+            parse_num(r.y.as_deref()),
+            parse_num(r.rr.as_deref()),
+            parse_num(r.tt.as_deref()),
+        ) else {
             continue;
         };
-        let Some(comp_ts) = parse_myt(&comp) else { continue };
-        let (Some(b), Some(y), Some(ri), Some(tt)) =
-            (num(r, "B"), num(r, "Y"), num(r, "RR"), num(r, "TT"))
-        else {
-            continue;
-        };
-        let jt = jstr(r, "JT").unwrap_or_default();
+        let jt = r.jt.clone().unwrap_or_default();
         // Gate the stack position against MAX_TIER HERE, at the single choke point where TOS data
         // enters. checked_add because NO4 is an unvalidated i32 and i32::MAX would otherwise wrap
         // into a negative tier that reads as plausible-ish garbage.
@@ -170,9 +183,9 @@ async fn tick(pool: &PgPool, run_id: i64, target: &str, cfg: &Config) -> Result<
         state::set_watermark(pool, STREAM, mx).await?;
     }
 
-    let capped = fetched as u32 >= FETCH_CAP;
+    let capped = fetched as i64 >= FETCH_CAP;
     state::merge_json(pool, run_id, "load_stats", json!({
-        "queries": 1, "rows_read": fetched, "query_ms": query_ms, "fetch_capped": capped,
+        "queries": 0, "oracle": false, "rows_read": fetched, "query_ms": query_ms, "fetch_capped": capped,
     })).await?;
     state::merge_json(pool, run_id, "collection", json!({
         "fetched": fetched, "inserted": inserted, "rejected_position": rejected,
