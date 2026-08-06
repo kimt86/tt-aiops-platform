@@ -6,8 +6,8 @@ Description=wp-tt scenario quay-crane work-plan archiver every 5min (local-only;
 # 더 조밀하게 돌 이유는 없다 — 우리가 원하는 것은 접안 직전의 마지막 판본이고, 중간 판본은
 # 계획 변경 연구용 부산물이다. 그리고 놓쳐도 (vessel,voyage) 지정 Oracle 백필로 회수된다.
 OnBootSec=9min
-OnUnitActiveSec=300s
-AccuracySec=20s
+OnCalendar=*-*-* *:0/5:20
+AccuracySec=5s
 
 [Install]
 WantedBy=timers.target

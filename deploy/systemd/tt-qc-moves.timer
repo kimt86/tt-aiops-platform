@@ -3,8 +3,8 @@ Description=wp-tt quay-crane move stream every 1min (incremental MCH_OPERATION C
 
 [Timer]
 OnBootSec=90s
-OnUnitActiveSec=60s
-AccuracySec=5s
+OnCalendar=*-*-* *:*:05
+AccuracySec=1s
 
 [Install]
 WantedBy=timers.target

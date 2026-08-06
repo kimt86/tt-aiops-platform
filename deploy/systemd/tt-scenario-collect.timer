@@ -3,8 +3,8 @@ Description=wp-tt scenario collector every 10min (isolated; honors kill switch s
 
 [Timer]
 OnBootSec=6min
-OnUnitActiveSec=600s
-AccuracySec=30s
+OnCalendar=*-*-* *:0/10:40
+AccuracySec=5s
 
 [Install]
 WantedBy=timers.target

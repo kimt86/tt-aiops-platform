@@ -3,8 +3,8 @@ Description=tt scenario gate transactions every 5min (per-container CYC_HISTORY 
 
 [Timer]
 OnBootSec=11min
-OnUnitActiveSec=300s
-AccuracySec=20s
+OnCalendar=*-*-* *:0/5:30
+AccuracySec=5s
 
 [Install]
 WantedBy=timers.target

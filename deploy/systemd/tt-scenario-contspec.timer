@@ -7,8 +7,8 @@ Description=wp-tt scenario container-size lookup every 5min (prompt on purpose �
 # 비용은 배치 하나(컨테이너 1,000개까지)당 왕복 1회이고, 실측 225개 조회에 2.7초였다.
 # 사전이 차면 모르는 상자가 없어 **Oracle 을 아예 호출하지 않고** 끝나므로 유휴 비용이 0이다.
 OnBootSec=11min
-OnUnitActiveSec=300s
-AccuracySec=20s
+OnCalendar=*-*-* *:0/5:50
+AccuracySec=5s
 
 [Install]
 WantedBy=timers.target

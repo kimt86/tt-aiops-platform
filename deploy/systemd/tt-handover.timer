@@ -3,8 +3,8 @@ Description=wp-tt authoritative soon-idle labels every 60s (incremental JOB_ORDE
 
 [Timer]
 OnBootSec=2min
-OnUnitActiveSec=60s
-AccuracySec=10s
+OnCalendar=*-*-* *:*:45
+AccuracySec=1s
 
 [Install]
 WantedBy=timers.target
