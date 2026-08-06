@@ -29,6 +29,19 @@ const SQL_LOCAL_TT_CYCLE: &str = include_str!("../sql/local/l_tt_cycle.sql");
 const SQL_LOCAL_CRANEQ: &str = include_str!("../sql/local/l_crane_q.sql");
 const SQL_LOCAL_CYCLE: &str = include_str!("../sql/local/l_cycle.sql");
 
+// KPI_T1_SRC kill switch (PLAN-extractor.md CHUNK6 6-1/6-2): local Postgres mirror
+// (vessel-grouped, same shape as SQL_MPH) for the PRODUCTION src_mph_vessels /
+// src_qcq / src_cycle / src_craneq paths, distinct from the parity-only SQL_LOCAL_*
+// above (which stay machno-only / headline-only and keep logging to kpi_parity_log
+// regardless of this switch).
+const SQL_LOCAL_MPH_VESSEL: &str = include_str!("../sql/local/l_mph_vessel.sql");
+
+/// `KPI_T1_SRC=oracle` reverts src_mph_vessels/src_qcq/src_cycle/src_craneq to the
+/// Oracle path unchanged; any other value (including unset) = local (default).
+fn kpi_t1_src_local() -> bool {
+    std::env::var("KPI_T1_SRC").map(|v| v != "oracle").unwrap_or(true)
+}
+
 fn sum<T: Copy + Into<f64>>(it: impl Iterator<Item = Option<T>>) -> f64 {
     it.flatten().map(|v| v.into()).sum()
 }
@@ -252,12 +265,14 @@ pub async fn tick_shift(pool: &PgPool, target: &str, tier: &str) -> Result<()> {
         step!("qc_q", src_qcq(pool, target, date, sh, start, end));
         // TT cycle is now also an MCH_OPERATION query (cheap) → refresh it on the fast tier
         step!("cycle", src_cycle(pool, target, date, sh, start, end));
-        step!("voyage_plan", crate::vessel::extract_voyage_plan(pool, target, date));
     }
     if want_util {
         step!("util", src_util(pool, target, date, sh, start, end));
     }
     if want_heavy {
+        // moved from t1 -> t2 (PLAN-extractor.md CHUNK6 6-1): 228-row VSB_VOYAGE scan,
+        // no need for 3-minute freshness -- 15-minute is plenty.
+        step!("voyage_plan", crate::vessel::extract_voyage_plan(pool, target, date));
         step!("empty", src_empty(pool, target, date, sh, start, end));
         step!("crane_q", src_craneq(pool, target, date, sh, start, end));
         // K_CYCLE parity (l_cycle vs the nightly e3b raw_k_cycle already in Postgres) --
@@ -353,8 +368,15 @@ async fn src_util(pool: &PgPool, _target: &str, date: NaiveDate, sh: Shift, star
 async fn src_mph_vessels(pool: &PgPool, target: &str, date: NaiveDate, sh: Shift, start: NaiveDateTime, end: NaiveDateTime) -> Result<()> {
     let end2 = end;
     run_logged(pool, "K_MPH_SHIFT", date, |_| async move {
-        let sql = params::render_shift(SQL_MPH, date, start, end, Some(TimeCol::MchOper))?;
-        let rows: Vec<crate::kpis::k_mph_realtime::Row> = fetch(target, &sql).await?;
+        let local = kpi_t1_src_local();
+        let rows: Vec<crate::kpis::k_mph_realtime::Row> = if local {
+            let ws = tt_core::shift::terminal_to_utc(start);
+            let we = tt_core::shift::terminal_to_utc(end);
+            sqlx::query_as(SQL_LOCAL_MPH_VESSEL).bind(ws).bind(we).fetch_all(pool).await?
+        } else {
+            let sql = params::render_shift(SQL_MPH, date, start, end, Some(TimeCol::MchOper))?;
+            fetch(target, &sql).await?
+        };
 
         // K_MPH headline (active-hours-weighted)
         let num = sum(rows.iter().map(|r| match (r.k_mph_per_active_hour, r.active_hours) { (Some(m), Some(h)) => Some(m*h), _ => None }));
@@ -364,7 +386,10 @@ async fn src_mph_vessels(pool: &PgPool, target: &str, date: NaiveDate, sh: Shift
         // weight = Σactive_hours (the true K_MPH denominator), NOT the voyage count
         upsert_shift(pool, date, sh, "K_MPH", "move/hr", value, Some(voyages as i64), Some(den), start, end2).await?;
         if kpi_parity_enabled() {
-            parity_step!("K_MPH", parity_mph(pool, date, sh, start, end2, value, den as i64));
+            // local mode: no Oracle round trip happened here, so the oracle side of
+            // parity naturally stops logging (oracle_n=0 -> insert_parity skips it).
+            let (ov, on) = if local { (None, 0) } else { (value, den as i64) };
+            parity_step!("K_MPH", parity_mph(pool, date, sh, start, end2, ov, on));
         }
 
         // vessel panel (group the same rows by vessel/voyage)
@@ -375,15 +400,23 @@ async fn src_mph_vessels(pool: &PgPool, target: &str, date: NaiveDate, sh: Shift
 
 async fn src_qcq(pool: &PgPool, target: &str, date: NaiveDate, sh: Shift, start: NaiveDateTime, end: NaiveDateTime) -> Result<()> {
     run_logged(pool, "K_QC_NOMOVE_SHIFT", date, |_| async move {
-        let sql = params::render_shift(SQL_QCQ, date, start, end, Some(TimeCol::MchOper))?;
-        let rows: Vec<crate::kpis::k_qc_q::Row> = fetch(target, &sql).await?;
+        let local = kpi_t1_src_local();
+        let rows: Vec<crate::kpis::k_qc_q::Row> = if local {
+            let ws = tt_core::shift::terminal_to_utc(start);
+            let we = tt_core::shift::terminal_to_utc(end);
+            sqlx::query_as(SQL_LOCAL_QCQ).bind(ws).bind(we).fetch_all(pool).await?
+        } else {
+            let sql = params::render_shift(SQL_QCQ, date, start, end, Some(TimeCol::MchOper))?;
+            fetch(target, &sql).await?
+        };
         let num = sum(rows.iter().map(|r| match (r.avg_idle_sec, r.idle_periods) { (Some(a), Some(p)) => Some(a*p), _ => None }));
         let den = sum(rows.iter().map(|r| r.idle_periods));
         let value = if den > 0.0 { Some((num/den*10.0).round()/10.0) } else { None };
         // weight = Σidle_periods (= sample_n here)
         upsert_shift(pool, date, sh, "K_QC_NOMOVE", "s", value, Some(den as i64), Some(den), start, end).await?;
         if kpi_parity_enabled() {
-            parity_step!("K_QC_Q", parity_qcq(pool, date, sh, start, end, value, den as i64));
+            let (ov, on) = if local { (None, 0) } else { (value, den as i64) };
+            parity_step!("K_QC_Q", parity_qcq(pool, date, sh, start, end, ov, on));
         }
         // also K_QC_TT_WAIT (same-bay ≈ truck-wait) from the same rows (no extra Oracle hit)
         let sb_num = sum(rows.iter().map(|r| match (r.same_bay_avg_sec, r.same_bay_periods) { (Some(a), Some(p)) => Some(a*p), _ => None }));
@@ -414,15 +447,23 @@ async fn src_cycle(pool: &PgPool, target: &str, date: NaiveDate, sh: Shift, star
     // Displayed K_CYCLE is the REAL TT cycle (MCH_OPERATION per-truck QC-move interval),
     // not the container handling span. One aggregate row; value = median, weight = samples.
     run_logged(pool, "K_CYCLE_SHIFT", date, |_| async move {
-        let sql = params::render_shift(SQL_TT_CYCLE, date, start, end, Some(TimeCol::MchOper))?;
-        let rows: Vec<crate::kpis::k_tt_cycle::Row> = fetch(target, &sql).await?;
+        let local = kpi_t1_src_local();
+        let rows: Vec<crate::kpis::k_tt_cycle::Row> = if local {
+            let ws = tt_core::shift::terminal_to_utc(start);
+            let we = tt_core::shift::terminal_to_utc(end);
+            sqlx::query_as(SQL_LOCAL_TT_CYCLE).bind(ws).bind(we).fetch_all(pool).await?
+        } else {
+            let sql = params::render_shift(SQL_TT_CYCLE, date, start, end, Some(TimeCol::MchOper))?;
+            fetch(target, &sql).await?
+        };
         let r = rows.first();
         let samples = r.and_then(|x| x.samples).unwrap_or(0.0);
         let value = r.and_then(|x| x.med_sec).filter(|_| samples > 0.0);
         // weight = samples (= sample_n)
         upsert_shift(pool, date, sh, "K_CYCLE", "s", value, Some(samples as i64), Some(samples), start, end).await?;
         if kpi_parity_enabled() {
-            parity_step!("K_TT_CYCLE", parity_tt_cycle(pool, date, sh, start, end, value, samples as i64));
+            let (ov, on) = if local { (None, 0) } else { (value, samples as i64) };
+            parity_step!("K_TT_CYCLE", parity_tt_cycle(pool, date, sh, start, end, ov, on));
         }
         Ok(rows.len() as u64)
     }).await.map(|_| ())
@@ -430,16 +471,32 @@ async fn src_cycle(pool: &PgPool, target: &str, date: NaiveDate, sh: Shift, star
 
 async fn src_craneq(pool: &PgPool, target: &str, date: NaiveDate, sh: Shift, start: NaiveDateTime, end: NaiveDateTime) -> Result<()> {
     run_logged(pool, "K_RTG_Q_SHIFT", date, |_| async move {
-        let sql = params::render_shift(SQL_CRANEQ, date, start, end, Some(TimeCol::JobHist))?;
-        let rows: Vec<crate::kpis::k_crane_q_daily::Row> = fetch(target, &sql).await?;
-        let num = sum(rows.iter().map(|r| match (r.k_crane_q_avg_sec, r.in_range) { (Some(a), Some(n)) => Some(a*n), _ => None }));
-        let den = sum(rows.iter().map(|r| r.in_range));
+        let local = kpi_t1_src_local();
+        // local mode uses LocalCraneQRow (k_crane_q_avg_sec, in_range only -- the
+        // production fold below never touches jobtype/events_nn/etc), not
+        // k_crane_q_daily::Row (which requires a work_date this shift window has none
+        // of a single fixed value for).
+        let (num, den, n): (f64, f64, usize) = if local {
+            let ws = tt_core::shift::terminal_to_utc(start);
+            let we = tt_core::shift::terminal_to_utc(end);
+            let rows: Vec<LocalCraneQRow> = sqlx::query_as(SQL_LOCAL_CRANEQ).bind(ws).bind(we).fetch_all(pool).await?;
+            let num = sum(rows.iter().map(|r| match (r.k_crane_q_avg_sec, r.in_range) { (Some(a), Some(n)) => Some(a*n), _ => None }));
+            let den = sum(rows.iter().map(|r| r.in_range));
+            (num, den, rows.len())
+        } else {
+            let sql = params::render_shift(SQL_CRANEQ, date, start, end, Some(TimeCol::JobHist))?;
+            let rows: Vec<crate::kpis::k_crane_q_daily::Row> = fetch(target, &sql).await?;
+            let num = sum(rows.iter().map(|r| match (r.k_crane_q_avg_sec, r.in_range) { (Some(a), Some(n)) => Some(a*n), _ => None }));
+            let den = sum(rows.iter().map(|r| r.in_range));
+            (num, den, rows.len())
+        };
         let value = if den > 0.0 { Some((num/den*10.0).round()/10.0) } else { None };
         // weight = Σin_range (= sample_n here)
         upsert_shift(pool, date, sh, "K_RTG_Q", "s", value, Some(den as i64), Some(den), start, end).await?;
         if kpi_parity_enabled() {
-            parity_step!("K_RTG_Q", parity_craneq(pool, date, sh, start, end, value, den as i64));
+            let (ov, on) = if local { (None, 0) } else { (value, den as i64) };
+            parity_step!("K_RTG_Q", parity_craneq(pool, date, sh, start, end, ov, on));
         }
-        Ok(rows.len() as u64)
+        Ok(n as u64)
     }).await.map(|_| ())
 }

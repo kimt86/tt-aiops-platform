@@ -12,7 +12,7 @@ use crate::{params, runner::Toolbox};
 pub const KPI_KEY: &str = "K_UTIL_CRANE";
 const SQL: &str = include_str!("../../sql/e1c_k_util_crane_merged_intervals.sql");
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, sqlx::FromRow)]
 #[serde(rename_all = "UPPERCASE")]
 pub struct Row {
     pub machno: String,
@@ -61,7 +61,19 @@ pub async fn upsert(pool: &PgPool, date: NaiveDate, run_id: i64, rows: &[Row]) -
     Ok(rows.len() as u64)
 }
 
+// KPI_NIGHTLY_SRC kill switch (PLAN-extractor.md CHUNK6 6-3): local Postgres mirror
+// (qc_move_log + rtg_move_log, RTG% only -- mirrors the Oracle filter exactly)
+// instead of the Oracle MCH_OPERATION day scan.
+const SQL_LOCAL_DAY: &str = include_str!("../../sql/local/l_util_crane_day.sql");
+
 pub async fn extract(pool: &PgPool, date: NaiveDate, target: &str) -> Result<u64> {
+    if crate::kpis::common::nightly_src_local() {
+        return run_logged(pool, KPI_KEY, date, |run_id| async move {
+            let rows: Vec<Row> = sqlx::query_as(SQL_LOCAL_DAY).bind(date).fetch_all(pool).await?;
+            upsert(pool, date, run_id, &rows).await
+        })
+        .await;
+    }
     let sql = params::render_day(SQL, date)?;
     run_logged(pool, KPI_KEY, date, |run_id| async move {
         let raw = Toolbox::from_env(target)?.run_sql(&sql).await?;

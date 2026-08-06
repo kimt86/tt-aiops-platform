@@ -244,7 +244,6 @@ async fn run_kpi(pool: &sqlx::PgPool, kpi: &str, date: NaiveDate, target: &str) 
     }
 
     match kpi {
-        "k_util_tt" => step!("k_util_tt", kpis::k_util_tt::extract(pool, date, target)),
         "k_util_crane" => step!("k_util_crane", kpis::k_util_crane::extract(pool, date, target)),
         "k_mph_realtime" => step!("k_mph_realtime", kpis::k_mph_realtime::extract(pool, date, target)),
         "k_qc_q" => step!("k_qc_q", kpis::k_qc_q::extract(pool, date, target)),
@@ -256,7 +255,6 @@ async fn run_kpi(pool: &sqlx::PgPool, kpi: &str, date: NaiveDate, target: &str) 
         "k_crane_q_hour" => step!("k_crane_q_hour", kpis::k_crane_q_hour::extract(pool, date, target)),
         "all" => {
             // LOW-load first
-            step!("k_util_tt", kpis::k_util_tt::extract(pool, date, target));
             step!("k_util_crane", kpis::k_util_crane::extract(pool, date, target));
             step!("k_mph_realtime", kpis::k_mph_realtime::extract(pool, date, target));
             step!("k_qc_q", kpis::k_qc_q::extract(pool, date, target));
@@ -269,7 +267,7 @@ async fn run_kpi(pool: &sqlx::PgPool, kpi: &str, date: NaiveDate, target: &str) 
             step!("k_crane_q_hour", kpis::k_crane_q_hour::extract(pool, date, target));
         }
         other => anyhow::bail!(
-            "unknown --kpi '{other}' (have: all, k_util_tt, k_util_crane, k_mph_realtime, \
+            "unknown --kpi '{other}' (have: all, k_util_crane, k_mph_realtime, \
              k_empty, k_cycle, k_crane_q, k_crane_q_hour)"
         ),
     }

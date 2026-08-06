@@ -12,7 +12,7 @@ use crate::{params, runner::Toolbox};
 pub const KPI_KEY: &str = "K_CRANE_Q";
 const SQL: &str = include_str!("../../sql/c08_k_crane_q.sql");
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, sqlx::FromRow)]
 #[serde(rename_all = "UPPERCASE")]
 pub struct Row {
     pub work_date: String, // YYYYMMDD
@@ -69,7 +69,26 @@ pub async fn upsert(pool: &PgPool, run_id: i64, rows: &[Row]) -> Result<u64> {
     Ok(rows.len() as u64)
 }
 
+// KPI_NIGHTLY_SRC kill switch (PLAN-extractor.md CHUNK6 6-3): local Postgres mirror
+// (tos_handover_label, day window on comp_ts) instead of the Oracle
+// JOB_ORDER_HISTORY day scan.
+const SQL_LOCAL_DAY: &str = include_str!("../../sql/local/l_crane_q_day.sql");
+
 pub async fn extract(pool: &PgPool, date: NaiveDate, target: &str) -> Result<u64> {
+    if crate::kpis::common::nightly_src_local() {
+        return run_logged(pool, KPI_KEY, date, |run_id| async move {
+            let (ws, we) = crate::kpis::common::day_bounds_utc(date);
+            let work_date = date.format("%Y%m%d").to_string();
+            let rows: Vec<Row> = sqlx::query_as(SQL_LOCAL_DAY)
+                .bind(ws)
+                .bind(we)
+                .bind(&work_date)
+                .fetch_all(pool)
+                .await?;
+            upsert(pool, run_id, &rows).await
+        })
+        .await;
+    }
     let sql = params::render_day(SQL, date)?;
     run_logged(pool, KPI_KEY, date, |run_id| async move {
         let raw = Toolbox::from_env(target)?.run_sql(&sql).await?;
