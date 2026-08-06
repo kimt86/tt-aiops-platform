@@ -432,13 +432,24 @@ COUNT(*)만 = 2.01초 ⇒ **왕복 고정비 ~2초가 지배하고 payload 기�
 검증: 틱당 Oracle 쿼리 2회(pool·workqueue)로 감소 확인(저널/코드), 틱 벽시계 전후 비교,
 `live_workpool` 행수 정상(±10%), `live_assigned_tt` 갱신 지속, dispatch_pred_sample 5분 내.
 
-### 7-2. K_EMPTY 로컬 전환 (08-08 대기 해제)
-`tos_handover_label.trv_rng` 는 2026-08-06 15시(KST)부터 착지 중.
-`sql/e4_k_empty_decomposition.sql` 의 산식을 `sql/local/l_empty.sql` 로 이식
-(원본 필터 `LNDN_TRV_RNG BETWEEN 0 AND 5000` 등 그대로).
-`kpis/k_empty.rs` + `shift.rs::src_empty` 를 `KPI_NIGHTLY_SRC`/`KPI_T1_SRC` 기존 게이트에 맞춰 분기.
-★검증은 **오늘 15시 이후 창**으로만 대조(그 이전은 재료가 NULL이라 비교 불가 — 정상).
-차이가 크면 원인을 밝히되, 재료 부족 구간이면 "데이터 공백"으로 보고하고 진행.
+### 7-2. K_EMPTY 로컬 전환 — ★재료가 반쪽이었다(1차 실행이 잡은 계획 오류)
+CHUNK 4 가 `LNDN_TRV_RNG`(적재거리)만 받아왔는데, e4 의 K_EMPTY 는 **공차거리**가 본체다:
+`k_empty_ratio = un_lndn/(lndn+un_lndn)`, `avg_empty_m`/`total_empty_m` 는 `un_lndn` 단독.
+`UN_LNDN_TRV_RNG` 는 Postgres 어디에도 없다. 그래서 다음 순서로 한다:
+
+(a) **mig(다음 빈 번호)**: `ALTER TABLE tos_handover_label ADD COLUMN IF NOT EXISTS un_trv_rng DOUBLE PRECISION;`
+    (CHECK 금지. 타입 실측 완료: `UN_LNDN_TRV_RNG = NUMBER(8,1)` → f64. `LNDN_TRV_RNG` 와 동일.)
+(b) `crates/extractor/src/handover.rs` SELECT 에 `UN_LNDN_TRV_RNG AS un_trv_rng`(`Option<f64>`) 추가·착지.
+    같은 꼬리 seek 라 왕복 증가 0. 배포 후 첫 틱 저널 파싱 에러 확인 필수.
+(c) `sql/local/l_empty.sql` 로 e4 산식 이식(원본 필터·캡 그대로: `LNDN_TRV_RNG BETWEEN 0 AND 5000` 등).
+(d) `kpis/k_empty.rs` + `shift.rs::src_empty` 를 기존 `KPI_NIGHTLY_SRC`/`KPI_T1_SRC` 게이트로 분기하고
+    **local 로 전환**한다.
+★재료는 (b) 배포 시점부터 쌓인다. 그 이전 창은 로컬 산출이 **행 없음/NULL** 이 되는데
+  이는 오류가 아니라 **데이터 공백**이며 사용자가 허용했다(서비스 전 단계). 틀린 값을 만드느니
+  빈 값을 내라 — 재료 없는 창에서 비율을 계산해 내보내지 말 것.
+검증: (b) 후 10분 시점에 `SELECT count(*) FROM tos_handover_label WHERE un_trv_rng IS NOT NULL
+  AND captured_at > now()-interval '10 min'` > 0. 그 뒤 로컬 산출이 값을 내는지, Oracle 산출과
+  같은 창(배포 이후)으로 대조 가능하면 대조(불가하면 "재료 축적 중"으로 보고).
 
 ### 7-3. K_CYCLE 표시 정의 재정의 + k_cycle 로컬화 (사용자 승인)
 `kpi_shift.K_CYCLE` 과 nightly `raw_k_cycle` 을 **tt_move_log 기반(`l_cycle`)으로 재정의**한다.
