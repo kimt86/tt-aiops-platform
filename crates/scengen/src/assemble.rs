@@ -65,12 +65,14 @@ const BAY_GAP_CAP_S: (f64, f64) = (0.0, 1800.0);
 /// "shortest interval holding half the points" contest by chance. That is not a hypothesis; it is
 /// what a single day of data did. Same estimator, windows all ending 2026-08-05:
 ///
+/// ```text
 ///     window   n      shorth        window ending   n      shorth (7-day)
 ///     1 day    338    185           08-02          1019    268
 ///     3 day    852    220           08-03          1231    266
 ///     5 day  1,361    262           08-04          1531    257
 ///     7 day  1,873    268           08-05          1873    268
 ///                                   08-06          1933    267
+/// ```
 ///
 /// Per-day values for 07-31..08-04 sat at 257..265 and then 08-05 alone read 185, on a day whose
 /// median gap (308s) was unremarkable — it simply carried 12.4% of its gaps under 105s where the

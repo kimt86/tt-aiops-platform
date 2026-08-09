@@ -8,7 +8,8 @@
 //! those containers up by number: an index seek per container, batched.
 //!
 //! Measured cost: 1,000 containers per query ~1.7 s of Oracle time (100 -> 0.38 s). At ~8,600 gate
-//! moves a day and a 15-minute cadence that is ~90 containers, i.e. under half a second per tick —
+//! moves a day and the 5-minute timer (tt-scenario-gate.timer) that is ~30 containers per tick,
+//! ~15 rows returned, ~1.9 s round-trip of which most is transport (2026-08-10 24h telemetry) —
 //! lighter than the collectors that do seek by time.
 //!
 //! We store ONLY the three events the yard stream cannot give us:

@@ -1,5 +1,5 @@
 [Unit]
-Description=wp-tt scenario collector every 10min (isolated; honors kill switch scenario.config.enabled)
+Description=wp-tt scenario collector every 10min (LOCAL read of public.tos_handover_label — ZERO Oracle since 2026-08-06; honors kill switch scenario.config.enabled)
 
 [Timer]
 OnBootSec=6min

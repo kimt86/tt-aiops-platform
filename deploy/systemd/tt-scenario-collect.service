@@ -1,5 +1,5 @@
 [Unit]
-Description=wp-tt scenario collector (ISOLATED, non-critical) -> scenario.move_hist. Fault here never affects dispatch/dashboard extraction.
+Description=wp-tt scenario collector (ISOLATED, non-critical, LOCAL only): public.tos_handover_label -> scenario.move_hist. ZERO Oracle since 2026-08-06. Fault here never affects dispatch/dashboard extraction.
 After=network-online.target
 
 [Service]

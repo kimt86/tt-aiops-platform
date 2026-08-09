@@ -1,5 +1,5 @@
 [Unit]
-Description=wp-tt scenario yard-crane move stream every 5min (incremental MCH_OPERATION RTG; isolated; honors kill switch)
+Description=wp-tt scenario yard-crane move stream every 5min (LOCAL replay of public.rtg_move_log — ZERO Oracle since 2026-08-06; honors kill switch)
 
 [Timer]
 OnBootSec=7min

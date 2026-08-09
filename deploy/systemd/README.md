@@ -18,17 +18,20 @@ Unit files are named `tt-*`. Two families live here and they are deliberately ke
 
 Conservative, load-conscious cadence against the live Oracle:
 
-| timer | command | cadence |
-|---|---|---|
-| `tt-nightly` | `extractor run --kpi all` (yesterday, authoritative) | 01:30 daily |
-| `tt-shift-t1` | `extractor tick --shift --tier t1` (MPH/QC-wait/util + vessels, **LIVE tab**) | 3 min |
-| `tt-shift-t2` | `extractor tick --shift --tier t2` (empty/cycle/crane-q cumulative, **LIVE tab**) | 15 min |
-| `tt-qc-moves` | `extractor qc-moves` (quay-crane move stream) | 60 s |
-| `tt-rtg-moves` | `extractor rtg-moves` (yard-crane move stream) | 60 s |
-| `tt-handover` | `extractor handover` | 60 s |
-| `tt-workpool` | `extractor workpool` | 90 s |
-| `tt-weather-live` | `extractor weather-live` | 3 min |
-| `tt-weather` | `extractor weather` | 60 min |
+| timer | command | cadence | Oracle |
+|---|---|---|---|
+| `tt-nightly` | `extractor run --kpi all` (yesterday, authoritative) | 01:30 daily | k_cycle only (rest local since 2026-08-06) |
+| `tt-shift-t1` | `extractor tick --shift --tier t1` (MPH/QC-wait/util + vessels, **LIVE tab**) | 3 min | **no** (local since 2026-08-06) |
+| `tt-shift-t2` | `extractor tick --shift --tier t2` (voyage_plan + cumulative KPIs, **LIVE tab**) | 15 min | voyage_plan only |
+| `tt-qc-moves` | `extractor qc-moves` (quay-crane move stream) | 60 s | yes (PK seek) |
+| `tt-rtg-moves` | `extractor rtg-moves` (yard-crane move stream) | 60 s | yes (PK seek) |
+| `tt-handover` | `extractor handover` | 60 s | yes (index seek) |
+| `tt-workpool` | `extractor workpool` (merged 1-pull since 2026-08-10) | 60 s | yes |
+| `tt-vessel-schedule` | `extractor vessel-schedule` | 5 min | yes |
+| `tt-stowplan` | `extractor stowplan` (UPD_DT delta) | 2 min | yes |
+| `tt-stowplan-recon` | `extractor stowplan --reconcile` | 1 h | yes |
+| `tt-weather-live` | `extractor weather-live` | 3 min | **no** (HTTP) |
+| `tt-weather` | `extractor weather` | 60 min | **no** (HTTP) |
 
 Local (no Oracle) derivations driven by `psql` over `scripts/*.sql`:
 
@@ -49,12 +52,15 @@ soon as a new shift starts.
 
 | timer | command | cadence | Oracle |
 |---|---|---|---|
-| `tt-scenario-collect` | `scengen collect` (vessel attribution stream) | 10 min | yes |
-| `tt-scenario-yard` | `scengen yard-moves` (yard-crane moves + decoded slot) | 5 min | yes |
-| `tt-scenario-gate` | `scengen gate` (gate transaction times for the local GI/GO containers) | 5 min | yes |
-| `tt-scenario-enrich` | `scengen enrich` (vessel particulars, container details) | 15 min | yes |
-| `tt-scenario-yard-build` | `scengen yard-build` (replays moves into the stack model) | 10 min | **no** |
-| `tt-scenario-snapshot` | `scengen snapshot` | — | **do not enable** |
+| `tt-scenario-collect` | `scengen collect` (vessel attribution stream) | 10 min | **no** (local `tos_handover_label` since 2026-08-06) |
+| `tt-scenario-yard` | `scengen yard-moves` (yard-crane moves + decoded slot) | 5 min | **no** (local `rtg_move_log` since 2026-08-06) |
+| `tt-scenario-gate` | `scengen gate` (gate transaction times for the local GI/GO containers) | 5 min | yes (PK IN seek) |
+| `tt-scenario-contspec` | `scengen container-spec` (ISO size for unknown containers) | 5 min | yes (PK IN seek, skips when drained) |
+| `tt-scenario-enrich` | `scengen enrich` (vessel particulars, container details) | 15 min | yes (new voyages only, ~17/day) |
+| `tt-scenario-plan` | `scengen qc-plan` (work-plan archiver from `live_workqueue`) | 5 min | **no** |
+| `tt-scenario-assemble` | `scengen assemble` (queued window builds) | 2 min | **no** |
+| `tt-scenario-plan-backfill` | `scengen plan-backfill` | 10 min | **disabled** (would seek `JOB_QUEUE_SCHEDULE` if enabled) |
+| `tt-scenario-snapshot` | `scengen snapshot` | — | **do not enable** (full aggregate of a hot table) |
 
 `tt-scenario-gate` is the odd one out: its watermark points at **our own** `rtg_move_log`, not at an
 Oracle key, because `CYC_HISTORY` has no time-leading index. It walks the local gate moves forward
@@ -83,15 +89,18 @@ systemctl --user daemon-reload
 systemctl --user enable --now tt-api.service
 systemctl --user enable --now tt-nightly.timer tt-shift-t1.timer tt-shift-t2.timer \
                               tt-qc-moves.timer tt-rtg-moves.timer tt-handover.timer \
-                              tt-workpool.timer tt-weather.timer tt-weather-live.timer
+                              tt-workpool.timer tt-vessel-schedule.timer \
+                              tt-stowplan.timer tt-stowplan-recon.timer \
+                              tt-weather.timer tt-weather-live.timer
 systemctl --user enable --now tt-move-log.timer tt-cycle-recon.timer \
                               tt-cycle-pred-shadow.timer tt-learn-cycle-remaining.timer
 
-# scenario subsystem (5 timers — snapshot is on-demand, see above)
+# scenario subsystem (8 timers — snapshot and plan-backfill stay off, see above)
 systemctl --user enable --now tt-scenario-web.service
 systemctl --user enable --now tt-scenario-collect.timer tt-scenario-yard.timer \
                               tt-scenario-gate.timer tt-scenario-yard-build.timer \
-                              tt-scenario-enrich.timer
+                              tt-scenario-enrich.timer tt-scenario-contspec.timer \
+                              tt-scenario-plan.timer tt-scenario-assemble.timer
 
 # keep everything running after logout (REQUIRED — otherwise --user units stop on SSH disconnect)
 loginctl enable-linger tkadmin
@@ -125,7 +134,10 @@ forward to "now", which turns the gap into permanent data loss.
 
 ## Tuning load
 
-- Widen intervals (`OnUnitActiveSec`) to reduce Oracle hits; `daemon-reload` after editing.
+- Widen intervals (`OnUnitActiveSec`, or the `OnCalendar` step for the second-staggered units)
+  to reduce Oracle hits; `daemon-reload` after editing. Firing seconds are deliberately spread
+  (:05 qc / :15 stowplan / :25 rtg / :30 gate / :35 vessel / :45 handover / :50 contspec /
+  :55 workpool) — keep a new timer off those slots.
 - The scenario collectors serialize their Oracle access with `flock(1)` among themselves. The
   critical extractors are deliberately **outside** that lock — several fire every 60 s and must not
   queue behind a scenario query.
