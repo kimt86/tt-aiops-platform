@@ -126,6 +126,15 @@ struct QueueOut {
     eta_bias_s: i64,
     /// SHADOW: this bay's total processing seconds (moves + transition overhead).
     proc_s: Option<i64>,
+    /// SHADOW(직렬화 제외·pool_mode=3): 크레인 타임라인에서 이 큐보다 앞에 남은 무브 수(들어올림 환산).
+    #[serde(skip)]
+    pace_before_n: Option<i64>,
+    /// SHADOW(직렬화 제외·pool_mode=3): 이 큐의 선박 '마지막 베이'까지 크레인이 해야 할 누적 무브 수.
+    #[serde(skip)]
+    pace_total_n: Option<i64>,
+    /// SHADOW(직렬화 제외·pool_mode=3): 이 선박의 출항 목표(finish_by = min(출항−버퍼, ESTWKC 가드)).
+    #[serde(skip)]
+    pace_finish_by: Option<DateTime<Utc>>,
 }
 
 #[derive(Serialize)]
@@ -291,6 +300,9 @@ pub(crate) async fn build_workpool(pool: PgPool) -> Result<WorkpoolOut, AppError
                     work_eta_ts: None,
                     eta_bias_s: 0,
                     proc_s: None,
+                    pace_before_n: None,
+                    pace_total_n: None,
+                    pace_finish_by: None,
                 }
             })
             .collect();
@@ -513,6 +525,9 @@ pub(crate) async fn build_workpool(pool: PgPool) -> Result<WorkpoolOut, AppError
             });
             {
                 let mut procs: Vec<f64> = Vec::with_capacity(idxs.len());
+                // 무브 수(들어올림 환산) — pool_mode=3 균등 페이스 마감용. procs(초)와 달리
+                // 시간이 아니라 개수다: (출항까지 남은 시간)÷(남은 무브 수)가 무브당 배정 시간.
+                let mut moves_n: Vec<f64> = Vec::with_capacity(idxs.len());
                 let mut prev: Option<(String, char, char)> = None;
                 for &i in &idxs {
                     // 트윈 비율은 선박 속성이라 큐마다 그 큐의 선박 것으로 본다(통합 타임라인이라
@@ -547,13 +562,16 @@ pub(crate) async fn build_workpool(pool: PgPool) -> Result<WorkpoolOut, AppError
                         }
                     }
                     procs.push(p);
+                    moves_n.push((remaining as f64) * move_factor);
                     prev = cur;
                 }
                 // 접미합 suffix[j] = procs[j..] 총합 → 구간합을 O(1)로.
                 let n = idxs.len();
                 let mut suffix = vec![0.0_f64; n + 1];
+                let mut suffix_n = vec![0.0_f64; n + 1];
                 for k in (0..n).rev() {
                     suffix[k] = suffix[k + 1] + procs[k];
+                    suffix_n[k] = suffix_n[k + 1] + moves_n[k];
                 }
                 // 각 선박의 '마지막 베이'가 통합 타임라인에서 어디인지 (그 배가 끝나는 지점)
                 let mut last_of: BTreeMap<String, usize> = BTreeMap::new();
@@ -579,6 +597,13 @@ pub(crate) async fn build_workpool(pool: PgPool) -> Result<WorkpoolOut, AppError
                     let cum_after = (suffix[k + 1] - suffix[last + 1]).max(0.0);
                     qc.queues[qi].deadline_ts =
                         Some(finish_by - chrono::Duration::seconds(cum_after as i64));
+                    // pool_mode=3 균등 페이스 재료: 이 큐 앞의 무브 수 / 선박 마지막 베이까지의
+                    // 누적 무브 수 / 출항 목표. 마감 계산은 소비처(stage2_work_candidates)가
+                    // 매 틱 fresh now 로 한다 — 값이 아니라 재료를 넘겨야 재앵커가 산다.
+                    qc.queues[qi].pace_before_n = Some((suffix_n[0] - suffix_n[k]).round() as i64);
+                    qc.queues[qi].pace_total_n =
+                        Some((suffix_n[0] - suffix_n[last + 1]).round() as i64);
+                    qc.queues[qi].pace_finish_by = Some(finish_by);
                 }
                 // QC 헤더는 '지금 작업 중인 배'(vessels[0] = 활성 무브 기준) 기준으로 낸다.
                 if let Some(vessel) = qc.vessels.first().cloned() {
@@ -979,14 +1004,23 @@ pub(crate) async fn stage2_work_candidates(pool: PgPool) -> Result<Vec<Stage2Wor
     // 출항 역산 마감(deadline_ts)·베이 처리시간(proc_s)도 같이 담는다(신규 계산 0, :465/:479에서 이미
     // 산출됨). ⚠ QcOut.slack_s는 쓰지 않는다 — QC의 '첫 선박'에만 채워지고(:482) 64개 중 37 QC가
     // 다선박이라 같은 QC의 모든 베이가 동일값이 되며, dispatch_pred_sample.slack_s와 이름이 충돌한다.
-    let mut eta: HashMap<(String, String, String), (DateTime<Utc>, Option<DateTime<Utc>>, Option<i64>)> = HashMap::new();
+    let mut eta: HashMap<
+        (String, String, String),
+        (DateTime<Utc>, Option<DateTime<Utc>>, Option<i64>, Option<i64>, Option<i64>, Option<DateTime<Utc>>),
+    > = HashMap::new();
     for qc in &wp.qcs {
         for q in &qc.queues {
             if let Some(e) = q.work_eta_ts {
-                eta.insert((qc.qc.clone(), q.vessel.clone(), q.queuename.clone()), (e, q.deadline_ts, q.proc_s));
+                eta.insert(
+                    (qc.qc.clone(), q.vessel.clone(), q.queuename.clone()),
+                    (e, q.deadline_ts, q.proc_s, q.pace_before_n, q.pace_total_n, q.pace_finish_by),
+                );
             }
         }
     }
+    // pool_mode=3 마감의 시계 원점 — 매 호출(60초 틱)마다 fresh. 완료·시각 경과가 반영된
+    // 재료(pace_*)와 함께 "출항까지 남은 시간 기준 균등 배분"이 계속 다시 계산된다.
+    let now_ts = Utc::now();
     // 설계 ②의 "트럭 준비시간" = 작업 할당부터 QC 작업지점 도착까지. 학습값을 쓴다(mig 0116의
     // realized_lead_s = TOS 실현 선행시간 = 배차 → 크레인 핸드오버, 7일 창으로 재측정).
     // ⚠ 같은 표의 extra_s 가 아니다 — 그건 "픽업 지점 도착 **이후**" 남은 몫이라 주행이 빠져 있다.
@@ -1017,6 +1051,14 @@ pub(crate) async fn stage2_work_candidates(pool: PgPool) -> Result<Vec<Stage2Wor
         let lead = lead_realized.get(&jt).copied()
             .unwrap_or(if jt == "LD" { LEAD_LD_S } else { LEAD_DS_S });
         let row = eta.get(&(qc.clone(), c.vessel.clone(), c.queuename.clone())).copied();
+        // 균등 페이스 (pool_mode=3): 첫 상자 마감 = now + (앞 무브 수 × 무브당 배정 시간).
+        // 목표 없으면 종전 전방 예측(work_eta) 폴백. 이 집계 경로는 상자 단위가 못 덮는 구역만.
+        let first_due = row.and_then(|r| r.5).map(|fb| {
+            let total_n = row.and_then(|r| r.4).unwrap_or(0).max(1);
+            let before_n = row.and_then(|r| r.3).unwrap_or(0).max(0);
+            let pace = ((fb - now_ts).num_seconds() / total_n).max(1);
+            now_ts + chrono::Duration::seconds(before_n * pace)
+        }).or(row.map(|r| r.0));
         out.push(Stage2Work {
             qc,
             vessel: c.vessel.clone(),
@@ -1027,7 +1069,7 @@ pub(crate) async fn stage2_work_candidates(pool: PgPool) -> Result<Vec<Stage2Wor
             work_eta_ts: row.map(|r| r.0),
             deadline_ts: row.and_then(|r| r.1),
             proc_s: row.and_then(|r| r.2),
-            dispatch_deadline_ts: row.map(|r| r.0 - chrono::Duration::seconds(lead)),
+            dispatch_deadline_ts: first_due.map(|e| e - chrono::Duration::seconds(lead)),
             dd_lead_s: Some(lead),
             slot_idx: None,   // live_candidate 는 집계 버킷이라 상자 단위가 아니다
             move_s: None,
@@ -1139,6 +1181,8 @@ pub(crate) async fn stage2_work_candidates(pool: PgPool) -> Result<Vec<Stage2Wor
          ),
          pp AS (        -- 계획에서의 자리: 같은 구역에서 planseq 가 더 작은 상자가 몇 개인가.
                         -- 우리 목록이 아니라 **계획 전체**를 세는 것이 이 배선의 핵심이다.
+                        -- ⚠ live_stow_plan 은 '남은 상자만의 거울'이다(완료 상자는 즉시 사라짐,
+                        -- 2026-08-10 실측) — 그래서 pos 는 절대 순번이 아니라 잔여 순번이다.
            SELECT vessel, voyage, queuename, contno,
                   (row_number() OVER (PARTITION BY vessel, voyage, queuename
                                       ORDER BY planseq NULLS LAST, contno) - 1) AS pos
@@ -1176,6 +1220,21 @@ pub(crate) async fn stage2_work_candidates(pool: PgPool) -> Result<Vec<Stage2Wor
         let row = eta.get(&(qc.clone(), vessel.clone(), queuename.clone())).copied();
         // 상자별 시각 = 구역 시작 + slot_idx × 순번당 걸음
         let box_eta = row.map(|r| r.0 + chrono::Duration::seconds(slot_idx * move_s));
+        // ── 배차 마감 = 출항 요구 페이스 균등 배분 (2026-08-10 재정의 · pool_mode=3) ────
+        // 무브가 실제 몇 초 걸릴지는 스케줄에 넣지 않는다(그건 급함의 잣대일 뿐).
+        //   무브당 배정 시간 = (출항 목표 − 지금) ÷ (선박 마지막 베이까지 남은 무브 수)
+        //   j번째 무브 시작 시각 = now + j × 배정 시간,  j = 앞 무브 수 + 구역 안 순번
+        // 시계가 흐르고 QC 완료가 쌓일 때마다(반영 ≤ ~2분) 이 나눗셈이 다시 되므로 마감은
+        // 항상 현재 기준이다 — 크레인이 밀리면 저절로 급해지고, 빠르면 느슨해진다.
+        // 모든 배의 첫 무브는 항상 '지금' 마감이라 활발한 구역이 풀에서 사라지지 않는다.
+        // 늦은 배(목표 ≤ now)는 페이스 1초 바닥 → 전부 지금 마감·순번 순서 유지.
+        // 출항 목표가 없는 배(스케줄 미상·가상선박)는 종전 전방 예측 마감으로 폴백.
+        let box_due = row.and_then(|r| r.5).map(|fb| {
+            let total_n = row.and_then(|r| r.4).unwrap_or(0).max(1);
+            let before_n = row.and_then(|r| r.3).unwrap_or(0).max(0);
+            let pace = ((fb - now_ts).num_seconds() / total_n).max(1);
+            now_ts + chrono::Duration::seconds((before_n + slot_idx) * pace)
+        }).or(box_eta);
         out.push(Stage2Work {
             qc,
             vessel,
@@ -1186,7 +1245,7 @@ pub(crate) async fn stage2_work_candidates(pool: PgPool) -> Result<Vec<Stage2Wor
             work_eta_ts: box_eta,
             deadline_ts: row.and_then(|r| r.1),
             proc_s: row.and_then(|r| r.2),
-            dispatch_deadline_ts: box_eta.map(|e| e - chrono::Duration::seconds(lead)),
+            dispatch_deadline_ts: box_due.map(|e| e - chrono::Duration::seconds(lead)),
             dd_lead_s: Some(lead),
             slot_idx: Some(slot_idx as i32),
             move_s: Some(move_s),

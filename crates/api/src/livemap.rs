@@ -4672,8 +4672,12 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
             let eta_by_key: HashMap<(String, String, String), i64> = work.iter()
                 .filter_map(|w| w.work_eta_ts.map(|e| ((w.qc.clone(), w.vessel.clone(), w.queuename.clone()), e.timestamp_millis())))
                 .collect();
-            // 구동 풀(mig 0121 → 0132 → 0133) — 레거시 풀은 제거됐다. pool_mode=1 항상.
-            let pool_mode: i16 = 1;
+            // 구동 풀(mig 0121 → 0132 → 0133 → 0140 → 0141). pool_mode=3: 마감 = 출항 요구
+            // 페이스 균등 배분 — (출항까지 남은 시간)÷(남은 무브 수)를 무브당 배정 시간으로,
+            // j번째 무브 시작 = now + j×배정시간, 매 틱 fresh now 로 재계산(2026-08-10 확정).
+            // 2(출항 역산×학습 걸음, 같은 날 ~30분 라이브)·1(전방 예측 마감, 08-06~10)과
+            // 모집단이 다르므로 집계는 반드시 이 값으로 가른다.
+            let pool_mode: i16 = 3;
             let driving: Vec<(usize, i64)> = pool_new;
             // STAGE 2 — PURE EFFICIENCY MATCHING. The work pool + per-crane demand caps are already
             // fixed by Stage 1; here each edge cost is just the truck's empty travel (+ anti-thrash
