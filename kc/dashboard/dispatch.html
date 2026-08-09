@@ -75,7 +75,7 @@
   <div class="kc-cal note"><span class="h">이제 단계별 학습 + 자가보정 (2026-07-09)</span><p>예전엔 상태별 고정 상수(운반 ~17분 · 도착대기 ~8분 · 임박 ~2분)였으나, 지금은 <strong>사이클 단계별로 실측을 학습</strong>(<code>free_in_sample</code>: delivering · approach · wait · soon)하고 <strong>잔차로 자가보정</strong>합니다(mig 0084–86). 러닝 센터의 ⑤ 곧-빔 게이트와 ⑥ 유휴분 카드도 <strong>한 카드로 통합</strong>됐습니다. 값(<code>free_in</code>)은 아직 <strong>표시 전용</strong>(그림자)이고 배차 결정엔 미사용. 상세 <a href="/kc/dashboard/learning.html">러닝 센터</a>.</p></div>
 
   <h2>4. 작업 풀 융합 — "계획(TOS) + 실측(GPS)"</h2>
-  <p>작업 풀은 <strong>TOS의 "지금 할 일"</strong>(90초마다 갱신)과 <strong>websocket 실측</strong>을 합칩니다.</p>
+  <p>작업 풀은 <strong>TOS의 "지금 할 일"</strong>(60초마다 갱신)과 <strong>websocket 실측</strong>을 합칩니다.</p>
   <div class="kc-tablewrap"><table>
     <thead><tr><th>화면 값</th><th>출처</th><th>뜻</th></tr></thead>
     <tbody>

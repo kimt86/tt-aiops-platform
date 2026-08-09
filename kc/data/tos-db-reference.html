@@ -76,7 +76,7 @@ websocket   ──(SSH 터널 → API 인제스트)▶ 메모리(라이브맵·�
   </table></div>
 
   <h3>3.5 라이브 작업지시 — 작업 풀 (현재 진행/대기)</h3>
-  <p>완료 이력(3.1~3.4)과 달리 <strong>지금 처리할 작업</strong>은 두 라이브 테이블에. 90초 추출 → TT 페이지. (<a href="/kc/data/dispatch-pools.html">차량·작업 풀 갱신</a>)</p>
+  <p>완료 이력(3.1~3.4)과 달리 <strong>지금 처리할 작업</strong>은 두 라이브 테이블에. 60초 추출 → TT 페이지. (<a href="/kc/data/dispatch-pools.html">차량·작업 풀 갱신</a>)</p>
   <div class="kc-tablewrap"><table>
     <thead><tr><th>JOB_ORDER_LIST 컬럼</th><th>의미</th></tr></thead>
     <tbody>
@@ -123,7 +123,7 @@ websocket   ──(SSH 터널 → API 인제스트)▶ 메모리(라이브맵·�
       <tr><td>L1 rollup (<code>kpi_daily</code>)</td><td>KPI별 일 권위 값(트렌드·이력 소스).</td></tr>
       <tr><td>L2 stats (<code>kpi_baseline</code>)</td><td>4주 롤링 + Welch t-test.</td></tr>
       <tr><td>LIVE (<code>kpi_shift</code> 등)</td><td>현재 교대 누적 → "오늘"을 Oracle 재스캔 없이.</td></tr>
-      <tr><td>작업풀 (<code>live_workqueue/pool</code>)</td><td>90초 full-replace.</td></tr>
+      <tr><td>작업풀 (<code>live_workqueue/pool</code>)</td><td>60초 full-replace.</td></tr>
     </tbody>
   </table></div>
   <div class="kc-cal warn"><span class="h">시간대(필수)</span><p>서버는 KST지만 터미널/Oracle은 <strong>MYT(UTC+8, Westports)</strong>. 교대 감지·기간 경계는 반드시 <code>wp_core::shift::terminal_now()</code> 사용(서버 <code>Local::now()</code>를 쓰면 교대 1h 오판·0행). 화면 표시 시각도 터미널 현지(MYT).</p></div>

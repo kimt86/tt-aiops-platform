@@ -1,10 +1,11 @@
 [Unit]
-Description=wp-tt LIVE work-pool snapshot every 90s (one bounded JOB_QUEUE_SCHEDULE + JOB_ORDER_LIST pull)
+Description=wp-tt LIVE work-pool snapshot every 60s (one merged pool_tick pull; CHUNK8)
 
 [Timer]
 OnBootSec=1min
-OnUnitActiveSec=90s
-AccuracySec=10s
+# :15 — clear of the 60s move triad (:05/:25/:45) and vessel-schedule (:35).
+OnCalendar=*-*-* *:*:15
+AccuracySec=1s
 
 [Install]
 WantedBy=timers.target

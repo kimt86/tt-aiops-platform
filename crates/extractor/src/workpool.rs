@@ -1,13 +1,16 @@
-//! Live work-pool snapshot extract. Two bounded Oracle scans per ~90s tick
-//! (PLAN-extractor CHUNK7 7-1(a): down from four — SQL_ASSIGNED folded into the main
-//! JOB_ORDER_LIST scan, vessel_schedule moved to its own subcommand/timer in 7-1(b)):
-//!   1. JOB_QUEUE_SCHEDULE → live_workqueue (per-QC queue plan + progress).
-//!   2. JOB_ORDER_LIST (A + B + Q, any jobtype) → split in Rust into:
+//! Live work-pool snapshot extract. ONE bounded Oracle round-trip per 60s tick
+//! (CHUNK8 2026-08-10: down from two — the JOB_QUEUE_SCHEDULE scan rides the same
+//! UNION ALL as the JOB_ORDER_LIST scan, discriminated by SRC; round-trip fixed cost
+//! ~2s dominates payload, so fewer round-trips is the lever, not fewer rows.
+//! History: CHUNK7 7-1(a) folded SQL_ASSIGNED in, 7-1(b) split vessel_schedule out):
+//!   SRC='WQ' JOB_QUEUE_SCHEDULE → live_workqueue (per-QC queue plan + progress).
+//!   SRC='WP' JOB_ORDER_LIST (A + B + Q, any jobtype) → split in Rust into:
 //!        - live_assigned_tt (any row with a non-empty YTNO — the old SQL_ASSIGNED
 //!                            population: any jobtype, status A/B/Q)
 //!        - live_workpool  (DS/LD + A = dispatched in-flight moves, the QC task cards)
 //!        - live_candidate (DS/LD + Q + empty YTNO = UNASSIGNED demand, aggregated:
 //!                          discharge by QC, load by source block — dispatch candidate pool)
+//! Kill switch: env WORKPOOL_FETCH=split reverts to the two separate scans.
 //! This is the ONLY path that brings the work pool into Postgres; the API crate can't
 //! reach Oracle. "Live now" (no date window) — bounded by status + recent CRE_DT to
 //! keep the scan small and Oracle-friendly.
@@ -25,6 +28,7 @@ use crate::runner::Toolbox;
 
 const SQL_WORKQUEUE: &str = include_str!("../sql/workqueue.sql");
 const SQL_WORKPOOL: &str = include_str!("../sql/workpool.sql");
+const SQL_POOL_TICK: &str = include_str!("../sql/pool_tick.sql");
 const SQL_VESSEL_SCHEDULE: &str = include_str!("../sql/vessel_schedule.sql");
 
 #[derive(Debug, Deserialize)]
@@ -89,6 +93,130 @@ pub struct MoveRow {
     pub twinkey: Option<String>, // twin pair grouping (same twinkey = 2 containers, 1 truck)
 }
 
+/// One row of the merged pool-tick scan (sql/pool_tick.sql): the superset of
+/// QueueRow (SRC='WQ') and MoveRow (SRC='WP') columns, NULL-padded per branch.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "UPPERCASE")]
+pub struct PoolTickRow {
+    pub src: String, // 'WQ' | 'WP'
+    pub queuename: Option<String>,
+    pub vessel: String,
+    pub voyage: Option<String>,
+    // WQ branch
+    pub qc: Option<String>,
+    pub disload: Option<String>,
+    pub seq: Option<i64>,
+    pub total_qty: Option<i64>,
+    pub comp_qty: Option<i64>,
+    pub plan_qty: Option<i64>,
+    // WP branch
+    pub jobtype: Option<String>,
+    pub jobstatus: Option<String>,
+    pub yt_status: Option<String>,
+    pub ytno: Option<String>,
+    pub armgc: Option<String>,
+    pub etw_dt: Option<String>,
+    pub actv_dt: Option<String>,
+    pub upd_dt: Option<String>,
+    pub cre_dt: Option<String>,
+    pub contno: Option<String>,
+    pub msnseq: Option<String>,
+    pub seqno: Option<String>,
+    pub yt_topos: Option<String>,
+    pub from_pos: Option<String>,
+    pub to_pos: Option<String>,
+    pub twintandem: Option<String>,
+    pub twinkey: Option<String>,
+}
+
+/// Split merged pool-tick rows back into the two shapes the landing code expects.
+/// A WQ row with no crane can't key live_workqueue — skip it with a warning rather
+/// than failing the batch (the SQL WHERE already excludes them; this is belt+braces).
+fn split_pool_tick(rows: Vec<PoolTickRow>) -> (Vec<QueueRow>, Vec<MoveRow>) {
+    let mut wq = Vec::new();
+    let mut wp = Vec::new();
+    for r in rows {
+        if r.src == "WQ" {
+            let (Some(qc), Some(queuename)) = (r.qc, r.queuename) else {
+                tracing::warn!(vessel = %r.vessel, "pool_tick WQ row missing qc/queuename — skipped");
+                continue;
+            };
+            wq.push(QueueRow {
+                qc,
+                vessel: r.vessel,
+                voyage: r.voyage,
+                queuename,
+                disload: r.disload,
+                seq: r.seq,
+                total_qty: r.total_qty,
+                comp_qty: r.comp_qty,
+                plan_qty: r.plan_qty,
+            });
+        } else {
+            wp.push(MoveRow {
+                queuename: r.queuename,
+                vessel: r.vessel,
+                voyage: r.voyage,
+                jobtype: r.jobtype,
+                jobstatus: r.jobstatus,
+                yt_status: r.yt_status,
+                ytno: r.ytno,
+                armgc: r.armgc,
+                etw_dt: r.etw_dt,
+                actv_dt: r.actv_dt,
+                upd_dt: r.upd_dt,
+                cre_dt: r.cre_dt,
+                contno: r.contno,
+                msnseq: r.msnseq,
+                seqno: r.seqno,
+                yt_topos: r.yt_topos,
+                from_pos: r.from_pos,
+                to_pos: r.to_pos,
+                twintandem: r.twintandem,
+                twinkey: r.twinkey,
+            });
+        }
+    }
+    (wq, wp)
+}
+
+/// Fetch both tick populations. Merged mode (default) = one Oracle round-trip via
+/// SQL_POOL_TICK; env WORKPOOL_FETCH=split = the pre-CHUNK8 two-scan path (kill switch).
+/// Logged under etl_run_log key POOL_FETCH so Oracle time/failures stay observable
+/// (the WORKQUEUE/WORKPOOL runs now time only their Postgres landing).
+async fn fetch_pool_tick(
+    pool: &PgPool,
+    target: &str,
+    date: chrono::NaiveDate,
+) -> Result<(Vec<QueueRow>, Vec<MoveRow>)> {
+    let run_id = crate::db::start_run(pool, "POOL_FETCH", date).await?;
+    let split_mode = std::env::var("WORKPOOL_FETCH").map(|v| v == "split").unwrap_or(false);
+    let fetched: Result<(Vec<QueueRow>, Vec<MoveRow>)> = async {
+        let tb = Toolbox::from_env(target)?;
+        if split_mode {
+            let wq = parse_rows(&tb.run_sql(SQL_WORKQUEUE).await?).context("parsing workqueue rows")?;
+            let wp = parse_rows(&tb.run_sql(SQL_WORKPOOL).await?).context("parsing workpool rows")?;
+            Ok((wq, wp))
+        } else {
+            let rows: Vec<PoolTickRow> =
+                parse_rows(&tb.run_sql(SQL_POOL_TICK).await?).context("parsing pool_tick rows")?;
+            Ok(split_pool_tick(rows))
+        }
+    }
+    .await;
+    match &fetched {
+        Ok((wq, wp)) => {
+            crate::db::finish_run(pool, run_id, "POOL_FETCH", date, "OK",
+                Some((wq.len() + wp.len()) as i64), None).await?;
+        }
+        Err(e) => {
+            crate::db::finish_run(pool, run_id, "POOL_FETCH", date, "FAILED",
+                None, Some(&e.to_string())).await?;
+        }
+    }
+    fetched
+}
+
 /// Parse an ETW field ("YYYYMMDDHH24MISS[mmm]", terminal MYT) to a UTC instant.
 /// Returns None for empty/short/malformed values.
 pub fn parse_etw(raw: &str) -> Option<DateTime<Utc>> {
@@ -100,8 +228,10 @@ pub fn parse_etw(raw: &str) -> Option<DateTime<Utc>> {
     Some(tt_core::shift::terminal_to_utc(naive))
 }
 
-/// Run one work-pool tick: refresh both snapshot tables. Each source is logged and a
-/// failure in one does not abort the other.
+/// Run one work-pool tick: one Oracle fetch, then refresh the snapshot tables. Each
+/// landing step is logged and a failure in one does not abort the other. A failed
+/// fetch marks both landing keys FAILED (same observability as when each scan was
+/// its own round-trip) and still lets the local-only ETW step run.
 pub async fn tick_workpool(pool: &PgPool, target: &str) -> Result<()> {
     let date = tt_core::shift::terminal_now().date_naive();
     let as_of = Utc::now();
@@ -113,8 +243,21 @@ pub async fn tick_workpool(pool: &PgPool, target: &str) -> Result<()> {
             }
         };
     }
-    step!("workqueue", src_workqueue(pool, target, date, as_of));
-    step!("workpool", src_workpool(pool, target, date, as_of));
+    match fetch_pool_tick(pool, target, date).await {
+        Ok((wq_rows, wp_rows)) => {
+            step!("workqueue", src_workqueue(pool, &wq_rows, date, as_of));
+            step!("workpool", src_workpool(pool, &wp_rows, date, as_of));
+        }
+        Err(e) => {
+            let msg = e.to_string();
+            for key in ["WORKQUEUE", "WORKPOOL"] {
+                if let Ok(rid) = crate::db::start_run(pool, key, date).await {
+                    let _ = crate::db::finish_run(pool, rid, key, date, "FAILED", None, Some(&msg)).await;
+                }
+            }
+            tracing::error!(error = %msg, "pool_tick fetch failed (workqueue/workpool skipped this tick)");
+        }
+    }
     step!("etw", src_etw(pool, date));
     tracing::info!(%as_of, "workpool tick done");
     Ok(())
@@ -122,23 +265,49 @@ pub async fn tick_workpool(pool: &PgPool, target: &str) -> Result<()> {
 
 /// Accurate per-container ETW from the Azure tos_etw_gateway (TOS ETW RPC). For each active
 /// voyage in the work pool, GET /v1/voyages/{vessel}/{voyage}/snapshot (via the wp-etw-bridge
-/// SSH tunnel) and upsert the ETW of containers we actually have in live_workpool. No Oracle.
+/// SSH tunnel) and upsert the containers' ETW. No Oracle.
+///
+/// CHUNK8 (2026-08-10, gateway untouched — this is purely our fetch loop):
+/// - The gateway stamps each snapshot with expires_at_utc (measured TTL 1800s, and
+///   fetched_at_utc shows it serves the same cached snapshot within that window), so
+///   refetching an unexpired voyage cannot return new data. Skip it. This cuts our
+///   calls into the shared gateway ~20x. Kill switch: env ETW_FETCH=always.
+/// - Keep the WHOLE snapshot, not just containers currently in live_workpool: a
+///   container entering the pool later then already has its ETW row, which is what
+///   lets the expiry gate be the only refetch trigger. (~10-15k rows steady — small.)
+/// A voyage the gateway doesn't know (404) has no rows, so it is retried every tick;
+/// measured 0.4s per miss, acceptable.
 async fn src_etw(pool: &PgPool, date: chrono::NaiveDate) -> Result<()> {
     run_logged(pool, "ETW", date, |_| async move {
         let base = std::env::var("ETW_GATEWAY_URL").unwrap_or_else(|_| "http://127.0.0.1:18080".into());
-        // only keep ETW for containers we display (the active work pool) — the per-voyage
-        // snapshot returns ~1000+ containers each; filtering keeps this table small.
-        let pool_cntrs: std::collections::HashSet<String> = sqlx::query_scalar::<_, String>(
-            "SELECT DISTINCT contno FROM live_workpool WHERE contno IS NOT NULL AND contno <> ''",
-        ).fetch_all(pool).await?.into_iter().collect();
+        let honor_expiry = std::env::var("ETW_FETCH").map(|v| v != "always").unwrap_or(true);
         let voyages: Vec<(String, String)> = sqlx::query_as(
             "SELECT DISTINCT vessel, voyage FROM live_workpool WHERE voyage IS NOT NULL AND voyage <> ''",
         ).fetch_all(pool).await?;
+        // Latest stored expiry per voyage = when its snapshot stops being current.
+        let mut valid_until: HashMap<(String, String), DateTime<Utc>> = HashMap::new();
+        if honor_expiry {
+            let rows: Vec<(String, String, Option<DateTime<Utc>>)> = sqlx::query_as(
+                "SELECT vessel, voyage, max(expires_at_utc) FROM tos_etw_cntr GROUP BY 1, 2",
+            ).fetch_all(pool).await?;
+            for (v, voy, exp) in rows {
+                if let Some(e) = exp { valid_until.insert((v, voy), e); }
+            }
+        }
         let parse_ts = |v: Option<&str>| v.and_then(|s| DateTime::parse_from_rfc3339(s).ok()).map(|d| d.with_timezone(&Utc));
 
+        let now = Utc::now();
         let mut tx = pool.begin().await?;
         let mut n = 0u64;
+        let (mut fetched_ct, mut skipped_ct) = (0u32, 0u32);
         for (vessel, voyage) in &voyages {
+            let unexpired = valid_until
+                .get(&(vessel.clone(), voyage.clone()))
+                .is_some_and(|e| *e > now);
+            if unexpired {
+                skipped_ct += 1;
+                continue;
+            }
             let voye = voyage.replace('/', "%2F");
             let url = format!("{base}/v1/voyages/{vessel}/{voye}/snapshot");
             let out = tokio::process::Command::new("curl")
@@ -147,12 +316,13 @@ async fn src_etw(pool: &PgPool, date: chrono::NaiveDate) -> Result<()> {
                 Ok(o) if o.status.success() => o.stdout,
                 _ => { tracing::warn!(%vessel, %voyage, "etw snapshot fetch failed"); continue; }
             };
+            fetched_ct += 1;
             let snap: serde_json::Value = match serde_json::from_slice(&body) { Ok(v) => v, Err(_) => continue };
             let fetched = parse_ts(snap.get("fetched_at_utc").and_then(|v| v.as_str()));
             let expires = parse_ts(snap.get("expires_at_utc").and_then(|v| v.as_str()));
             for c in snap.get("cntr_list").and_then(|v| v.as_array()).into_iter().flatten() {
                 let cntr = c.get("cntr_no").and_then(|v| v.as_str()).unwrap_or("");
-                if cntr.is_empty() || !pool_cntrs.contains(cntr) { continue; }
+                if cntr.is_empty() { continue; }
                 let disld = c.get("dis_ld").and_then(|v| v.as_str());
                 let qc = parse_ts(c.get("qc_etw_utc").and_then(|v| v.as_str()));
                 let vsl = parse_ts(c.get("vessel_etw_utc").and_then(|v| v.as_str()));
@@ -170,21 +340,20 @@ async fn src_etw(pool: &PgPool, date: chrono::NaiveDate) -> Result<()> {
                 n += 1;
             }
         }
-        // drop ETW for containers no longer in any active pool (not refreshed in 2h)
+        // drop ETW for voyages no longer refreshed (left the pool >2h ago)
         sqlx::query("DELETE FROM tos_etw_cntr WHERE updated_at < now() - interval '2 hours'")
             .execute(&mut *tx).await?;
         tx.commit().await?;
+        tracing::info!(fetched = fetched_ct, skipped = skipped_ct, upserts = n, "etw refresh");
         Ok(n)
     }).await.map(|_| ())
 }
 
-async fn src_workqueue(pool: &PgPool, target: &str, date: chrono::NaiveDate, as_of: DateTime<Utc>) -> Result<()> {
+async fn src_workqueue(pool: &PgPool, rows: &[QueueRow], date: chrono::NaiveDate, as_of: DateTime<Utc>) -> Result<()> {
     run_logged(pool, "WORKQUEUE", date, |_| async move {
-        let raw = Toolbox::from_env(target)?.run_sql(SQL_WORKQUEUE).await?;
-        let rows: Vec<QueueRow> = parse_rows(&raw).context("parsing workqueue rows")?;
         let mut tx = pool.begin().await?;
         sqlx::query("DELETE FROM live_workqueue").execute(&mut *tx).await?;
-        for r in &rows {
+        for r in rows {
             sqlx::query(
                 "INSERT INTO live_workqueue
                    (qc, vessel, voyage, queuename, disload, seq, total_qty, comp_qty, plan_qty, as_of_ts)
@@ -254,11 +423,8 @@ fn block_prefix(s: &str) -> &str {
     s.split('-').next().unwrap_or(s).trim()
 }
 
-async fn src_workpool(pool: &PgPool, target: &str, date: chrono::NaiveDate, as_of: DateTime<Utc>) -> Result<()> {
+async fn src_workpool(pool: &PgPool, rows: &[MoveRow], date: chrono::NaiveDate, as_of: DateTime<Utc>) -> Result<()> {
     run_logged(pool, "WORKPOOL", date, |_| async move {
-        let raw = Toolbox::from_env(target)?.run_sql(SQL_WORKPOOL).await?;
-        let rows: Vec<MoveRow> = parse_rows(&raw).context("parsing workpool rows")?;
-
         // candidate (unassigned) aggregation: key = (queue, vessel, jobtype, src_block);
         // value = (count, representative rtg). Discharge groups by QC (src_block = None,
         // pickup = the crane); load groups by source block (pickup varies per container).
@@ -270,7 +436,7 @@ async fn src_workpool(pool: &PgPool, target: &str, date: chrono::NaiveDate, as_o
         // status A/B/Q, the SQL WHERE already bounds this) with a non-empty YTNO — the exact
         // population the old separate SQL_ASSIGNED scan (DISTINCT ytno,jobstatus) produced.
         let mut assigned: std::collections::HashSet<(String, Option<String>)> = std::collections::HashSet::new();
-        for r in &rows {
+        for r in rows {
             let yt = r.ytno.as_deref().unwrap_or("").trim();
             if yt.is_empty() { continue; }
             assigned.insert((yt.to_string(), r.jobstatus.as_deref().map(str::trim).map(str::to_string)));
@@ -290,7 +456,7 @@ async fn src_workpool(pool: &PgPool, target: &str, date: chrono::NaiveDate, as_o
         // SQL WHERE above now also returns other jobtypes/status B, which feed ONLY
         // live_assigned_tt above, never live_workpool/live_candidate).
         let mut active = 0u64;
-        for r in &rows {
+        for r in rows {
             let is_ds_ld = matches!(r.jobtype.as_deref(), Some("DS") | Some("LD"));
             match (is_ds_ld, r.jobstatus.as_deref()) {
                 (true, Some("A")) => {
@@ -394,6 +560,23 @@ mod tests {
         assert!(parse_etw("").is_none());
         assert!(parse_etw("2026").is_none());
         assert!(parse_etw("notadate012345").is_none());
+    }
+
+    #[test]
+    fn splits_pool_tick_rows() {
+        // one WQ + one WP row, shapes as the merged pool_tick.sql probe returned them
+        // (2026-08-10 oracle-prod): numbers are JSON numbers, the other branch's columns null.
+        let raw = r#"{"result":"[{\"SRC\":\"WQ\",\"QUEUENAME\":\"14D-L\",\"VESSEL\":\"EMZP\",\"VOYAGE\":\"011/2026\",\"QC\":\"C11\",\"DISLOAD\":\"L\",\"SEQ\":12,\"TOTAL_QTY\":38,\"COMP_QTY\":38,\"PLAN_QTY\":0,\"JOBTYPE\":null,\"YTNO\":null},{\"SRC\":\"WP\",\"QUEUENAME\":\"34H-D\",\"VESSEL\":\"CLOA\",\"VOYAGE\":\"12E\",\"QC\":null,\"SEQ\":null,\"TOTAL_QTY\":null,\"JOBTYPE\":\"DS\",\"JOBSTATUS\":\"A\",\"YTNO\":\"TT945\",\"ARMGC\":\"RTG122\",\"ETW_DT\":\"20260609101604681\",\"CONTNO\":\"EITU0580638\",\"SEQNO\":\"20260609094100\"}]"}"#;
+        let rows: Vec<PoolTickRow> = parse_rows(raw).unwrap();
+        let (wq, wp) = split_pool_tick(rows);
+        assert_eq!((wq.len(), wp.len()), (1, 1));
+        assert_eq!(wq[0].qc, "C11");
+        assert_eq!(wq[0].queuename, "14D-L");
+        assert_eq!(wq[0].total_qty, Some(38));
+        assert_eq!(wp[0].jobtype.as_deref(), Some("DS"));
+        assert_eq!(wp[0].ytno.as_deref(), Some("TT945"));
+        assert_eq!(wp[0].seqno.as_deref(), Some("20260609094100"));
+        assert!(parse_etw(wp[0].etw_dt.as_deref().unwrap()).is_some());
     }
 
     #[test]

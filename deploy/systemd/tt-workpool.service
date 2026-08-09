@@ -1,5 +1,5 @@
 [Unit]
-Description=tt-aiops-platform LIVE work-pool snapshot (JOB_QUEUE_SCHEDULE + JOB_ORDER_LIST -> Postgres)
+Description=tt-aiops-platform LIVE work-pool snapshot (merged JOB_QUEUE_SCHEDULE+JOB_ORDER_LIST 1-pull -> Postgres)
 After=network-online.target
 
 [Service]

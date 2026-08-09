@@ -1,5 +1,17 @@
 # PLAN-extractor — TOS Oracle 부하 최소화 (추출기 최적화)
 
+## CHUNK 8 (2026-08-10 — 사용자 승인 후속 런: workpool 왕복 병합 + 60초화 + ETW 만료 게이트)
+
+| 항목 | 내용 | 결과 |
+|---|---|---|
+| 8-1 왕복 병합 | workqueue+workpool 을 `sql/pool_tick.sql` UNION ALL 1왕복으로(판별자 SRC). 킬스위치 `WORKPOOL_FETCH=split`. Oracle 시간은 새 런로그 키 `POOL_FETCH`(WORKQUEUE/WORKPOOL 키는 이제 PG 착지만 잼) | 틱당 Oracle 2→1회 · POOL_FETCH 3.6s |
+| 8-2 60초화 | `tt-workpool.timer` OnCalendar `*:*:15`(무브 3종 :05/:25/:45·선박 :35 회피)·AccuracySec=1s | 실주기 93.5→60.0s · 왕복 77→60회/h |
+| 8-3 ETW 만료 게이트 | 게이트웨이 스냅샷 TTL 1800s 실측 — 유효기간 내 항차는 재요청 안 함(킬스위치 `ETW_FETCH=always`). 풀 필터 제거(스냅샷 통째 저장 → 새 풀 진입 상자도 즉시 행 보유). **Azure 쪽 변경 0** | 게이트웨이 콜 ~385→~26회/h · 틱 벽시계 24→4.2s |
+
+검증(2026-08-10): 매분 :15 정발화·행수 pool 828/wq 804/assigned 341(전부 배포 전 ±5%)·
+qc 부착 828/828·dispatch_pred_sample 95s 내·api 에러 0. ⚠주의: 만료 시(30분마다) 한 틱은
+전 항차 재요청으로 예전처럼 ~20초 걸린다 — 정상이다.
+
 ## STATUS (2026-08-06 마감)
 
 | 청크 | 상태 | 커밋 |

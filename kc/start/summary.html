@@ -53,7 +53,7 @@
   <h2>④ 라이브 기능 — 대시보드 페이지들</h2>
   <p>대시보드는 <strong>KPI · TT · CYCLES · MAP · HEALTH · FEED</strong> 페이지로 구성됩니다. 핵심 네 가지:</p>
   <ul>
-    <li><strong>TT · 배차 현황</strong> — 작업 풀(수요)과 차량 풀(공급)을 한 화면에. extractor가 약 90초마다 TOS 작업 큐를 복제하고, 정확한 ETW는 Azure 게이트웨이(SSH 터널)에서 받아 보강합니다.</li>
+    <li><strong>TT · 배차 현황</strong> — 작업 풀(수요)과 차량 풀(공급)을 한 화면에. extractor가 약 60초마다 TOS 작업 큐를 복제하고, 정확한 ETW는 Azure 게이트웨이(SSH 터널)에서 받아 보강합니다.</li>
     <li><strong>MAP · 라이브 맵</strong> — GPS websocket 기반 — MapLibre + ESRI 지도 위에 터미널 차량의 실시간 위치를 그립니다.</li>
     <li><strong>CYCLES · 사이클 이력</strong> — 사이클을 단계별로 분해해 막대로 보여줍니다. 관측하지 못한 단계는 추정하지 않고 NULL로 둡니다.</li>
     <li><strong>FEED · WS 데이터 헬스</strong> — GPS·PLC websocket 수신 상태를 감시합니다 — 라이브 지표의 신뢰 전제 조건입니다.</li>
