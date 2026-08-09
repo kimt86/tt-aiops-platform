@@ -7,17 +7,19 @@ set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
+# Oracle 을 실제로 치는 유닛만 (2026-08-10 정비: scenario-collect/yard 는 CHUNK4 로컬화로 제외,
+# vessel-schedule/stowplan-recon 추가. shift-t1 은 로컬이지만 벽시계 감시용으로 유지)
 UNITS=(
   tt-qc-moves
   tt-rtg-moves
   tt-handover
   tt-workpool
+  tt-vessel-schedule
   tt-shift-t1
   tt-shift-t2
   tt-stowplan
+  tt-stowplan-recon
   tt-nightly
-  tt-scenario-collect
-  tt-scenario-yard
   tt-scenario-gate
   tt-scenario-contspec
   tt-scenario-enrich

@@ -3,8 +3,9 @@ Description=wp-tt LIVE work-pool snapshot every 60s (one merged pool_tick pull; 
 
 [Timer]
 OnBootSec=1min
-# :15 — clear of the 60s move triad (:05/:25/:45) and vessel-schedule (:35).
-OnCalendar=*-*-* *:*:15
+# :55 — clear of the 60s move triad (:05/:25/:45), vessel-schedule (:35),
+# stowplan (:15 even minutes — the first pick collided there) and scengen (:10-:50).
+OnCalendar=*-*-* *:*:55
 AccuracySec=1s
 
 [Install]
