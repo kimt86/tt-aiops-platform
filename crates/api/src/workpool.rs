@@ -870,9 +870,11 @@ pub fn spawn_dispatch_pred_logger(pool: PgPool) {
                             (None, None, None)
                         };
                     let _ = sqlx::query(
+                        // pred_ver=3: 걸음이 learn_qc_slot_step 로 바뀐 판 (2026-08-10, mig 0139).
+                        // 2와 slot 의미는 같다 — 집계는 pred_ver 로 가른다.
                         "INSERT INTO dispatch_pred_sample
                            (qc, vessel, contno, queuename, jobtype, pred_work_eta_ts, dispatch_deadline_ts, assigned, slack_s, lead_s, became_assigned_at, became_assigned_tick, tos_upd_dt, etw_qc_ts, applied_bias_s, bias_ver, pred_ver, slot_idx)
-                         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,2,2,$16)",
+                         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,2,3,$16)",
                     )
                     .bind(&w.qc)
                     .bind(&w.vessel)
@@ -903,6 +905,9 @@ pub fn spawn_dispatch_pred_logger(pool: PgPool) {
                     .execute(&pool)
                     .await;
                 let _ = sqlx::query("REFRESH MATERIALIZED VIEW CONCURRENTLY learn_qc_wall_cadence")
+                    .execute(&pool)
+                    .await;
+                let _ = sqlx::query("REFRESH MATERIALIZED VIEW CONCURRENTLY learn_qc_slot_step")
                     .execute(&pool)
                     .await;
                 let _ = sqlx::query("REFRESH MATERIALIZED VIEW CONCURRENTLY learn_dispatch_lead")
@@ -1061,6 +1066,20 @@ pub(crate) async fn stage2_work_candidates(pool: PgPool) -> Result<Vec<Stage2Wor
             move_time.insert((qc.clone(), if jt == "LD" { 'L' } else { 'D' }), *wall_s as i64);
         }
     }
+    // 순번당 걸음 (mig 0139) — 상자별 예측 전용. 벽시계 리듬(무브당)이 아니라 "잔여 순번
+    // 하나당 실측 경과"의 중앙값이다: 크레인이 계획 순서를 그대로 따르지 않아 순번당 진행은
+    // 무브당 리듬보다 빠르다(실측 DS 117 vs 126 / LD 133 vs 183초 — 그 차이 × 순번이 뒤
+    // 순번의 늦은 예측으로 쌓였다, pred_ver 2→3 경계). 구역 시작(before) 누적은 계속 벽시계
+    // 리듬을 쓴다 — 거기는 '크레인이 소화할 총 무브량'이라 무브당이 맞다.
+    let mut slot_step: HashMap<(String, char), i64> = HashMap::new();
+    let step_rows: Vec<(String, String, Option<i32>)> = sqlx::query_as(
+        "SELECT qc, jobtype, step_s FROM learn_qc_slot_step WHERE step_s IS NOT NULL")
+        .fetch_all(&pool_for_lead).await.unwrap_or_default();
+    for (qc, jt, st) in &step_rows {
+        if let Some(st) = st {
+            slot_step.insert((qc.clone(), if jt == "LD" { 'L' } else { 'D' }), (*st as i64).clamp(30, 600));
+        }
+    }
 
     // 상자 단위로 가져온다 — 구역 하나에 한 줄이 아니라 **상자 하나에 한 줄**.
     // 그래야 "구역 j번째 상자가 언제 처리되나"를 각각 계산할 수 있다.
@@ -1148,10 +1167,14 @@ pub(crate) async fn stage2_work_candidates(pool: PgPool) -> Result<Vec<Stage2Wor
     for (qc, vessel, queuename, jt, src_block, contno, slot_idx, tos_assigned) in per_box {
         let lead = lead_realized.get(&jt).copied()
             .unwrap_or(if jt == "LD" { LEAD_LD_S } else { LEAD_DS_S });
-        let move_s = move_time.get(&(qc.clone(), if jt == "LD" { 'L' } else { 'D' })).copied()
+        // 걸음 사슬: 크레인별 학습 → 전역('*') 학습 → 벽시계/활동 리듬 → 상수 (mig 0139)
+        let jc = if jt == "LD" { 'L' } else { 'D' };
+        let move_s = slot_step.get(&(qc.clone(), jc)).copied()
+            .or_else(|| slot_step.get(&("*".to_string(), jc)).copied())
+            .or_else(|| move_time.get(&(qc.clone(), jc)).copied())
             .unwrap_or(if jt == "LD" { BOX_MOVE_LD_S } else { BOX_MOVE_DS_S });
         let row = eta.get(&(qc.clone(), vessel.clone(), queuename.clone())).copied();
-        // 상자별 시각 = 구역 시작 + slot_idx × 무브시간
+        // 상자별 시각 = 구역 시작 + slot_idx × 순번당 걸음
         let box_eta = row.map(|r| r.0 + chrono::Duration::seconds(slot_idx * move_s));
         out.push(Stage2Work {
             qc,
