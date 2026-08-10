@@ -20,6 +20,25 @@ function countdown(deadlineIso: string | null, nowMs: number, ko: boolean): { te
   return { text: t, cls: "ok" };
 }
 
+/** 채택률 추이 스파크라인 — 시간당 1점(mig 0144). 실선=상자 채택, 점선=트럭까지 일치. */
+function AdoptionTrend({ data }: { data: { box_pct: number | null; ytno_match_pct: number | null }[] }) {
+  const w = 100, h = 36;
+  const line = (pick: (p: { box_pct: number | null; ytno_match_pct: number | null }) => number | null) =>
+    data
+      .map((p, i) => {
+        const v = pick(p);
+        return v == null ? null : `${(i / Math.max(1, data.length - 1)) * w},${h - 3 - (Math.min(v, 100) / 100) * (h - 6)}`;
+      })
+      .filter(Boolean)
+      .join(" ");
+  return (
+    <svg viewBox={`0 0 ${w} ${h}`} preserveAspectRatio="none" style={{ width: "100%", height: 36, display: "block" }}>
+      <polyline points={line((p) => p.box_pct)} fill="none" stroke="#34d399" strokeWidth="1.4" vectorEffect="non-scaling-stroke" strokeLinejoin="round" />
+      <polyline points={line((p) => p.ytno_match_pct)} fill="none" stroke="#a78bfa" strokeWidth="1.2" strokeDasharray="3 2" vectorEffect="non-scaling-stroke" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
 function Stat({ label, val, unit, cls }: { label: string; val: string; unit?: string; cls?: string }) {
   return (
     <div className="stat-card">
@@ -145,10 +164,22 @@ export default function BoardPage({ lang }: { lang: Lang }) {
         </div>
       </section>
 
+      {(d?.adoption_trend.length ?? 0) >= 2 && (
+        <section className="tcard" style={{ marginTop: 12 }}>
+          <div className="tcard-head">
+            <h3>{ko ? "채택률 추이" : "Adoption trend"}<span className="h3-sub">{ko ? "시간당 1점 · 최근 7일" : "hourly · 7d"}</span></h3>
+            <div className="head-sub"><span className="muted">{ko ? "실선 = 상자 채택 · 점선 = 트럭까지 일치" : "solid = box · dashed = truck match"}</span></div>
+          </div>
+          <div className="tcard-body">
+            <AdoptionTrend data={d?.adoption_trend ?? []} />
+          </div>
+        </section>
+      )}
+
       <p className="ls-note" style={{ marginTop: 10 }}>
         {ko
-          ? "SHADOW 모드: 이 추천은 기록만 되며 현장 배차를 바꾸지 않습니다. 적용은 TOS 수동 배차 화면에서 담당자가 합니다. 채택률은 TOS 실배차 기록과 자동 대조한 값입니다."
-          : "SHADOW mode: recommendations are recorded only. Apply via the TOS manual dispatch screen. Adoption is auto-scored against actual TOS dispatches."}
+          ? "SHADOW 모드: 이 추천은 기록만 되며 현장 배차를 바꾸지 않습니다. 적용은 TOS 수동 배차 화면에서 담당자가 합니다. 채택률은 TOS 실배차 기록과 자동 대조한 값입니다 — 낮다는 것은 틀렸다는 뜻이 아니라 TOS와 다른 판단을 하고 있다는 뜻일 수 있습니다."
+          : "SHADOW mode: recommendations are recorded only. Apply via the TOS manual dispatch screen. Adoption is auto-scored against actual TOS dispatches — low means we differ from TOS, not necessarily that we're wrong."}
       </p>
     </div>
   );

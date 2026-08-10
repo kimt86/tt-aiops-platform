@@ -219,19 +219,24 @@ export default function Stage2Page({ lang }: { lang: Lang }) {
           </div>
           <div className="ls-note" style={{ marginTop: 8 }}>
             {k
-              ? "크레인이 트럭이 없어 멈춰 있던 시간 중, 근방(~600m)에 빈 트럭이 있었던 비율입니다. 트럭이 부족해서가 아니라 가까운 빈 트럭을 안 보낸 것 — 최적 매칭이 줄일 수 있는 비효율입니다."
-              : "Of the time a crane sat stuck waiting for a truck, how often a free truck was within ~600m — a dispatch gap optimal matching would close."}
+              ? "크레인이 트럭이 없어 멈춰 있던 시간 중, 근방(~600m)에 빈 트럭이 있었던 비율입니다. 트럭이 부족해서가 아니라 가까운 빈 트럭을 안 보낸 것 — 최적 매칭이 줄일 수 있는 비효율입니다. 이 값은 현장 실측 계기이며, 후보 선정(굶주림 신호)에는 쓰지 않습니다(2026-08-06 설계 결정)."
+              : "Of the time a crane sat stuck waiting for a truck, how often a free truck was within ~600m — a dispatch gap optimal matching would close. Field gauge only; not an input to candidate selection (by design, 2026-08-06)."}
           </div>
         </div>
       )}
 
       {sv && sv.ticks > 0 && (
         <div className="ls-card" style={{ borderTopColor: "#a78bfa", padding: "12px 16px", marginBottom: 12 }}>
-          <div style={{ fontWeight: 700, marginBottom: 8 }}>{k ? "⚙️ 최적 솔버 vs 단순 배정 (최근 30분)" : "⚙️ Optimal solver vs greedy (30m)"}</div>
+          <div style={{ fontWeight: 700, marginBottom: 8 }}>{k ? "⚙️ 매칭 내부 대조 — 최적 매칭 vs 단순 배정 (최근 30분)" : "⚙️ Internal baseline — optimal vs naive assignment (30m)"}</div>
           <div className="ls-chips">
             <Chip label={k ? "총 도착시간 절감" : "arrival saved"} value={sv.savings_pct != null ? `${sv.savings_pct.toFixed(0)}%` : "—"} accent="#34d399" />
-            <Chip label={k ? "마감 누락 (단순→최적)" : "misses (greedy→opt)"} value={`${sv.greedy_miss ?? "—"} → ${sv.optimal_miss ?? "—"}`} accent="#a78bfa" />
+            <Chip label={k ? "마감 누락 (단순→최적)" : "misses (naive→opt)"} value={`${sv.greedy_miss ?? "—"} → ${sv.optimal_miss ?? "—"}`} accent="#a78bfa" />
             <Chip label={k ? "비교 틱" : "ticks"} value={String(sv.ticks)} />
+          </div>
+          <div className="ls-note" style={{ marginTop: 8 }}>
+            {k
+              ? "추천은 항상 최적 매칭입니다. '단순 배정'은 추천이 아니라 측정용 기준선 — 같은 풀을 가까운 순으로만 짝지으면 얼마나 나빠지는지를 보는 내부 대조군입니다."
+              : "Recommendations are always the optimal matching; the naive assignment is a measurement baseline, never a recommendation."}
           </div>
         </div>
       )}
@@ -245,7 +250,7 @@ export default function Stage2Page({ lang }: { lang: Lang }) {
             <th>{k ? "유형" : "job"}</th>
             <th>{k ? "픽업블록" : "pickup"}</th>
             <th>{k ? "도착" : "arrival"}</th>
-            <th>{k ? "마감여유(분)" : "slack(min)"}</th>
+            <th title={k ? "크레인이 이 컨테이너를 다루는 시각 대비 트럭 도착 여유 — 배차 마감(출항 요구 페이스)과는 다른 축" : "arrival slack vs the crane-need time — a different axis from the dispatch deadline"}>{k ? "크레인여유(분)" : "crane slack(m)"}</th>
             <th>OD</th>
             <th>{k ? "전환" : "switch"}</th>
           </tr>

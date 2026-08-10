@@ -962,6 +962,37 @@ pub fn spawn_dispatch_pred_logger(pool: PgPool) {
                 let _ = sqlx::query("REFRESH MATERIALIZED VIEW CONCURRENTLY learn_qc_slot_step")
                     .execute(&pool)
                     .await;
+                // 채택률 시계열 (mig 0144) — 시간당 ~1점(최근 55분 내 점이 있으면 건너뜀).
+                // 보드의 24h 즉석 계산과 같은 잣대·같은 쿼리를 그대로 박제한다.
+                let _ = sqlx::query(
+                    "INSERT INTO dispatch_adoption_metric
+                       (captured_at, window_h, boxes_reco, boxes_dispatched, box_pct, ytno_match_pct)
+                     WITH r AS (
+                       SELECT contno, min(ts) AS first_ts
+                         FROM stage2_match_shadow
+                        WHERE ts > now() - interval '24 hours' AND contno IS NOT NULL
+                        GROUP BY contno
+                     ), d AS (
+                       SELECT r.contno, t.ytno, t.dispatch_ts
+                         FROM r
+                         JOIN LATERAL (
+                           SELECT ytno, dispatch_ts FROM tt_move_log t
+                            WHERE t.contno = r.contno AND t.dispatch_ts >= r.first_ts
+                              AND t.dispatch_ts < r.first_ts + interval '20 minutes'
+                            ORDER BY t.dispatch_ts LIMIT 1) t ON true
+                     )
+                     SELECT now(), 24, (SELECT count(*) FROM r), count(*),
+                            (100.0*count(*)/nullif((SELECT count(*) FROM r),0))::float8,
+                            (100.0*count(*) FILTER (WHERE EXISTS (
+                               SELECT 1 FROM stage2_match_shadow m
+                                WHERE m.contno = d.contno AND m.ytno = d.ytno AND m.ts <= d.dispatch_ts))
+                              /nullif(count(*),0))::float8
+                       FROM d
+                     HAVING NOT EXISTS (SELECT 1 FROM dispatch_adoption_metric
+                                         WHERE captured_at > now() - interval '55 minutes')",
+                )
+                .execute(&pool)
+                .await;
                 let _ = sqlx::query("REFRESH MATERIALIZED VIEW CONCURRENTLY learn_dispatch_lead")
                     .execute(&pool)
                     .await;
@@ -1868,6 +1899,12 @@ struct BoardAdoption {
     /// 배차된 상자 중 트럭까지 우리 추천과 일치한 비율(배차 이전 추천 행 기준)
     ytno_match_pct: Option<f64>,
 }
+#[derive(Serialize, sqlx::FromRow)]
+struct AdoptionPt {
+    captured_at: DateTime<Utc>,
+    box_pct: Option<f64>,
+    ytno_match_pct: Option<f64>,
+}
 #[derive(Serialize)]
 pub struct DispatchBoardOut {
     mode: String,
@@ -1876,6 +1913,8 @@ pub struct DispatchBoardOut {
     recos: Vec<BoardReco>,
     pool: Option<BoardPoolStat>,
     adoption: Option<BoardAdoption>,
+    /// 채택률 시계열(시간당 ~1점, 최근 7일 — mig 0144)
+    adoption_trend: Vec<AdoptionPt>,
 }
 
 /// `GET /api/dispatch/board`
@@ -1932,6 +1971,13 @@ pub async fn dispatch_board(State(pool): State<PgPool>) -> Result<Json<DispatchB
     .fetch_optional(&pool)
     .await
     .unwrap_or(None);
+    let adoption_trend: Vec<AdoptionPt> = sqlx::query_as(
+        "SELECT captured_at, box_pct, ytno_match_pct FROM dispatch_adoption_metric
+          WHERE captured_at > now() - interval '7 days' ORDER BY captured_at",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap_or_default();
     Ok(Json(DispatchBoardOut {
         mode: std::env::var("DISPATCH_MODE").unwrap_or_else(|_| "shadow".into()),
         generated_at,
@@ -1939,5 +1985,6 @@ pub async fn dispatch_board(State(pool): State<PgPool>) -> Result<Json<DispatchB
         recos,
         pool: pool_stat,
         adoption,
+        adoption_trend,
     }))
 }

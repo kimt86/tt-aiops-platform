@@ -724,9 +724,22 @@ const PAGES: { key: PageKey; label: string; Icon: () => ReactElement; ko: string
   { key: "feed", label: "FEED", Icon: IconFeed, ko: "WS 데이터 헬스", en: "WS Data Health" },
 ];
 
+// URL 해시 딥링크(P3 후속): 주소 뒤 #board 처럼 탭을 지정해 공유할 수 있다 —
+// 관제에 배차 보드 URL 을 그대로 건네는 용도(라우터 없이 최소 구현).
+const pageFromHash = (): PageKey => {
+  const h = window.location.hash.replace("#", "");
+  return PAGES.some((p) => p.key === h) ? (h as PageKey) : "kpi";
+};
+
 export default function App() {
   const [lang, setLang] = useState<Lang>("en");
-  const [page, setPage] = useState<PageKey>("kpi");
+  const [page, setPage] = useState<PageKey>(pageFromHash);
+  useEffect(() => { window.history.replaceState(null, "", `#${page}`); }, [page]);
+  useEffect(() => {
+    const onHash = () => setPage(pageFromHash());
+    window.addEventListener("hashchange", onHash);
+    return () => window.removeEventListener("hashchange", onHash);
+  }, []);
   const clock = useClock();
   const health = useHealth();
   const feed = useFeedHealth();

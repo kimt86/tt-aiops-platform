@@ -292,6 +292,8 @@ export interface DispatchBoard {
     boxes_reco: number; boxes_dispatched: number;
     box_pct: number | null; ytno_match_pct: number | null;
   } | null;
+  /** 채택률 시계열(시간당 ~1점, 최근 7일) */
+  adoption_trend: { captured_at: string; box_pct: number | null; ytno_match_pct: number | null }[];
 }
 export interface Stage2Advisory {
   ytno: string; qc: string | null; jobtype: string | null; src_block: string | null;
