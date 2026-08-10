@@ -92,8 +92,12 @@ pub async fn tick_qc_moves(pool: &PgPool, target: &str) -> Result<()> {
         // LEADING column of PK MCH_PK_OPERATION). `SEQNO >= wm` SEEKS via the PK (INDEX hint pins it) and
         // reads only the new tail — NO re-scan of today's rows — so poll cost is independent of frequency
         // (verified: seek ~0.8s vs a full scan ~45s). `>=` (not `>`) re-reads the watermark second so the
-        // non-unique SEQNO can't skip same-second rows; ON CONFLICT dedups the tiny overlap. REGEXP/LENGTH
-        // are post-filters on the small tail. Quay cranes only; every QC move has a truck → DS-pickup / LD-drop.
+        // non-unique SEQNO can't skip same-second rows; ON CONFLICT dedups the tiny overlap. The machno/LENGTH
+        // filters apply to the small tail only. Quay cranes only; every QC move has a truck → DS-pickup / LD-drop.
+        // ★크레인 판별은 접두사 정규식이 아니라 **장비 마스터**(CDY_MACHINE type=QC, 78대·미니 테이블)로
+        // 한다(2026-08-11). '^(C|M|Z)' 하드코딩이 CR4(모든 이름: C·CR·DC·M·Z)를 놓쳐 HLLO 항차가
+        // 통째로 안 보였다. 마스터에 QC 가 새로 등록되면 여기는 자동으로 따라간다 — KPI 쪽 정규식이
+        // 뒤처지면 nightly crane_guard 가 경보한다.
         let sql = format!(
             "SELECT /*+ INDEX(MCH_OPERATION MCH_PK_OPERATION) */
                     MCH_OPER_MACHNO AS machno, SUBSTR(MCH_OPER_CONTNO,1,11) AS contno,
@@ -104,7 +108,8 @@ pub async fn tick_qc_moves(pool: &PgPool, target: &str) -> Result<()> {
                FROM TOSADM.MCH_OPERATION
               WHERE MCH_OPER_SEQNO >= '{seek_from}'
                 AND MCH_OPER_SEQNO <= '{until}'
-                AND REGEXP_LIKE(MCH_OPER_MACHNO, '^(C|M|Z)[0-9]')
+                AND MCH_OPER_MACHNO IN (SELECT CDY_MCHN_CODE FROM TOSADM.CDY_MACHINE
+                                         WHERE CDY_MCHN_TYPE = 'QC')
                 AND LENGTH(MCH_OPER_COMPTIME) >= 6
               ORDER BY MCH_OPER_SEQNO
               FETCH FIRST {FETCH_CAP} ROWS ONLY"

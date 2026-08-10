@@ -23,7 +23,7 @@ SELECT machno                                                        AS qc_machn
        min(comp_ts)                                                  AS first_move,
        max(comp_ts)                                                  AS last_move
   FROM qc_move_log
- WHERE machno ~ '^[CMZ][0-9]+$'
+ WHERE machno ~ '^(C|CR|DC|M|Z)[0-9]+$'
    AND jobtype IN ('LD', 'DS')
    AND comp_ts >= $1 AND comp_ts < $2
  GROUP BY machno

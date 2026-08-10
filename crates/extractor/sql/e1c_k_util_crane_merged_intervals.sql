@@ -8,7 +8,7 @@ WITH moves AS (
          TO_DATE(MCH_OPER_COMPDATE || MCH_OPER_COMPTIME, 'YYYYMMDDHH24MISS') AS end_dt
     FROM TOSADM.MCH_OPERATION
    WHERE MCH_OPER_COMPDATE = '{{DAY_STR}}'
-     AND (REGEXP_LIKE(MCH_OPER_MACHNO, '^[CMZ][0-9]+$') OR MCH_OPER_MACHNO LIKE 'RTG%')
+     AND (REGEXP_LIKE(MCH_OPER_MACHNO, '^(C|CR|DC|M|Z)[0-9]+$') OR MCH_OPER_MACHNO LIKE 'RTG%')
      AND ST_DT IS NOT NULL AND LENGTH(ST_DT) >= 14
      AND LENGTH(MCH_OPER_COMPDATE || MCH_OPER_COMPTIME) = 14
 ),
@@ -36,7 +36,7 @@ merged AS (
 SELECT /*+ NO_PARALLEL */
        machno,
        CASE
-         WHEN REGEXP_LIKE(machno, '^[CMZ][0-9]+$') THEN 'QC'
+         WHEN REGEXP_LIKE(machno, '^(C|CR|DC|M|Z)[0-9]+$') THEN 'QC'
          WHEN machno LIKE 'RTG%'                THEN 'YC'
        END                                                                AS machine_type,
        COUNT(*)                                                            AS interval_groups,

@@ -17,7 +17,7 @@ WITH m0 AS (
          CASE WHEN EXTRACT(EPOCH FROM (comp_ts - LAG(comp_ts) OVER (PARTITION BY machno ORDER BY comp_ts))) <= 2
               THEN 0 ELSE 1 END AS new_lift
     FROM qc_move_log
-   WHERE machno ~ '^[CMZ][0-9]+$'
+   WHERE machno ~ '^(C|CR|DC|M|Z)[0-9]+$'
      AND business_date = $1
 ),
 lifts AS (

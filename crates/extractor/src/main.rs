@@ -138,6 +138,10 @@ async fn main() -> Result<()> {
             if kpi == "all" {
                 transform::run(&pool, date).await?;
                 baseline::run(&pool, date).await?;
+                // QC 이름 드리프트 가드 — 장비 마스터(78행) 1회 조회, 실패해도 nightly 는 계속.
+                if let Err(e) = tt_extractor::crane_guard::qc_master_guard(&pool, &target).await {
+                    tracing::error!(error = %e, "qc master guard failed (continuing)");
+                }
             }
         }
         Command::Tick { tier, target, shift } => {

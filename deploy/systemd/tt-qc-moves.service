@@ -1,5 +1,5 @@
 [Unit]
-Description=tt-aiops-platform quay-crane (C/M/Z) move stream MCH_OPERATION -> qc_move_log
+Description=tt-aiops-platform quay-crane (master QC set) move stream MCH_OPERATION -> qc_move_log
 After=network-online.target
 
 [Service]

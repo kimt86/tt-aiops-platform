@@ -24,7 +24,7 @@ SELECT vessel,
        to_char(min(comp_ts) AT TIME ZONE 'Asia/Kuala_Lumpur', 'YYYYMMDDHH24MISS') AS first_move,
        to_char(max(comp_ts) AT TIME ZONE 'Asia/Kuala_Lumpur', 'YYYYMMDDHH24MISS') AS last_move
   FROM qc_move_log
- WHERE machno ~ '^[CMZ][0-9]+$'
+ WHERE machno ~ '^(C|CR|DC|M|Z)[0-9]+$'
    AND jobtype IN ('LD', 'DS')
    AND comp_ts >= $1 AND comp_ts < $2
  GROUP BY vessel, voyage, machno

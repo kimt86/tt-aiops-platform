@@ -2,6 +2,7 @@
 //! parse/upsert/run-log paths without the binary.
 
 pub mod baseline;
+pub mod crane_guard;
 pub mod db;
 pub mod handover;
 pub mod kpis;

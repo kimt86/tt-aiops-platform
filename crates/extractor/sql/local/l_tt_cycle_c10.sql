@@ -7,7 +7,7 @@
 WITH base AS (
   SELECT trk_id, jobtype AS jt, comp_ts
     FROM qc_move_log
-   WHERE machno ~ '^[CMZ][0-9]+$'
+   WHERE machno ~ '^(C|CR|DC|M|Z)[0-9]+$'
      AND jobtype IN ('LD', 'DS')
      AND trk_id IS NOT NULL
      AND comp_ts >= $1 AND comp_ts < $2
