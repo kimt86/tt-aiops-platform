@@ -580,7 +580,8 @@ function QcColV2({ x, lang, ttState, working, showOurs, showAllUn, advByCont, ad
 }) {
   const k = ko(lang);
   const pct = x.tot > 0 ? Math.round((x.comp / x.tot) * 100) : 0;
-  const firstRemQ = x.queues.find((q) => q.remaining > 0)?.queuename ?? null;
+  // '다음≈' = 타임라인상 처음으로 남은 일이 있는 **발행된** 베이의 첫 슬롯(발행 전 베이는 접힘).
+  const firstRemQ = x.queues.find((q) => q.remaining > 0 && x.boxesByQueue.has(q.queuename))?.queuename ?? null;
   // 🤖 배정: contno 정확 일치 우선, 없으면(옛 형식) QC별 같은 방향 첫-적합 폴백.
   const loosePool = (advLoose.get(x.qc.qc) ?? []).slice();
   const pickFor = (b: WpBox): OurPick | null => {
@@ -621,7 +622,10 @@ function QcColV2({ x, lang, ttState, working, showOurs, showAllUn, advByCont, ad
         );
       })()}
       <div className="qc-seqlabel">{k ? "작업 (계획 순서)" : "work (plan order)"}</div>
-      {x.queues.filter((q) => q.remaining > 0 || x.boxesByQueue.has(q.queuename)).map((q) => {
+      {/* 상자(지시)가 발행된 베이만 블록으로 그린다. 발행 전 베이는 맨 아래 한 줄 요약 —
+          실측 큐 블록 490중 447개가 상자 없는 미래 베이였고, 그 헤더·푸터 DOM이 스크롤을
+          끌고 내려갔다(2026-08-10). 정보는 아래 요약(개수·잔여·최악 여유)으로 보존한다. */}
+      {x.queues.filter((q) => x.boxesByQueue.has(q.queuename)).map((q) => {
         const boxes = x.boxesByQueue.get(q.queuename) ?? [];
         const bslack = bucketSlackS(q, Date.now());
         const jt = boxes[0]?.jobtype ?? (q.disload === "L" ? "LD" : q.disload === "D" ? "DS" : null);
@@ -695,6 +699,20 @@ function QcColV2({ x, lang, ttState, working, showOurs, showAllUn, advByCont, ad
           </div>
         );
       })}
+      {(() => {
+        // 발행 전 베이 요약 — 계획에는 있으나 TOS 지시가 아직 없는 뒤쪽 베이들.
+        const rest = x.queues.filter((q) => q.remaining > 0 && !x.boxesByQueue.has(q.queuename));
+        if (rest.length === 0) return null;
+        const restRem = rest.reduce((a, b) => a + b.remaining, 0);
+        const slacks = rest.map((b) => bucketSlackS(b, Date.now())).filter((s): s is number => s != null);
+        const restMin = slacks.length ? Math.min(...slacks) : null;
+        return (
+          <div className="qc-bay-more" title={k ? "지시가 아직 발행되지 않은 베이(계획에는 있음). 신호등·여유 = 그중 가장 급한 베이 기준" : "bays with no issued orders yet (planned). Light/slack = worst among them"}>
+            {tierLight(restMin)} {k ? `이후 ${rest.length}베이 · 남은 ${restRem}` : `+${rest.length} bays · ${restRem} left`}
+            {restMin != null ? ` · ${relDurOf(restMin, k)} ${restMin < 0 ? (k ? "부족" : "short") : (k ? "여유" : "slack")}` : ""}
+          </div>
+        );
+      })()}
     </div>
   );
 }
@@ -749,10 +767,11 @@ export default function TtPage({ lang }: { lang: Lang }) {
   const { snap, err } = usePositions();
   const { data: wp } = useWorkpool();
   const { advisory, picks } = useStage2();
-  // 1초 틱 — 카운트다운(마감·출항·ETW)이 15초 폴 사이에도 흐르게 한다. 뷰 조립은 틱이 아니라
-  // 데이터 갱신(wp 15s·snap 3s)에만 다시 한다(useMemo) — 틱당 일은 DOM 재조정뿐이어야 한다.
+  // 5초 틱 — 카운트다운(마감·출항·ETW)이 15초 폴 사이에도 흐르게 한다. 1초 틱은 트리 전체
+  // 재조정을 매초 돌려 스크롤 페인트와 겹쳤다(2026-08-10 증상) — 5초면 체감 라이브는 같다.
+  // 뷰 조립은 틱이 아니라 데이터 갱신(wp 15s·snap 3s)에만 다시 한다(useMemo).
   const [, setTick] = useState(0);
-  useEffect(() => { const iv = setInterval(() => setTick((t) => t + 1), 1000); return () => clearInterval(iv); }, []);
+  useEffect(() => { const iv = setInterval(() => setTick((t) => t + 1), 5000); return () => clearInterval(iv); }, []);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   const views = useMemo(() => buildVesselViews(wp, snap, Date.now()), [wp, snap]);
   return (
