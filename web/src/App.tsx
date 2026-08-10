@@ -836,7 +836,7 @@ export default function App() {
               </button>
             ))}
           </div>
-          {page === "kpi" ? <KpiPage lang={lang} /> : page === "board" ? <BoardPage lang={lang} /> : page === "tt" ? <TtPage lang={lang} /> : page === "stage2" ? <Stage2Page lang={lang} /> : page === "cycles" ? <CyclesPage lang={lang} /> : page === "learn" ? <LearnPage lang={lang} /> : page === "map" ? <LiveMapPage lang={lang} /> : page === "health" ? <HealthPage lang={lang} /> : <FeedHealthPage lang={lang} />}
+          {page === "kpi" ? <KpiPage lang={lang} /> : page === "board" ? <BoardPage lang={lang} /> : page === "tt" ? <TtPage lang={lang} /> : page === "stage2" ? <Stage2Page lang={lang} /> : page === "cycles" ? <CyclesPage lang={lang} /> : page === "learn" ? <LearnPage lang={lang} /> : page === "map" ? <LiveMapPage lang={lang} internal={internal} /> : page === "health" ? <HealthPage lang={lang} /> : <FeedHealthPage lang={lang} />}
         </div>
       </div>
     </FeedHealthContext.Provider>

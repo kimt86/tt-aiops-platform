@@ -414,7 +414,9 @@ function WeatherFx({ mode, intensity, storm }: { mode: "rain" | "cloud" | "clear
   );
 }
 
-export default function LiveMapPage({ lang }: { lang: Lang }) {
+// internal: 내부 모드(#internal)에서만 디버그 도구를 보여준다 — GPS튐 칩·리플레이 전환·
+// 부드럽게(보간) 셀렉터·도로망 링크/노드. 고객 화면(기본)은 관제 뷰 + 배차 레이어만.
+export default function LiveMapPage({ lang, internal = false }: { lang: Lang; internal?: boolean }) {
   const ko = lang === "ko";
   const mapEl = useRef<HTMLDivElement>(null);
   const mapRef = useRef<maplibregl.Map | null>(null);
@@ -460,6 +462,15 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
   const [wx, setWx] = useState<{ precip_mm_hr: number | null; visibility_km: number | null; wind_ms: number | null; weather_code: number | null; age_s: number } | null>(null);
   const [liveInfo, setLiveInfo] = useState<{ connected: boolean; count: number; asOf: string | null }>({ connected: false, count: 0, asOf: null });
   const [dispatchCounts, setDispatchCounts] = useState<Record<string, number>>({});
+
+  // 내부 모드가 꺼지면 내부 전용 레이어·모드를 강제 해제 — 켠 채로 나가면 끌 UI가 없다
+  useEffect(() => {
+    if (!internal) {
+      setShowLinks(false);
+      setShowNodes(false);
+      setUseLive(true); // 리플레이(데모)는 내부 전용
+    }
+  }, [internal]);
 
   // clicked-vehicle detail panel
   const [selDev, setSelDev] = useState<SelVeh | null>(null);
@@ -1122,7 +1133,11 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
   const liveActive = mapMode === "live";
   const staleAge = asOfAge == null ? "?" : asOfAge >= 3600 ? `${Math.floor(asOfAge / 3600)}${ko ? "시간" : "h"}` : asOfAge >= 60 ? `${Math.floor(asOfAge / 60)}${ko ? "분" : "m"}` : `${asOfAge}${ko ? "초" : "s"}`;
   const set = (k: LayerKey, v: boolean) => setToggles((t) => ({ ...t, [k]: v }));
-  const activeCount = Object.values(toggles).filter(Boolean).length;
+  // 고객 모드는 패널에 보이는 4개(영역·추천선·작업지점·수요)만 정직하게 센다
+  const activeCount = internal
+    ? Object.values(toggles).filter(Boolean).length
+    : [toggles.areas, showAdvisory, showWorkPts, toggles.demand].filter(Boolean).length;
+  const layerTotal = internal ? LAYER_TOTAL : 4;
 
   return (
     <div className="map-page">
@@ -1152,15 +1167,18 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
         </button>
         <button
           className={`map-live ${mapMode}`}
-          onClick={() => setUseLive((v) => !v)}
-          title={ko ? "라이브/리플레이(데모) 전환" : "Toggle live / replay (demo)"}
+          onClick={internal ? () => setUseLive((v) => !v) : undefined}
+          style={internal ? undefined : { cursor: "default" }}
+          title={internal
+            ? (ko ? "라이브/리플레이(데모) 전환" : "Toggle live / replay (demo)")
+            : (ko ? "피드 상태" : "feed status")}
         >
           <span className="dot" />
           {mapMode === "live" ? (ko ? "라이브" : "LIVE")
             : mapMode === "stale" ? (ko ? "정지" : "STALE")
             : (ko ? "리플레이·데모" : "REPLAY·demo")}
         </button>
-        {liveActive && (
+        {internal && liveActive && (
           <div className="map-delay" title={ko ? "지연 재생 — 그 사이 도착한 GPS로 차량 움직임을 부드럽게 보간" : "Delayed playback — interpolate motion from fixes that arrive during the delay"}>
             <span className="mdl-lbl">{ko ? "부드럽게" : "Smooth"}</span>
             {DELAY_OPTS.map((m) => (
@@ -1176,7 +1194,7 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
         ) : (
           <span className={`map-clock mono${mapMode === "stale" ? " stale" : ""}`} title={liveInfo.asOf ?? ""}>⟳ {asOfAge != null ? `${asOfAge}s` : "—"}{delayMin > 0 && mapMode === "live" ? ` · −${delayLbl(delayMin, ko)}` : ""}</span>
         )}
-        {liveActive && gpsHealth.total > 0 && (() => {
+        {internal && liveActive && gpsHealth.total > 0 && (() => {
           const pct = (gpsHealth.outliers / gpsHealth.total) * 100;
           const cls = pct >= 2 ? "bad" : pct >= 0.5 ? "warn" : "ok";
           return (
@@ -1242,7 +1260,7 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
       <aside className={`llp ${panelOpen ? "open" : "closed"}`}>
         <button className="llp-head" onClick={() => setPanelOpen((v) => !v)}>
           <span className="llp-title">{ko ? "레이어" : "Layers"}</span>
-          <span className="llp-count">{activeCount} / {LAYER_TOTAL}</span>
+          <span className="llp-count">{activeCount} / {layerTotal}</span>
           <span className="llp-chev">{panelOpen ? "▾" : "▸"}</span>
         </button>
         {panelOpen && (
@@ -1251,19 +1269,21 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
               <header>{ko ? "영역" : "Areas"}</header>
               <Row on={toggles.areas} color="#7eb6ff" label={ko ? "도로/블록 영역" : "Road/Block"} onChange={(v) => set("areas", v)} />
             </section>
-            <section className="llp-sec">
-              <header>{ko ? "도로망" : "Road network"}</header>
-              <Row on={showLinks} color="#22d3ee" label={ko ? "링크" : "Links"} onChange={setShowLinks} />
-              <Row on={showNodes} color="#a78bfa" label={ko ? "노드" : "Nodes"} onChange={setShowNodes} />
-              {showNodes && (
-                <div style={{ display: "flex", flexWrap: "wrap", gap: 6, padding: "4px 0 6px 14px" }}>
-                  <Chip on={nodeKinds.block} color="#5eead4" label={ko ? "블록" : "Block"} onClick={() => setNodeKinds((s) => ({ ...s, block: !s.block }))} />
-                  <Chip on={nodeKinds.crane} color="#f59e0b" label="QC" onClick={() => setNodeKinds((s) => ({ ...s, crane: !s.crane }))} />
-                  <Chip on={nodeKinds.wharf} color="#38bdf8" label={ko ? "안벽" : "Wharf"} onClick={() => setNodeKinds((s) => ({ ...s, wharf: !s.wharf }))} />
-                  <Chip on={nodeKinds.junction} color="#ffffff" label={ko ? "교차로" : "Junction"} onClick={() => setNodeKinds((s) => ({ ...s, junction: !s.junction }))} />
-                </div>
-              )}
-            </section>
+            {internal && (
+              <section className="llp-sec">
+                <header>{ko ? "도로망 (내부)" : "Road network (internal)"}</header>
+                <Row on={showLinks} color="#22d3ee" label={ko ? "링크" : "Links"} onChange={setShowLinks} />
+                <Row on={showNodes} color="#a78bfa" label={ko ? "노드" : "Nodes"} onChange={setShowNodes} />
+                {showNodes && (
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 6, padding: "4px 0 6px 14px" }}>
+                    <Chip on={nodeKinds.block} color="#5eead4" label={ko ? "블록" : "Block"} onClick={() => setNodeKinds((s) => ({ ...s, block: !s.block }))} />
+                    <Chip on={nodeKinds.crane} color="#f59e0b" label="QC" onClick={() => setNodeKinds((s) => ({ ...s, crane: !s.crane }))} />
+                    <Chip on={nodeKinds.wharf} color="#38bdf8" label={ko ? "안벽" : "Wharf"} onClick={() => setNodeKinds((s) => ({ ...s, wharf: !s.wharf }))} />
+                    <Chip on={nodeKinds.junction} color="#ffffff" label={ko ? "교차로" : "Junction"} onClick={() => setNodeKinds((s) => ({ ...s, junction: !s.junction }))} />
+                  </div>
+                )}
+              </section>
+            )}
             <section className="llp-sec">
               <header>{ko ? "배차 (DISPATCH)" : "Dispatch"}</header>
               <Row on={showAdvisory} color="#a78bfa" label={ko ? "배차 추천선 (지금 이 트럭 → 여기)" : "Live recommendations (truck → work)"} onChange={setShowAdvisory} />
