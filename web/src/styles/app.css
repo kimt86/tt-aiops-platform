@@ -55,9 +55,12 @@ body {
   background: rgba(10,15,29,0.85); backdrop-filter: blur(6px);
   border-bottom: 1px solid var(--border);
   position: sticky; top: var(--header-h); z-index: 20;
+  /* 탭 9개가 안 들어가는 폭에서는 라벨을 두 줄로 접거나 본문을 밀지 말고 탭바 안에서만 스크롤 —
+     탭바 높이가 --tabbar-h로 고정되어야 아래 sticky 오프셋 계산이 성립한다 */
+  overflow-x: auto; scrollbar-width: thin;
 }
 .ptab {
-  display: inline-flex; align-items: center; gap: 7px;
+  display: inline-flex; align-items: center; gap: 7px; flex: none; white-space: nowrap;
   padding: 7px 15px; font-size: 12px; font-weight: 700;
   color: var(--text-dim); cursor: pointer;
   background: transparent; border: 1px solid transparent; border-radius: var(--radius-md);
@@ -310,7 +313,7 @@ td.mono { font-family: "JetBrains Mono", monospace; color: var(--text); }
 /* card shell */
 .tcard { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg); }
 .tcard-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 10px 14px; border-bottom: 1px solid var(--border-soft); background: var(--surface-2);
-  position: sticky; top: calc(var(--header-h) + 48px); z-index: 12; border-radius: var(--radius-lg) var(--radius-lg) 0 0; }
+  position: sticky; top: calc(var(--header-h) + var(--tabbar-h)); z-index: 12; border-radius: var(--radius-lg) var(--radius-lg) 0 0; }
 .tcard-head h3 { font-size: 12px; font-weight: 700; color: var(--text); display: flex; align-items: baseline; gap: 8px; }
 .tcard-head h3 .h3-sub { font-size: 10px; font-weight: 400; color: var(--text-mute); }
 .tcard-body { padding: 14px; }
@@ -345,7 +348,9 @@ td.mono { font-family: "JetBrains Mono", monospace; color: var(--text); }
 .qc-progress-bar { height: 4px; background: var(--bg-soft); border-radius: 999px; overflow: hidden; }
 .qc-progress-bar .fill { height: 100%; background: linear-gradient(90deg, var(--brand-deep), var(--brand)); border-radius: 999px; }
 .qc-progress-bar.maint .fill { background: var(--bad); }
-.qc-task { display: grid; grid-template-columns: 24px 1fr auto; gap: 6px; align-items: center; padding: 5px 6px; border-radius: var(--radius-md); font-size: 11px; }
+/* 배차 칩 열(3열)은 fit-content 상한 — auto면 칩 두 개가 max-content를 다 가져가 컨테이너 번호가
+   칩 밑으로 페인트 오버플로한다(1280·1600px 실측). 상한에 걸리면 칩이 .chips의 flex-wrap으로 접힌다 */
+.qc-task { display: grid; grid-template-columns: 24px minmax(0, 1fr) fit-content(55%); gap: 6px; align-items: center; padding: 5px 6px; border-radius: var(--radius-md); font-size: 11px; }
 .qc-task.now { background: rgba(34,197,94,0.10); border: 1px solid var(--good-border); }
 .qc-task.next { background: var(--bg-soft); border: 1px solid var(--border-soft); }
 .qc-task.queued { background: transparent; border: 1px dashed var(--border-soft); opacity: 0.85; }
@@ -381,6 +386,8 @@ td.mono { font-family: "JetBrains Mono", monospace; color: var(--text); }
 .qc-task.next .seq { background: var(--brand-deep); color: #fff; }
 .qc-task .body { min-width: 0; }
 .qc-task .body .top { display: flex; gap: 6px; align-items: center; font-family: "JetBrains Mono", monospace; font-size: 10px; font-weight: 600; color: var(--text); }
+/* 컨테이너 번호는 좁아지면 말줄임 — 넘치게 두면 배차 칩 위로 그대로 그려진다 */
+.qc-task .body .top .cont { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .qc-baytag { font-family: "JetBrains Mono", monospace; font-size: 9px; font-weight: 600; color: var(--text-dim); background: rgba(255,255,255,0.06); padding: 0 4px; border-radius: 3px; margin-left: auto; }
 .qc-dl { font-family: "JetBrains Mono", monospace; font-size: 8px; color: var(--text-faint); flex: none; }
 .qc-dl.soon { color: #fbbf24; }
@@ -394,7 +401,8 @@ td.mono { font-family: "JetBrains Mono", monospace; color: var(--text); }
 .qc-slack.ok { color: #22c55e; background: rgba(34,197,94,0.10); }
 .qc-slack.tight { color: #fbbf24; background: rgba(245,158,11,0.12); }
 .qc-slack.late { color: #fca5a5; background: rgba(239,68,68,0.14); }
-.qc-task .body .bot { font-size: 9px; color: var(--text-mute); margin-top: 1px; display: flex; align-items: center; gap: 4px; flex-wrap: nowrap; overflow: hidden; }
+/* 배지(ETW·배차 마감)는 잘라내지 않는다 — 마감은 이 화면 출력의 본체라 글자 중간 클리핑 대신 줄바꿈 */
+.qc-task .body .bot { font-size: 9px; color: var(--text-mute); margin-top: 1px; display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
 .qc-task .body .bot .jetw { font-size: 8px; font-weight: 600; padding: 0 4px; border-radius: 4px; border: none; flex: none; }
 .qc-task .body .bot .rtg-actv { flex: none; }
 .qc-task .body .bot .wp-loc { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -403,6 +411,13 @@ td.mono { font-family: "JetBrains Mono", monospace; color: var(--text); }
 .qc-task .assign .tt-status { font-size: 8px; color: var(--text-dim); margin-top: 2px; display: block; }
 .qc-task .assign .tt-none { font-size: 9px; color: var(--bad); font-weight: 600; }
 .qc-task .assign .tt .dot { display: inline-block; width: 6px; height: 6px; border-radius: 999px; vertical-align: middle; }
+/* TOS 칩 + 🤖 우리 배차 칩 묶음 — 열이 fit-content 상한에 걸리면 여기서 접힌다(오른쪽 정렬 유지) */
+.qc-task .assign .chips { display: inline-flex; align-items: center; justify-content: flex-end; gap: 6px; flex-wrap: wrap; }
+.qc-task .assign .tt-ours { display: inline-flex; align-items: center; gap: 3px; padding: 0 5px; border-radius: 4px; font-size: 11px; font-weight: 700;
+  color: var(--purple); background: rgba(167,139,250,0.13); border: 1px solid rgba(167,139,250,0.40); }
+.qc-task .assign .tt-ours .d { color: var(--text-mute); font-weight: 400; }
+.qc-task .assign .tt-ours.agree { color: #34d399; background: rgba(52,211,153,0.13); border-color: rgba(52,211,153,0.40); }
+.qc-task .assign .tt-ours.agree .d { color: #34d399; }
 .qc-more { display: block; width: 100%; font-size: 9px; color: var(--text-dim); text-align: center; padding: 4px 0; font-family: "JetBrains Mono", monospace; background: var(--bg-soft); border: 1px solid var(--border-soft); border-radius: var(--radius-md); cursor: pointer; transition: color .12s, border-color .12s; }
 .qc-more:hover { color: var(--brand); border-color: var(--brand); }
 
@@ -466,7 +481,7 @@ td.mono { font-family: "JetBrains Mono", monospace; color: var(--text); }
 .util-legend i { display: inline-block; width: 8px; height: 8px; border-radius: 2px; vertical-align: middle; margin-right: 5px; }
 
 /* ============================ LIVE MAP ============================ */
-.map-page { position: relative; height: calc(100vh - var(--header-h) - 48px); overflow: hidden; }
+.map-page { position: relative; height: calc(100vh - var(--header-h) - var(--tabbar-h)); overflow: hidden; }
 /* higher specificity than maplibre's .maplibregl-map { position: relative } */
 .map-page > .map-canvas { position: absolute; inset: 0; }
 .map-canvas .maplibregl-ctrl-attrib, .map-canvas .maplibregl-ctrl-logo { display: none !important; }
@@ -780,14 +795,16 @@ td.mono { font-family: "JetBrains Mono", monospace; color: var(--text); }
 .lvp-stat { background: var(--surface-2); border: 1px solid var(--border); border-top: 3px solid var(--border-strong); border-radius: var(--radius-lg); padding: 10px 12px; text-align: center; }
 .lvp-n { font-family: "Manrope", sans-serif; font-size: 26px; font-weight: 800; color: var(--text); letter-spacing: -0.02em; }
 .lvp-l { font-size: 11px; color: var(--text-dim); margin-top: 2px; }
-.lvp-cols { display: grid; grid-template-columns: 1.3fr 1fr; gap: 14px; }
+/* minmax(0,…) — 맨 fr은 최소폭이 내용물이라 못 줄어들어, 스왑 열이 카드 밖(화면 밖)으로 밀렸다.
+   실제 접힘 분기는 파일 끝 @container(카드 폭 기준) — 아래 @media는 미지원 브라우저 폴백 */
+.lvp-cols { display: grid; grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr); gap: 14px; }
 @media (max-width: 900px) { .lvp-stats { grid-template-columns: repeat(2, 1fr); } .lvp-cols { grid-template-columns: 1fr; } }
 .lvp-col { background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 10px 12px; }
 .lvp-col-h { display: flex; align-items: center; gap: 7px; font-size: 12px; font-weight: 700; color: var(--text); margin-bottom: 8px; }
 .lvp-col-h .sw { width: 10px; height: 10px; border-radius: 999px; }
 .lvp-cn { margin-left: auto; font-family: "JetBrains Mono", monospace; font-size: 12px; color: var(--text-dim); background: var(--surface-3); padding: 1px 8px; border-radius: 999px; }
 .lvp-list { display: flex; flex-direction: column; gap: 4px; max-height: 230px; overflow-y: auto; }
-.lvp-row { display: flex; align-items: center; gap: 7px; font-size: 12px; padding: 4px 6px; border-radius: 6px; background: var(--surface); }
+.lvp-row { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 7px; font-size: 12px; padding: 4px 6px; border-radius: 6px; background: var(--surface); }
 .lvp-id { font-weight: 700; color: var(--text); }
 .lvp-tier { font-size: 9px; font-weight: 800; padding: 1px 5px; border-radius: 999px; border: 1px solid currentColor; opacity: 0.9; }
 .lvp-job { font-size: 9px; font-weight: 800; padding: 1px 5px; border-radius: 3px; }
@@ -820,6 +837,18 @@ td.mono { font-family: "JetBrains Mono", monospace; color: var(--text); }
 /* 후보 행 맨 앞의 상태 점 — 열 대신 점으로 상태를 구분해 한 줄로 세운다 */
 .lvp-row .sw { width: 8px; height: 8px; border-radius: 999px; flex: none; }
 .lvp-freein.lvp-now { color: var(--good); background: var(--good-bg); border-color: var(--good-border); }
+
+/* ── TT 페이지 반응형 = 카드 폭 기준(@container) ─────────────────────────────────
+   이 페이지 카드들은 뷰포트의 ~37%(우측 열)·~63%(좌측 열)만 차지해서, 뷰포트 기준 @media로는
+   카드가 실제로 좁아지는 구간(예: 뷰포트 1201~1800px에서 스왑 열이 화면 밖 24~246px)을 못 잡는다.
+   위쪽의 @media 분기는 @container 미지원 브라우저용 폴백으로 남겨두고, 여기 규칙이 이긴다(동일
+   특이도·뒤 선언 우선). 문턱값은 실측: qc-panel 열은 ~330px, lvp 두 열은 카드 ~620px부터 성립. */
+.tt-col-qc { container-type: inline-size; }
+.lvp { container-type: inline-size; }
+@container (max-width: 1050px) { .qc-panel { grid-template-columns: repeat(2, 1fr); } }
+@container (max-width: 660px) { .qc-panel { grid-template-columns: 1fr; } }
+@container (max-width: 620px) { .lvp-cols { grid-template-columns: 1fr; } }
+@container (max-width: 520px) { .lvp-stats4 { grid-template-columns: repeat(2, 1fr); } }
 
 /* KPI history matrix (by day/week/month) */
 .hist-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--surface); }

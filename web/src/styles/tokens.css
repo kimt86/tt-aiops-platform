@@ -36,4 +36,5 @@
   --radius-md: 0.25rem;
   --radius-lg: 0.5rem;
   --header-h: 56px;
+  --tabbar-h: 50px; /* .ptab 한 줄 높이 + .tabbar 상하 패딩 — 탭은 nowrap이라 고정 */
 }

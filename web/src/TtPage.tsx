@@ -505,7 +505,8 @@ function QcCol({ q, lang, ttState, working, mph, maxN, showDl, dl, ourRecs, ourP
         <span className="seq">{seqTxt}</span>
         <div className="body">
           <div className="top">
-            <span className={`type-${kindChip(m.jobtype)}`}>{kindLabel(m.jobtype)}</span> {m.contno ?? "—"}{m.twintandem ? ` · ${m.twintandem}` : ""}
+            <span className={`type-${kindChip(m.jobtype)}`}>{kindLabel(m.jobtype)}</span>
+            <span className="cont" title={`${m.contno ?? "—"}${m.twintandem ? ` · ${m.twintandem}` : ""}`}>{m.contno ?? "—"}{m.twintandem ? ` · ${m.twintandem}` : ""}</span>
           </div>
           <div className="bot">
             {(() => { const e = etwLabel(m.etw_accurate, m.etw_expires, lang); return e && role !== "past" && <span className={`jetw ${e.cls}`} title={k ? "TOS 작업예정(ETW) — 크레인이 이 컨테이너를 작업할 예정 시각" : "TOS ETW — when the crane is scheduled to work this"}>⏱ {e.text}</span>; })()}
@@ -521,7 +522,7 @@ function QcCol({ q, lang, ttState, working, mph, maxN, showDl, dl, ourRecs, ourP
           </div>
         </div>
         <div className="assign">
-          <span style={{ display: "inline-flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+          <span className="chips">
             {assigned(m) ? <span className="tt" title={dspTitle(tt?.dispatch, lang)}>{dot && <span className="dot" style={{ background: dot, marginRight: 4 }} />}{m.ytno}</span> : <span className="tt-none">{k ? "미배차" : "Unassigned"}</span>}
             {(() => {
               const our = recForMove.get(mkey(m));
@@ -530,7 +531,6 @@ function QcCol({ q, lang, ttState, working, mph, maxN, showDl, dl, ourRecs, ourP
               // (✓ green if we'd pick the same; else how much faster/slower we'd arrive).
               const isCmp = our.kind === "cmp";
               const agree = isCmp && our.agree === true;
-              const col = agree ? "#34d399" : "#a78bfa";
               const detail = isCmp
                 ? (agree ? "✓" : our.delta_s != null ? (our.delta_s > 0 ? `▲${fmtEta(our.delta_s)}` : `▼${fmtEta(-our.delta_s)}`) : "")
                 : (our.arrival_s != null ? fmtEta(our.arrival_s) : "");
@@ -540,8 +540,8 @@ function QcCol({ q, lang, ttState, working, mph, maxN, showDl, dl, ourRecs, ourP
                   : (agree ? `our dispatch: ${our.ytno} (same as TOS)` : `our dispatch: ${our.ytno}`))
                 : (k ? `우리 배차: ${our.ytno}${our.arrival_s != null ? ` · 픽업 도착 ${fmtEta(our.arrival_s)}` : ""}` : `our dispatch: ${our.ytno}`);
               return (
-                <span className="tt-ours" style={{ display: "inline-flex", alignItems: "center", gap: 3, padding: "0 5px", borderRadius: 4, fontSize: 11, fontWeight: 700, color: col, background: `${col}22`, border: `1px solid ${col}66` }} title={title}>
-                  🤖 {our.ytno}{detail ? <span style={{ color: agree ? col : "var(--text-mute)", fontWeight: 400 }}>{detail}</span> : null}
+                <span className={`tt-ours${agree ? " agree" : ""}`} title={title}>
+                  🤖 {our.ytno}{detail ? <span className="d">{detail}</span> : null}
                 </span>
               );
             })()}
@@ -585,10 +585,10 @@ function QcCol({ q, lang, ttState, working, mph, maxN, showDl, dl, ourRecs, ourP
         shown.forEach((m, i) => {
           if (m.queuename !== prevQ) {
             prevQ = m.queuename;
-            const dl = m.jobtype === "DS" ? (k ? "양하" : "DSC") : m.jobtype === "LD" ? (k ? "적하" : "LOD") : "";
+            const dirLabel = m.jobtype === "DS" ? (k ? "양하" : "DSC") : m.jobtype === "LD" ? (k ? "적하" : "LOD") : "";
             out.push(
               <div className="qc-qdiv" key={`d-${m.queuename}-${i}`}>
-                <span className="mono">{m.queuename || "—"}</span>{dl && <span className="qc-qdiv-t">{dl}</span>}
+                <span className="mono">{m.queuename || "—"}</span>{dirLabel && <span className="qc-qdiv-t">{dirLabel}</span>}
               </div>
             );
           }
