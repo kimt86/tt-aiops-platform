@@ -18,6 +18,9 @@ type Dev = {
 type Snap = {
   connected: boolean; as_of: string | null; dispatch_counts?: Record<string, number>;
   crane_mph_live?: number | null; crane_moves_60m?: number; cranes_working?: number;
+  // GPS 침묵(120초+)인데 매처가 풀에 유지하는 후보(무브로그 앵커/드랍 근접). devices에는 안 나온다.
+  stage2_held?: { id: string; jobtype?: string; free_in_s: number; anchored: boolean }[];
+  stage2_pool_age_s?: number | null;
   devices: Dev[];
 };
 
@@ -59,7 +62,6 @@ const DSP_META: Record<string, { ko: string; en: string; color: string }> = {
   idle: { ko: "유휴 (배차 가능)", en: "Idle (available)", color: "#22c55e" },
   staging: { ko: "배차·대기", en: "Assigned·staging", color: "#0ea5e9" },
   soon_idle: { ko: "곧유휴·임박", en: "Imminent", color: "#f59e0b" },
-  approaching: { ko: "접근·적재됨", en: "Approaching", color: "#fcd34d" },
   delivering: { ko: "적재 이동", en: "Delivering", color: "#64748b" },
   wait_rtg: { ko: "도착·RTG 대기", en: "Arrived·wait RTG", color: "#ef4444" },
   empty_travel: { ko: "공차 주행 중", en: "Empty traveling", color: "#94a3b8" },
@@ -116,8 +118,9 @@ const kindLabel = (jt: string | null) => (jt === "DS" ? "DSC" : jt === "LD" ? "L
 // ───────────────────────── live vehicle pool ─────────────────────────
 type LiveTT = { id: string; cls: string; dispatch?: string; jobtype?: string; topos1?: string; dispatch_reason?: string; swappable?: boolean; dest_remaining_m?: number; nearest_rtg_m?: number; free_in_s?: number; free_in_hi_s?: number };
 
-// "곧 빔 ~N분 (최대 M분)" — shadow time-to-free from the backend (free_in_s), display-only.
-// Grounded in tt_cycle_v2 (도착→자유 중앙 8분, 운반중 17분); the p90 width conveys the RTG-wait tail.
+// "곧 빔 ~N분 (최대 M분)" — 백엔드 free_in_s. 후보 상태(soon_idle/wait_rtg)에서는 매처가
+// 마지막 틱에 실제로 쓴 비용 기저(base)를 그대로 실어준 값이고(≤60s 지연), 그 외 상태나
+// 매처 미발행 구간만 상수표 폴백이다. hi(p90)는 상수표 경로에서만 있다.
 function freeInLabel(d: LiveTT, lang: Lang): string | null {
   if (d.free_in_s == null) return null;
   const m = Math.round(d.free_in_s / 60);
@@ -130,9 +133,6 @@ function freeInLabel(d: LiveTT, lang: Lang): string | null {
 function soonWhy(d: LiveTT, lang: Lang): string {
   const k = ko(lang);
   if (d.dispatch === "idle") return k ? "지금 배차 가능" : "dispatchable now";
-  if (d.dispatch === "approaching") {
-    return k ? "QC 양하 완료 · RTG 대기" : "QC discharged · waiting RTG";
-  }
   if (d.dispatch === "wait_rtg") {
     const m = d.nearest_rtg_m != null ? ` ${Math.round(d.nearest_rtg_m)}m` : "";
     return k ? `블록 도착 · RTG 대기${m}` : `at block · waiting RTG${m}`;
@@ -145,16 +145,19 @@ function soonWhy(d: LiveTT, lang: Lang): string {
 }
 
 // ── 후보 차량 = 매처(spawn_stage2_shadow)가 실제로 배차 대상으로 삼는 상태 ──────────────────
-// 매처는 idle(즉시) + soon_idle/approaching/wait_rtg(곧 자유, 학습된 free_in을 비용에 더함)만
-// 후보로 쓰고 delivering/empty_travel/staging은 건너뛴다. 예전 이 카드는 idle+soon_idle만 보여줘
-// wait_rtg(블록 도착·RTG 대기)가 통째로 빠져 있었다 — 화면과 매처가 서로 다른 풀을 말했다.
-const CANDIDATE_STATES = ["idle", "soon_idle", "approaching", "wait_rtg"] as const;
+// 매처는 idle(즉시) + soon_idle/wait_rtg(곧 자유)만 후보로 쓰고 delivering/empty_travel/staging은
+// 건너뛴다. (approaching은 분류기가 더는 내지 않는 은퇴 상태 — 2026-08-10 양쪽에서 정리.)
+// 여기에 더해 매처는 GPS가 침묵(120초+)해도 무브로그가 '아직 일하는 중'이라 하는 트럭을 풀에
+// 유지한다 — 그런 트럭은 devices에 없으므로 snap.stage2_held로 따로 받아 아래에서 합산한다.
+const CANDIDATE_STATES = ["idle", "soon_idle", "wait_rtg"] as const;
 // 정렬 기준 = 매처의 간선 비용 기저(base): 지금 자유면 0, 아니면 자유까지 예측 초.
+// free_in_s는 후보 상태에서 매처가 마지막 틱에 쓴 base 그대로다(백엔드 stage2_pool 발행,
+// ≤60s 지연) — 양하는 그 트립의 무브로그 앵커 우선, 정차면 정차 중앙값, 이동 중이면 학습값,
+// 매처 미발행 구간만 상수표 폴백. 그래서 이 정렬은 매처의 순서와 같은 숫자로 선다.
 const freeInOf = (d: LiveTT): number => (d.dispatch === "idle" ? 0 : d.free_in_s ?? 9e9);
-// ⚠ 후보를 두 갈래로만 센다: '지금 유휴' vs '곧 자유'. 곧유휴/접근/RTG대기를 갈라 세우지 않는다 —
-// ADR 0002(유휴 리드타임은 예측하지 않는다, 채택 2026-07-15)로 상태별 개별 예측을 중단했고,
-// 실제 코드도 트럭이 정차(<3km/h)면 learn_free_in_stationary(=jobtype만, DS 242s/LD 145s)를 써서
-// 상태를 아예 보지 않는다(상태별 learn_free_in_bias는 '움직이는 중'일 때만 폴백). 화면이 세 갈래로
+// ⚠ 후보를 두 갈래로만 센다: '지금 유휴' vs '곧 자유'. 곧유휴/RTG대기를 갈라 세우지 않는다 —
+// ADR 0002(유휴 리드타임은 예측하지 않는다, 채택 2026-07-15)로 상태별 개별 예측을 중단했다.
+// 시간-투-프리의 출처는 위 주석(앵커→정차 중앙값→학습값→상수)이 현행이다. 화면이 세 갈래로
 // 나누면 시스템이 실제로 하지 않는 구분을 하는 것처럼 읽힌다. 상태는 행 앞 점(보조 정보)으로만 남긴다.
 const isIdleNow = (d: LiveTT) => d.dispatch === "idle";
 // localized dispatch-state label for tooltips
@@ -168,7 +171,7 @@ function dspTitle(dispatch: string | undefined, lang: Lang): string | undefined 
 function ttWhere(tt: Dev | undefined, jobtype: string | null, lang: Lang): string | null {
   if (!tt?.dispatch) return null;
   const k = ko(lang), d = tt.dispatch, arrived = tt.arrival === "ARRIVED";
-  if (d === "soon_idle" || d === "approaching" || (arrived && (d === "delivering" || d === "staging"))) {
+  if (d === "soon_idle" || (arrived && (d === "delivering" || d === "staging"))) {
     return jobtype === "LD" ? (k ? "QC 밑·적재 중" : "at QC · loading") : (k ? "야드 도착·RTG 인계" : "at yard · RTG handover");
   }
   if (d === "wait_rtg") return k ? "야드 도착·RTG 대기" : "at yard · waiting RTG";
@@ -182,13 +185,22 @@ function ttWhere(tt: Dev | undefined, jobtype: string | null, lang: Lang): strin
 function LiveDispatchPool({ lang, snap, err }: { lang: Lang; snap: Snap | null; err: boolean }) {
   const k = ko(lang);
   const tts = ((snap?.devices ?? []) as LiveTT[]).filter((d) => d.cls === "TT");
-  // 후보 = 매처가 쓰는 4개 상태. 자유가 빠른 순(= 매처 비용 기저 순)으로 한 줄로 세운다.
+  // GPS 침묵(120초+)인데 매처가 풀에 유지 중인 후보 — devices에 없는 트럭이라 별도 채널로 온다.
+  const heldKind = new Map<string, "anchored" | "held">();
+  const heldRows: LiveTT[] = (snap?.stage2_held ?? [])
+    .filter((h) => !tts.some((d) => d.id === h.id))
+    .map((h) => {
+      heldKind.set(h.id, h.anchored ? "anchored" : "held");
+      return { id: h.id, cls: "TT", dispatch: "soon_idle", jobtype: h.jobtype, free_in_s: h.free_in_s } as LiveTT;
+    });
+  // 후보 = 보이는 후보 상태 + 침묵 유지. 자유가 빠른 순(= 매처 비용 기저 순)으로 한 줄로 세운다.
   const cands = tts
     .filter((d) => (CANDIDATE_STATES as readonly string[]).includes(d.dispatch ?? ""))
+    .concat(heldRows)
     .sort((a, b) => freeInOf(a) - freeInOf(b) || a.id.localeCompare(b.id));
   const idleN = cands.filter(isIdleNow).length;
-  const soonN = cands.length - idleN;  // 곧 자유 = 곧유휴 + 접근 + RTG대기 (한 갈래로 센다·위 주석 참조)
-  const busyN = tts.length - cands.length; // 운반중·배차대기·공차 = 매처가 건너뛰는 차량
+  const soonN = cands.length - idleN;  // 곧 자유 = 곧유휴 + RTG대기 + 침묵 유지 (한 갈래로 센다·위 주석 참조)
+  const busyN = tts.length - (cands.length - heldRows.length); // 운반중·배차대기·공차 = 매처가 건너뛰는 차량(보이는 것만)
   const empties = tts.filter((d) => d.dispatch === "empty_travel");
   // swap pool: empty trucks still far enough from their pickup, EXCLUDING yard moves (MI/MO)
   // — only vessel work (DS/LD) is swappable. Distance threshold is operator-adjustable.
@@ -216,7 +228,7 @@ function LiveDispatchPool({ lang, snap, err }: { lang: Lang; snap: Snap | null; 
       <div className="tcard-body">
         {/* 후보 총계를 먼저 크게 — 매처가 이번 틱에 쓸 수 있는 차량 수가 이 카드의 헤드라인이다. */}
         <div className="lvp-stats lvp-stats4">
-          <div className="lvp-stat lvp-stat-hero" title={k ? "매처가 지금 배차 대상으로 삼는 차량 = 지금 유휴 + 곧 자유" : "vehicles the matcher treats as dispatchable = idle now + soon free"}>
+          <div className="lvp-stat lvp-stat-hero" title={k ? `매처가 지금 배차 대상으로 삼는 차량 = 지금 유휴 + 곧 자유 (GPS 침묵 유지 ${heldRows.length}대 포함)` : `vehicles the matcher treats as dispatchable = idle now + soon free (incl. ${heldRows.length} GPS-silent held)`}>
             <div className="lvp-n">{cands.length}</div>
             <div className="lvp-l">{k ? "후보 차량" : "Candidates"}</div>
           </div>
@@ -224,7 +236,7 @@ function LiveDispatchPool({ lang, snap, err }: { lang: Lang; snap: Snap | null; 
             <div className="lvp-n">{idleN}</div>
             <div className="lvp-l">{k ? "지금 유휴" : "Idle now"}</div>
           </div>
-          <div className="lvp-stat" style={{ borderTopColor: DSP_META.soon_idle.color }} title={k ? "아직 작업 중이지만 곧 자유 — 자유까지 예측 시간이 비용에 더해진다. 안벽 핸드오버·RTG 대기를 갈라 세지 않는다(ADR 0002: 상태별 개별 예측 중단, 정차 시엔 작업유형 중앙값만 사용)" : "still working but soon free — predicted time-to-free is added to the cost. Quay handover vs RTG wait are NOT counted separately (ADR 0002: per-state prediction discontinued; when stopped, only the job-type median is used)"}>
+          <div className="lvp-stat" style={{ borderTopColor: DSP_META.soon_idle.color }} title={k ? `아직 작업 중이지만 곧 자유 — 자유까지 예측 시간이 비용에 더해진다. 안벽 핸드오버·RTG 대기를 갈라 세지 않는다(ADR 0002). 시간 출처: 양하는 그 트립의 무브로그 앵커 우선, 정차면 정차 중앙값, 이동 중이면 학습값. GPS 침묵이어도 무브로그가 '일하는 중'이라 하면 풀에 유지된다(지금 ${heldRows.length}대)` : `still working but soon free — predicted time-to-free is added to the cost. Quay handover vs RTG wait are NOT counted separately (ADR 0002). Time source: DS uses this trip's move-log anchor first, stationary median when stopped, learned values while moving. GPS-silent trucks stay in the pool while the move-log says they're working (${heldRows.length} now)`}>
             <div className="lvp-n">{soonN}</div>
             <div className="lvp-l">{k ? "곧 자유" : "Soon free"}</div>
           </div>
@@ -237,23 +249,28 @@ function LiveDispatchPool({ lang, snap, err }: { lang: Lang; snap: Snap | null; 
           <div className="lvp-col">
             <div className="lvp-col-h">{k ? "후보 — 자유가 빠른 순" : "Candidates — soonest free first"}<span className="lvp-cn">{cands.length}</span></div>
             <div className="lvp-sub">{k
-              ? "매처가 쓰는 순서와 같음(지금 자유 = 0초, 나머지는 자유까지 예측 시간을 비용에 더함)"
-              : "same order the matcher uses (free now = 0s; others add predicted time-to-free to the cost)"}</div>
+              ? "매처가 마지막 틱(60초 주기)에 실제로 쓴 값 그대로 — 지금 자유 = 0초, 나머지는 자유까지 예측 시간을 비용에 더함"
+              : "the exact numbers the matcher used last tick (60s cadence) — free now = 0s; others add predicted time-to-free to the cost"}</div>
             <div className="lvp-list lvp-list-tall">
               {cands.length === 0 && <div className="lvp-empty">{k ? "없음" : "none"}</div>}
               {cands.map((d) => {
                 const meta = DSP_META[d.dispatch ?? ""] ?? null;
                 const now = d.dispatch === "idle";
+                const hk = heldKind.get(d.id); // GPS 침묵 유지 트럭 (stage2_held)
                 return (
                   <div className="lvp-row" key={d.id}>
-                    <span className="sw" style={{ background: meta?.color ?? "var(--text-mute)" }} title={dspTitle(d.dispatch, lang)} />
+                    <span className="sw" style={{ background: meta?.color ?? "var(--text-mute)", opacity: hk ? 0.45 : undefined }} title={hk ? (k ? "GPS 침묵 — 매처가 무브로그 근거로 풀에 유지" : "GPS silent — held in the pool on move-log evidence") : dspTitle(d.dispatch, lang)} />
                     <span className="lvp-id mono">{d.id}</span>
                     {d.jobtype && <span className={`lvp-job type-${d.jobtype.toLowerCase()}`}>{d.jobtype}</span>}
                     {d.topos1 && <span className="lvp-dest mono">→{d.topos1}</span>}
                     {now
                       ? <span className="lvp-freein lvp-now">{k ? "지금" : "now"}</span>
-                      : freeInLabel(d, lang) && <span className="lvp-freein" title={k ? "자유까지 추정(측정 중앙값·표시 전용, 배차 미연결)" : "estimated time-to-free (measured median · display-only, not wired to dispatch)"}>{freeInLabel(d, lang)}</span>}
-                    <span className="lvp-why">{soonWhy(d, lang)}</span>
+                      : freeInLabel(d, lang) && <span className="lvp-freein" title={k ? "매처가 마지막 틱에 쓴 자유까지 시간(양하는 무브로그 앵커 우선·정차는 정차 중앙값·60초 주기 갱신)" : "time-to-free the matcher used last tick (DS: move-log anchor first; stopped: stationary median; refreshed every 60s)"}>{freeInLabel(d, lang)}</span>}
+                    <span className="lvp-why">{hk
+                      ? (hk === "anchored"
+                          ? (k ? "GPS 침묵 · 무브로그 앵커로 유지" : "GPS silent · held by move-log anchor")
+                          : (k ? "GPS 침묵 · 드랍 근접 대기로 유지" : "GPS silent · held waiting at its drop"))
+                      : soonWhy(d, lang)}</span>
                   </div>
                 );
               })}
@@ -283,8 +300,8 @@ function LiveDispatchPool({ lang, snap, err }: { lang: Lang; snap: Snap | null; 
           </div>
         </div>
         <div className="lvp-note">{k
-          ? "후보 = 지금 유휴 + 곧 자유. 운반 중·배차 대기·공차는 이미 일이 있어 제외한다. 자유까지 시간은 측정 중앙값 기반 추정이고 표시 전용이다 — 트럭이 멈춰 있으면 작업유형(양하/적하) 중앙값만 쓰고 '안벽 핸드오버냐 RTG 대기냐'는 보지 않는다. 개별 트럭의 남은 시간을 정밀하게 맞히는 일은 관측 신호의 근본 한계로 중단했다(대기를 만드는 크레인 큐가 안 보이고, 트럭은 멈추면 단말이 침묵한다). 같은 이유로 매처가 잠시 붙잡아 두는 '신호가 끊긴 마지막 단계 트럭'은 화면에 안 보일 수 있다."
-          : "Candidates = idle now + soon free. Delivering / staging / empty trucks already have work and are skipped. Time-to-free is a measured-median estimate, display-only — when a truck is stopped only the job-type (DS/LD) median is used; whether it is a quay handover or an RTG wait is not considered. Predicting an individual truck's remaining time precisely was discontinued as an observability limit (the crane queue that creates the wait is invisible, and devices go silent while stopped). For the same reason the matcher's briefly-silent last-stage trucks may not appear here."}</div>
+          ? "후보 = 지금 유휴 + 곧 자유. 운반 중·배차 대기·공차는 이미 일이 있어 제외한다. 자유까지 시간은 매처가 마지막 틱(60초 주기)에 실제로 쓴 값이다 — 양하는 그 트립의 크레인 픽업부터 내려 세는 무브로그 앵커를 먼저 쓰고, 없으면 정차 중앙값(작업유형별) → 학습값 → 상수 순서로 폴백한다. 개별 트럭의 남은 시간을 정밀하게 맞히는 일은 관측 신호의 근본 한계로 중단했다(대기를 만드는 크레인 큐가 안 보이고, 트럭은 멈추면 단말이 침묵한다). 다만 GPS가 120초 넘게 침묵해도 무브로그가 '아직 일하는 중'이라 하면 매처는 그 트럭을 풀에 유지하며, 그런 트럭은 여기 'GPS 침묵'으로 표시된다(지도에는 없음)."
+          : "Candidates = idle now + soon free. Delivering / staging / empty trucks already have work and are skipped. Time-to-free is the value the matcher actually used on its last tick (60s cadence) — DS counts down from this trip's own crane pickup (move-log anchor) when available, else stationary median (per job type) → learned values → constants. Predicting an individual truck's remaining time precisely was discontinued as an observability limit (the crane queue that creates the wait is invisible, and devices go silent while stopped). Trucks silent for 120s+ are still HELD in the pool while the move-log says they're working — they appear here flagged 'GPS silent' (absent from the map)."}</div>
       </div>
     </section>
   );

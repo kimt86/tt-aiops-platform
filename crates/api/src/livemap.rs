@@ -667,6 +667,30 @@ pub struct LiveMap {
     // moment (last delivering → drop), not the loose laden_arrived. Used as the dispatch base for a
     // candidate truck that is genuinely STOPPED at its drop; moving trucks keep free_in_bias.
     stationary_free: RwLock<HashMap<String, (i64, i64)>>,
+    // 매처(spawn_stage2_shadow)가 마지막 틱에 실제로 쓴 차량 풀. positions 가 이걸 그대로
+    // 서빙해서 TT 페이지의 후보 카드가 매처와 같은 숫자로 정렬/표시된다(재유도 아님 — 동일 값).
+    stage2_pool: RwLock<Stage2Pool>,
+}
+
+/// The vehicle pool the Stage-2 matcher ACTUALLY used on its last tick (published every 60s).
+/// `bases` = ytno → cost base (seconds-to-free; 0 = idle). `held` = GPS-silent trucks the matcher
+/// keeps in the pool (age > STALE_AFTER_S, so the positions device list cannot show them).
+#[derive(Default)]
+struct Stage2Pool {
+    as_of_ms: i64,
+    bases: HashMap<String, i64>,
+    held: Vec<HeldCandidateOut>,
+}
+
+/// GPS-silent candidate the matcher holds — surfaced separately because the device list
+/// filters out stale fixes. `anchored` = the time-to-free counts down from this trip's own
+/// crane pickup (move-log anchor) rather than the learned stationary constant.
+#[derive(Serialize, Clone)]
+struct HeldCandidateOut {
+    id: String,
+    jobtype: String,
+    free_in_s: i64,
+    anchored: bool,
 }
 
 /// Cap on the in-memory completed-cycle buffer. If the flusher stalls we drop the oldest
@@ -695,6 +719,7 @@ impl LiveMap {
             crane_wp: RwLock::new(HashMap::new()),
             free_in_bias: RwLock::new(HashMap::new()),
             stationary_free: RwLock::new(HashMap::new()),
+            stage2_pool: RwLock::new(Stage2Pool::default()),
             connected: AtomicBool::new(false),
             messages: AtomicU64::new(0),
             reconnects: AtomicU64::new(0),
@@ -762,8 +787,9 @@ struct DeviceOut {
     dest_remaining_m: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     swappable: Option<bool>,
-    // SHADOW: display-only time-to-free estimate (median + p90 seconds), by state+jobtype.
-    // Not used in dispatch yet — see free_in().
+    // Time-to-free estimate (median + p90 seconds). For candidate states (soon_idle/wait_rtg)
+    // this is the Stage-2 matcher's published cost base (same number it matched with, ≤60s old);
+    // other states get the free_in() constants (display-only).
     #[serde(skip_serializing_if = "Option::is_none")]
     free_in_s: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -838,6 +864,12 @@ pub struct PositionsOut {
     /// live QC starvation (K_QC_TT_WAIT_GPS basis) — quay cranes idle with NO truck + their avg wait (s)
     qc_starving: usize,
     qc_wait_live_s: Option<i64>,
+    /// GPS-silent trucks the Stage-2 matcher HOLDS as candidates (stale fixes are filtered out
+    /// of `devices`, so without this the TT-page pool card undercounts the matcher's pool).
+    /// Empty when the matcher hasn't published within ~3 min.
+    stage2_held: Vec<HeldCandidateOut>,
+    /// seconds since the matcher last published its pool (None = never, e.g. right after boot)
+    stage2_pool_age_s: Option<i64>,
     devices: Vec<DeviceOut>,
 }
 
@@ -1095,14 +1127,15 @@ fn classify_tt(
     }
 }
 
-/// Display-only estimate of time-to-free (median, p90) in seconds, by dispatch state + jobtype.
-/// SHADOW: shown in the API/UI for situational awareness; NOT wired into any dispatch cost or
-/// ranking yet (promotion happens only after the live-emitted ETAs are validated against actuals).
+/// CONSTANT-table estimate of time-to-free (median, p90) in seconds, by dispatch state + jobtype.
+/// Role today: the LAST fallback of the matcher's cost base (anchor → stationary → learned bias
+/// → this), and the display value for non-candidate states (e.g. delivering) or when the matcher
+/// hasn't published a pool recently. Candidate states normally serve the matcher's base instead.
 ///
 /// Grounded in `tt_cycle_v2` measurement (DS, last 36h, 2026-06-16, all from the same GPS clock so
 /// the tiers are internally consistent):
 ///   - delivering (loaded, still driving): pickup_left→dropped  p50 17.2m / p90 40.3m  (n=7,264)
-///   - arrived at block (approaching/wait_rtg): laden_arrived→dropped  p50 8.0m / p90 27m (n=6,249)
+///   - arrived at block (wait_rtg): laden_arrived→dropped  p50 8.0m / p90 27m (n=6,249)
 ///   - soon_idle (RTG ≤30m engaged, or quay PLC): ~2m — least-grounded tier (no RTG-distance history),
 ///     rough "handover in progress" value.
 /// Only DS is grounded; other jobtypes get None (their free-point differs and is unmeasured here).
@@ -1110,7 +1143,6 @@ fn free_in(state: &str, jobtype: Option<&str>) -> (Option<i64>, Option<i64>) {
     let ds = jobtype == Some("DS");
     match state {
         "delivering" if ds => (Some(1030), Some(2420)),
-        "approaching" => (Some(480), Some(1620)), // approaching is DS-only by construction
         "wait_rtg" if ds => (Some(480), Some(1620)),
         "soon_idle" => (Some(120), Some(360)),    // imminent: DS RTG≤30m or LD quay handover
         _ => (None, None),
@@ -1150,6 +1182,19 @@ pub async fn positions(State(lm): State<Arc<LiveMap>>, State(pool): State<PgPool
         let g = lm.crane_wp.read().await;
         resolve_crane_wp(&line, &g, &cranes)
     };
+    // Stage-2 matcher pool published on its last tick (60s cadence). Candidate states serve
+    // these bases as free_in_s so the TT-page card sorts/labels by the SAME numbers the matcher
+    // used; if the matcher hasn't published within ~3 min (boot/outage) fall back to constants.
+    let (s2_bases, s2_held, s2_age_s) = {
+        let sp = lm.stage2_pool.read().await;
+        let age_s = (sp.as_of_ms > 0).then(|| ((now - sp.as_of_ms) / 1000).max(0));
+        let fresh = age_s.is_some_and(|a| a <= 180);
+        (
+            if fresh { sp.bases.clone() } else { HashMap::new() },
+            if fresh { sp.held.clone() } else { Vec::new() },
+            age_s,
+        )
+    };
     let mut devices: Vec<DeviceOut> = map
         .iter()
         .filter_map(|(id, p)| {
@@ -1163,11 +1208,18 @@ pub async fn positions(State(lm): State<Arc<LiveMap>>, State(pool): State<PgPool
             let nearest_rtg_m = c.as_ref().and_then(|c| c.nearest_rtg_m);
             let dest_remaining_m = c.as_ref().and_then(|c| c.dest_remaining_m);
             let swappable = c.as_ref().and_then(|c| c.swappable);
-            // shadow time-to-free, derived from the classified state (display-only)
-            let (free_in_s, free_in_hi_s) = c
-                .as_ref()
-                .map(|c| free_in(c.state, p.jobtype.as_deref()))
-                .unwrap_or((None, None));
+            // time-to-free: candidate states (soon_idle/wait_rtg) mirror the matcher's published
+            // cost base — the same number the matcher used last tick (DS move-log anchor first,
+            // stationary median when stopped, learned bias otherwise). Non-candidate states and
+            // matcher-stale windows keep the free_in() constants. Published bases carry no p90.
+            let (free_in_s, free_in_hi_s) = match dispatch {
+                Some(s @ ("soon_idle" | "wait_rtg")) => match s2_bases.get(id) {
+                    Some(&b) => (Some(b), None),
+                    None => free_in(s, p.jobtype.as_deref()),
+                },
+                Some(s) => free_in(s, p.jobtype.as_deref()),
+                None => (None, None),
+            };
             // attach crane PLC state (ctab zone) when fresh — id matches the crane id.
             let plc_out = plc.get(id).and_then(|c| {
                 let pa = (now - c.last_seen_ms) / 1000;
@@ -1244,7 +1296,7 @@ pub async fn positions(State(lm): State<Arc<LiveMap>>, State(pool): State<PgPool
     let active_trucks: usize = dispatch_counts.iter().filter(|(k, _)| **k != "idle").map(|(_, v)| *v).sum();
     // L for Little's law = trucks on a laden round-trip arc (en route to pick up, carrying,
     // or at handover). Exclude idle and wait_rtg (parked) so W = L/λ isn't biased high.
-    let cycling_trucks: usize = ["empty_travel", "delivering", "soon_idle", "approaching"]
+    let cycling_trucks: usize = ["empty_travel", "delivering", "soon_idle"]
         .iter()
         .map(|k| dispatch_counts.get(k).copied().unwrap_or(0))
         .sum();
@@ -1349,6 +1401,8 @@ pub async fn positions(State(lm): State<Arc<LiveMap>>, State(pool): State<PgPool
         tt_util_shift_avg,
         qc_starving,
         qc_wait_live_s,
+        stage2_held: s2_held,
+        stage2_pool_age_s: s2_age_s,
         devices,
     })
 }
@@ -4403,7 +4457,7 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                 tracing::info!(n = inflight.len(), "move-log in-flight anchor");
             }
             // candidate vehicles: idle (free now) + soon-free; committed/moving (delivering/empty) skipped
-            let vehicles: Vec<(String, f64, f64, i64, &'static str)> = {
+            let (vehicles, held_out): (Vec<(String, f64, f64, i64, &'static str)>, Vec<HeldCandidateOut>) = {
                 let map = lm.devices.read().await;
                 let plc = lm.plc.read().await;
                 let centroids = lm.centroids.read().await;
@@ -4422,6 +4476,7 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                 let fi_bias = lm.free_in_bias.read().await; // ⑥ learned soon_idle seconds-to-idle
                 let st_free = lm.stationary_free.read().await; // 정차 앵커 (mig 0091)
                 let mut v = Vec::new();
+                let mut held: Vec<HeldCandidateOut> = Vec::new();
                 let mut n_ds_anchor: usize = 0; // 관측 카운터 — DS 앵커 duration이 실제로 쓰였는지(mig 0132·CHUNK B)
                 for (id, p) in map.iter() {
                     if p.cls != "TT" { continue; }
@@ -4460,6 +4515,7 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                             None => (st_free.get(jt).map(|&(m, _)| m).unwrap_or(300).clamp(30, 3600), "soon_idle_held"),
                         };
                         v.push((id.clone(), dlat, dlon, base, state));
+                        held.push(HeldCandidateOut { id: id.clone(), jobtype: jt.to_string(), free_in_s: base, anchored: anchored.is_some() });
                         continue;
                     }
                     let c = classify_tt(p, assigned_pool.get(id), &rtgs, &plc, &cranes, &centroids, now);
@@ -4476,7 +4532,7 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                         // events (see the ⚠⚠ block on spawn_free_in_logger for the measurements).
                         // Until that swap lands this is still what the matcher uses, so anyone
                         // benchmarking "current vs new" must not mistake it for a validated baseline.
-                        s @ ("soon_idle" | "approaching" | "wait_rtg") => {
+                        s @ ("soon_idle" | "wait_rtg") => {
                             // jobtype must use the SAME latched fallback the MV/logger key on
                             // (free_in_sample writer + near-miss logger), else a momentary None
                             // jobtype misses the learned bucket and collapses to the 30s floor.
@@ -4492,9 +4548,9 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                             } else {
                                 // 정차 앵커 (mig 0091): a truck genuinely STOPPED at its drop (arrived state
                                 // + speed<idle) frees in the GPS-stationary median (LD ~141/DS ~258) —
-                                // ~half the loose-arrival free_in estimate, correctly calibrated. Moving/
-                                // approaching trucks keep free_in_bias (they still have to reach + stop).
-                                let stopped = s != "approaching" && p.speed < IDLE_SPEED_KMH;
+                                // ~half the loose-arrival free_in estimate, correctly calibrated. Moving
+                                // trucks keep free_in_bias (they still have to reach + stop).
+                                let stopped = p.speed < IDLE_SPEED_KMH;
                                 if let Some(&(med, _p90)) = st_free.get(&jt).filter(|_| stopped) {
                                     med
                                 } else {
@@ -4517,8 +4573,16 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                 if tick % 10 == 0 {
                     tracing::info!(n = n_ds_anchor, total = v.len(), "DS 보이는 트럭 앵커 duration 적용");
                 }
-                v
+                (v, held)
             };
+            // publish the pool this tick ACTUALLY uses (empty included — that's the truth) so
+            // positions/TT-page mirror the matcher's numbers instead of re-deriving them.
+            {
+                let mut sp = lm.stage2_pool.write().await;
+                sp.as_of_ms = now;
+                sp.bases = vehicles.iter().map(|(id, _, _, b, _)| (id.clone(), *b)).collect();
+                sp.held = held_out;
+            }
             if vehicles.is_empty() {
                 continue;
             }
@@ -5049,7 +5113,7 @@ pub fn spawn_dispatch_compare(lm: Arc<LiveMap>, pool: PgPool) {
                 };
                 let mut best: Option<(String, i64)> = None;
                 for (yt, la, lo, st) in avail {
-                    if !matches!(st, "idle" | "soon_idle" | "approaching" | "wait_rtg") {
+                    if !matches!(st, "idle" | "soon_idle" | "wait_rtg") {
                         continue;
                     }
                     let a = cost(la, lo, dlat, dlon, jobtype == "LD");
