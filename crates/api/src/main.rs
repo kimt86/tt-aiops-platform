@@ -57,6 +57,7 @@ fn app(state: AppState) -> Router {
         .route("/api/stage2/shadow", get(workpool::stage2_shadow))
         .route("/api/stage2/advisory", get(workpool::stage2_advisory))
         .route("/api/stage2/compare", get(workpool::dispatch_compare))
+        .route("/api/stage2/box-compare", get(workpool::stage2_box_compare))
         .route("/api/stage2/fair-compare", get(workpool::stage2_fair_compare))
         .route("/api/stage2/fair-breakdown", get(workpool::stage2_fair_breakdown))
         .route("/api/stage2/compare-picks", get(workpool::stage2_compare_picks))

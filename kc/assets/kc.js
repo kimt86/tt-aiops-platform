@@ -17,7 +17,7 @@ const NAV = [
     { page: "dashboard/dispatch",    title: "TT Dispatch & 라이브맵" },
     { page: "dashboard/cycle",       title: "Cycle 페이지" },
     { page: "dashboard/learning",    title: "러닝 센터" },
-    { page: "dashboard/stage2-match", title: "MATCH (2단계 매칭)" },
+    { page: "dashboard/stage2-match", title: "배차 비교 (VS TOS)" },
   ]},
   { id: "data", label: "데이터 & 지표", items: [
     { page: "data/tos-extraction",     title: "TOS 데이터 추출 전수", group: "TOS" },

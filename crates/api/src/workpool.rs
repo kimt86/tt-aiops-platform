@@ -1776,8 +1776,15 @@ pub struct FairCompare {
 #[derive(Serialize)]
 pub struct FairCompareOut {
     latest: Option<FairCompare>,
-    /// average of `savings_pct` — see the warning on that field. Kept for continuity.
+    /// pair-weighted over the returned window: 100·(Σtos−Σour)/Σtos — see the warning on
+    /// `savings_pct`. (Was a plain per-tick mean before 2026-08-10, which let a 4-pair tick
+    /// weigh as much as a 120-pair one.)
     avg_savings_pct: Option<f64>,
+    /// Σn over the returned window — the pair count that matches `avg_savings_pct`'s window,
+    /// so the headline can quote one consistent denominator instead of the latest tick's n.
+    pairs_total: i64,
+    /// window-consistent same-pick share: 100·Σsame_n/Σn
+    same_pct: Option<f64>,
     /// ★ the honest one: of the range a coin-flip assignment leaves open (random − optimal), what
     /// share does TOS already capture? 100% = TOS is already optimal and there is nothing to win;
     /// low = real headroom. None until enough rows carry the random baseline.
@@ -1798,11 +1805,13 @@ pub async fn stage2_fair_compare(State(pool): State<PgPool>) -> Result<Json<Fair
     .fetch_all(&pool)
     .await?;
     let latest = recent.first().cloned();
-    let avg_savings_pct = if recent.is_empty() {
-        None
-    } else {
-        Some(recent.iter().map(|r| r.savings_pct).sum::<f64>() / recent.len() as f64)
-    };
+    // pair-weighted, one window: totals over the same 48 rows the page quotes
+    let tot_tos: i64 = recent.iter().map(|r| r.tos_total_s).sum();
+    let tot_our: i64 = recent.iter().map(|r| r.our_total_s).sum();
+    let pairs_total: i64 = recent.iter().map(|r| r.n as i64).sum();
+    let same_total: i64 = recent.iter().map(|r| r.same_n as i64).sum();
+    let avg_savings_pct = (tot_tos > 0).then(|| 100.0 * (tot_tos - tot_our) as f64 / tot_tos as f64);
+    let same_pct = (pairs_total > 0).then(|| 100.0 * same_total as f64 / pairs_total as f64);
     // random >= TOS >= optimal, so (random-TOS)/(random-optimal) is the share of the achievable
     // range TOS already holds. Skip rows where the denominator is degenerate (random == optimal
     // means every permutation costs the same and there was nothing to decide).
@@ -1816,7 +1825,7 @@ pub async fn stage2_fair_compare(State(pool): State<PgPool>) -> Result<Json<Fair
         .collect();
     let avg_tos_capture_pct = (!caps.is_empty()).then(|| caps.iter().sum::<f64>() / caps.len() as f64);
     let rand_n = recent.iter().filter(|r| r.rand_total_s.is_some()).count();
-    Ok(Json(FairCompareOut { latest, avg_savings_pct, avg_tos_capture_pct, rand_n, recent }))
+    Ok(Json(FairCompareOut { latest, avg_savings_pct, pairs_total, same_pct, avg_tos_capture_pct, rand_n, recent }))
 }
 
 #[derive(Serialize, sqlx::FromRow)]
@@ -1851,8 +1860,10 @@ pub async fn stage2_fair_breakdown(State(pool): State<PgPool>) -> Result<Json<Fa
     let by_job: Vec<FairBucket> = sqlx::query_as(&format!(
         "SELECT jobtype AS key, {COLS} FROM fair_compare_detail WHERE {win} GROUP BY jobtype ORDER BY jobtype"
     )).fetch_all(&pool).await?;
+    // bucket by the DISPATCH time, not the 5-min loader's write time (up to 5 min late and
+    // wrong at hour boundaries). dispatch_ts exists since mig 0110; COALESCE covers older rows.
     let by_hour: Vec<FairBucket> = sqlx::query_as(&format!(
-        "SELECT lpad((extract(hour FROM ts AT TIME ZONE 'Asia/Kuala_Lumpur'))::int::text,2,'0') AS key, {COLS}
+        "SELECT lpad((extract(hour FROM COALESCE(dispatch_ts, ts) AT TIME ZONE 'Asia/Kuala_Lumpur'))::int::text,2,'0') AS key, {COLS}
            FROM fair_compare_detail WHERE {win} GROUP BY 1 ORDER BY 1"
     )).fetch_all(&pool).await?;
     let by_dist: Vec<FairBucket> = sqlx::query_as(&format!(
@@ -1880,7 +1891,8 @@ pub async fn dispatch_compare(State(pool): State<PgPool>) -> Result<Json<Dispatc
     let summary: CompareSummary = sqlx::query_as(
         "SELECT count(*) AS n,
                 (100.0*count(*) FILTER (WHERE NOT agree)/nullif(count(*),0))::float8 AS divergence_pct,
-                (100.0*count(*) FILTER (WHERE delta_s > 0)/nullif(count(*),0))::float8 AS ours_faster_pct,
+                (100.0*count(*) FILTER (WHERE delta_s > 0)
+                      /nullif(count(*) FILTER (WHERE delta_s IS NOT NULL),0))::float8 AS ours_faster_pct,
                 avg(delta_s)::float8 AS avg_delta_s,
                 (percentile_cont(0.5) WITHIN GROUP (ORDER BY delta_s))::float8 AS median_delta_s,
                 avg(our_arrival_s)::float8 AS avg_our_arrival_s,
@@ -1900,6 +1912,171 @@ pub async fn dispatch_compare(State(pool): State<PgPool>) -> Result<Json<Dispatc
     .fetch_all(&pool)
     .await?;
     Ok(Json(DispatchCompareOut { summary, recent }))
+}
+
+// ── 상자 단위 시스템 비교 — VS TOS 헤드라인 (2026-08-10) ─────────────────────────────────────
+// 같은 상자(contno)에 대해 우리 추천(트럭·시점)과 TOS 실배차(트럭·시점)를 직접 짝짓는다.
+// 시점 격차는 정오 판정이 아니라 계기다: 우리 마감은 출항 요구 페이스 규범(pool_mode=3)이라
+// TOS 배차시각과 다르다는 사실만으로 어느 쪽이 틀렸다고 말할 수 없다. 분모 2개를 응답에
+// 그대로 싣는다(boxes_reco → boxes_joined). contno 는 mig 0142(2026-08-10)부터 기록되므로
+// 그 이전 추천은 분모에 들어오지 않는다 — 표본이 차오르는 중이라는 라벨이 프론트에 있다.
+
+#[derive(Serialize, sqlx::FromRow)]
+struct BoxJobStat {
+    jobtype: Option<String>,
+    n: i64,
+    /// TOS 배차시각 − 우리 최초 추천시각 (초; + = TOS 가 우리보다 늦게 배차)
+    gap_p25_s: Option<f64>,
+    gap_p50_s: Option<f64>,
+    gap_p75_s: Option<f64>,
+    /// 우리 마감선 − TOS 배차시각 (초; + = 우리 마감 안쪽 배차)
+    margin_p50_s: Option<f64>,
+    truck_match_pct: Option<f64>,
+}
+#[derive(Serialize, sqlx::FromRow)]
+struct BoxTiming {
+    jobtype: Option<String>,
+    n: i64,
+    /// TOS 실현: 배차 → QC 처리완료 (DS=pickup_ts, LD=free_ts — 트럭 준비시간의 실측판)
+    realized_lead_p50_s: Option<f64>,
+    realized_lead_p90_s: Option<f64>,
+    /// 모형 무부하주행 p50 (learn_dispatch_lead.modeled_arrival_s) — 물리적으로 꼭 드는 몫
+    modeled_travel_s: Option<i32>,
+    /// 학습된 실현 리드 — ⚠ TOS 실현치에서 학습되므로 이것으로 TOS 를 채점하면 동어반복.
+    /// 눈금(참고)으로만 내보낸다.
+    learned_lead_s: Option<i32>,
+}
+#[derive(Serialize, sqlx::FromRow)]
+struct BoxRow {
+    contno: String,
+    qc: Option<String>,
+    jobtype: Option<String>,
+    first_ts: DateTime<Utc>,
+    our_ytno: Option<String>,
+    tos_ytno: Option<String>,
+    dispatch_ts: Option<DateTime<Utc>>,
+    gap_s: Option<f64>,
+    margin_s: Option<f64>,
+    truck_match: Option<bool>,
+}
+#[derive(Serialize)]
+pub struct BoxCompareOut {
+    /// 분모①: 최근 24h 우리가 추천한 상자 수 (contno 단위·최초 추천 기준)
+    boxes_reco: i64,
+    /// 분모②: 그중 TOS 도 최초 추천 앞뒤 3시간 안에 실배차해 짝지어진 상자 수
+    boxes_joined: i64,
+    truck_match_pct: Option<f64>,
+    /// TOS 배차가 우리 최초 추천 이후였던 비율
+    tos_after_pct: Option<f64>,
+    gap_p25_s: Option<f64>,
+    gap_p50_s: Option<f64>,
+    gap_p75_s: Option<f64>,
+    /// TOS 배차가 우리 마감선 안쪽(margin ≥ 0)이었던 비율
+    margin_in_pct: Option<f64>,
+    by_job: Vec<BoxJobStat>,
+    timing: Vec<BoxTiming>,
+    recent: Vec<BoxRow>,
+}
+
+/// 공용 CTE: 우리 추천(상자별 최초 행) ⨝ TOS 실배차(±3h 최근접). 프로브는
+/// stage2_match_shadow PK(ts) 범위 + tt_move_log(contno) 인덱스(mig 0092 계열)로 간다.
+const BOX_JOIN_CTE: &str = "WITH r AS (
+       SELECT contno,
+              min(ts) AS first_ts,
+              (array_agg(ytno    ORDER BY ts))[1] AS first_ytno,
+              (array_agg(qc      ORDER BY ts))[1] AS qc,
+              (array_agg(jobtype ORDER BY ts))[1] AS jobtype,
+              (array_agg(dispatch_deadline_ts ORDER BY ts))[1] AS first_deadline
+         FROM stage2_match_shadow
+        WHERE ts > now() - interval '24 hours' AND contno IS NOT NULL
+        GROUP BY contno
+     ), j AS (
+       SELECT r.contno, r.qc, r.jobtype, r.first_ts, r.first_ytno, r.first_deadline,
+              t.ytno AS tos_ytno, t.dispatch_ts,
+              EXTRACT(EPOCH FROM (t.dispatch_ts - r.first_ts))::float8       AS gap_s,
+              EXTRACT(EPOCH FROM (r.first_deadline - t.dispatch_ts))::float8 AS margin_s,
+              EXISTS (SELECT 1 FROM stage2_match_shadow m
+                       WHERE m.contno = r.contno AND m.ytno = t.ytno AND m.ts <= t.dispatch_ts) AS truck_match
+         FROM r
+         JOIN LATERAL (
+           SELECT ytno, dispatch_ts FROM tt_move_log t
+            WHERE t.contno = r.contno
+              AND t.dispatch_ts >= r.first_ts - interval '3 hours'
+              AND t.dispatch_ts <  r.first_ts + interval '3 hours'
+            ORDER BY abs(EXTRACT(EPOCH FROM (t.dispatch_ts - r.first_ts))) LIMIT 1
+         ) t ON true
+     )";
+
+/// `GET /api/stage2/box-compare`
+pub async fn stage2_box_compare(State(pool): State<PgPool>) -> Result<Json<BoxCompareOut>, AppError> {
+    let (boxes_reco, boxes_joined, truck_match_pct, tos_after_pct, gap_p25_s, gap_p50_s, gap_p75_s, margin_in_pct): (
+        i64, i64, Option<f64>, Option<f64>, Option<f64>, Option<f64>, Option<f64>, Option<f64>,
+    ) = sqlx::query_as(&format!(
+        "{BOX_JOIN_CTE}
+         SELECT (SELECT count(*) FROM r)::int8,
+                count(*)::int8,
+                (100.0*count(*) FILTER (WHERE truck_match)/nullif(count(*),0))::float8,
+                (100.0*count(*) FILTER (WHERE gap_s >= 0)/nullif(count(*),0))::float8,
+                (percentile_cont(0.25) WITHIN GROUP (ORDER BY gap_s))::float8,
+                (percentile_cont(0.5)  WITHIN GROUP (ORDER BY gap_s))::float8,
+                (percentile_cont(0.75) WITHIN GROUP (ORDER BY gap_s))::float8,
+                (100.0*count(*) FILTER (WHERE margin_s >= 0)/nullif(count(*),0))::float8
+           FROM j"
+    ))
+    .fetch_one(&pool)
+    .await?;
+    let by_job: Vec<BoxJobStat> = sqlx::query_as(&format!(
+        "{BOX_JOIN_CTE}
+         SELECT jobtype, count(*)::int8 AS n,
+                (percentile_cont(0.25) WITHIN GROUP (ORDER BY gap_s))::float8 AS gap_p25_s,
+                (percentile_cont(0.5)  WITHIN GROUP (ORDER BY gap_s))::float8 AS gap_p50_s,
+                (percentile_cont(0.75) WITHIN GROUP (ORDER BY gap_s))::float8 AS gap_p75_s,
+                (percentile_cont(0.5)  WITHIN GROUP (ORDER BY margin_s))::float8 AS margin_p50_s,
+                (100.0*count(*) FILTER (WHERE truck_match)/nullif(count(*),0))::float8 AS truck_match_pct
+           FROM j WHERE jobtype IN ('DS','LD') GROUP BY jobtype ORDER BY jobtype"
+    ))
+    .fetch_all(&pool)
+    .await?;
+    let recent: Vec<BoxRow> = sqlx::query_as(&format!(
+        "{BOX_JOIN_CTE}
+         SELECT contno, qc, jobtype, first_ts, first_ytno AS our_ytno,
+                tos_ytno, dispatch_ts, gap_s, margin_s, truck_match
+           FROM j ORDER BY dispatch_ts DESC LIMIT 20"
+    ))
+    .fetch_all(&pool)
+    .await?;
+    // 시점 실측 — 상자 조인과 무관하게 TOS 전체(최근 24h 완결 무브)로 잰다. business_date
+    // 인덱스 선두 컬럼으로 범위를 좁힌 뒤 dispatch_ts 필터(단독 인덱스 없음).
+    let timing: Vec<BoxTiming> = sqlx::query_as(
+        "SELECT t.jobtype, count(*)::int8 AS n,
+                (percentile_cont(0.5) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM
+                   (CASE WHEN t.jobtype='DS' THEN t.pickup_ts ELSE t.free_ts END) - t.dispatch_ts)))::float8 AS realized_lead_p50_s,
+                (percentile_cont(0.9) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM
+                   (CASE WHEN t.jobtype='DS' THEN t.pickup_ts ELSE t.free_ts END) - t.dispatch_ts)))::float8 AS realized_lead_p90_s,
+                max(l.modeled_arrival_s)::int4 AS modeled_travel_s,
+                max(l.realized_lead_s)::int4   AS learned_lead_s
+           FROM tt_move_log t
+           LEFT JOIN learn_dispatch_lead l ON l.jobtype = t.jobtype
+          WHERE t.business_date >= ((now() AT TIME ZONE 'Asia/Kuala_Lumpur')::date - 1)
+            AND t.dispatch_ts > now() - interval '24 hours'
+            AND t.jobtype IN ('DS','LD')
+          GROUP BY t.jobtype ORDER BY t.jobtype",
+    )
+    .fetch_all(&pool)
+    .await?;
+    Ok(Json(BoxCompareOut {
+        boxes_reco,
+        boxes_joined,
+        truck_match_pct,
+        tos_after_pct,
+        gap_p25_s,
+        gap_p50_s,
+        gap_p75_s,
+        margin_in_pct,
+        by_job,
+        timing,
+        recent,
+    }))
 }
 
 // ── 배차 추천 보드 (P1, 2026-08-10) ──────────────────────────────────────────────────────────

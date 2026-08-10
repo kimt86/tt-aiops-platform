@@ -3,34 +3,61 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>MATCH (2단계 매칭) 페이지 — TT AIOps 지식센터</title>
-  <meta name="description" content="MATCH 탭의 모든 숫자·칩·표 칸이 무슨 뜻이고 어떻게 읽는지 — 권고 매칭·thrash·근방 유휴 비효율·도착·마감여유.">
+  <title>배차 비교(VS TOS) 페이지 — TT AIOps 지식센터</title>
+  <meta name="description" content="VS TOS 탭의 모든 숫자·칩·표 칸이 무슨 뜻이고 어떻게 읽는지 — 같은 컨테이너 짝 비교·시점 실측·재배열 여지·권고 엔진 상세.">
   <link rel="stylesheet" href="/kc/assets/kc.css">
   <script defer src="/kc/assets/kc.js"></script>
 </head>
 <body>
 <main class="kc-article" data-page="dashboard/stage2-match" data-source="dashboard/stage2-match.md">
-  <h1>MATCH (2단계 매칭) 페이지 — 한 줄 한 줄 해설</h1>
-  <p class="kc-lede">MATCH 탭은 <strong>"지금 어느 트럭을 어느 작업에 보내면 가장 좋은가"를 컴퓨터가 추천</strong>하고, 그 추천이 얼마나 똑똑한지 보여주는 화면입니다.</p>
+  <h1>배차 비교(VS TOS) 페이지 — 한 줄 한 줄 해설</h1>
+  <p class="kc-lede">VS TOS 탭은 <strong>같은 컨테이너를 두고 우리 추천(어느 트럭을, 언제)과 현장 시스템(TOS)의 실제 배차를 나란히 놓고 비교</strong>하는 화면입니다.</p>
   <div class="kc-meta"><span class="kc-badge kind">대시보드 가이드</span><span class="kc-badge living">리빙 문서</span></div>
 
-  <div class="kc-cal tip"><span class="h">이 페이지를 한마디로</span><p>단, <strong>실제 운영은 바꾸지 않습니다</strong> — 옆에서 "이렇게 하면 어때요?" 제안만 하면서 추천이 맞는지 점수를 매기는 <strong>연습(그림자) 모드</strong>입니다.</p></div>
+  <div class="kc-cal tip"><span class="h">이 페이지를 한마디로</span><p>단, <strong>실제 운영은 바꾸지 않습니다</strong> — 옆에서 "우리라면 이렇게 했을 것"을 기록만 하는 <strong>연습(그림자) 모드</strong>입니다. 그리고 이 화면의 비교는 <strong>점수 매기기가 아니라 계기판</strong>입니다: 어느 쪽이 "맞았다"고 판정하지 않고, 두 시스템이 얼마나 다르게 움직이는지를 정직하게 보여줍니다.</p></div>
 
-  <h2>0. 먼저 큰 그림 — 이 화면이 왜 있나</h2>
-  <p>항만에서 가장 비싼 기계는 <strong>안벽 크레인</strong>입니다. 크레인이 멈추면 <strong>배가 항구에 더 오래 묶여</strong> 손해입니다. 크레인이 쉬지 않으려면 <strong>트럭이 제때 옆에 와 있어야</strong> 합니다. 그래서 배차를 <strong>두 단계</strong>로 나눕니다.</p>
-  <ol>
-    <li><strong>1단계 — 무엇이 급한가</strong>: 배가 떠나는 시각에서 거꾸로 계산해 "어느 작업에 언제까지 트럭이 필요한가". <em>(TT Dispatch 페이지)</em></li>
-    <li><strong>2단계 — 누구를 보낼까</strong>: 급한 작업들에 <strong>어느 트럭을 보내면 전체가 가장 효율적인지</strong>. <strong>이 MATCH 페이지가 2단계입니다.</strong></li>
-  </ol>
-  <blockquote>비유: 1단계는 "어느 식탁이 주문을 기다리는지" 정하고, 2단계는 "어느 종업원을 어느 식탁에 보내야 모두가 가장 빨리 받는지" 정하는 것.</blockquote>
+  <h2>0. 먼저 큰 그림 — 왜 "판정"이 아니라 "계기"인가</h2>
+  <p>우리 배차의 답은 세 가지입니다: <strong>어느 컨테이너에</strong>, <strong>어느 트럭을</strong>, <strong>언제 보낼까</strong>. 이 중 "언제"가 특히 중요합니다 — 너무 이르면 트럭이 크레인 앞에서 놀고, 너무 늦으면 크레인이 트럭을 기다립니다.</p>
+  <p>그런데 우리의 "언제"는 크레인 시각을 알아맞히는 <strong>예측이 아니라</strong>, <strong>배가 제시간에 떠나려면 이 페이스로 가야 한다</strong>는 기준(출항에서 거꾸로 센 페이스)입니다. 그래서 TOS가 우리와 다른 시각에 배차했다는 사실만으로는 어느 쪽이 틀렸다고 말할 수 없습니다. 이 페이지가 시점 차이를 <strong>판정 없이 그대로</strong> 보여주는 이유입니다.</p>
 
-  <h2>1. 화면 맨 위 — 요약 칩 6개 (최근 30분)</h2>
+  <h2>1. 헤드라인 — 📦 같은 상자, 두 시스템 (최근 24시간)</h2>
+  <p>파란 배너가 이 페이지의 중심입니다. <strong>같은 컨테이너</strong>에 대해 우리 추천과 TOS 실제 배차를 짝지어 셉니다.</p>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th>숫자</th><th>무슨 뜻인가</th></tr></thead>
+    <tbody>
+      <tr><td><strong>분모 문장</strong></td><td>"우리가 추천한 상자 N개 중 TOS도 앞뒤 3시간 안에 실배차한 M개" — 비교에 <strong>무엇이 들어갔고 무엇이 빠졌는지</strong>를 항상 먼저 밝힙니다</td></tr>
+      <tr><td><strong>트럭까지 같은 선택</strong></td><td>짝지어진 상자 중, TOS가 실제 보낸 트럭을 우리도 (배차 전에) 추천했던 비율</td></tr>
+      <tr><td><strong>시점 격차</strong></td><td>TOS 배차시각 − 우리 최초 추천시각. +10분이면 "TOS가 우리보다 10분 뒤에 보냈다"는 뜻. 중앙값과 25%·75% 지점을 함께 표시</td></tr>
+      <tr><td><strong>우리 마감선 안쪽</strong></td><td>TOS 배차가 우리가 계산한 마감선(출항 페이스 기준) 안에 이뤄진 비율</td></tr>
+    </tbody>
+  </table></div>
+  <div class="kc-cal note"><span class="h">트럭 일치가 몇 %대로 낮은데 문제 아닌가요?</span><p>아닙니다. 두 시스템의 고르는 방식이 다르니 같은 트럭이 나오는 게 오히려 드뭅니다. <strong>TOS를 똑같이 흉내내는 게 목표라면 TOS를 넘어설 수 없습니다.</strong> 이 숫자는 품질 점수가 아니라 "두 시스템이 얼마나 겹치는가"라는 참고 계기입니다.</p></div>
+  <p>아래 표는 최근에 짝지어진 컨테이너 20개를 한 줄씩 보여줍니다 — 우리 트럭(✓는 배차 전에 그 트럭을 추천했던 경우), TOS 트럭, 시점 격차, 마감 여유.</p>
+  <div class="kc-cal warn"><span class="h">표본이 아직 차는 중</span><p>컨테이너 단위 추천 기록은 <strong>2026-08-10부터</strong> 쌓기 시작했습니다. 처음 며칠은 짝 수가 적으니, 비율보다 개수를 먼저 보세요.</p></div>
+
+  <h2>2. ⏱ 시점 실측 — TOS 배차부터 크레인 처리까지</h2>
+  <p>최근 24시간의 <strong>실제로 끝난 모든 운반</strong>에서 잽니다: 배차된 순간부터 안벽 크레인이 그 컨테이너를 처리 완료할 때까지 걸린 시간(= 실현 리드).</p>
+  <ul>
+    <li><strong>양하</strong>는 크레인이 사슬 <strong>중간</strong>(트럭에 실어줌)에 있어 리드가 짧고, <strong>적하</strong>는 크레인이 사슬 <strong>끝</strong>(트럭에서 내림)에 있어 깁니다 — 무부하주행 → 픽업 → 부하주행 → 드랍오프 네 단계 중 어디까지 포함되느냐의 차이입니다.</li>
+    <li>리드에서 <strong>빈 차로 가는 시간(모형)</strong>을 빼면, 나머지가 픽업·대기·짐 싣고 가는 몫입니다.</li>
+  </ul>
+  <div class="kc-cal note"><span class="h">왜 "TOS가 몇 분 일찍 보냈다"고 판정하지 않나요?</span><p>"몇 분이 적당한가"의 기준을 <strong>TOS의 평균 실적</strong>으로 잡으면, TOS를 TOS 자신으로 채점하는 셈이라 항상 "적당함"이 나옵니다(같은 것을 같은 것과 비교하는 오류). 그래서 이 카드는 판정 없이 <strong>실측값과 그 분해만</strong> 보여줍니다.</p></div>
+
+  <h2>3. ⚖️ 재배열 여지(상한) — 우리 성과가 아니라 기회의 크기</h2>
+  <p>초록 배너는 우리 추천과 무관한 <strong>별도의 측정</strong>입니다: 같은 순간 TOS가 실제로 배차한 트럭들만 모아, "같은 트럭들을 서로 바꿔 짝지었다면 빈 차 이동이 얼마나 줄었을까"를 계산합니다.</p>
+  <ul>
+    <li>TOS의 원래 배정도 "바꿔 짝짓기"의 한 경우라서, 이 값은 <strong>절대 음수가 나올 수 없습니다</strong>. 그래서 "절감 실적"이 아니라 <strong>개선 여지의 상한</strong>이라고 부릅니다.</li>
+    <li><strong>"TOS가 이미 잡고 있는 %"</strong>: 아무렇게나(무작위) 짝지었을 때와 최적으로 짝지었을 때 사이에서 TOS가 어디쯤 있는지. 실측으로 TOS는 이미 약 4분의 3을 잡고 있습니다 — 남은 4분의 1이 매칭 개선으로 실제 노려볼 몫입니다.</li>
+    <li>아래 막대들은 이 여지가 <strong>어디서 나오는지</strong>(거리대·작업유형·시간대·크레인별) 보여줍니다. 여지는 거의 전부 <strong>먼 거리 배차</strong>에서 나옵니다 — 긴 빈 차 이동을 더 가까운 트럭으로 바꿀 때.</li>
+  </ul>
+
+  <h2>4. 권고 엔진 상세 — 요약 칩 6개 (최근 30분)</h2>
   <div class="kc-tablewrap"><table>
     <thead><tr><th>칩</th><th>무슨 뜻인가</th><th>어떻게 읽나</th></tr></thead>
     <tbody>
       <tr><td><strong>현재 권고 매칭</strong></td><td>지금 컴퓨터가 "이 트럭 → 이 작업" 추천한 짝의 수</td><td>가동 트럭·작업이 많을수록 큼</td></tr>
       <tr><td><strong>thrash (재배정율)</strong></td><td>다시 계산할 때마다 트럭의 추천 작업이 <strong>바뀌는 비율</strong></td><td><strong>낮을수록 좋음</strong>(안정적)</td></tr>
-      <tr><td><strong>마감 충족</strong></td><td>추천 트럭이 크레인 필요 시각 <strong>전에 도착</strong>할 비율</td><td>높을수록 좋음 (지금은 보수적으로 낮게)</td></tr>
+      <tr><td><strong>마감 충족(크레인 기준)</strong></td><td>추천 트럭이 크레인 필요 시각 <strong>전에 도착</strong>할 비율</td><td>높을수록 좋음 (지금은 보수적으로 낮게)</td></tr>
       <tr><td><strong>중앙 도착</strong></td><td>추천 트럭들의 작업지점 도착 시간 <strong>중앙값</strong></td><td>짧을수록 가까운 트럭을 잘 고름</td></tr>
       <tr><td><strong>도로망 라우팅(R)</strong></td><td>이동시간을 <strong>도로망 길찾기(실측 곡선)</strong>로 계산한 비율</td><td>높을수록 실제 도로에 기반</td></tr>
       <tr><td><strong>30분 매칭</strong></td><td>최근 30분 추천 총 개수</td><td>표본 축적량</td></tr>
@@ -38,8 +65,7 @@
   </table></div>
   <div class="kc-cal note"><span class="h">thrash가 왜 중요한가요?</span><p>트럭 GPS는 조금씩 흔들립니다. 그때마다 추천이 바뀌면 트럭이 우왕좌왕. 그래서 <strong>"새 작업이 확실히(약 3분 이상) 더 좋아질 때만 바꾸도록"</strong> 안전장치를 넣었고, thrash가 보통 <strong>4%</strong>로 낮게 유지됩니다(96%는 유지).</p></div>
 
-  <h2>2. 핵심 카드 — "권고 vs TOS, 근방 유휴 비효율" 🎯</h2>
-  <p>이게 <strong>가장 중요한 부분</strong>입니다. <strong>"지금 TOS가 놓치고 있고, 우리 방식이 고칠 수 있는 낭비"</strong>를 보여줍니다.</p>
+  <h2>4-2. 카드 — "근방 유휴 비효율" 🎯</h2>
   <div class="kc-tablewrap"><table>
     <thead><tr><th>숫자</th><th>무슨 뜻인가</th></tr></thead>
     <tbody>
@@ -49,24 +75,16 @@
       <tr><td><strong>영향 QC</strong></td><td>그런 일을 겪은 크레인 수</td></tr>
     </tbody>
   </table></div>
-  <p>크레인이 멈춘 게 <strong>트럭 부족이 아닙니다.</strong> 근처에 빈 트럭이 있었는데 <strong>그걸 안 보내서</strong> 멈춘 것 — <strong>2단계 최적 매칭이 줄일 수 있는 낭비</strong>입니다.</p>
+  <p>크레인이 멈춘 게 <strong>트럭 부족이 아닙니다.</strong> 근처에 빈 트럭이 있었는데 <strong>그걸 안 보내서</strong> 멈춘 것 — <strong>2단계 최적 매칭이 줄일 수 있는 낭비</strong>입니다. 이 값은 현장 실측 계기이며, 후보 선정에는 쓰지 않습니다(2026-08-06 설계 결정).</p>
 
-  <h2>2-2. 카드 — "최적 솔버 vs 단순 배정" ⚙️</h2>
+  <h2>4-3. 카드 — "최적 매칭 vs 단순 배정" ⚙️</h2>
   <ul>
     <li><strong>단순 배정</strong>: 급한 작업부터 "남은 트럭 중 제일 가까운 것"을 하나씩 붙임.</li>
-    <li><strong>최적(지금 쓰는 권고)</strong>: 모든 트럭·작업을 한 표에 놓고 <strong>전체 도착시간이 가장 작아지게 한꺼번에</strong> 짝지음(급한 작업엔 가산점).</li>
+    <li><strong>최적(지금 쓰는 권고)</strong>: 모든 트럭·작업을 한 표에 놓고 <strong>전체 도착시간이 가장 작아지게 한꺼번에</strong> 짝지음.</li>
   </ul>
-  <div class="kc-tablewrap"><table>
-    <thead><tr><th>숫자</th><th>무슨 뜻인가</th></tr></thead>
-    <tbody>
-      <tr><td><strong>총 도착시간 절감</strong></td><td>최적이 단순보다 전체 도착시간을 몇 % 줄였나 (클수록 좋음)</td></tr>
-      <tr><td><strong>마감 누락 (단순→최적)</strong></td><td>마감 놓친 배정: 단순 → 최적. 최적이 더 작아야 좋음</td></tr>
-      <tr><td><strong>비교 틱</strong></td><td>비교에 쓴 시점 수</td></tr>
-    </tbody>
-  </table></div>
-  <blockquote>핵심: 최적은 <strong>전체 도착시간을 줄이면서(효율) 동시에 마감 누락도 줄입니다(긴급).</strong></blockquote>
+  <p>단순 배정은 추천이 아니라 <strong>측정용 기준선(내부 대조군)</strong>입니다 — 같은 풀을 덜 똑똑하게 짝지으면 얼마나 나빠지는지를 보는 용도.</p>
 
-  <h2>3. 아래 표 — 지금 이 순간의 추천 목록</h2>
+  <h2>5. 아래 표 — 지금 이 순간의 추천 목록</h2>
   <p>각 줄은 <strong>"이 트럭을 이 작업에 보내라"는 추천 하나</strong>입니다.</p>
   <div class="kc-tablewrap"><table>
     <thead><tr><th>칸</th><th>무슨 뜻인가</th></tr></thead>
@@ -77,33 +95,29 @@
       <tr><td><strong>유형</strong></td><td>양하 / 적하</td></tr>
       <tr><td><strong>픽업블록</strong></td><td>적하일 때 어느 야드 블록에서 집어오는지(양하는 비어 있음)</td></tr>
       <tr><td><strong>도착</strong></td><td><strong>빈 차가 될 때까지(곧빔) + 작업지점까지 순수 주행</strong> 예상 시간 (분:초). 이게 2단계 매칭 비용</td></tr>
-      <tr><td><strong>마감여유(분)</strong></td><td>크레인 필요 시각 대비 여유. +면 제때, −면 늦음(빨강)</td></tr>
-      <tr><td><strong>출항여유(신규·화면 밖)</strong></td><td>같은 "여유"라도 <strong>기준이 다릅니다</strong>. 마감여유는 <strong>크레인이 그 작업을 필요로 하는 시각</strong> 기준이고(위 정의 그대로·변경 없음), 출항여유는 <strong>배가 떠나는 시각에서 거꾸로 센</strong> 기준입니다. 출항여유는 아직 화면에 안 나오고 기록(그림자)만 합니다</td></tr>
+      <tr><td><strong>크레인여유(분)</strong></td><td>크레인이 그 컨테이너를 필요로 하는 시각 대비 도착 여유. +면 제때, −면 늦음(빨강). <strong>배차 마감(출항 페이스 기준)과는 다른 축</strong>입니다</td></tr>
       <tr><td><strong>OD</strong></td><td>도착 시간을 <strong>도로망 길찾기(R)</strong>로 냈는지, <strong>격자 기준 어림(L3)</strong>인지</td></tr>
       <tr><td><strong>전환(↔)</strong></td><td>직전 추천과 작업이 바뀐 트럭이면 ↔</td></tr>
     </tbody>
   </table></div>
-  <h3>한 줄 읽어보기 (예시)</h3>
-  <blockquote><strong>TT993 · 유휴 · C57 07A · 적하 · 09B · 1:16 · +0.7 · R · (빈칸)</strong></blockquote>
-  <p><strong>993번 트럭</strong>은 지금 <strong>놀고 있고</strong>, <strong>C57 크레인의 적하 작업</strong>에 추천됐습니다. <strong>09B 블록</strong>에서 컨테이너를 집어 <strong>1분 16초</strong> 만에 도착하며, 크레인 필요 시각보다 <strong>0.7분 여유</strong>가 있어 제때. 도착 시간은 <strong>도로망 길찾기(R)</strong>로 계산했고, 직전과 같은 작업이라 전환 표시 없음.</p>
 
   <div class="kc-cal note"><span class="h">매칭 비용은 무엇으로 재나 — 순수 주행(구간시간) + 곧빔시간</span>
-    <p>2단계 비용 = <strong>곧 빔 시간</strong>(트럭이 일 중이면 언제 비나) + <strong>순수 주행 시간</strong>(비운 뒤 작업지점까지 가는 구간 시간). 순수 주행 = 움직이기 시작해 작업지점 도달까지의 시간(경로 정체 포함 · 도착 후 크레인 대기만 뺌). 값은 <strong>추론 도로망 위 길찾기 시간을 실측 "실제시간 곡선"으로 변환</strong>해 냅니다(기대 p50 · 보수 p90, 티어 R) — 아주 짧은 이동도 실측 바닥(~89초) 밑으로 안 내려가고 먼 트럭이 더 싸게 될 수 없습니다. 길찾기 불능 소수(~3%)만 <strong>맨해튼 거리→실제시간 곡선</strong>으로 어림(티어 L3). <em>(예전 225m 격자표는 2026-07-02에 도로망 길찾기로 대체.)</em></p>
-    <p>크레인 앞 <strong>줄서기(큐)</strong>는 도착 <em>이후</em>에 생기므로 이동시간에 넣지 않습니다. 즉 2단계 비용은 순수 효율만 잽니다. <em>(한때 이 대기를 1단계 신호로 빼려 했으나 재보니 거의 0이라 2026-07-01 폐기.)</em></p>
+    <p>2단계 비용 = <strong>곧 빔 시간</strong>(트럭이 일 중이면 언제 비나) + <strong>순수 주행 시간</strong>(비운 뒤 작업지점까지 가는 구간 시간). 순수 주행 = 움직이기 시작해 작업지점 도달까지의 시간(경로 정체 포함 · 도착 후 크레인 대기만 뺌). 값은 <strong>추론 도로망 위 길찾기 시간을 실측 "실제시간 곡선"으로 변환</strong>해 냅니다(기대 p50 · 보수 p90, 티어 R) — 아주 짧은 이동도 실측 바닥(~89초) 밑으로 안 내려가고 먼 트럭이 더 싸게 될 수 없습니다. 길찾기 불능 소수(~3%)만 <strong>맨해튼 거리→실제시간 곡선</strong>으로 어림(티어 L3).</p>
+    <p>크레인 앞 <strong>줄서기(큐)</strong>는 도착 <em>이후</em>에 생기므로 이동시간에 넣지 않습니다. 즉 2단계 비용은 순수 효율만 잽니다.</p>
   </div>
 
-  <h2>4. 이 페이지를 볼 때 무엇을 보면 되나</h2>
+  <h2>6. 이 비교가 말할 수 없는 것 (페이지 맨 아래 회색 상자)</h2>
   <ul>
-    <li><strong>thrash가 낮게(한 자릿수 %) 유지되나?</strong> → 추천이 안정적.</li>
-    <li><strong>"근방 유휴 비효율"이 큰가?</strong> → 현 운영이 놓치는 낭비 = 우리 개선 여지가 크다.</li>
-    <li><strong>도착 시간이 짧고 R(도로망) 비율이 높나?</strong> → 가까운 트럭을 실제 도로 기준으로 잘 고름.</li>
-    <li><strong>마감여유가 −(빨강)인 줄이 많나?</strong> → 급한데 트럭이 멀다는 뜻.</li>
+    <li><strong>연쇄 효과</strong>: 우리가 실제로 다르게 보냈다면 그 뒤 트럭들의 위치가 전부 달라집니다. 이 화면의 비교는 한 수 앞만 보고, 그 사슬은 반영하지 못합니다.</li>
+    <li><strong>같은 자, 우리 자</strong>: 이동시간은 양쪽 다 우리 도로망 모형으로 잽니다. 잣대가 같아 방향은 공정하지만, 모형 오차 위에서 최적을 고르면 여지가 실제보다 부풀 수 있어 무작위 대조군으로 일부 보정합니다.</li>
+    <li><strong>TOS가 배차한 것만 짝지어짐</strong>: TOS가 늦게 보냈거나 안 보낸 작업에서의 차이는 이 화면에 나타나지 않습니다.</li>
+    <li><strong>일치율·채택률은 품질이 아님</strong>: 채택률 시계열은 배차 보드 화면에 있고, 거기서도 "겹침 계기"로만 읽어야 합니다.</li>
   </ul>
 
-  <h2>5. 꼭 알아둘 점 (주의)</h2>
+  <h2>7. 꼭 알아둘 점 (주의)</h2>
   <div class="kc-cal warn"><span class="h">이건 "연습(그림자)"입니다</span><p>추천은 <strong>실제 배차를 움직이지 않습니다.</strong> 운영은 그대로 두고 "우리라면 이렇게 했을 것"을 기록만 합니다. 실제 결과와 비교해 우리 방식이 정말 나은지 먼저 확인하기 위함.</p></div>
   <ul>
-    <li><strong>"마감 충족"이 낮게 나오는 이유</strong>: 작업 필요 시각을 지금은 다소 이르게(보수적) 잡아 몇 분 거리 트럭이 "늦음"으로 표시. 이 숫자는 <strong>기록·관찰용</strong>이고 추천을 막지는 않음.</li>
+    <li><strong>"마감 충족(크레인 기준)"이 낮게 나오는 이유</strong>: 작업 필요 시각을 지금은 다소 이르게(보수적) 잡아 몇 분 거리 트럭이 "늦음"으로 표시. 이 숫자는 <strong>기록·관찰용</strong>이고 추천을 막지는 않음.</li>
     <li><strong>OD가 L3(어림)인 줄</strong>: 실제 주행 데이터가 부족해 <strong>야드 도로 격자 방향을 따라</strong> 거리를 어림한 것. 도로망이 커버하면 R로 바뀜.</li>
     <li><strong>숫자는 약 15초마다 갱신</strong>. 가동 배·트럭이 없으면 표가 빌 수 있음.</li>
   </ul>

@@ -328,13 +328,46 @@ export interface FairCompare {
 }
 export interface FairCompareOut {
   latest: FairCompare | null;
-  /** ⚠ 절감이 아니라 '최적까지의 거리'. 정의상 음수가 될 수 없다. */
+  /** ⚠ 절감이 아니라 '최적까지의 거리'. 정의상 음수가 될 수 없다. 쌍 가중(창 전체 Σ 기준). */
   avg_savings_pct: number | null;
+  /** avg_savings_pct 와 같은 창의 쌍 수 — 헤드라인 분모 */
+  pairs_total: number;
+  /** 같은 창의 동일 픽 비율 */
+  same_pct: number | null;
   /** ★정직한 지표: 무작위 배정이 남긴 여지 중 TOS 가 이미 잡고 있는 비율(%) */
   avg_tos_capture_pct: number | null;
   /** 무작위 대조군이 있는 최근 행 수(배포 직후엔 0) */
   rand_n: number;
   recent: FairCompare[];
+}
+
+/** 상자 단위 시스템 비교 — `GET /api/stage2/box-compare` (VS TOS 헤드라인).
+ *  시점 격차는 정오 판정이 아니라 계기: 우리 마감은 출항 요구 페이스 규범(pool_mode=3). */
+export interface BoxCompare {
+  boxes_reco: number;          // 분모①: 24h 우리가 추천한 상자(contno) 수
+  boxes_joined: number;        // 분모②: 그중 TOS 도 ±3h 안에 배차해 짝지어진 상자 수
+  truck_match_pct: number | null;
+  tos_after_pct: number | null; // TOS 배차가 우리 최초 추천 이후였던 비율
+  gap_p25_s: number | null;     // TOS 배차시각 − 우리 최초 추천시각
+  gap_p50_s: number | null;
+  gap_p75_s: number | null;
+  margin_in_pct: number | null; // TOS 배차가 우리 마감선 안쪽이었던 비율
+  by_job: {
+    jobtype: string | null; n: number;
+    gap_p25_s: number | null; gap_p50_s: number | null; gap_p75_s: number | null;
+    margin_p50_s: number | null; truck_match_pct: number | null;
+  }[];
+  timing: {
+    jobtype: string | null; n: number;
+    realized_lead_p50_s: number | null; realized_lead_p90_s: number | null;
+    modeled_travel_s: number | null; learned_lead_s: number | null;
+  }[];
+  recent: {
+    contno: string; qc: string | null; jobtype: string | null;
+    first_ts: string; our_ytno: string | null; tos_ytno: string | null;
+    dispatch_ts: string | null; gap_s: number | null; margin_s: number | null;
+    truck_match: boolean | null;
+  }[];
 }
 // 학습 센터 — 데이터 수집 카탈로그(데이터 탭)
 export interface DataStat { key: string; total: number; n_1h: number; n_24h: number; latest: string | null; }
@@ -382,6 +415,7 @@ export const api = {
   stage2WorkPoints: () => get<WorkPoint[]>("/api/stage2/work-points"),
   dispatchCompare: () => get<DispatchCompare>("/api/stage2/compare"),
   stage2FairCompare: () => get<FairCompareOut>("/api/stage2/fair-compare"),
+  stage2BoxCompare: () => get<BoxCompare>("/api/stage2/box-compare"),
   stage2FairBreakdown: () => get<FairBreakdown>("/api/stage2/fair-breakdown"),
   livemapWharf: () => get<WharfPoint[]>("/api/livemap/wharf"),
   healthDispatch: () => get<HealthDispatch>("/api/health/dispatch"),
