@@ -762,6 +762,29 @@ function FleetCard({ lang, snap }: { lang: Lang; snap: Snap | null }) {
   );
 }
 
+// ───────────────────────── 맨 위로 ─────────────────────────
+// 타임라인이 길어 어디서든 최상단 복귀 — 600px 넘게 내려가면 우하단에 나타난다.
+// 스크롤 리스너는 passive + rAF 스로틀(같은 값이면 setState 가 바로 bail-out)이라
+// 스크롤 성능 수리(313a0f0)를 되물리지 않는다.
+function ScrollTopButton({ lang }: { lang: Lang }) {
+  const [show, setShow] = useState(false);
+  useEffect(() => {
+    let raf = 0;
+    const onScroll = () => {
+      if (raf) return;
+      raf = requestAnimationFrame(() => { raf = 0; setShow(window.scrollY > 600); });
+    };
+    onScroll();
+    window.addEventListener("scroll", onScroll, { passive: true });
+    return () => { window.removeEventListener("scroll", onScroll); if (raf) cancelAnimationFrame(raf); };
+  }, []);
+  if (!show) return null;
+  return (
+    <button className="scrolltop" title={ko(lang) ? "맨 위로" : "back to top"} aria-label={ko(lang) ? "맨 위로" : "back to top"}
+      onClick={() => window.scrollTo({ top: 0, behavior: "smooth" })}>↑</button>
+  );
+}
+
 // ───────────────────────── 페이지 ─────────────────────────
 export default function TtPage({ lang }: { lang: Lang }) {
   const { snap, err } = usePositions();
@@ -784,6 +807,7 @@ export default function TtPage({ lang }: { lang: Lang }) {
         <LiveDispatchPool lang={lang} snap={snap} err={err} />
         <FleetCard lang={lang} snap={snap} />
       </div>
+      <ScrollTopButton lang={lang} />
     </div>
   );
 }

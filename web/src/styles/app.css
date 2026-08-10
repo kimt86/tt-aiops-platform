@@ -238,6 +238,15 @@ td.mono { font-family: "JetBrains Mono", monospace; color: var(--text); }
 .vessel-card.clickable:hover .vmore { color: var(--brand); }
 
 /* modern QC popup */
+/* 맨 위로 플로팅 버튼 — 긴 페이지(TT Dispatch 등)에서 600px 이상 내려가면 나타난다.
+   헤더(30)·탭바(20) 위, 모달 백드롭(200) 아래. */
+.scrolltop { position: fixed; right: 22px; bottom: 22px; z-index: 40; width: 40px; height: 40px;
+  border-radius: 999px; background: var(--surface-2); border: 1px solid var(--border-strong);
+  color: var(--text-dim); font-size: 16px; font-weight: 800; cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  box-shadow: 0 6px 18px rgba(0,0,0,0.35); }
+.scrolltop:hover { color: var(--text); background: var(--surface); }
+
 .modal-backdrop { position: fixed; inset: 0; z-index: 200; display: flex; align-items: center; justify-content: center; padding: 24px; background: rgba(3,7,18,0.72); backdrop-filter: blur(5px); animation: mdFade .12s ease; }
 .modal { width: min(760px, 96vw); max-height: 88vh; overflow-y: auto; background: linear-gradient(180deg, var(--surface-2), var(--surface)); border: 1px solid var(--border-strong); border-radius: 16px; box-shadow: 0 28px 70px rgba(0,0,0,0.55); padding: 18px 20px 22px; animation: mdPop .15s cubic-bezier(.2,.8,.2,1); }
 .modal-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
