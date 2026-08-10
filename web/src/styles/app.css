@@ -547,6 +547,13 @@ td.mono { font-family: "JetBrains Mono", monospace; color: var(--text); }
   padding: 3px 10px; border-radius: 999px; color: var(--text-dim); background: var(--surface-2);
   border: 1px solid var(--border); margin-right: 8px; }
 .map-rotate:hover { color: var(--brand); border-color: var(--brand); }
+/* AI 배차 뷰 마스터 토글 — 지도의 헤드라인 기능이라 보라 강조 */
+.map-dispatch { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; font-weight: 700; cursor: pointer;
+  padding: 3px 12px; border-radius: 999px; color: #c4b5fd; background: rgba(139,92,246,0.10);
+  border: 1px solid rgba(139,92,246,0.45); margin-right: 8px; }
+.map-dispatch:hover { color: #ddd6fe; border-color: #8b5cf6; background: rgba(139,92,246,0.18); }
+.map-dispatch.on { color: #fff; background: linear-gradient(135deg, #7c3aed, #8b5cf6); border-color: #8b5cf6;
+  box-shadow: 0 0 10px rgba(139,92,246,0.5); }
 .map-live.live { color: #86efac; border: 1px solid rgba(34,197,94,0.45); background: rgba(34,197,94,0.10); }
 .map-live.replay { color: #fcd34d; border: 1px solid var(--warn-border); background: var(--warn-bg); }
 .map-live.stale { color: #fecaca; border: 1px solid rgba(220,38,38,0.55); background: rgba(220,38,38,0.14); }

@@ -441,7 +441,7 @@ export default function LiveMapPage({ lang, internal = false }: { lang: Lang; in
   const [nodeKinds, setNodeKinds] = useState({ junction: false, block: true, crane: true, wharf: true });
   const roadGraphLoaded = useRef(false);
   const [showWeatherFx, setShowWeatherFx] = useState(true); // game-like weather effect overlay (default on; toggle via the weather chip)
-  const [panelOpen, setPanelOpen] = useState(true);
+  const [panelOpen, setPanelOpen] = useState(internal); // 고객 기본 = 닫힘(월보드처럼 읽히게), 내부 = 열림
   const [counts, setCounts] = useState({ total: 0, moving: 0, idle: 0, off: 0 });
   const [tpos, setTpos] = useState(0);
   const filterRef = useRef<{ equip: Set<EquipKey>; state: string | null; dispatch: Dispatch | null }>({ equip: equipSet, state: stateFilter, dispatch: null });
@@ -1138,6 +1138,7 @@ export default function LiveMapPage({ lang, internal = false }: { lang: Lang; in
     ? Object.values(toggles).filter(Boolean).length
     : [toggles.areas, showAdvisory, showWorkPts, toggles.demand].filter(Boolean).length;
   const layerTotal = internal ? LAYER_TOTAL : 4;
+  const dispatchViewOn = showAdvisory || showWorkPts || toggles.demand;
 
   return (
     <div className="map-page">
@@ -1158,6 +1159,17 @@ export default function LiveMapPage({ lang, internal = false }: { lang: Lang; in
           ))}
         </div>
         <span className="spacer" />
+        {/* B 승격: 배차 레이어 3종(추천선·작업지점·수요)을 한 번에 켜는 마스터 토글 —
+            지도의 헤드라인 기능. 개별 조절은 레이어 패널에 그대로 있다. */}
+        <button
+          className={`map-dispatch${dispatchViewOn ? " on" : ""}`}
+          onClick={() => { const v = !dispatchViewOn; setShowAdvisory(v); setShowWorkPts(v); set("demand", v); }}
+          title={ko
+            ? "AI 배차 뷰 — 추천선(트럭→작업)·작업지점(TOS vs 우리)·미배정 수요를 한 번에 표시"
+            : "AI dispatch view — recommendation lines, work points (TOS vs ours), unassigned demand"}
+        >
+          ⚡ {ko ? "AI 배차" : "AI Dispatch"}
+        </button>
         <button
           className="map-rotate"
           onClick={() => { const m = mapRef.current; if (m) { m.easeTo({ bearing: QUAY_BEARING, duration: 500 }); try { localStorage.setItem(BEARING_KEY, String(QUAY_BEARING)); } catch { /* ignore */ } } }}
