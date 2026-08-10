@@ -115,14 +115,46 @@ pub async fn build(pool: &PgPool, ws: DateTime<Utc>, we: DateTime<Utc>) -> Resul
     // moves, the move_hist path only 1,493 — so 57 moves collapsed into a nameless vessel that a
     // consumer would read as one more ship. move_hist stays as the fallback because it still covers
     // windows older than the columns.
+    // start_ts/service_s 는 st_ts/dur_s 를 쓰지 않는다(2026-08-10 사용자 지시): qc_move_log 의
+    // st_ts 는 크레인 시작이 아니라 **트럭 배정 시각**(TOS ST_DT 소급기입)이라 dur_s(=comp−st)를
+    // 서비스 시간으로 내보내면 적하가 중앙 ~24분짜리 무브가 된다. TOS 에 QC 물리 시작은 없으므로
+    // (mig0146 컬럼 주석·발굴조사) KPI 절체와 같은 식으로 추정한다: 들어올림(트윈=같은
+    // (machno,seqno), lift_size 가 이미 그 키를 쓴다) 단위로
+    //   est_start = greatest(같은 크레인 직전 들어올림 완료, 완료 − learn_qc_move_time)
+    // service_s = 완료 − est_start. 트윈 두 행은 같은 들어올림 값을 공유한다.
     let vessels_txt: Option<String> = sqlx::query_scalar(
         r#"
-        WITH q AS (
-          SELECT machno, contno, seqno, jobtype, st_ts, comp_ts, dur_s, vessel, voyage,
+        WITH q0 AS (
+          SELECT machno, contno, seqno, jobtype, comp_ts, vessel, voyage,
                  count(*) OVER (PARTITION BY machno, seqno) AS lift_size,
                  row_number() OVER (PARTITION BY machno ORDER BY comp_ts, seqno) AS crane_seq
             FROM qc_move_log
            WHERE comp_ts >= $1 AND comp_ts < $2 AND jobtype IN ('DS','LD')
+        ),
+        lift AS (
+          SELECT machno, seqno, MIN(jobtype) AS jt, MAX(comp_ts) AS lift_comp
+            FROM q0 GROUP BY machno, seqno
+        ),
+        lift_est AS (
+          SELECT l.machno, l.seqno, l.lift_comp,
+                 GREATEST(
+                   l.lift_comp - make_interval(secs => COALESCE(t.med_sec, j.med, 100)),
+                   COALESCE(MAX(l.lift_comp) OVER (PARTITION BY l.machno ORDER BY l.lift_comp
+                                                   ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING),
+                            l.lift_comp - make_interval(secs => COALESCE(t.med_sec, j.med, 100)))
+                 ) AS est_start
+            FROM lift l
+            LEFT JOIN (SELECT qc, jobtype, med_sec FROM learn_qc_move_time WHERE shift = 'ALL') t
+              ON t.qc = l.machno AND t.jobtype = l.jt
+            LEFT JOIN (SELECT jobtype, percentile_cont(0.5) WITHIN GROUP (ORDER BY med_sec) AS med
+                         FROM learn_qc_move_time WHERE shift = 'ALL' GROUP BY jobtype) j
+              ON j.jobtype = l.jt
+        ),
+        q AS (
+          SELECT q0.*, e.est_start,
+                 round(EXTRACT(EPOCH FROM (e.lift_comp - e.est_start)))::int AS svc_s
+            FROM q0
+            JOIN lift_est e ON e.machno = q0.machno AND e.seqno = q0.seqno
         ),
         vv AS (
           SELECT DISTINCT ON (contno, jobtype) contno, jobtype, vessel, voyage
@@ -137,7 +169,7 @@ pub async fn build(pool: &PgPool, ws: DateTime<Utc>, we: DateTime<Utc>) -> Resul
                  COALESCE(q.voyage, vv.voyage) AS voyage, jsonb_build_object(
                    'container_id', q.contno,
                    'move_type', CASE q.jobtype WHEN 'DS' THEN 'discharge' WHEN 'LD' THEN 'load' ELSE q.jobtype END,
-                   'move_ts', q.comp_ts, 'start_ts', q.st_ts, 'service_s', q.dur_s,
+                   'move_ts', q.comp_ts, 'start_ts', q.est_start, 'service_s', q.svc_s,
                    'crane', q.machno, 'crane_seq', q.crane_seq,
                    'twin_group', q.machno || '/' || q.seqno, 'lift_size', q.lift_size, 'is_twin', (q.lift_size > 1),
                    -- Size falls back to the yard. The manifest is the authority, but it is a SHIP
