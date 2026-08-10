@@ -7,7 +7,7 @@
 //   ③ 후보 차량 풀 — 매처가 이번 틱에 쓸 수 있는 차량(발행된 비용 기저 그대로)
 //   ④ 작업 중 차량 — 매처가 건너뛰는(이미 일 있는) 트럭
 // 원천: /api/workpool(TOS 미러 ~90s) + /api/livemap/positions(웹소켓 GPS/PLC, 3s 폴).
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { type Lang } from "./i18n";
 import { api, type WorkpoolResponse, type WpQc, type WpQueue, type WpMove, type WpBoxDeadline, type Stage2Advisory, type ComparePick } from "./api";
 
@@ -501,24 +501,35 @@ function QcTimeline({ lang, wp, snap, views, advisory, picks }: {
   const { ageS, stale, txt } = useWpAge(wp, k);
   const [showOurs, setShowOurs] = useState(true);
   const [showAllUn, setShowAllUn] = useState(false);
-  const ttState = new Map<string, Dev>();
-  const craneFresh = new Map<string, boolean>();
-  for (const d of snap?.devices ?? []) {
-    if (d.cls === "TT") ttState.set(d.id, d);
-    else if (d.plc) craneFresh.set(d.id, (d.plc.age_s ?? 999) <= 120);
-  }
+  // ⚠ 조회용 Map 들은 전부 useMemo — 페이지가 1초 틱으로 재렌더되므로, 여기서 매 렌더마다
+  // 재구축하면 그게 곧 초당 CPU/GC 부하가 된다(2026-08-10 브라우저 과부하 사고의 절반).
+  const { ttState, craneFresh } = useMemo(() => {
+    const ttState = new Map<string, Dev>();
+    const craneFresh = new Map<string, boolean>();
+    for (const d of snap?.devices ?? []) {
+      if (d.cls === "TT") ttState.set(d.id, d);
+      else if (d.plc) craneFresh.set(d.id, (d.plc.age_s ?? 999) <= 120);
+    }
+    return { ttState, craneFresh };
+  }, [snap]);
   // 🤖 추천 신선도: advisory 는 매처 '마지막 틱' 행 — 매처가 멈추면 낡은 추천이 남으므로 나이를 재고 180초 넘으면 붙이지 않는다.
   const advTs = advisory[0]?.ts ? Date.parse(advisory[0].ts as string) : null;
   const advAgeS = advTs != null ? Math.max(0, Math.round((Date.now() - advTs) / 1000)) : null;
   const advFresh = advisory.length > 0 && (advAgeS == null || advAgeS <= 180);
-  const advByCont = new Map<string, Stage2Advisory>();
-  const advLoose = new Map<string, Stage2Advisory[]>(); // contno 없는 옛 형식 폴백(QC별)
-  if (advFresh) for (const r of advisory) {
-    if (r.contno) advByCont.set(r.contno, r);
-    else if (r.qc) { const a = advLoose.get(r.qc) ?? []; a.push(r); advLoose.set(r.qc, a); }
-  }
-  const picksByKey = new Map<string, ComparePick>();
-  for (const p of picks) picksByKey.set(`${p.qc}|${p.queuename}|${p.tos_ytno}`, p);
+  const { advByCont, advLoose } = useMemo(() => {
+    const advByCont = new Map<string, Stage2Advisory>();
+    const advLoose = new Map<string, Stage2Advisory[]>(); // contno 없는 옛 형식 폴백(QC별)
+    if (advFresh) for (const r of advisory) {
+      if (r.contno) advByCont.set(r.contno, r);
+      else if (r.qc) { const a = advLoose.get(r.qc) ?? []; a.push(r); advLoose.set(r.qc, a); }
+    }
+    return { advByCont, advLoose };
+  }, [advisory, advFresh]);
+  const picksByKey = useMemo(() => {
+    const m = new Map<string, ComparePick>();
+    for (const p of picks) m.set(`${p.qc}|${p.queuename}|${p.tos_ytno}`, p);
+    return m;
+  }, [picks]);
   return (
     <section className={`tcard${stale ? " wp-stale" : ""}`}>
       <div className="tcard-head">
@@ -738,10 +749,12 @@ export default function TtPage({ lang }: { lang: Lang }) {
   const { snap, err } = usePositions();
   const { data: wp } = useWorkpool();
   const { advisory, picks } = useStage2();
-  // 1초 틱 — 카운트다운(마감·출항·ETW)이 15초 폴 사이에도 흐르게 한다.
+  // 1초 틱 — 카운트다운(마감·출항·ETW)이 15초 폴 사이에도 흐르게 한다. 뷰 조립은 틱이 아니라
+  // 데이터 갱신(wp 15s·snap 3s)에만 다시 한다(useMemo) — 틱당 일은 DOM 재조정뿐이어야 한다.
   const [, setTick] = useState(0);
   useEffect(() => { const iv = setInterval(() => setTick((t) => t + 1), 1000); return () => clearInterval(iv); }, []);
-  const views = buildVesselViews(wp, snap, Date.now());
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const views = useMemo(() => buildVesselViews(wp, snap, Date.now()), [wp, snap]);
   return (
     <div className="content tt-page tt-2col">
       <div className="tt-col tt-col-qc">

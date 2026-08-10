@@ -1678,11 +1678,15 @@ pub struct ComparePick {
 /// for works TOS already assigned (from the timing-skew-free comparison). Lets the TT page show OUR
 /// pick beside the TOS-assigned truck on assigned rows too (unassigned rows use /api/stage2/advisory).
 pub async fn stage2_compare_picks(State(pool): State<PgPool>) -> Result<Json<Vec<ComparePick>>, AppError> {
+    // 창 2일 → 3시간 (2026-08-10). 화면은 **지금 배정된** 행에만 이 값을 붙이는데(배정은
+    // ~1시간 안에 회전) 2일 창은 표가 쌓일수록 응답이 자랐다 — 실측 30,411행/4.2MB를 15초마다
+    // 폴링 + 탭이 매 렌더마다 그 Map 을 재구축해 브라우저가 죽었다. 3시간이면 회전 주기의
+    // 3배 여유. dispatch_compare_ts (ts) 인덱스가 있어 창 축소는 스캔이 아니라 인덱스를 탄다.
     let rows = sqlx::query_as::<_, ComparePick>(
         "SELECT DISTINCT ON (qc, queuename, tos_ytno)
                 qc, queuename, tos_ytno, our_ytno, our_arrival_s, tos_arrival_s, agree, delta_s
            FROM dispatch_compare_shadow
-          WHERE ts > now() - interval '2 days'
+          WHERE ts > now() - interval '3 hours'
           ORDER BY qc, queuename, tos_ytno, ts DESC",
     )
     .fetch_all(&pool)
