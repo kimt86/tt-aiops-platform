@@ -79,7 +79,11 @@ pub async fn aggregate(pool: &PgPool, from: NaiveDate, to: NaiveDate) -> Result<
         let (vw, w, nt) = t("K_EMPTY_R");
         m.insert("K_EMPTY_R", finish(num + vw / 100.0, den + w, nr + nt, 4, 100.0));
     }
-    // K_CYCLE (s): real TT cycle (raw_k_tt_cycle), weighted median, weight = samples.
+    // K_CYCLE (s): truck cycle (raw_k_tt_cycle), weighted median, weight = samples.
+    // ★2026-08-10 재정의(사용자 승인): 생산 SQL(extractor l_tt_cycle*.sql)의 내용이
+    // 배정→트럭 자유(tt_move_log)로 바뀌었다 — 이 파일은 raw/kpi_shift 를 그대로 읽으므로
+    // 코드 무변경으로 두 경로가 함께 이동(7-3 분열 재발 불가 구조). 08-10 이전 raw 행은
+    // 옛 c10 리듬 값 그대로라 그 날짜를 걸치는 기간은 두 정의가 섞인다(KC 고지).
     // (The container handling span lives in raw_k_cycle, kept internally, not displayed.)
     {
         let (num, den, nr) = raw_nd(pool,

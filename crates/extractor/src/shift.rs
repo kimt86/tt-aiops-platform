@@ -26,6 +26,9 @@ const SQL_CRANEQ: &str = include_str!("../sql/c08_k_crane_q.sql");
 const SQL_LOCAL_MPH: &str = include_str!("../sql/local/l_mph.sql");
 const SQL_LOCAL_QCQ: &str = include_str!("../sql/local/l_qc_q.sql");
 const SQL_LOCAL_TT_CYCLE: &str = include_str!("../sql/local/l_tt_cycle.sql");
+// 옛 c10 "회전 리듬" — 표시에서 내린 뒤에도 파리티 키 K_CYCLE_C10 으로 내부 수집을
+// 계속한다(2026-08-10 재정의 때 사용자와 약속·비교용). 산식 이력은 파일 머리 참조.
+const SQL_LOCAL_TT_CYCLE_C10: &str = include_str!("../sql/local/l_tt_cycle_c10.sql");
 const SQL_LOCAL_CRANEQ: &str = include_str!("../sql/local/l_crane_q.sql");
 const SQL_LOCAL_CYCLE: &str = include_str!("../sql/local/l_cycle.sql");
 // K_EMPTY production local source (PLAN-extractor.md CHUNK7 7-2(d), same KPI_T1_SRC gate as
@@ -454,12 +457,12 @@ async fn src_empty(pool: &PgPool, target: &str, date: NaiveDate, sh: Shift, star
 }
 
 async fn src_cycle(pool: &PgPool, target: &str, date: NaiveDate, sh: Shift, start: NaiveDateTime, end: NaiveDateTime) -> Result<()> {
-    // Displayed K_CYCLE is the REAL TT cycle (MCH_OPERATION per-truck QC-move interval),
-    // not the container handling span. One aggregate row; value = median, weight = samples.
-    // ★PLAN-extractor.md CHUNK7 7-3 철회(2026-08-06): 재정의를 시도했다가 되돌렸다 — 근거로
-    // 인용한 "41% 과소"는 crates/api/src/cycles.rs v1(다른 화면)에 관한 메모였다. agg.rs가
-    // 이미 raw_k_tt_cycle(c10)을 "the displayed K_CYCLE"로 명시 취급한다(raw_k_cycle은
-    // "kept internally, not displayed"). CHUNK 6의 판정(재정의 금지)으로 복귀.
+    // ★2026-08-10 재정의(사용자 승인·비교 설명 후 결정): 표시 K_CYCLE = **배정→트럭 자유**
+    // (tt_move_log dispatch_ts→free_ts, l_tt_cycle.sql 머리에 근거 전체). 값이 c10 리듬의
+    // 13~15분에서 ~24분으로 이동 — KC kpi 문서 2곳에 08-10 단차 고지. 옛 c10 은 아래에서
+    // K_CYCLE_C10 파리티로 내부 수집 지속, Oracle 킬스위치(KPI_T1_SRC=oracle)는 c10 원본
+    // 그대로라 즉시 복귀 가능. (7-3 철회 사고의 교훈대로 raw_k_tt_cycle·kpi_shift 두 표시
+    // 경로가 같은 SQL 내용 교체로 동시에 움직인다 — 한쪽만 바뀌는 구조가 아님.)
     run_logged(pool, "K_CYCLE_SHIFT", date, |_| async move {
         let local = kpi_t1_src_local();
         let rows: Vec<crate::kpis::k_tt_cycle::Row> = if local {
@@ -478,6 +481,24 @@ async fn src_cycle(pool: &PgPool, target: &str, date: NaiveDate, sh: Shift, star
         if kpi_parity_enabled() {
             let (ov, on) = if local { (None, 0) } else { (value, samples as i64) };
             parity_step!("K_TT_CYCLE", parity_tt_cycle(pool, date, sh, start, end, ov, on));
+        }
+        // 옛 정의(c10 회전 리듬) 내부 수집 — 표시에서 내렸지만 계속 잰다(재정의 때 약속).
+        if local && kpi_parity_enabled() {
+            let ws = tt_core::shift::terminal_to_utc(start);
+            let we = tt_core::shift::terminal_to_utc(end);
+            match sqlx::query_as::<_, crate::kpis::k_tt_cycle::Row>(SQL_LOCAL_TT_CYCLE_C10)
+                .bind(ws).bind(we).fetch_all(pool).await
+            {
+                Ok(c10) => {
+                    let r = c10.first();
+                    let n = r.and_then(|x| x.samples).unwrap_or(0.0);
+                    let v = r.and_then(|x| x.med_sec).filter(|_| n > 0.0);
+                    if let Err(e) = insert_parity(pool, "K_CYCLE_C10", date, sh, "local", v, Some(n as i64)).await {
+                        tracing::warn!(error = %e, "K_CYCLE_C10 parity insert failed (continuing)");
+                    }
+                }
+                Err(e) => tracing::warn!(error = %e, "K_CYCLE_C10 query failed (continuing)"),
+            }
         }
         Ok(rows.len() as u64)
     }).await.map(|_| ())

@@ -41,9 +41,10 @@
   <p>달린 전체 거리 중 <strong>빈 차 비율</strong>. 계산 <code>Σ공차m ÷ Σ(공차m+적재m)</code>. 높을수록 빈 주행 낭비↑.</p>
   <div class="kc-cal note"><span class="h">2026-08-08부터 세는 방법이 바뀌었습니다 (①② 공통)</span><p>예전 방식은 취소되고 다시 발행된 작업이나, 작업 도중에 잠깐 크게 적혔던 거리까지 함께 세서 값이 부풀려졌고, 야드 안 재배치 작업도 포함했습니다. 지금은 <strong>실제로 완료된 운반(양하·적하)의 최종 기록만</strong> 셉니다. 그래서 08-08 이후 공차비율이 예전(~47%)보다 낮은 <strong>~39% 수준으로 보이는 게 정상</strong>이며, 그 날짜를 걸치는 기간 비교에는 두 방식 값이 섞입니다.</p></div>
 
-  <h3>③ K_CYCLE — 사이클타임 (초) · 낮을수록 좋음</h3>
-  <p>컨테이너 1개 작업이 <strong>처음부터 끝까지 걸린 시간</strong>. 출처 <code>JOB_ORDER_HISTORY</code> — 한 작업(CONTNO·POINT·SEQNO)의 첫~마지막 이벤트 간격. 계산 = 작업별 (마지막−첫) 시각의 <strong>작업 수 가중 평균</strong>. 보통 <strong>~60분</strong> 수준(TOS 행정시간 포함 — 아래 참고).</p>
-  <div class="kc-cal note"><span class="h">KPI의 K_CYCLE vs Cycle 페이지의 사이클 — 교차검증</span><p>이름은 같지만 <strong>측정 대상이 다릅니다.</strong> <strong>K_CYCLE(TOS) = 작업의 첫~마지막 이벤트 간격</strong> — 배차 큐·재계획 등 <em>행정 시간</em>까지 포함(중앙 <strong>~60분</strong>). <strong>Cycle 페이지(GPS) = 실제 주행 한 바퀴</strong>(중앙 ~20분). GPS가 K_CYCLE의 <strong>33~43%</strong> — 잰 게 달라 <strong>절대값 불일치가 정상</strong>. K_CYCLE는 KPI/추세엔 신뢰, <em>물리적</em> 사이클·ML 라벨엔 GPS 사이클을. — <a href="/kc/dashboard/cycle.html">Cycle 해설</a></p></div>
+  <h3>③ K_CYCLE — 트럭 사이클 (초) · 낮을수록 좋음</h3>
+  <p>트럭이 <strong>일을 배정받은 순간부터, 그 상자가 트럭 손을 떠날 때까지</strong> 걸린 시간. "트럭 손을 떠남" = 마지막 크레인이 트럭에서 상자를 들어올린 때(적하=안벽 크레인, 양하=야드 크레인). 계산 = 운반별 시간의 <strong>중앙값</strong>(운반 수 가중 결합), 트윈(상자 2개 한 번에)은 한 번의 운반으로 셉니다. 보통 <strong>~24분</strong> 수준.</p>
+  <div class="kc-cal note"><span class="h">2026-08-10부터 재는 잣대가 바뀌었습니다</span><p>예전에는 "트럭이 안벽 일을 마친 뒤 → 다음 안벽 일을 마칠 때까지"의 <em>리듬</em>을 쟀고, 2~20분 사이만 세서 <strong>13~15분</strong>으로 보였습니다. 그 방식은 ①20분 넘게 걸린 사례를 통째로 버려 현장이 느릴수록 좋아 보이고 ②작업 사이 쉬는 시간이 섞이고 ③양하의 진짜 끝(야드에서 내리는 순간)을 못 봤습니다. 지금은 배정부터 끝까지 전부 세므로 <strong>08-10 이후 ~24분으로 보이는 게 정상</strong>이며, 이 날짜를 걸치는 기간 비교에는 두 잣대 값이 섞입니다. 옛 리듬 값은 내부적으로 계속 수집합니다.</p></div>
+  <div class="kc-cal note"><span class="h">Cycle 페이지(GPS)와의 관계</span><p>이제 <strong>거의 같은 것을 잽니다</strong> — GPS 사이클(중앙 ~20분)은 실제 주행 한 바퀴, K_CYCLE은 배정 순간부터라 출발 전 대기까지 포함해 조금 더 큽니다. 두 값이 비슷하게 나오는 게 정상입니다. — <a href="/kc/dashboard/cycle.html">Cycle 해설</a></p></div>
 
   <h3>④ K_UTIL — TT 가동률 (%) · 높을수록 좋음</h3>
   <p>트럭들이 근무 시간 중 <strong>실제로 일한 비율</strong>. 출처 <code>MCH_WORKTIME</code> − <code>MCH_WORKSTOP</code>. 계산 = <strong>트럭별</strong> <code>min(1, 가동분÷경과분)</code>을 <strong>평균</strong>(비율들의 평균).</p>

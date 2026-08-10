@@ -1,6 +1,8 @@
-//! K_TT_CYCLE extract: c10 (MCH_OPERATION per-truck QC-move interval) -> raw_k_tt_cycle.
-//! This is the REAL truck cycle (delivery-to-delivery), distinct from the container
-//! handling span (raw_k_cycle, kept internally). One row per day.
+//! K_TT_CYCLE extract -> raw_k_tt_cycle (one row per day). ★2026-08-10 재정의(사용자 승인):
+//! local 경로(l_tt_cycle_day.sql)는 **배정→트럭 자유**(tt_move_log dispatch_ts→free_ts)를
+//! 계산한다 — 근거·보존 규칙은 sql/local/l_tt_cycle.sql 머리. Oracle 킬스위치 경로는
+//! 종전 c10(MCH_OPERATION per-truck QC-move interval·회전 리듬) 그대로 = 즉시 복귀 수단.
+//! ⚠ 08-10 이전 raw 행은 c10 값 — 기간 조회가 그 날짜를 걸치면 두 정의가 섞인다(KC 고지).
 
 use anyhow::{Context, Result};
 use chrono::NaiveDate;
