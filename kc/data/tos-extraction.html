@@ -222,7 +222,7 @@ SELECT 'WP' AS src,
    AND v.VSP_SHP_PLANST = 'P'
    AND v.UPD_DT &gt;= TO_DATE('{워터마크}','YYYYMMDDHH24MISS')
    AND (v.VSP_SHP_VESSEL, v.VSP_SHP_VOYAGE) IN ({작업 중 항차 목록 ≤40})</code></pre>
-  <p><strong>부하 근거</strong>: <code>UPD_DT</code> 인덱스(<code>IDX_VSP_SHIP_UPD_DT</code>, 실측 확인)로 변경분만, 항차 목록은 우리 Postgres에서 만들어 넘깁니다(Oracle 부담 0). 종전의 5분 전체교체(6,200행)를 2026-08-06에 델타로 바꿔 <strong>전송 행수를 1/80로</strong> 줄였습니다.</p>
+  <p><strong>부하 근거</strong>: <code>UPD_DT</code> 인덱스(<code>IDX_VSP_SHIP_UPD_DT</code>, 실측 확인)로 변경분만, 항차 목록은 우리 Postgres에서 만들어 넘깁니다(Oracle 부담 0). 종전의 5분 전체교체(6,200행)를 2026-08-06에 델타로 바꿔 <strong>전송 행수를 1/80로</strong> 줄였습니다. 새로 접안해 막 활성이 된 항차(계획 행의 수정시각이 과거라 델타에 안 걸림)는 <strong>같은 왕복에 UNION ALL로 그 항차만 통째 시딩</strong>합니다(2026-08-10 — 별도 왕복 없음).</p>
   <p><strong>용도</strong>: <code>live_stow_plan</code>의 상자별 계획 순번(PLANSEQ)은 <strong>같은 구역 안에서 어느 상자를 먼저 다루는지의 권위 값</strong>입니다(TOS 배차기도 이 값으로 정렬함을 소스에서 확인). 배차의 마감 풀이 매칭과 크레인 작업시각 예측이 여기 의존합니다.</p>
 
   <h4>⑦ stowplan 화해(reconcile) — 시간당 1번 전체 대조</h4>

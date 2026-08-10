@@ -37,6 +37,7 @@ use crate::runner::Toolbox;
 
 const SQL_STOWPLAN: &str = include_str!("../sql/stowplan.sql");
 const SQL_STOWPLAN_DELTA: &str = include_str!("../sql/stowplan_delta.sql");
+const SQL_STOWPLAN_SEED: &str = include_str!("../sql/stowplan_seed.sql");
 
 /// 한 주기에 조회할 항차 수 상한. 넘으면 자르고 경고한다 — 조용히 줄이면 "다 봤다"로 읽힌다.
 /// 실측: 항차 26개·미완료 적하 4,725행에 2.3초. 40이면 배 이상 여유다.
@@ -210,7 +211,33 @@ async fn src_stowplan_delta(
         let first_tick = wm.is_none();
         let wm = wm.unwrap_or_else(|| WM_FLOOR.to_string());
 
-        let sql = SQL_STOWPLAN_DELTA.replace("__VOYAGES__", &list).replace("{wm}", &wm);
+        // 신규 활성 항차 시딩(2026-08-10): 접안으로 막 활성이 된 항차의 계획 행은 UPD_DT 가
+        // 과거(계획은 접안 전 작성)라 델타 조건에 절대 안 걸린다 — 종전엔 시간당 recon 까지
+        // 최대 1시간 그 배의 순번이 거울에 없었다. 거울에 행이 하나도 없는 활성 항차만 골라
+        // 같은 왕복에 UNION ALL 로 통째 읽는다(왕복 증가 0, sql/stowplan_seed.sql 참고).
+        // 첫 틱은 워터마크가 바닥이라 델타 자체가 전체를 읽으므로 시딩이 필요 없다.
+        // ⚠ 후보는 "시딩됨"이 아니라 "후보"다: 활성 목록에는 계획이 아예 없는 센티넬
+        // 유령선박(RHXX 등)과 전 행이 완료된 끝물 항차도 있고, 그쪽은 0행이 돌아온다
+        // (실측: RHXX 2건이 상시 후보 — 같은 왕복 안 술어 몇 개라 무해).
+        let seed_voyages: Vec<(String, String)> = if first_tick {
+            Vec::new()
+        } else {
+            let present: std::collections::HashSet<(String, String)> =
+                sqlx::query_as::<_, (String, String)>(&format!(
+                    "SELECT DISTINCT vessel, voyage FROM live_stow_plan WHERE (vessel, voyage) IN ({list})"
+                ))
+                .fetch_all(pool)
+                .await?
+                .into_iter()
+                .collect();
+            used.iter().filter(|v| !present.contains(v)).cloned().collect()
+        };
+
+        let mut sql = SQL_STOWPLAN_DELTA.replace("__VOYAGES__", &list).replace("{wm}", &wm);
+        if !seed_voyages.is_empty() {
+            sql.push_str("\nUNION ALL\n");
+            sql.push_str(&SQL_STOWPLAN_SEED.replace("__SEED_VOYAGES__", &voyage_in_list(&seed_voyages)));
+        }
         let raw = Toolbox::from_env(target)?.run_sql(&sql).await?;
         let rows: Vec<PlanDeltaRow> = parse_rows(&raw).context("parsing stowplan delta rows")?;
 
@@ -317,6 +344,7 @@ async fn src_stowplan_delta(
             upserted,
             deleted,
             first_tick,
+            seed_candidates = seed_voyages.len(),
             "stowplan delta tick done"
         );
         Ok(rows.len() as u64)

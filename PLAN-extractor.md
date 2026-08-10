@@ -7,6 +7,7 @@
 | 8-1 왕복 병합 | workqueue+workpool 을 `sql/pool_tick.sql` UNION ALL 1왕복으로(판별자 SRC). 킬스위치 `WORKPOOL_FETCH=split`. Oracle 시간은 새 런로그 키 `POOL_FETCH`(WORKQUEUE/WORKPOOL 키는 이제 PG 착지만 잼) | 틱당 Oracle 2→1회 · POOL_FETCH 3.6s |
 | 8-2 60초화 | `tt-workpool.timer` OnCalendar `*:*:55`(무브 3종 :05/:25/:45·선박 :35·stowplan :15·scengen :10-:50 회피)·AccuracySec=1s | 실주기 93.5→60.0s · 왕복 77→60회/h |
 | 8-3 ETW 만료 게이트 | 게이트웨이 스냅샷 TTL 1800s 실측 — 유효기간 내 항차는 재요청 안 함(킬스위치 `ETW_FETCH=always`). 풀 필터 제거(스냅샷 통째 저장 → 새 풀 진입 상자도 즉시 행 보유). **Azure 쪽 변경 0** | 게이트웨이 콜 ~385→~26회/h · 틱 벽시계 24→4.2s |
+| 8-4 stowplan 신규항차 시딩 | 전체 점검에서 발견: recon 드리프트 725~5,164행/h 만성 — ①개정=삭제+재삽입이라 UPD_DT 델타가 삭제를 못 봄(유령, recon이 치유·설계대로) ②**신규 접안 항차는 계획 UPD_DT가 과거라 델타에 절대 안 걸려 최대 1시간 순번 부재**(스파이크와 시기 일치). ②를 수리: 거울에 행 0개인 활성 항차만 델타 질의에 UNION ALL 시딩(`sql/stowplan_seed.sql`·**왕복 증가 0**). 무파괴 검증: 실항차 프로브 18/18행·센티넬 RHXX 0행·라이브 틱 파싱 정상 | 접안 후 순번 공백 1시간→최대 2분 |
 
 검증(2026-08-10): 매분 정발화(처음 :15 → stowplan 짝수분 :15 와 겹쳐 당일 :55 로 이동)·
 행수 pool 828/wq 804/assigned 341(전부 배포 전 ±5%)·
