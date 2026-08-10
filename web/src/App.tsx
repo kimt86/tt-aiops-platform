@@ -730,12 +730,12 @@ type PageKey = "kpi" | "board" | "tt" | "stage2" | "cycles" | "learn" | "map" | 
 // 그대로 열려 있으므로, 진짜 접근 통제가 필요해지면 서버측 게이트를 따로 만든다.
 const PAGES: { key: PageKey; label: string; Icon: () => ReactElement; ko: string; en: string; internal?: boolean }[] = [
   { key: "kpi", label: "KPI", Icon: IconKpi, ko: "KPI 운영 지표", en: "KPI Metrics" },
-  { key: "board", label: "BOARD", Icon: IconBoard, ko: "배차 보드", en: "Dispatch Board" },
   { key: "tt", label: "TT", Icon: IconTt, ko: "TT 배차 현황", en: "TT Dispatch" },
-  { key: "stage2", label: "VS TOS", Icon: IconStage2, ko: "배차 비교", en: "Dispatch vs TOS", internal: true },
+  { key: "board", label: "BOARD", Icon: IconBoard, ko: "배차 보드", en: "Dispatch Board" },
   { key: "cycles", label: "CYCLES", Icon: IconCycles, ko: "사이클 이력", en: "Cycle History" },
-  { key: "learn", label: "LEARN", Icon: IconLearn, ko: "학습 센터", en: "Learning Center", internal: true },
   { key: "map", label: "MAP", Icon: IconMap, ko: "라이브 맵", en: "Live Map" },
+  { key: "learn", label: "LEARN", Icon: IconLearn, ko: "학습 센터", en: "Learning Center", internal: true },
+  { key: "stage2", label: "VS TOS", Icon: IconStage2, ko: "배차 비교", en: "Dispatch vs TOS", internal: true },
   { key: "health", label: "HEALTH", Icon: IconHealth, ko: "AI 배차 헬스", en: "Dispatch Health", internal: true },
   { key: "feed", label: "FEED", Icon: IconFeed, ko: "WS 데이터 헬스", en: "WS Data Health", internal: true },
 ];
