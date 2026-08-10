@@ -97,6 +97,11 @@ body {
 .status-pill.bad { background: var(--bad-bg); color: #fca5a5; border: 1px solid var(--bad-border); }
 .status-pill.bad .dot { background: var(--bad); }
 
+/* 내부 모드 — 켜져 있을 때만 헤더에 뜨는 해제 칩 + 내부 전용 탭의 호박색 점 표시 */
+.internal-chip { display: inline-flex; align-items: center; gap: 4px; margin-right: 10px; padding: 3px 9px; font-family: "JetBrains Mono", monospace; font-size: 9.5px; font-weight: 800; letter-spacing: 0.08em; color: #fbbf24; background: rgba(245,158,11,0.12); border: 1px solid rgba(245,158,11,0.45); border-radius: 999px; cursor: pointer; }
+.internal-chip:hover { background: rgba(245,158,11,0.22); }
+.side-item.internal .label::after, .ptab.internal > span::after { content: "•"; color: #f59e0b; margin-left: 3px; }
+
 .lang-toggle { display: inline-flex; background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.12); border-radius: var(--radius-md); padding: 2px; }
 .lang-btn { padding: 3px 10px; font-size: 10px; font-weight: 700; background: transparent; border: none; color: var(--text-dim); cursor: pointer; border-radius: 3px; font-family: "JetBrains Mono", monospace; }
 .lang-btn.active { background: var(--brand); color: #fff; }

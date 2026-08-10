@@ -724,34 +724,63 @@ const IconBoard = () => (
 );
 
 type PageKey = "kpi" | "board" | "tt" | "stage2" | "cycles" | "learn" | "map" | "health" | "feed";
-const PAGES: { key: PageKey; label: string; Icon: () => ReactElement; ko: string; en: string }[] = [
+// internal: 고객에게 보여주지 않는 내부 진단·분석 페이지 (2026-08-11 사용자 결정).
+// 기본은 고객 화면(탭 숨김 + 해시 직접 접근도 KPI 로 우회)이고, 주소 뒤 #internal 로
+// 내부 모드를 켜면 localStorage 에 기억된다. 표시 구분일 뿐 인증이 아니다 — API 는
+// 그대로 열려 있으므로, 진짜 접근 통제가 필요해지면 서버측 게이트를 따로 만든다.
+const PAGES: { key: PageKey; label: string; Icon: () => ReactElement; ko: string; en: string; internal?: boolean }[] = [
   { key: "kpi", label: "KPI", Icon: IconKpi, ko: "KPI 운영 지표", en: "KPI Metrics" },
   { key: "board", label: "BOARD", Icon: IconBoard, ko: "배차 보드", en: "Dispatch Board" },
   { key: "tt", label: "TT", Icon: IconTt, ko: "TT 배차 현황", en: "TT Dispatch" },
-  { key: "stage2", label: "VS TOS", Icon: IconStage2, ko: "배차 비교", en: "Dispatch vs TOS" },
+  { key: "stage2", label: "VS TOS", Icon: IconStage2, ko: "배차 비교", en: "Dispatch vs TOS", internal: true },
   { key: "cycles", label: "CYCLES", Icon: IconCycles, ko: "사이클 이력", en: "Cycle History" },
-  { key: "learn", label: "LEARN", Icon: IconLearn, ko: "학습 센터", en: "Learning Center" },
+  { key: "learn", label: "LEARN", Icon: IconLearn, ko: "학습 센터", en: "Learning Center", internal: true },
   { key: "map", label: "MAP", Icon: IconMap, ko: "라이브 맵", en: "Live Map" },
-  { key: "health", label: "HEALTH", Icon: IconHealth, ko: "AI 배차 헬스", en: "Dispatch Health" },
-  { key: "feed", label: "FEED", Icon: IconFeed, ko: "WS 데이터 헬스", en: "WS Data Health" },
+  { key: "health", label: "HEALTH", Icon: IconHealth, ko: "AI 배차 헬스", en: "Dispatch Health", internal: true },
+  { key: "feed", label: "FEED", Icon: IconFeed, ko: "WS 데이터 헬스", en: "WS Data Health", internal: true },
 ];
+
+const INTERNAL_LS_KEY = "tt_internal_mode";
+const internalFromStorage = () => localStorage.getItem(INTERNAL_LS_KEY) === "1";
 
 // URL 해시 딥링크(P3 후속): 주소 뒤 #board 처럼 탭을 지정해 공유할 수 있다 —
 // 관제에 배차 보드 URL 을 그대로 건네는 용도(라우터 없이 최소 구현).
-const pageFromHash = (): PageKey => {
+const pageFromHash = (internalOn: boolean): PageKey => {
   const h = window.location.hash.replace("#", "");
-  return PAGES.some((p) => p.key === h) ? (h as PageKey) : "kpi";
+  const p = PAGES.find((p) => p.key === h);
+  return p && (internalOn || !p.internal) ? p.key : "kpi";
 };
 
 export default function App() {
   const [lang, setLang] = useState<Lang>("en");
-  const [page, setPage] = useState<PageKey>(pageFromHash);
+  // #internal 진입은 여기(state 초기화)서 잡아야 한다 — 마운트 효과 순서상 아래
+  // replaceState 가 해시를 #kpi 로 덮어쓴 뒤에야 hashchange 핸들러가 붙기 때문.
+  const [internal, setInternal] = useState<boolean>(() => {
+    if (window.location.hash === "#internal") { localStorage.setItem(INTERNAL_LS_KEY, "1"); return true; }
+    return internalFromStorage();
+  });
+  const [page, setPage] = useState<PageKey>(() => pageFromHash(internalFromStorage()));
   useEffect(() => { window.history.replaceState(null, "", `#${page}`); }, [page]);
   useEffect(() => {
-    const onHash = () => setPage(pageFromHash());
+    const onHash = () => {
+      if (window.location.hash === "#internal") {
+        localStorage.setItem(INTERNAL_LS_KEY, "1");
+        setInternal(true);
+        setPage(pageFromHash(true)); // #internal 자체는 페이지가 아니라 kpi 로
+        return;
+      }
+      setPage(pageFromHash(internal));
+    };
+    onHash(); // 초기 진입이 #internal 인 경우도 처리
     window.addEventListener("hashchange", onHash);
     return () => window.removeEventListener("hashchange", onHash);
-  }, []);
+  }, [internal]);
+  const exitInternal = () => {
+    localStorage.removeItem(INTERNAL_LS_KEY);
+    setInternal(false);
+    if (PAGES.find((p) => p.key === page)?.internal) setPage("kpi");
+  };
+  const visiblePages = PAGES.filter((p) => internal || !p.internal);
   const clock = useClock();
   const health = useHealth();
   const feed = useFeedHealth();
@@ -771,6 +800,15 @@ export default function App() {
           <span className="site-k">SITE</span>Westports Malaysia
         </span>
         <span className="spacer" />
+        {internal && (
+          <button
+            className="internal-chip"
+            onClick={exitInternal}
+            title={lang === "ko"
+              ? "내부 모드 — 내부 전용 탭이 보입니다. 클릭하면 고객 화면으로 (다시 켜기: 주소 뒤 #internal)"
+              : "Internal mode — internal-only tabs are visible. Click for customer view (re-enable: #internal)"}
+          >INTERNAL ×</button>
+        )}
         <HealthPill health={health} feed={feed} lang={lang} />
         <span className="clock">{clock}</span>
         <div className="lang-toggle">
@@ -782,8 +820,8 @@ export default function App() {
       <OpsAlertBanner lang={lang} />
       <div className="app-body">
         <nav className="sidebar">
-          {PAGES.map((p) => (
-            <button key={p.key} className={`side-item${page === p.key ? " active" : ""}`} onClick={() => setPage(p.key)} title={pageName(p)}>
+          {visiblePages.map((p) => (
+            <button key={p.key} className={`side-item${page === p.key ? " active" : ""}${p.internal ? " internal" : ""}`} onClick={() => setPage(p.key)} title={pageName(p)}>
               <p.Icon />
               <span className="label">{p.label}</span>
             </button>
@@ -792,8 +830,8 @@ export default function App() {
         </nav>
         <div className="main-col">
           <div className="tabbar">
-            {PAGES.map((p) => (
-              <button key={p.key} className={`ptab${page === p.key ? " active" : ""}`} onClick={() => setPage(p.key)}>
+            {visiblePages.map((p) => (
+              <button key={p.key} className={`ptab${page === p.key ? " active" : ""}${p.internal ? " internal" : ""}`} onClick={() => setPage(p.key)}>
                 <p.Icon /><span>{pageName(p)}</span>
               </button>
             ))}
