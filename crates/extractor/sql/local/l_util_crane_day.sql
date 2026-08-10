@@ -1,16 +1,52 @@
 -- Local nightly-day production for K_UTIL_CRANE (Oracle original:
--- sql/e1c_k_util_crane_merged_intervals.sql). Same interval-merge technique as
--- sql/local/l_qc_q.sql, but a straight per-machine merge (no vessel/voyage
--- partition -- the original doesn't partition by vessel either). Union of QC
--- (qc_move_log, machno ^C[0-9]+$) and YC (rtg_move_log, machno LIKE 'RTG%' --
--- the ORIGINAL Oracle filter excludes ES%, so this mirrors that exactly, not
--- rtg_move_log's full RTG+ES coverage). $1 = business date.
-WITH moves AS (
-  SELECT machno, 'QC' AS machine_type, st_ts AS s, comp_ts AS e
+-- sql/e1c_k_util_crane_merged_intervals.sql). Straight per-machine merge (no
+-- vessel/voyage partition -- the original doesn't partition by vessel either).
+-- $1 = business date.
+--
+-- ★2026-08-10 QC 절반 재정의(사용자 지시): qc_move_log.st_ts 는 크레인 시작이 아니라
+-- 트럭 배정 시각이라, [st_ts, comp_ts] 병합은 트럭 이동시간까지 크레인 가동으로 세어
+-- 가동률을 약 2배 부풀렸다(실측 63~69% → 추정 시작 기준 35~38%). QC 는 트윈을
+-- 들어올림으로 접고 추정 물리 시작(greatest(직전 들어올림 완료, 완료−학습 무브시간))으로
+-- 바쁨 구간을 만든다 — 산식 설명은 l_qc_q.sql 머리 참조.
+-- ⚠ YC(rtg_move_log) 절반은 그대로: 그쪽 st_ts 는 진짜 물리 시작이다(겹침 1.3% 실측).
+--    machno LIKE 'RTG%' 는 원본 Oracle 필터 그대로(ES% 제외).
+-- ⚠ QC 절반은 jobtype 무필터(원본과 동일 모집단) — LD/DS 외 유형은 학습 무브시간이
+--    없어 유형 중앙값→100초로 폴백한다.
+WITH m0 AS (
+  SELECT machno, jobtype AS jt, comp_ts,
+         CASE WHEN EXTRACT(EPOCH FROM (comp_ts - LAG(comp_ts) OVER (PARTITION BY machno ORDER BY comp_ts))) <= 2
+              THEN 0 ELSE 1 END AS new_lift
     FROM qc_move_log
    WHERE machno ~ '^C[0-9]+$'
-     AND st_ts IS NOT NULL
      AND business_date = $1
+),
+lifts AS (
+  SELECT machno, MIN(jt) AS jt, MAX(comp_ts) AS e
+    FROM (SELECT m0.*, SUM(new_lift) OVER (PARTITION BY machno ORDER BY comp_ts) AS lift_id FROM m0) x
+   GROUP BY machno, lift_id
+),
+mt AS (
+  SELECT qc, jobtype, med_sec FROM learn_qc_move_time WHERE shift = 'ALL'
+),
+jt_med AS (
+  SELECT jobtype, percentile_cont(0.5) WITHIN GROUP (ORDER BY med_sec) AS med FROM mt GROUP BY jobtype
+),
+all_med AS (
+  SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY med_sec) AS med FROM mt
+),
+moves AS (
+  SELECT l.machno, 'QC' AS machine_type,
+         GREATEST(
+           l.e - make_interval(secs => COALESCE(t.med_sec, j.med, a.med, 100)),
+           COALESCE(MAX(l.e) OVER (PARTITION BY l.machno ORDER BY l.e
+                                   ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING),
+                    l.e - make_interval(secs => COALESCE(t.med_sec, j.med, a.med, 100)))
+         ) AS s,
+         l.e
+    FROM lifts l
+    LEFT JOIN mt t     ON t.qc = l.machno AND t.jobtype = l.jt
+    LEFT JOIN jt_med j ON j.jobtype = l.jt
+    CROSS JOIN all_med a
   UNION ALL
   SELECT machno, 'YC' AS machine_type, st_ts AS s, comp_ts AS e
     FROM rtg_move_log

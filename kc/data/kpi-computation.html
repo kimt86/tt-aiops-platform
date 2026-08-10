@@ -59,6 +59,7 @@ K_EMPTY_R = round(Σtotal_empty_m / Σ(empty_m+laden_m) * 100, 4)        sample_
 
   <h3>K_QC_NOMOVE — QC 대기 (표시)</h3>
   <p><code>MCH_OPERATION</code>에서 <code>REGEXP_LIKE(MACHNO,'^C[0-9]+$')</code> 안벽 크레인·<code>JOBTYPE IN('LD','DS')</code>. 잇닿은 move를 active 구간으로 병합 → 구간 사이 갭 = 유휴(<code>LEAD(gs)−ge</code>). 30분(1800초) 초과 갭은 작업종료/교대 공백으로 제외. <code>HAVING COUNT(*)≥{{QCQ_HAVING}}</code>(day=10, shift=2). 롤업: <code>value=round(Σ(avg_idle_sec·idle_periods)/Σidle_periods,1)</code>, 가중치=idle_periods.</p>
+  <div class="kc-cal note"><span class="h">2026-08-10부터 active 구간의 시작이 바뀌었습니다</span><p>예전에는 구간 시작을 <code>ST_DT</code>로 잡았는데, 이 값은 크레인 작업 시작이 아니라 <strong>트럭 배정 시각</strong>입니다(완료보다 양하 중앙 ~7분·적하 중앙 ~24분 이름 — 트럭 이동시간). 그래서 크레인 유휴가 실제의 약 1/10로 보였습니다. TOS에 크레인 물리 시작은 기록되지 않아(무브 행 자체가 완료 시점에 삽입됨), 지금은 <strong>트윈(완료 0~2초 차 연속 2행)을 한 들어올림으로 접고</strong> 시작을 <code>greatest(직전 들어올림 완료, 완료 − learn_qc_move_time)</code>로 <strong>추정</strong>합니다(<code>sql/local/l_qc_q.sql</code> 3본 공통). 08-10 이전 <code>raw_k_qc_q</code> 행은 옛 방식 값 그대로 보존되므로 기간 조회가 이 날짜를 걸치면 단차가 섞입니다. 내부 데이터 <code>raw_k_util_crane</code>의 QC 절반도 같은 날 같은 방식으로 바뀌어 가동률이 약 절반(63~69% → 35~38%)으로 내려간 것이 정상입니다.</p></div>
 
   <h3>K_MPH — QC 처리량 (move/hr)</h3>
   <p><code>MCH_OPERATION</code>, LD/DS만. <code>active_hours = COUNT(DISTINCT SUBSTR(COMPTIME,1,2))</code>(실작업 시각 수) → <code>k_mph_per_active_hour = moves/active_hours</code>. 롤업: <code>value=round(Σ(k_mph·active_hours)/Σactive_hours,2)</code>, <code>sample_n=count(distinct vessel/voyage)</code>.</p>

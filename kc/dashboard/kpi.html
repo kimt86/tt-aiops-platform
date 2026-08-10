@@ -52,6 +52,7 @@
   <h3>⑤ K_QC_TT_WAIT — QC 트럭 대기 (초) · 낮을수록 좋음 · 보조 GPS</h3>
   <p>안벽 크레인(QC)이 <strong>트럭을 기다린 시간</strong> — <em>같은 베이</em>에서 move 사이 빈 갭(≈진짜 트럭 대기). 베이 이동/해치 제외. 메인 출처 <code>MCH_OPERATION</code>(같은 <code>QUEUENAME</code> 갭). 보조 <strong>K_QC_TT_WAIT_GPS</strong> = <em>지금</em> 굶는 QC 수·평균 대기(QC PLC idle인데 그 밑에 트럭 GPS 없음).</p>
   <div class="kc-cal note"><span class="h">왜 '같은 베이'만 세나 (TOS 실측 5일)</span><p>QC엔 LD/DS move만 기록되고 해치·베이이동은 move 행이 없어, <em>모든</em> 갭을 합치면(숨김 지표 <strong>K_QC_NOMOVE</strong>) 트럭 대기를 <strong>~1.8배 과대평가</strong>. 5일 조사: 베이 변경 ≈45%(갠트리/해치, 대기 아님)·같은 베이 ≈55%(≈진짜 대기). 그래서 메인은 <strong>베이 불변 갭만</strong>, 보조는 <strong>GPS로 '트럭 없음'까지 확인</strong>.</p></div>
+  <div class="kc-cal note"><span class="h">2026-08-10부터 세는 방법이 바뀌었습니다 (⑤와 숨김 K_QC_NOMOVE 공통)</span><p>예전에는 크레인이 "일하는 중"인 구간을 <strong>트럭에게 일을 시킨 순간부터</strong>로 잡았습니다. 그런데 트럭이 크레인까지 달려오는 시간(양하 ~7분·적하 ~24분)까지 크레인이 일한 것으로 세어져, <strong>크레인이 트럭을 기다린 시간이 실제의 약 1/10만 보였습니다</strong>. TOS에는 크레인이 실제로 일을 시작한 시각이 기록되지 않기 때문에, 지금은 <strong>완료 시각에서 그 크레인의 평균 작업시간을 뺀 시각</strong>(단, 직전 상자 완료보다 이르게는 안 잡음)으로 시작을 <strong>추정</strong>해서 셉니다. 그래서 08-10 이후에는 대기 <strong>횟수가 훨씬 많아지고 1회 평균 초는 짧아진 것이 정상</strong>이며, 이 날짜를 걸치는 기간 비교에는 두 방식 값이 섞입니다. 1~2분 이하의 짧은 갭에는 추정 오차가 섞일 수 있어, 진짜 "크레인 굶김"은 <strong>5분 이상 갭</strong>(하루 650~850건 수준)을 보는 것이 정확합니다.</p></div>
 
   <h3>⑥ K_MPH — QC 처리량 (move/시간) · 높을수록 좋음</h3>
   <p>크레인이 <strong>1시간에 컨테이너를 몇 번 옮겼나</strong>(생산성 핵심). 출처 <code>MCH_OPERATION</code>. 계산 <code>move수 ÷ 가동시간(hr)</code>의 가동시간 가중 평균.</p>

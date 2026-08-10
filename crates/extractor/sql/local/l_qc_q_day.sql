@@ -1,14 +1,42 @@
--- Local nightly-day production for K_QC_NOMOVE / K_QC_Q (Oracle original:
--- sql/f2_k_qc_q.sql via params::render_day, HAVING=10). Same interval-merge
--- technique as sql/local/l_qc_q.sql (shift path); here windowed by
--- qc_move_log.business_date instead of a comp_ts range. $1 = business date.
-WITH moves AS (
-  SELECT machno AS qc, vessel, voyage, st_ts AS s, comp_ts AS e, queuename AS qn
+-- K_QC_NOMOVE / K_QC_Q (nightly-day path) → raw_k_qc_q. $1 = business date.
+-- 산식은 l_qc_q.sql(shift path)과 동일 — 그 파일 머리의 ★2026-08-10 재정의 설명을 볼 것.
+-- (요지: st_ts=트럭 배정이라 쓰지 않는다. 트윈을 들어올림으로 접고, 추정 물리 시작 =
+--  greatest(직전 들어올림 완료, 완료 − learn_qc_move_time) 으로 바쁨 구간을 만든다.)
+-- 다른 점: 창이 business_date 하나·HAVING=10(원본 day-path 그대로).
+-- ⚠ 2026-08-10 이전의 raw_k_qc_q 행은 옛 산식(st_ts) 값 그대로 보존 — 기간 조회가
+--    이 날짜를 걸치면 단차가 섞인다(KC kpi 문서 고지).
+WITH m0 AS (
+  SELECT machno AS qc, vessel, voyage, queuename AS qn, jobtype AS jt, comp_ts,
+         CASE WHEN EXTRACT(EPOCH FROM (comp_ts - LAG(comp_ts) OVER (PARTITION BY machno ORDER BY comp_ts))) <= 2
+              THEN 0 ELSE 1 END AS new_lift
     FROM qc_move_log
    WHERE machno ~ '^C[0-9]+$'
      AND jobtype IN ('LD', 'DS')
-     AND st_ts IS NOT NULL
      AND business_date = $1
+),
+lifts AS (
+  SELECT qc, MIN(vessel) AS vessel, MIN(voyage) AS voyage, MIN(qn) AS qn, MIN(jt) AS jt,
+         MAX(comp_ts) AS e
+    FROM (SELECT m0.*, SUM(new_lift) OVER (PARTITION BY qc ORDER BY comp_ts) AS lift_id FROM m0) x
+   GROUP BY qc, lift_id
+),
+mt AS (
+  SELECT qc, jobtype, med_sec FROM learn_qc_move_time WHERE shift = 'ALL'
+),
+jt_med AS (
+  SELECT jobtype, percentile_cont(0.5) WITHIN GROUP (ORDER BY med_sec) AS med FROM mt GROUP BY jobtype
+),
+moves AS (
+  SELECT l.qc, l.vessel, l.voyage, l.qn, l.e,
+         GREATEST(
+           l.e - make_interval(secs => COALESCE(t.med_sec, j.med, 100)),
+           COALESCE(MAX(l.e) OVER (PARTITION BY l.qc, l.vessel, l.voyage ORDER BY l.e
+                                   ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING),
+                    l.e - make_interval(secs => COALESCE(t.med_sec, j.med, 100)))
+         ) AS s
+    FROM lifts l
+    LEFT JOIN mt t     ON t.qc = l.qc AND t.jobtype = l.jt
+    LEFT JOIN jt_med j ON j.jobtype = l.jt
 ),
 flagged AS (
   SELECT qc, vessel, voyage, s, e, qn,
