@@ -5,12 +5,12 @@
 import { useEffect, useState } from "react";
 import { type Lang } from "./i18n";
 import { api, type HealthDispatch } from "./api";
+import { mytTime } from "./timefmt";
 
 const ko = (l: Lang) => l === "ko";
 const pct = (v: number | null | undefined) => (v == null ? "—" : v.toFixed(v < 10 ? 1 : 0));
 const mmss = (s: number | null | undefined) => (s == null ? "—" : `${Math.floor(s / 60)}:${String(Math.round(s % 60)).padStart(2, "0")}`);
-// KST clock, locale-neutral (HH:MM:SS, 24h) so it reads the same in both languages
-const kstTime = (iso: string) => new Date(iso).toLocaleTimeString("en-GB", { timeZone: "Asia/Kuala_Lumpur", hour12: false }); // MYT (terminal local)
+
 
 function Hist({ data }: { data: { label: string; n: number }[] }) {
   const max = Math.max(1, ...data.map((h) => h.n));
@@ -78,10 +78,11 @@ export default function HealthPage({ lang }: { lang: Lang }) {
       tone: (d?.thrash_pct ?? 0) < 12 ? "good" : "warn",
     },
     {
+      // 크레인 기준 축(mig 0116) — 옛 feasible_pct 는 적하에서 야드 도착만 세던 폐기 축이라 쓰지 않는다.
       label: t("마감 충족", "Feasible"),
-      val: pct(d?.feasible_pct),
+      val: pct(d?.feasible_crane_pct),
       unit: "%",
-      note: t("권고가 제때 도착", "arrives in time"),
+      note: t("크레인 기준 — 권고 트럭이 크레인 시각까지 도착", "crane-basis: truck reaches crane in time"),
       tone: "good",
     },
     {
@@ -167,7 +168,7 @@ export default function HealthPage({ lang }: { lang: Lang }) {
             <tbody>
               {(d?.decisions ?? []).map((x, i) => (
                 <tr key={i}>
-                  <td className="mono">{kstTime(x.ts)}</td>
+                  <td className="mono">{mytTime(x.ts)}</td>
                   <td className="mono">{x.ytno}</td>
                   <td className="mono">{x.qc} <span style={{ color: "var(--text-mute)" }}>{x.queuename}</span></td>
                   <td>{x.jobtype === "DS" ? t("양하", "DS") : x.jobtype === "LD" ? t("적하", "LD") : x.jobtype}</td>

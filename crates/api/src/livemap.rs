@@ -4523,7 +4523,7 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                 continue;
             }
             // candidate work + pickup coord
-            let Ok(work) = crate::workpool::stage2_work_candidates(pool.clone()).await else { continue };
+            let Ok((_, work)) = crate::workpool::stage2_work_candidates(pool.clone()).await else { continue };
             let (cranes_now, centroids_now): (HashMap<String, (f64, f64)>, HashMap<String, (f64, f64)>) = {
                 let map = lm.devices.read().await;
                 let cr = map.iter()

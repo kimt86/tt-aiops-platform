@@ -182,7 +182,7 @@ const DEFAULT_TOGGLES: Toggles = {
   pointsOther: false, linksStraight: false, linksTurn: false, linksLaneSwitch: false,
   learnTopos: false, learnLanes: false, demand: false,
 };
-const LAYER_TOTAL = 12; // toggle count shown in the panel header
+const LAYER_TOTAL = 13; // toggle count shown in the panel header
 const EMPTY_FC: GeoJSON.FeatureCollection = { type: "FeatureCollection", features: [] };
 
 // (wharf overlay removed — work-points/cranes/wharf are now shown via the road-network node-type
@@ -429,7 +429,8 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
   const [stateFilter, setStateFilter] = useState<string | null>(null);
   const [dispatchFilter, setDispatchFilter] = useState<Dispatch | null>(null);
   const [toggles, setToggles] = useState<Toggles>(DEFAULT_TOGGLES);
-  const [showWorkPts, setShowWorkPts] = useState(false); // dispatched work points (TOS vs ours); replaces the old advisory
+  const [showWorkPts, setShowWorkPts] = useState(false); // dispatched work points (TOS vs ours)
+  const [showAdvisory, setShowAdvisory] = useState(false); // 라이브 추천선(P3 복원): 지금 이 트럭을 여기로
   const workPtsRef = useRef<WorkPoint[]>([]);
   const selectedWpRef = useRef<WorkPoint | null>(null); // the clicked work point (for re-anchoring its truck lines)
   const dispPosRef = useRef<Map<string, [number, number]>>(new Map()); // each device's currently DISPLAYED (smoothed) position
@@ -507,6 +508,35 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
     const iv = setInterval(poll, 15000);
     return () => { alive = false; clearInterval(iv); selectedWpRef.current = null; };
   }, [ready, showWorkPts]);
+
+  // 라이브 추천선(P3): 켜져 있을 때만 15초 폴링 — advisory 응답이 양 끝점 좌표를 담고 있다.
+  useEffect(() => {
+    if (!ready || !showAdvisory) return;
+    let alive = true;
+    const poll = () => api.stage2Advisory().then((rows) => {
+      if (!alive) return;
+      const fc = {
+        type: "FeatureCollection" as const,
+        features: rows
+          .filter((r) => r.src_lat != null && r.src_lon != null && r.dest_lat != null && r.dest_lon != null)
+          .map((r) => ({
+            type: "Feature" as const,
+            geometry: { type: "LineString" as const, coordinates: [[r.src_lon as number, r.src_lat as number], [r.dest_lon as number, r.dest_lat as number]] },
+            properties: { feasible: r.feasible ? 1 : 0 },
+          })),
+      };
+      (mapRef.current?.getSource("advisory-lines") as maplibregl.GeoJSONSource | undefined)?.setData(fc);
+    }).catch(() => {});
+    poll();
+    const iv = setInterval(poll, 15000);
+    return () => { alive = false; clearInterval(iv); };
+  }, [ready, showAdvisory]);
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map) return;
+    if (map.getLayer("advisory-lines")) map.setLayoutProperty("advisory-lines", "visibility", showAdvisory ? "visible" : "none");
+    if (!showAdvisory) (map.getSource("advisory-lines") as maplibregl.GeoJSONSource | undefined)?.setData(EMPTY_FC);
+  }, [showAdvisory, ready]);
 
   // work-points overlay visibility
   useEffect(() => {
@@ -587,6 +617,21 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
       // Pin icon: green = we'd pick the same truck as TOS; magenta = we differ. (Replaces advisory.)
       if (!map.hasImage("wp-agree")) map.addImage("wp-agree", pinImage("#22c55e"), { pixelRatio: 2 });
       if (!map.hasImage("wp-diff")) map.addImage("wp-diff", pinImage("#e0218a"), { pixelRatio: 2 });
+      // ── 라이브 배차 추천선 (P3 복원) — /api/stage2/advisory: 트럭(현위치)→작업지점 점선.
+      // 초록 = 마감 충족 예상, 주황 = 마감 위험. 15초 폴링·정적 선(프레임 글루 없음).
+      map.addSource("advisory-lines", { type: "geojson", data: EMPTY_FC });
+      map.addLayer({
+        id: "advisory-lines",
+        type: "line",
+        source: "advisory-lines",
+        layout: { visibility: "none", "line-cap": "round" },
+        paint: {
+          "line-color": ["case", ["==", ["get", "feasible"], 1], "#34d399", "#f59e0b"],
+          "line-width": 2.2,
+          "line-opacity": 0.85,
+          "line-dasharray": [2, 1.5],
+        },
+      });
       map.addSource("workpts-lines", { type: "geojson", data: EMPTY_FC });
       map.addLayer({
         id: "workpts-lines",
@@ -1221,6 +1266,7 @@ export default function LiveMapPage({ lang }: { lang: Lang }) {
             </section>
             <section className="llp-sec">
               <header>{ko ? "배차 (DISPATCH)" : "Dispatch"}</header>
+              <Row on={showAdvisory} color="#a78bfa" label={ko ? "배차 추천선 (지금 이 트럭 → 여기)" : "Live recommendations (truck → work)"} onChange={setShowAdvisory} />
               <Row on={showWorkPts} color="#34d399" label={ko ? "배차 작업지점 (클릭: TOS vs 우리)" : "Dispatched work points (click: TOS vs ours)"} onChange={setShowWorkPts} />
               <Row on={toggles.demand} color="#fb923c" label={ko ? "작업 수요 · 미배정 (DS/LD)" : "Demand · unassigned"} onChange={(v) => set("demand", v)} />
               <div className="llp-hint">{ko ? "작업지점: 클릭=TOS vs 우리 배차 비교 · 수요: 크기=대수(주황 DS·청록 LD)·클릭=상세" : "work points: click = TOS vs ours · demand: size = count (orange DS · teal LD), click for details"}</div>

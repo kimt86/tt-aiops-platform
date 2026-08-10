@@ -3,6 +3,7 @@ import { api, type BreakdownResponse, type HealthResponse, type KpiCard, type Kp
 import { LineChart } from "./charts";
 import { deltaLabel, fmtValue, isImprovement } from "./format";
 import { t, type Lang } from "./i18n";
+import BoardPage from "./BoardPage";
 import TtPage from "./TtPage";
 import Stage2Page from "./Stage2Page";
 import CyclesPage from "./CyclesPage";
@@ -704,9 +705,16 @@ const IconLearn = () => (
   </svg>
 );
 
-type PageKey = "kpi" | "tt" | "stage2" | "cycles" | "learn" | "map" | "health" | "feed";
+const IconBoard = () => (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <rect x="3" y="4" width="18" height="16" rx="2" /><path d="M7 9h6M7 13h10M7 17h4" />
+  </svg>
+);
+
+type PageKey = "kpi" | "board" | "tt" | "stage2" | "cycles" | "learn" | "map" | "health" | "feed";
 const PAGES: { key: PageKey; label: string; Icon: () => ReactElement; ko: string; en: string }[] = [
   { key: "kpi", label: "KPI", Icon: IconKpi, ko: "KPI 운영 지표", en: "KPI Metrics" },
+  { key: "board", label: "BOARD", Icon: IconBoard, ko: "배차 보드", en: "Dispatch Board" },
   { key: "tt", label: "TT", Icon: IconTt, ko: "TT 배차 현황", en: "TT Dispatch" },
   { key: "stage2", label: "VS TOS", Icon: IconStage2, ko: "배차 비교", en: "Dispatch vs TOS" },
   { key: "cycles", label: "CYCLES", Icon: IconCycles, ko: "사이클 이력", en: "Cycle History" },
@@ -765,7 +773,7 @@ export default function App() {
               </button>
             ))}
           </div>
-          {page === "kpi" ? <KpiPage lang={lang} /> : page === "tt" ? <TtPage lang={lang} /> : page === "stage2" ? <Stage2Page lang={lang} /> : page === "cycles" ? <CyclesPage lang={lang} /> : page === "learn" ? <LearnPage lang={lang} /> : page === "map" ? <LiveMapPage lang={lang} /> : page === "health" ? <HealthPage lang={lang} /> : <FeedHealthPage lang={lang} />}
+          {page === "kpi" ? <KpiPage lang={lang} /> : page === "board" ? <BoardPage lang={lang} /> : page === "tt" ? <TtPage lang={lang} /> : page === "stage2" ? <Stage2Page lang={lang} /> : page === "cycles" ? <CyclesPage lang={lang} /> : page === "learn" ? <LearnPage lang={lang} /> : page === "map" ? <LiveMapPage lang={lang} /> : page === "health" ? <HealthPage lang={lang} /> : <FeedHealthPage lang={lang} />}
         </div>
       </div>
     </FeedHealthContext.Provider>

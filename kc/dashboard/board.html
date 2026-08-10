@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>배차 보드 페이지 — TT AIOps 지식센터</title>
+  <meta name="description" content="배차 보드 탭의 모든 값 — 지금 보내야 할 트럭 목록·마감 카운트다운·채택률이 무슨 뜻이고 어디서 오는지.">
+  <link rel="stylesheet" href="/kc/assets/kc.css">
+  <script defer src="/kc/assets/kc.js"></script>
+</head>
+<body>
+<main class="kc-article" data-page="dashboard/board" data-source="dashboard/board.md">
+  <h1>배차 보드 페이지 — 한 줄 한 줄 해설</h1>
+  <p class="kc-lede">배차 보드는 <strong>"지금 이 트럭을 여기로 보내세요"</strong>만 담는 실행 화면입니다(2026-08-10 신설). 분석·통계는 다른 탭이 맡고, 여기는 담당자가 보고 바로 적용할 수 있는 것만 남겼습니다.</p>
+  <div class="kc-meta"><span class="kc-badge kind">대시보드 가이드</span><span class="kc-badge living">리빙 문서</span></div>
+
+  <div class="kc-cal tip"><span class="h">이 페이지를 한마디로</span><p>컴퓨터가 1분마다 계산한 배차 추천 중 <strong>급한 순서</strong>대로 보여줍니다. 아직 <strong>그림자 모드(SHADOW)</strong>라 실제 배차는 바꾸지 않습니다 — 적용은 담당자가 TOS의 수동 배차 화면에서 합니다.</p></div>
+
+  <h2>1. 추천 목록 — 각 칸의 뜻</h2>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th>칸</th><th>무슨 뜻인가</th></tr></thead>
+    <tbody>
+      <tr><td><strong>트럭</strong></td><td>보낼 트럭 번호 (TOS에서 그대로 찾을 수 있게 큰 글씨)</td></tr>
+      <tr><td><strong>컨테이너·QC·베이</strong></td><td>어느 컨테이너를 어느 크레인·어느 자리에서 다루는 일인지</td></tr>
+      <tr><td><strong>유형</strong></td><td>양하(배→야드) / 적하(야드→배)</td></tr>
+      <tr><td><strong>보내야 할 때까지</strong></td><td><strong>배차 마감 카운트다운.</strong> 마감 = "처음 정한 출항시각을 지키려면 언제까지 보내야 하나"를 남은 시간·남은 일로 계속 다시 계산한 값. 빨강 = 이미 지남(가장 급함)</td></tr>
+      <tr><td><strong>예상 도착</strong></td><td>그 트럭이 픽업 지점까지 가는 데 걸릴 시간(실측 도로망 기준)</td></tr>
+    </tbody>
+  </table></div>
+
+  <h2>2. 위쪽 숫자 5개</h2>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th>값</th><th>무슨 뜻인가</th></tr></thead>
+    <tbody>
+      <tr><td><strong>추천(이번 틱)</strong></td><td>이번 계산(1분 주기)에서 나온 추천 수</td></tr>
+      <tr><td><strong>남긴 트럭</strong></td><td>급한 일이 없어 <strong>일부러 보내지 않고 남겨둔</strong> 트럭 수 — 미리 보내 세워두는 낭비를 막는 동작</td></tr>
+      <tr><td><strong>마감 경과 작업</strong></td><td>마감이 이미 지난 작업 수 (출항이 빠듯한 배의 일)</td></tr>
+      <tr><td><strong>채택률(상자·24h)</strong></td><td>최근 24시간에 우리가 추천한 컨테이너 중, 추천 후 <strong>20분 안에 TOS가 실제로 배차</strong>한 비율</td></tr>
+      <tr><td><strong>트럭까지 일치</strong></td><td>그중 <strong>트럭 선택까지</strong> 우리 추천과 같았던 비율</td></tr>
+    </tbody>
+  </table></div>
+  <div class="kc-cal note"><span class="h">채택률을 읽는 주의</span><p>우리 추천 목록은 <strong>TOS가 아직 안 보낸 것</strong>만 담습니다. 즉 채택률이 낮다는 것은 "우리가 틀렸다"가 아니라 <strong>"TOS와 다른 판단을 하고 있다"</strong>는 뜻일 수 있습니다 — 이 차이가 바로 검증 대상입니다. 이 수치는 2026-08-10부터 쌓이기 시작했습니다.</p></div>
+
+  <h2>3. 신선도 — 회색이 되면</h2>
+  <p>계산이 <strong>150초 넘게</strong> 새로 오지 않으면 화면 전체가 회색이 되고 정지 표시가 붙습니다. <strong>회색 화면의 추천은 적용하지 마세요</strong> — 현장이 이미 달라졌을 수 있습니다.</p>
+
+  <hr>
+  <p><strong>계산 원리 →</strong> <a href="/kc/dispatch/dispatch-deadline.html">배차 마감은 어떻게 정하나</a> · <strong>2단계 매칭 →</strong> <a href="/kc/dashboard/stage2-match.html">MATCH 페이지 해설</a></p>
+</main>
+</body>
+</html>

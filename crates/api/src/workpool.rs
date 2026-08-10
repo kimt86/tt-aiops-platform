@@ -152,6 +152,17 @@ struct QcOut {
     slack_s: Option<i64>,
 }
 
+/// 상자별 권위 배차 마감 (P2 재편, 2026-08-10). 프론트가 옛 식(작업ETA − 상수 리드,
+/// idx/rem×proc 안분)으로 로컬 재계산하던 것을 끊는다 — 마감은 백엔드 한 곳에서만 계산한다
+/// (현행 = 출항 요구 페이스 균등 배분, pool_mode=3).
+#[derive(Serialize)]
+pub struct BoxDeadlineOut {
+    contno: String,
+    jobtype: String,
+    dispatch_deadline_ts: Option<DateTime<Utc>>,
+    dd_lead_s: Option<i64>,
+}
+
 #[derive(Serialize)]
 pub struct WorkpoolOut {
     as_of: Option<DateTime<Utc>>,
@@ -165,13 +176,28 @@ pub struct WorkpoolOut {
     /// discharge grouped by QC, load grouped by source block (pickup location).
     candidates: Vec<CandidateOut>,
     candidate_total: i64,
+    /// 상자별 권위 배차 마감 — `/api/workpool` 핸들러만 채운다(내부 소비자는 빈 벡터).
+    box_deadlines: Vec<BoxDeadlineOut>,
 }
 
 const POOL_CAP: usize = 80;
 
 /// `GET /api/workpool` — the live per-QC work pool (Postgres snapshot, ~90s fresh).
+/// 상자별 권위 마감(box_deadlines)을 같이 실어 프론트의 로컬 마감 재계산을 없앤다(P2).
 pub async fn workpool(State(pool): State<PgPool>) -> Result<Json<WorkpoolOut>, AppError> {
-    Ok(Json(build_workpool(pool).await?))
+    let (mut wp, cand) = stage2_work_candidates(pool).await?;
+    wp.box_deadlines = cand
+        .into_iter()
+        .filter_map(|w| {
+            w.contno.map(|contno| BoxDeadlineOut {
+                contno,
+                jobtype: w.jobtype,
+                dispatch_deadline_ts: w.dispatch_deadline_ts,
+                dd_lead_s: w.dd_lead_s,
+            })
+        })
+        .collect();
+    Ok(Json(wp))
 }
 
 /// The full per-QC work pool + shadow deadline computation, shared by the HTTP handler and the
@@ -708,6 +734,7 @@ pub(crate) async fn build_workpool(pool: PgPool) -> Result<WorkpoolOut, AppError
         pool: front,
         candidates,
         candidate_total,
+        box_deadlines: Vec::new(), // HTTP 핸들러만 채운다
     })
 }
 
@@ -843,7 +870,7 @@ pub fn spawn_dispatch_pred_logger(pool: PgPool) {
             // ETW order). Scoring already ran above (blocks 0/1a/1b/2); this only records new
             // predictions. pred_ver=2 tags these rows so analysis never mixes them with the
             // legacy population (mig 0130).
-            let cand = match stage2_work_candidates(pool.clone()).await { Ok(v) => v, Err(_) => continue };
+            let cand = match stage2_work_candidates(pool.clone()).await { Ok(v) => v.1, Err(_) => continue };
             // contno → upd_ts (TOS UPD_DT) seed for D_tos — same source/filter as block (0) above.
             let upd_of: HashMap<String, Option<DateTime<Utc>>> = {
                 let mut m: HashMap<String, Option<DateTime<Utc>>> = HashMap::new();
@@ -997,7 +1024,9 @@ pub(crate) struct Stage2Work {
 const LEAD_DS_S: i64 = 450;
 const LEAD_LD_S: i64 = 1180;
 
-pub(crate) async fn stage2_work_candidates(pool: PgPool) -> Result<Vec<Stage2Work>, AppError> {
+pub(crate) async fn stage2_work_candidates(
+    pool: PgPool,
+) -> Result<(WorkpoolOut, Vec<Stage2Work>), AppError> {
     let pool_for_lead = pool.clone();
     let wp = build_workpool(pool).await?;
     // (qc,vessel,queuename) = live_workqueue의 PK(0012:22)라 1:1 — dedup 불필요. work-ETA와 나란히
@@ -1253,7 +1282,7 @@ pub(crate) async fn stage2_work_candidates(pool: PgPool) -> Result<Vec<Stage2Wor
             contno: Some(contno),
         });
     }
-    Ok(out)
+    Ok((wp, out))
 }
 
 // ── Stage-2 shadow validation dashboard feed ─────────────────────────────────────────────────
@@ -1262,6 +1291,8 @@ struct S2Summary {
     matches_30m: i64,
     switched_pct: Option<f64>,
     feasible_pct: Option<f64>,
+    /// mig 0116 크레인 기준 축 — feasible_pct(옛 축, 적재 구간 누락)를 화면에서 대체한다.
+    feasible_crane_pct: Option<f64>,
     routed_pct: Option<f64>,
     median_arrival_s: Option<f64>,
     vehicles: i64,
@@ -1315,15 +1346,21 @@ pub struct Stage2ShadowOut {
 /// `GET /api/stage2/shadow` — live Stage-2 matching shadow: last-30min summary (thrash, feasibility,
 /// OD tier, median arrival) + the most recent tick's recommended vehicle→work matches.
 pub async fn stage2_shadow(State(pool): State<PgPool>) -> Result<Json<Stage2ShadowOut>, AppError> {
+    // ⚠ 30분 창은 반드시 pool_mode=3(현행 모집단)으로 가른다 — 마감 정의 전환(mig 0140·0141)
+    // 직후 창이 경계를 걸치면 옛 모집단과 섞인 수치가 나간다(2026-08-10 P2 정비).
     let summary: S2Summary = sqlx::query_as(
         "SELECT count(*) AS matches_30m,
                 (100.0*count(*) FILTER (WHERE switched)/nullif(count(*),0))::float8 AS switched_pct,
                 (100.0*count(*) FILTER (WHERE feasible)/nullif(count(*),0))::float8 AS feasible_pct,
+                (100.0*count(*) FILTER (WHERE feasible_crane)
+                   /nullif(count(*) FILTER (WHERE feasible_crane IS NOT NULL),0))::float8 AS feasible_crane_pct,
                 (100.0*count(*) FILTER (WHERE cost_tier='R')/nullif(count(*),0))::float8 AS routed_pct,
                 (percentile_cont(0.5) WITHIN GROUP (ORDER BY arrival_s))::float8 AS median_arrival_s,
                 count(DISTINCT ytno) AS vehicles,
                 count(DISTINCT (qc, queuename, vessel)) AS works
-           FROM stage2_match_shadow WHERE ts > now() - interval '30 minutes'",
+           FROM stage2_match_shadow m WHERE m.ts > now() - interval '30 minutes'
+            AND m.ts IN (SELECT ts FROM stage2_solver_shadow
+                          WHERE ts > now() - interval '30 minutes' AND pool_mode = 3)",
     )
     .fetch_one(&pool)
     .await?;
@@ -1360,7 +1397,7 @@ pub async fn stage2_shadow(State(pool): State<PgPool>) -> Result<Json<Stage2Shad
                 (100.0*sum(greedy_cost_s - optimal_cost_s)/nullif(sum(greedy_cost_s),0))::float8 AS savings_pct,
                 sum(greedy_miss)::bigint AS greedy_miss,
                 sum(optimal_miss)::bigint AS optimal_miss
-           FROM stage2_solver_shadow WHERE ts > now() - interval '30 minutes'",
+           FROM stage2_solver_shadow WHERE ts > now() - interval '30 minutes' AND pool_mode = 3",
     )
     .fetch_one(&pool)
     .await?;
@@ -1465,14 +1502,16 @@ pub async fn health_dispatch(State(pool): State<PgPool>) -> Result<Json<HealthDi
                 (100.0*count(*) FILTER (WHERE cost_tier='R')/nullif(count(*),0))::float8,
                 (percentile_cont(0.5) WITHIN GROUP (ORDER BY arrival_s))::float8,
                 (percentile_cont(0.9) WITHIN GROUP (ORDER BY arrival_s))::float8
-           FROM stage2_match_shadow WHERE ts > now() - interval '30 minutes'",
+           FROM stage2_match_shadow WHERE ts > now() - interval '30 minutes'
+            AND ts IN (SELECT ts FROM stage2_solver_shadow
+                        WHERE ts > now() - interval '30 minutes' AND pool_mode = 3)",
     )
     .fetch_one(&pool)
     .await?;
 
     let savings_pct: Option<f64> = sqlx::query_scalar(
         "SELECT (100.0*sum(greedy_cost_s - optimal_cost_s)/nullif(sum(greedy_cost_s),0))::float8
-           FROM stage2_solver_shadow WHERE ts > now() - interval '30 minutes'",
+           FROM stage2_solver_shadow WHERE ts > now() - interval '30 minutes' AND pool_mode = 3",
     )
     .fetch_one(&pool)
     .await
@@ -1487,6 +1526,8 @@ pub async fn health_dispatch(State(pool): State<PgPool>) -> Result<Json<HealthDi
                   count(*)::int8 AS n, min(arrival_s) AS ord
              FROM stage2_match_shadow
             WHERE ts > now() - interval '1 hour' AND arrival_s IS NOT NULL
+              AND ts IN (SELECT ts FROM stage2_solver_shadow
+                          WHERE ts > now() - interval '1 hour' AND pool_mode = 3)
             GROUP BY 1) z ORDER BY ord",
     )
     .fetch_all(&pool)
@@ -1498,6 +1539,8 @@ pub async fn health_dispatch(State(pool): State<PgPool>) -> Result<Json<HealthDi
                 (100.0*count(*) FILTER (WHERE switched)/nullif(count(*),0))::float8 AS thrash_pct,
                 count(*)::int8 AS matches
            FROM stage2_match_shadow WHERE ts > now() - interval '24 hours'
+            AND ts IN (SELECT ts FROM stage2_solver_shadow
+                        WHERE ts > now() - interval '24 hours' AND pool_mode = 3)
           GROUP BY 1 ORDER BY 1",
     )
     .fetch_all(&pool)
@@ -1788,4 +1831,113 @@ pub async fn dispatch_compare(State(pool): State<PgPool>) -> Result<Json<Dispatc
     .fetch_all(&pool)
     .await?;
     Ok(Json(DispatchCompareOut { summary, recent }))
+}
+
+// ── 배차 추천 보드 (P1, 2026-08-10) ──────────────────────────────────────────────────────────
+// 관제/배차 담당자용 실행 화면의 단일 원천. 최신 틱 추천(상자 단위·급한 순) + 풀 요약 +
+// 신선도 + 채택률(추천 vs TOS 실배차 — TOS 배차 기록은 이미 추출 중이라 피드백이 공짜다).
+// TOS 무접촉 공유안의 1단계(사람이 다리) 화면이 이걸 읽고, 2단계(HTTP Pull)도 같은 내용이다.
+
+#[derive(Serialize, sqlx::FromRow)]
+struct BoardReco {
+    ytno: String,
+    contno: Option<String>,
+    qc: Option<String>,
+    vessel: Option<String>,
+    queuename: Option<String>,
+    jobtype: Option<String>,
+    src_block: Option<String>,
+    dispatch_deadline_ts: Option<DateTime<Utc>>,
+    dd_slack_s: Option<i32>,
+    arrival_s: Option<i32>,
+    switched: Option<bool>,
+}
+#[derive(Serialize, sqlx::FromRow)]
+struct BoardPoolStat {
+    n_works: Option<i32>,
+    trucks_held: Option<i32>,
+    overdue: Option<i32>,
+}
+#[derive(Serialize, sqlx::FromRow)]
+struct BoardAdoption {
+    /// 분모: 최근 24시간에 우리가 추천한 상자 수(contno 단위, 최초 추천 시각 기준)
+    boxes_reco: i64,
+    /// 그중 최초 추천 후 20분 안에 TOS 가 실제로 배차한 상자 수
+    boxes_dispatched: i64,
+    box_pct: Option<f64>,
+    /// 배차된 상자 중 트럭까지 우리 추천과 일치한 비율(배차 이전 추천 행 기준)
+    ytno_match_pct: Option<f64>,
+}
+#[derive(Serialize)]
+pub struct DispatchBoardOut {
+    mode: String,
+    generated_at: Option<DateTime<Utc>>,
+    age_s: Option<i64>,
+    recos: Vec<BoardReco>,
+    pool: Option<BoardPoolStat>,
+    adoption: Option<BoardAdoption>,
+}
+
+/// `GET /api/dispatch/board`
+pub async fn dispatch_board(State(pool): State<PgPool>) -> Result<Json<DispatchBoardOut>, AppError> {
+    let generated_at: Option<DateTime<Utc>> =
+        sqlx::query_scalar("SELECT max(ts) FROM stage2_match_shadow")
+            .fetch_one(&pool)
+            .await?;
+    let age_s = generated_at.map(|t| (Utc::now() - t).num_seconds());
+    let recos: Vec<BoardReco> = match generated_at {
+        Some(ts) => sqlx::query_as(
+            "SELECT ytno, contno, qc, vessel, queuename, jobtype, src_block,
+                    dispatch_deadline_ts, dd_slack_s, arrival_s, switched
+               FROM stage2_match_shadow WHERE ts = $1
+              ORDER BY dd_slack_s ASC NULLS LAST LIMIT 40",
+        )
+        .bind(ts)
+        .fetch_all(&pool)
+        .await?,
+        None => Vec::new(),
+    };
+    let pool_stat: Option<BoardPoolStat> = sqlx::query_as(
+        "SELECT n_works, trucks_held_n AS trucks_held, pool_overdue_n AS overdue
+           FROM stage2_solver_shadow WHERE pool_mode = 3 ORDER BY ts DESC LIMIT 1",
+    )
+    .fetch_optional(&pool)
+    .await?;
+    // 채택률 — contno 는 mig 0142(2026-08-10)부터 기록되므로 24h 창은 그때부터 찬다.
+    // 프로브 인덱스: stage2_match_shadow(contno, ts) = mig 0143.
+    let adoption: Option<BoardAdoption> = sqlx::query_as(
+        "WITH r AS (
+           SELECT contno, min(ts) AS first_ts
+             FROM stage2_match_shadow
+            WHERE ts > now() - interval '24 hours' AND contno IS NOT NULL
+            GROUP BY contno
+         ), d AS (
+           SELECT r.contno, t.ytno, t.dispatch_ts
+             FROM r
+             JOIN LATERAL (
+               SELECT ytno, dispatch_ts FROM tt_move_log t
+                WHERE t.contno = r.contno AND t.dispatch_ts >= r.first_ts
+                  AND t.dispatch_ts < r.first_ts + interval '20 minutes'
+                ORDER BY t.dispatch_ts LIMIT 1) t ON true
+         )
+         SELECT (SELECT count(*) FROM r)::int8 AS boxes_reco,
+                count(*)::int8 AS boxes_dispatched,
+                (100.0*count(*)/nullif((SELECT count(*) FROM r),0))::float8 AS box_pct,
+                (100.0*count(*) FILTER (WHERE EXISTS (
+                   SELECT 1 FROM stage2_match_shadow m
+                    WHERE m.contno = d.contno AND m.ytno = d.ytno AND m.ts <= d.dispatch_ts))
+                  /nullif(count(*),0))::float8 AS ytno_match_pct
+           FROM d",
+    )
+    .fetch_optional(&pool)
+    .await
+    .unwrap_or(None);
+    Ok(Json(DispatchBoardOut {
+        mode: std::env::var("DISPATCH_MODE").unwrap_or_else(|_| "shadow".into()),
+        generated_at,
+        age_s,
+        recos,
+        pool: pool_stat,
+        adoption,
+    }))
 }

@@ -4,12 +4,12 @@
 import { useEffect, useState } from "react";
 import { type Lang } from "./i18n";
 import { api, type Stage2Shadow, type DispatchCompare } from "./api";
+import { mytTime } from "./timefmt";
 
 const ko = (l: Lang) => l === "ko";
 const pct = (v: number | null | undefined) => (v == null ? "—" : `${v.toFixed(0)}%`);
 const mmss = (s: number | null | undefined) => (s == null ? "—" : `${Math.floor(s / 60)}:${String(Math.round(s % 60)).padStart(2, "0")}`);
 const signMin = (s: number | null | undefined) => (s == null ? "—" : `${s >= 0 ? "+" : ""}${(s / 60).toFixed(1)}`);
-const hhmm = (iso: string) => new Date(iso).toLocaleTimeString("en-GB", { timeZone: "Asia/Kuala_Lumpur", hour12: false }); // MYT (terminal local)
 
 function Chip({ label, value, accent }: { label: string; value: string; accent?: string }) {
   return (
@@ -69,6 +69,12 @@ export default function Stage2Page({ lang }: { lang: Lang }) {
     const iv = setInterval(poll, 15000);
     return () => { alive = false; clearInterval(iv); };
   }, []);
+  // 신선도(P2): 매처 마지막 틱(latest_ts)이 150초를 넘으면 낡은 매칭이다 — 회색 처리로
+  // "라이브처럼 보이는 죽은 표"를 막는다(TtPage wpStale 패턴 이식).
+  const [nowMs, setNowMs] = useState(Date.now());
+  useEffect(() => { const iv = setInterval(() => setNowMs(Date.now()), 5000); return () => clearInterval(iv); }, []);
+  const tickAgeS = d?.latest_ts ? Math.max(0, Math.round((nowMs - new Date(d.latest_ts).getTime()) / 1000)) : null;
+  const engineStale = err || tickAgeS == null || tickAgeS > 150;
   const s = d?.summary;
   const ie = d?.inefficiency;
   const sv = d?.solver;
@@ -169,7 +175,7 @@ export default function Stage2Page({ lang }: { lang: Lang }) {
         <tbody>
           {(cmp?.recent ?? []).map((r, i) => (
             <tr key={i}>
-              <td className="mono">{hhmm(r.ts)}</td>
+              <td className="mono">{mytTime(r.ts)}</td>
               <td className="mono">{r.qc} <span style={{ color: "var(--text-mute)" }}>{r.queuename}</span></td>
               <td>{jobKo(r.jobtype)}</td>
               <td className="mono">{r.tos_ytno} <span style={{ color: "var(--text-mute)" }}>{mmss(r.tos_arrival_s)}</span></td>
@@ -183,12 +189,20 @@ export default function Stage2Page({ lang }: { lang: Lang }) {
       {(cmp?.recent ?? []).length === 0 && <div className="cyc-empty">{k ? "비교 사례 누적 중 (작업이 배차될 때마다 기록)" : "accumulating — logged as works get dispatched"}</div>}
 
       {/* ── secondary: live recommendation engine detail ── */}
-      <div className="area-divider" style={{ marginTop: 22 }}><span>{k ? "권고 엔진 상세 (그림자 매처)" : "Recommendation engine (shadow)"}</span></div>
+      <div className="area-divider" style={{ marginTop: 22 }}><span>{k ? "권고 엔진 상세 (그림자 매처)" : "Recommendation engine (shadow)"}</span>
+        <span className={`pill ${engineStale ? "bad" : "good"}`} style={{ marginLeft: 8 }}>
+          {engineStale
+            ? (k ? `⚠ 정지 · ${tickAgeS != null ? `${tickAgeS}초 전` : "?"} 틱` : `⚠ stale · ${tickAgeS ?? "?"}s`)
+            : (k ? `LIVE · ${tickAgeS}초 전 틱` : `LIVE · ${tickAgeS}s`)}
+        </span>
+      </div>
 
+      <div style={engineStale ? { opacity: 0.5, filter: "grayscale(0.5)" } : undefined}>
       <div className="ls-chips" style={{ marginBottom: 12 }}>
         <Chip label={k ? "현재 권고 매칭" : "current matches"} value={String(rows.length)} accent="#f472b6" />
         <Chip label={k ? "thrash (재배정율)" : "thrash"} value={pct(s?.switched_pct)} accent={(s?.switched_pct ?? 0) < 10 ? "#34d399" : "#f59e0b"} />
-        <Chip label={k ? "마감 충족" : "feasible"} value={pct(s?.feasible_pct)} />
+        {/* 크레인 기준 축(mig 0116) — 옛 feasible_pct 는 폐기 축이라 표시하지 않는다 */}
+        <Chip label={k ? "마감 충족(크레인 기준)" : "feasible (crane)"} value={pct(s?.feasible_crane_pct)} />
         <Chip label={k ? "중앙 도착" : "median arrival"} value={s?.median_arrival_s != null ? `${(s.median_arrival_s / 60).toFixed(1)}${k ? "분" : "m"}` : "—"} />
         <Chip label={k ? "도로망 라우팅(R)" : "routed (R)"} value={pct(s?.routed_pct)} accent="#60a5fa" />
         <Chip label={k ? "30분 매칭" : "30m matches"} value={s ? s.matches_30m.toLocaleString() : "—"} />
@@ -253,6 +267,7 @@ export default function Stage2Page({ lang }: { lang: Lang }) {
         </tbody>
       </table>
       {rows.length === 0 && <div className="cyc-empty">{k ? "권고 매칭 없음 (후보 차량/작업 대기 중)" : "no matches yet"}</div>}
+      </div>
     </div>
   );
 }

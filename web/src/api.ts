@@ -101,10 +101,16 @@ export interface WpCandidate {
   src_block: string | null; rtg: string | null; n: number;
   moves_until: number; active: boolean;
 }
+/** 상자별 권위 배차 마감 (P2) — 프론트는 마감을 재계산하지 않고 이 값을 그대로 쓴다. */
+export interface WpBoxDeadline {
+  contno: string; jobtype: string;
+  dispatch_deadline_ts: string | null; dd_lead_s: number | null;
+}
 export interface WorkpoolResponse {
   as_of: string | null; qc_count: number; active_moves: number; total_remaining: number;
   qcs: WpQc[]; pool: WpMove[];
   candidates: WpCandidate[]; candidate_total: number;
+  box_deadlines: WpBoxDeadline[];
 }
 
 // TT work-cycle history (from the accumulated tt_cycle_log).
@@ -231,6 +237,7 @@ export interface Stage2Match {
 export interface Stage2Shadow {
   summary: {
     matches_30m: number; switched_pct: number | null; feasible_pct: number | null;
+    feasible_crane_pct: number | null; // mig0116 크레인 기준 축 — 화면은 이걸 쓴다(옛 축 대체)
     routed_pct: number | null; median_arrival_s: number | null; vehicles: number; works: number;
   };
   latest_ts: string | null;
@@ -240,7 +247,9 @@ export interface Stage2Shadow {
 }
 export interface HealthDispatch {
   up: boolean; last_tick_age_s: number | null; ticks_1h: number; matches_latest: number;
-  thrash_pct: number | null; feasible_pct: number | null; savings_pct: number | null; routed_pct: number | null;
+  thrash_pct: number | null; feasible_pct: number | null;
+  feasible_crane_pct: number | null; // mig0116 크레인 기준 축 — 화면은 이걸 쓴다(옛 축 대체)
+  savings_pct: number | null; routed_pct: number | null;
   arr_p50_s: number | null; arr_p90_s: number | null;
   arrival_hist: { label: string; n: number }[];
   trend: { hour: string; thrash_pct: number | null; matches: number }[];
@@ -265,6 +274,24 @@ export interface DispatchCompare {
 }
 export interface WharfPoint {
   topos: string; lat: number; lon: number; n: number; spread_m: number | null;
+}
+/** 배차 추천 보드 — `GET /api/dispatch/board` (P1) */
+export interface BoardReco {
+  ytno: string; contno: string | null; qc: string | null; vessel: string | null;
+  queuename: string | null; jobtype: string | null; src_block: string | null;
+  dispatch_deadline_ts: string | null; dd_slack_s: number | null;
+  arrival_s: number | null; switched: boolean | null;
+}
+export interface DispatchBoard {
+  mode: string;
+  generated_at: string | null;
+  age_s: number | null;
+  recos: BoardReco[];
+  pool: { n_works: number | null; trucks_held: number | null; overdue: number | null } | null;
+  adoption: {
+    boxes_reco: number; boxes_dispatched: number;
+    box_pct: number | null; ytno_match_pct: number | null;
+  } | null;
 }
 export interface Stage2Advisory {
   ytno: string; qc: string | null; jobtype: string | null; src_block: string | null;
@@ -334,6 +361,7 @@ export const api = {
   learnExtra: () => get<LearnExtra>("/api/learn/extra"),
   learnDataCatalog: () => get<DataStat[]>("/api/learn/data-catalog"),
   learnDataSample: (key: string) => get<DataRow[]>(`/api/learn/data-sample?key=${encodeURIComponent(key)}`),
+  dispatchBoard: () => get<DispatchBoard>("/api/dispatch/board"),
   stage2Shadow: () => get<Stage2Shadow>("/api/stage2/shadow"),
   stage2Advisory: () => get<Stage2Advisory[]>("/api/stage2/advisory"),
   stage2ComparePicks: () => get<ComparePick[]>("/api/stage2/compare-picks"),

@@ -1142,3 +1142,11 @@ td.mono { font-family: "JetBrains Mono", monospace; color: var(--text); }
 .outage-banner.down .ob-ico { animation: ob-blink 1.4s ease-in-out infinite; }
 @keyframes ob-blink { 0%,100%{opacity:1} 50%{opacity:.4} }
 @media (prefers-reduced-motion: reduce) { .outage-banner.down .ob-ico { animation:none; } }
+
+/* ── 배차 추천 보드 (P1) ─────────────────────────────────────────────────── */
+.board-table td { vertical-align: middle; }
+.board-table .board-tt { font-family: "JetBrains Mono", monospace; font-size: 20px; font-weight: 800; letter-spacing: -0.5px; color: var(--text); }
+.board-table td.ok { color: #86efac; font-family: "JetBrains Mono", monospace; font-weight: 700; }
+.board-table td.warn { color: #fcd34d; font-family: "JetBrains Mono", monospace; font-weight: 700; }
+.board-table td.bad { color: #fca5a5; font-family: "JetBrains Mono", monospace; font-weight: 800; }
+.board-table td.lo { color: var(--text-mute); }

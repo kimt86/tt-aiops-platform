@@ -312,6 +312,11 @@ function LiveQcSequence({ lang, wp, snap }: { lang: Lang; wp: WorkpoolResponse |
   // 1s ticker so relative times (ETW, deadline, slack) keep counting down between 15s data polls.
   const [, setTick] = useState(0);
   useEffect(() => { const iv = setInterval(() => setTick((t) => t + 1), 1000); return () => clearInterval(iv); }, []);
+  // 상자별 권위 배차 마감(contno → epoch ms) — /api/workpool.box_deadlines (P2)
+  const dlByCont = new Map<string, number>();
+  for (const b of wp?.box_deadlines ?? []) {
+    if (b.dispatch_deadline_ts) dlByCont.set(b.contno, new Date(b.dispatch_deadline_ts).getTime());
+  }
   // OUR pick on every row: unassigned demands ← live Stage-2 advisory; TOS-assigned rows ← the
   // timing-skew-free comparison (who we'd have picked at the dispatch moment).
   const [advisory, setAdvisory] = useState<Stage2Advisory[]>([]);
@@ -407,7 +412,7 @@ function LiveQcSequence({ lang, wp, snap }: { lang: Lang; wp: WorkpoolResponse |
               <div className="qc-vbar-track"><div className="fill" style={{ width: `${vpct}%` }} /></div>
             </div>
             <div className="qc-panel">
-              {g.items.map((q) => <QcCol key={q.qc} q={q} lang={lang} ttState={ttState} working={craneFresh.get(q.qc) ?? false} mph={craneMph.get(q.qc)} maxN={maxN} showDl={showDl} ourRecs={showOurs ? recsByQc.get(q.qc) : undefined} ourPicks={showOurs ? picksByKey : undefined} />)}
+              {g.items.map((q) => <QcCol key={q.qc} q={q} lang={lang} ttState={ttState} working={craneFresh.get(q.qc) ?? false} mph={craneMph.get(q.qc)} maxN={maxN} showDl={showDl} dl={dlByCont} ourRecs={showOurs ? recsByQc.get(q.qc) : undefined} ourPicks={showOurs ? picksByKey : undefined} />)}
             </div>
           </div>
           );
@@ -425,7 +430,7 @@ const agoMin = (ts?: string | null): number | null =>
 // containers] → NOW → [future N containers]; N counts CONTAINERS (not bays). "future" is mostly the
 // not-yet-dispatched (candidate) work. TOS has no per-container order within a bay, so within-bay
 // unassigned order is by bay only. Label = Vessel(QC) ↔ Block(RTG).
-function QcCol({ q, lang, ttState, working, mph, maxN, showDl, ourRecs, ourPicks }: { q: WpQc; lang: Lang; ttState: Map<string, Dev>; working: boolean; mph?: number; maxN: number | "auto"; showDl: boolean; ourRecs?: Stage2Advisory[]; ourPicks?: Map<string, ComparePick> }) {
+function QcCol({ q, lang, ttState, working, mph, maxN, showDl, dl, ourRecs, ourPicks }: { q: WpQc; lang: Lang; ttState: Map<string, Dev>; working: boolean; mph?: number; maxN: number | "auto"; showDl: boolean; dl: Map<string, number>; ourRecs?: Stage2Advisory[]; ourPicks?: Map<string, ComparePick> }) {
   const k = ko(lang);
   const tot = q.queues.reduce((a, x) => a + x.total, 0);
   const done = q.queues.reduce((a, x) => a + x.done, 0);
@@ -464,25 +469,10 @@ function QcCol({ q, lang, ttState, working, mph, maxN, showDl, ourRecs, ourPicks
   for (const m of q.moves) if (assigned(m) && !discharged(m)) truckedSet.add((m.ytno as string).trim());
   const trucked = truckedSet.size;
 
-  // SHADOW deadline distribution: per-QC slack (will it finish by departure?) + per-bay deadline.
-  // per-bay work-ETA (when the QC starts the bay) + proc seconds, from the backend. KEYED PER
-  // VESSEL: a QC can hold queues for two vessels with colliding queuenames (e.g. both "06H-L"), so
-  // keying by name alone would mix them. Per-move dispatch deadline is derived in row().
-  const bkey = (vessel: string | null | undefined, qn: string) => `${vessel ?? "?"}|${qn}`;
-  const etaByQueue = new Map<string, { eta: string; proc: number; rem: number }>();
-  for (const b of q.queues) if (b.work_eta_ts) etaByQueue.set(bkey(b.vessel, b.queuename), { eta: b.work_eta_ts, proc: b.proc_s ?? 0, rem: Math.max(1, b.remaining) });
+  // 배차 마감은 백엔드 권위값(/api/workpool.box_deadlines — 출항 요구 페이스 균등 배분)을
+  // 그대로 쓴다(P2, 2026-08-10). 옛 로컬 재계산(작업ETA + idx/rem×proc − 상수 리드)은 폐기
+  // 판이라 걷어냈다 — 마감을 계산하는 곳은 백엔드 한 곳뿐이어야 화면과 풀이 같은 숫자를 본다.
   const mkey = (m: WpMove) => `${m.vessel}-${m.queuename}-${m.contno ?? ""}-${m.ytno ?? "u"}`;
-  // within-bay work order index (the i-th remaining container of its bay), for staggering work-ETA
-  const moveIdx = new Map<string, number>();
-  {
-    const bayIdx = new Map<string, number>();
-    for (const m of notDone) {
-      const bk = bkey(m.vessel, m.queuename);
-      const i = bayIdx.get(bk) ?? 0;
-      bayIdx.set(bk, i + 1);
-      moveIdx.set(mkey(m), i);
-    }
-  }
 
   // OUR pick on every row. Unassigned demands → live Stage-2 advisory (next truck per QC, laid onto
   // the unassigned containers in sequence order, same-jobtype first). TOS-assigned rows → the
@@ -520,18 +510,12 @@ function QcCol({ q, lang, ttState, working, mph, maxN, showDl, ourRecs, ourPicks
           <div className="bot">
             {(() => { const e = etwLabel(m.etw_accurate, m.etw_expires, lang); return e && role !== "past" && <span className={`jetw ${e.cls}`} title={k ? "TOS 작업예정(ETW) — 크레인이 이 컨테이너를 작업할 예정 시각" : "TOS ETW — when the crane is scheduled to work this"}>⏱ {e.text}</span>; })()}
             {showDl && (() => {
-              // work_eta is forward-from-now per vessel; the backend only chains the QC's CURRENT
-              // (primary) vessel, so only show the dispatch deadline for primary-vessel moves.
-              if (q.vessels[0] && m.vessel !== q.vessels[0]) return null;
-              const e = etaByQueue.get(bkey(m.vessel, m.queuename));
-              if (!e) return null;
-              // when the QC works THIS container = bay start + its share of the bay's processing
-              const idx = moveIdx.get(mkey(m)) ?? 0;
-              const workEtaMs = new Date(e.eta).getTime() + (idx / e.rem) * e.proc * 1000;
-              const lead = m.jobtype === "LD" ? 1180 : 450; // truck journey p75 (= backend LEAD_*_S)
-              const dispatchSec = Math.round((workEtaMs - Date.now()) / 1000) - lead;
+              // 백엔드 권위 마감(출항 요구 페이스) — 컨테이너 번호로 직결. 없으면 표시 안 함.
+              const dlMs = m.contno ? dl.get(m.contno) : undefined;
+              if (dlMs == null) return null;
+              const dispatchSec = Math.round((dlMs - Date.now()) / 1000);
               const cls = dispatchSec < 120 ? "bad" : dispatchSec < 1800 ? "warn" : "ok";
-              return <span className={`jetw ${cls}`} title={k ? "이 컨테이너 배차 마감까지 남은 시간 = 작업 예정시각 − 트럭 리드타임(실측 여정 p75: 양하 7.5분/적하 20분). 빨강=지금 배차" : "time until this container's dispatch deadline = work-ETA − truck lead (measured journey p75: DS 7.5m / LD 20m); red = dispatch now"}>🏁 {clockDur(dispatchSec, k)}</span>;
+              return <span className={`jetw ${cls}`} title={k ? "이 컨테이너의 배차 마감까지 남은 시간 — 처음 정한 출항시각을 지키기 위한 요구 마감(백엔드 계산). 빨강=지금 배차" : "time until this container's dispatch deadline — required to meet the planned departure (backend-computed); red = dispatch now"}>🏁 {clockDur(dispatchSec, k)}</span>;
             })()}
             {role === "past" && m.actv_ts && <span className="jetw rtg-actv" title={k ? "TOS ACTV — QC 양하 완료(트럭 적재). 검증 ACTV==QC move 완료 0초(n=3464)." : "TOS ACTV — QC discharged onto the truck (verified, n=3464)."}>{k ? "양하완료" : "discharged"}</span>}
           </div>
