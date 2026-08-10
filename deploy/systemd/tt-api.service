@@ -12,6 +12,9 @@ WorkingDirectory=%h/projects/tt-aiops-platform
 Environment=DATABASE_URL=postgresql://wp:wp@127.0.0.1:5433/wp_tt
 Environment=API_ADDR=0.0.0.0:8080
 Environment=RUST_LOG=info,tt_api=info
+# 배차 모드 (mig 0142): shadow = 추천 기록만(자기 추천 이력은 게이지로 계상).
+# active = 자기 추천 이력이 풀에서 작업을 제외(재추천 방지) — 실배차 전환 때만 바꾼다.
+Environment=DISPATCH_MODE=shadow
 # Stage-2 선택에 '출항 역산 마감 티어'를 반영한다(그림자 한정·실배차 무영향).
 #   (미설정) = 항상 OFF · 1 = 항상 ON · ab = A/B 측정(30분 블록 무작위)
 #

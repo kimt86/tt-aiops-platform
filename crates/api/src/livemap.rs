@@ -4302,10 +4302,21 @@ pub fn spawn_selfcal_refresh(lm: Arc<LiveMap>, pool: PgPool) {
 const SILENT_HOLD_S: i64 = 1200;     // hold a silent loaded truck up to 20min (covers 88% of waits) before assuming off-shift
 const HELD_NEAR_DROP_M: f64 = 120.0; // ...only if its last position is within this of its drop (= waiting there, last stage)
 
+/// 배차 모드 (mig 0142). `DISPATCH_MODE=active` 일 때만 자기 추천 이력이 풀에서 작업을
+/// 제외한다(추천→TOS 추출 반영 사이의 재추천 방지). 기본 shadow = 계상만(게이지).
+/// 실배차 전환의 **운영 상태**이지 실험 레버가 아니다 — 값은 유닛 파일에 있다.
+static DISPATCH_ACTIVE: AtomicBool = AtomicBool::new(false);
+
 pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
     tokio::spawn(async move {
+        DISPATCH_ACTIVE.store(
+            std::env::var("DISPATCH_MODE").unwrap_or_default() == "active",
+            Ordering::Relaxed,
+        );
         let mut ticker = tokio::time::interval(Duration::from_secs(60));
         let mut tick = 0u64;
+        // 추천 생산 0(트럭·작업은 있는데) 연속 틱 수 — 3틱이면 경보 (mig 0142)
+        let mut zero_streak: u32 = 0;
         // 티어 히스테리시스 상태(틱마다 현재 키 집합으로 통째 교체 = 누수 없음)
         let mut prev_tier: HashMap<(String, String, String), u8> = HashMap::new();
         loop {
@@ -4323,6 +4334,16 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
             )
             .fetch_all(&pool).await.unwrap_or_default()
             .into_iter().map(|(yt, q, v, qn)| (yt, (q, v, qn))).collect();
+            // 자기 추천 이력 (mig 0142): 최근 180초 안에 추천한 상자 키. TTL 180초는
+            // 추천→TOS 추출 반영 지연(~1-2분)을 덮는 값 — active 모드에서 이 집합에 든
+            // 작업은 풀에서 제외되고, TTL이 지나도록 실배차 확인이 안 오면 다시 들어온다.
+            let self_recent: std::collections::HashSet<(String, String, String)> =
+                sqlx::query_as::<_, (String, String, String)>(
+                    "SELECT DISTINCT vessel, queuename, contno FROM stage2_match_shadow
+                      WHERE ts > now() - interval '180 seconds' AND contno IS NOT NULL",
+                )
+                .fetch_all(&pool).await.unwrap_or_default()
+                .into_iter().collect();
             // mig 0116 — seconds between REACHING THE PICKUP POINT and the crane handover that our
             // travel model does not count. For DS the pickup point IS the crane, so this is small
             // (~74s of queue). For LD the pickup point is the YARD BLOCK while the deadline is the
@@ -4604,6 +4625,7 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
             //   작업도달 예측의 퍼짐이 IQR ~1,400초라 그 절반도 안 되는 보수적 값에서 출발한다.
             //   1단계에서 마감이 지난 슬롯(pool_overdue_n)이 계속 나오면 늘려야 한다.
             const POOL_MARGIN_S: i64 = 300;
+            let mut self_cover_n: i32 = 0; // 자기 추천 이력 적중 수 (mig 0142)
             let (pool_new, pool_overdue_n, trucks_held_n, due_buckets_n) = {
                 // (works 인덱스, 이 틱에 마감이 도래한 슬롯 수, 가장 이른 슬롯의 마감 ms)
                 let mut due: Vec<(usize, i64, i64)> = Vec::new();
@@ -4625,6 +4647,14 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                     //   "이미 배차됨"의 출처가 TOS 가 아니라 우리 자신의 직전 추천이 되어야 한다.
                     //   그때는 이 조건을 우리 배차 이력으로 바꾼다.
                     if w.tos_assigned { continue }
+                    // 자기 추천 이력 (mig 0142): shadow = 계상만(self_cover_n 게이지 — 직전 틱
+                    // 추천 수와 비슷해야 배선이 산 것, 0이면 키 불일치 버그). active = 제외.
+                    if let Some(c) = w.contno.as_ref() {
+                        if self_recent.contains(&(w.vessel.clone(), w.queuename.clone(), c.clone())) {
+                            self_cover_n += 1;
+                            if DISPATCH_ACTIVE.load(Ordering::Relaxed) { continue }
+                        }
+                    }
                     let Some(dd) = w.dispatch_deadline_ts else { continue };
                     let move_s = if w.jobtype == "LD" { LD_MOVE_S } else { DS_MOVE_S };
                     let base = dd.timestamp_millis();
@@ -4814,8 +4844,8 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                 // 컬럼(dep_slack_s / dep_tier)으로만 추가한다.
                 let ins = sqlx::query(
                     "INSERT INTO stage2_match_shadow
-                       (ts,tick,ytno,qc,vessel,queuename,jobtype,src_block,veh_state,arrival_s,od_p90_s,deadline_slack_s,feasible,cost_tier,switched,dest_lat,dest_lon,src_lat,src_lon,dep_slack_s,dep_tier,lead_extra_s,crane_slack_s,feasible_crane,dispatch_deadline_ts,dd_slack_s,dd_lead_s,deadline_ver)
-                     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,2) ON CONFLICT (ts,ytno) DO NOTHING",
+                       (ts,tick,ytno,qc,vessel,queuename,jobtype,src_block,veh_state,arrival_s,od_p90_s,deadline_slack_s,feasible,cost_tier,switched,dest_lat,dest_lon,src_lat,src_lon,dep_slack_s,dep_tier,lead_extra_s,crane_slack_s,feasible_crane,dispatch_deadline_ts,dd_slack_s,dd_lead_s,deadline_ver,contno)
+                     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,2,$28) ON CONFLICT (ts,ytno) DO NOTHING",
                 )
                 .bind(ts).bind(tick as i64).bind(&v.0).bind(&w.qc).bind(&w.vessel).bind(&w.queuename)
                 .bind(&w.jobtype).bind(&w.src_block).bind(v.4)
@@ -4832,6 +4862,7 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                     ((d.timestamp_millis() - now) / 1000).clamp(-2_000_000_000, 2_000_000_000) as i32
                 }))
                 .bind(w.dd_lead_s.map(|v| v as i32))
+                .bind(w.contno.clone()) // mig 0142 — 상자 단위 집행·자기 추천 이력의 키
                 .execute(&pool).await;
                 if let Err(e) = ins {
                     ins_err_n += 1;
@@ -4846,8 +4877,8 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
             }
             let gap_pct = if opt_cost > 0 { 100.0 * (greedy_cost - opt_cost) as f64 / opt_cost as f64 } else { 0.0 };
             let solver_ins = sqlx::query(
-                "INSERT INTO stage2_solver_shadow (ts,tick,n_trucks,n_works,greedy_n,greedy_cost_s,optimal_n,optimal_cost_s,gap_pct,greedy_miss,optimal_miss,dep_tier_on,dep_tier0_n,dep_urgent_slots,dep_null_n,dep_demoted_n,ab_block,ab_warmup,works_raw,need_horizon_on,works_no_eta,works_no_coord,pool_new_n,pool_overlap_n,trucks_held_n,pool_overdue_n,pool_mode,due_buckets_n)
-                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28) ON CONFLICT (ts) DO NOTHING",
+                "INSERT INTO stage2_solver_shadow (ts,tick,n_trucks,n_works,greedy_n,greedy_cost_s,optimal_n,optimal_cost_s,gap_pct,greedy_miss,optimal_miss,dep_tier_on,dep_tier0_n,dep_urgent_slots,dep_null_n,dep_demoted_n,ab_block,ab_warmup,works_raw,need_horizon_on,works_no_eta,works_no_coord,pool_new_n,pool_overlap_n,trucks_held_n,pool_overdue_n,pool_mode,due_buckets_n,self_cover_n)
+                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29) ON CONFLICT (ts) DO NOTHING",
             )
             .bind(ts).bind(tick as i64).bind(vehicles.len() as i32).bind(driving.len() as i32)
             .bind(greedy_n).bind(greedy_cost).bind(assign.len() as i32).bind(opt_cost).bind(gap_pct as f32)
@@ -4866,7 +4897,21 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
             .bind(trucks_held_n).bind(pool_overdue_n)
             .bind(pool_mode)
             .bind(due_buckets_n)                                                           // mig 0133
+            .bind(self_cover_n)                                                            // mig 0142
             .execute(&pool).await;
+            // 생산 0 경보 (mig 0142): 트럭도 작업도 있는데 추천이 3틱 연속 0이면 매칭이 죽은
+            // 것이다. 총정지는 stage2_match_shadow DEADMAN(30분)이 백스톱으로 잡지만, 이건
+            // "틱은 도는데 비어 있다"를 3분 안에 잡는 빠른 경보다. 조용한 시간대(작업 0)에는
+            // 조건이 성립하지 않아 오경보가 없다.
+            if !vehicles.is_empty() && !driving.is_empty() && assign.is_empty() {
+                zero_streak += 1;
+                if zero_streak == 3 {
+                    crate::db::alert(&pool, "stage2_reco", "zero_production", "crit",
+                        "트럭·작업이 있는데 추천 생산이 3틱 연속 0 — 매칭이 죽었다", None).await;
+                }
+            } else {
+                zero_streak = 0;
+            }
             // mig 0121 → 0133 — 구동 풀(설계③)에 든 묶음의 상세. 레거시 풀이 사라져 in_current_pool/
             // rank_current는 NULL(비교 대상 없음).
             {
