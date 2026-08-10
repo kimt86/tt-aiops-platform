@@ -325,6 +325,13 @@ td.mono { font-family: "JetBrains Mono", monospace; color: var(--text); }
 .vbar { height: 5px; background: var(--bg-soft); border-radius: 999px; overflow: hidden; }
 .vbar-fill { height: 100%; background: linear-gradient(90deg, var(--brand-deep), var(--brand)); border-radius: 999px; }
 .vmeta { display: flex; justify-content: space-between; font-size: 9px; color: var(--text-mute); gap: 6px; }
+/* 출항 완료 선박 — 기본 접힘, summary가 섹션 제목을 겸한다 */
+.departed-fold { margin-top: 14px; }
+.departed-fold > summary.departed-title { cursor: pointer; list-style: none; user-select: none; }
+.departed-fold > summary.departed-title::before { content: "▸"; margin-right: 6px; color: var(--text-dim); }
+.departed-fold[open] > summary.departed-title::before { content: "▾"; }
+.departed-fold > summary::-webkit-details-marker { display: none; }
+.departed-fold .vessel-card { opacity: 0.72; border-left-color: var(--text-dim); }
 
 /* ============================ TT PAGE (mock) ============================ */
 .tt-page { display: flex; flex-direction: column; gap: 12px; }

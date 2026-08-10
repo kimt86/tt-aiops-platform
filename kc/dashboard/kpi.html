@@ -91,6 +91,18 @@
     <li><strong>QC별 처리량 분해</strong>: K_MPH를 <strong>크레인별로</strong>(C·M·Z 전 안벽 크레인) 쪼개 어느 크레인이 빠르고 느린지(<code>/api/breakdown/qc</code>).</li>
   </ul>
 
+  <h2>5-1. "작업중 선박" 카드 목록</h2>
+  <p>실시간 탭 아래쪽에는 <strong>이번 교대에 안벽 크레인이 상자를 1개라도 다룬 배</strong>가 카드로 나옵니다.
+  즉 "지금 이 순간 접안해 있는 배"가 아니라 <strong>이번 교대의 작업 실적이 있는 배</strong>입니다.
+  그래서 교대가 바뀌면 목록이 비었다가, 각 배의 첫 작업이 잡히면 다시 채워집니다(원천 갱신 약 3분).</p>
+  <ul>
+    <li><strong>작업중 선박</strong>: 이번 교대에 실적이 있고 <strong>아직 항구에 있는</strong> 배.</li>
+    <li><strong>출항 완료</strong> (접힌 줄, 2026-08-11 추가): 이번 교대에 일을 하고 <strong>이미 떠난</strong> 배.
+    실적 통계에는 그대로 포함되지만, 화면에서는 따로 모아 기본으로 접어 둡니다. 제목 줄을 누르면 펼쳐집니다.</li>
+  </ul>
+  <p>"떠났다"의 판단은 선박 스케줄의 <strong>실제 출항 시각</strong>이 찍혔는지로 합니다 — TT Dispatch가
+  "접안 중인 배만 보여주기"에 쓰는 것과 같은 자료입니다. 스케줄에서 찾을 수 없는 배는 안전하게 "작업중" 쪽에 둡니다.</p>
+
   <h2>6. (참고) 페이지 상단의 라이브 QC 요약</h2>
   <p>KPI 카드와 별개로 <strong>지금 도는 QC</strong>를 요약하는 줄이 있을 수 있습니다(예 "QC 평균 처리량(PLC)", "QC 수·평균 대기"). 이건 TOS 점수가 아니라 <strong>websocket PLC(실시간)</strong> 기반 참고용. (상세 <a href="/kc/dashboard/dispatch.html">TT Dispatch 해설</a>)</p>
 

@@ -538,6 +538,10 @@ function LiveTab({ lang }: { lang: Lang }) {
   if (!live) return <div className="loading">{s.loading}</div>;
   const shiftName = (s as Record<string, string>)["shift_" + live.shift];
   const vrows = vessels?.vessels ?? [];
+  // 목록 기준은 "이번 교대 QC 실적"(vessel_shift) 그대로 두고, 이미 출항한 배만 접힌
+  // 하위 섹션으로 분리한다 (2026-08-11 사용자 결정). departed = live_vessel_schedule.actdep_ts.
+  const active = vrows.filter((v) => !v.departed);
+  const gone = vrows.filter((v) => v.departed);
   const sel = vrows.find((v) => vkey(v) === selKey) ?? null; // re-resolve each poll so the modal stays live
   return (
     <>
@@ -563,8 +567,16 @@ function LiveTab({ lang }: { lang: Lang }) {
       </div>
 
       {/* 현재 작업 중인 선박 (카드 클릭 → QC별 처리량 팝업) */}
-      <div className="section-title" style={{ marginTop: 18 }}>{s.activeVessels}<span className="section-sub">{vrows.length}</span></div>
-      <VesselPanel vessels={vrows} lang={lang} onSelect={(v) => setSelKey(vkey(v))} />
+      <div className="section-title" style={{ marginTop: 18 }}>{s.activeVessels}<span className="section-sub">{active.length}</span></div>
+      <VesselPanel vessels={active} lang={lang} onSelect={(v) => setSelKey(vkey(v))} />
+
+      {/* 이번 교대에 작업 후 출항 완료한 선박 — 기본 접힘 */}
+      {gone.length > 0 && (
+        <details className="departed-fold">
+          <summary className="section-title departed-title">{s.departedVessels}<span className="section-sub">{gone.length}</span></summary>
+          <VesselPanel vessels={gone} lang={lang} onSelect={(v) => setSelKey(vkey(v))} />
+        </details>
+      )}
 
       {sel && <VesselQcModal vessel={sel} lang={lang} onClose={() => setSelKey(null)} />}
     </>

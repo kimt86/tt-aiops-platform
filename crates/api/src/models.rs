@@ -198,6 +198,7 @@ pub struct VesselRow {
     pub planned_moves: Option<i32>,
     pub progress_pct: Option<f64>,
     pub qc_rows: Vec<VesselQc>,
+    pub departed: bool,
 }
 
 #[derive(Serialize)]

@@ -72,6 +72,7 @@ export interface VesselRow {
   mph: number | null; first_move: string | null; last_move: string | null;
   planned_moves: number | null; progress_pct: number | null;
   qc_rows: VesselQc[];
+  departed: boolean;
 }
 export interface VesselsResponse { shift: string; as_of: string; vessels: VesselRow[]; }
 

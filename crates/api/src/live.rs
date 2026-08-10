@@ -108,12 +108,18 @@ pub async fn vessels(State(pool): State<PgPool>) -> Result<Json<VesselsResponse>
     let now = shift::terminal_now().naive_local();
     let (date, sh): (NaiveDate, _) = shift::current(now);
 
-    let rows: Vec<(String, String, Option<i32>, Option<i32>, Option<i32>, Option<i32>, Option<String>, Option<f64>, Option<String>, Option<String>, Option<i32>)> =
+    // departed: 이번 교대에 실적이 있어도 이미 출항한 배는 프론트가 따로 접어 보여준다
+    // (2026-08-11 사용자 결정 — 목록 기준 자체는 "이번 교대 QC 실적"으로 유지).
+    // 판정은 live_vessel_schedule.actdep_ts (TT Dispatch 접안 필터와 같은 소스, PK가
+    // (vessel,voyage)라 fan-out 없음). 스케줄에 없는 항차는 false = 활성 쪽(fail-open).
+    let rows: Vec<(String, String, Option<i32>, Option<i32>, Option<i32>, Option<i32>, Option<String>, Option<f64>, Option<String>, Option<String>, Option<i32>, bool)> =
         sqlx::query_as(
             "SELECT v.vessel, v.voyage, v.moves, v.load_moves, v.discharge_moves, v.qc_count,
-                    v.qcs, v.mph::float8, v.first_move, v.last_move, p.planned_moves
+                    v.qcs, v.mph::float8, v.first_move, v.last_move, p.planned_moves,
+                    (s.actdep_ts IS NOT NULL) AS departed
                FROM vessel_shift v
                LEFT JOIN raw_voyage_plan p ON p.vessel=v.vessel AND p.voyage=v.voyage
+               LEFT JOIN live_vessel_schedule s ON s.vessel=v.vessel AND s.voyage=v.voyage
               WHERE v.business_date=$1 AND v.shift=$2
               ORDER BY v.moves DESC NULLS LAST",
         )
@@ -143,7 +149,7 @@ pub async fn vessels(State(pool): State<PgPool>) -> Result<Json<VesselsResponse>
 
     let vessels = rows
         .into_iter()
-        .map(|(vessel, voyage, moves, ld, ds, qcc, qcs, mph, fm, lm, planned)| {
+        .map(|(vessel, voyage, moves, ld, ds, qcc, qcs, mph, fm, lm, planned, departed)| {
             let qc_list = qcs
                 .unwrap_or_default()
                 .split(',')
@@ -169,6 +175,7 @@ pub async fn vessels(State(pool): State<PgPool>) -> Result<Json<VesselsResponse>
                 planned_moves: planned,
                 progress_pct,
                 qc_rows,
+                departed,
             }
         })
         .collect();
