@@ -3989,6 +3989,9 @@ fn clean_driver(s: &str) -> String {
 // anti-thrash: a vehicle keeps its previous-tick work bucket unless another is >= this many
 // arrival-seconds cheaper. Damps reassignment from small OD/GPS noise.
 const SWITCH_PENALTY_S: i64 = 180;
+/// 설계③ 풀 여유 — 마감이 (지금 + 이 값) 안에 든 슬롯을 풀에 담는다. 보드 깔때기의
+/// '마감 도래' 계수도 이 값을 써야 화면과 매처가 같은 숫자를 본다.
+pub(crate) const POOL_MARGIN_S: i64 = 300;
 // committed window (anti-thrash, TOS prefetch "early-decide, stable-execute"): once a truck's prior
 // recommendation is on the verge of dispatch (its work-ETA within this window), switching it away
 // costs COMMIT_LOCK_S — a near-lock so GPS jitter can't flip an about-to-go truck off its work.
@@ -4688,7 +4691,7 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
             // ⚠ 여유(POOL_MARGIN_S)는 잠정값이다. "우리가 우리 예측을 못 믿는 만큼"이 정의인데,
             //   작업도달 예측의 퍼짐이 IQR ~1,400초라 그 절반도 안 되는 보수적 값에서 출발한다.
             //   1단계에서 마감이 지난 슬롯(pool_overdue_n)이 계속 나오면 늘려야 한다.
-            const POOL_MARGIN_S: i64 = 300;
+            //   (상수는 모듈 상단 pub(crate) — 보드 깔때기가 같은 잣대로 '마감 도래'를 센다.)
             let mut self_cover_n: i32 = 0; // 자기 추천 이력 적중 수 (mig 0142)
             let (pool_new, pool_overdue_n, trucks_held_n, due_buckets_n) = {
                 // (works 인덱스, 이 틱에 마감이 도래한 슬롯 수, 가장 이른 슬롯의 마감 ms)

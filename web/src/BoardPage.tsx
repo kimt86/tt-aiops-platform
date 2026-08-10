@@ -48,6 +48,74 @@ function Stat({ label, val, unit, cls }: { label: string; val: string; unit?: st
   );
 }
 
+// ── 배차 깔때기 ────────────────────────────────────────────────────────────────
+// "추천이 왜 이 수뿐인가"를 단계 계수로 보여준다. 미터(단일 색)는 **직전 단계 대비 비율** —
+// 절대폭으로 그리면 494 vs 8 이라 뒷단계가 안 보인다. 숫자는 텍스트 토큰, 색은 비율만 담는다.
+function FunnelStage({ n, label, note, prev, hot, chip, title, ko }: {
+  n: number; label: string; note?: string; prev?: number; hot?: boolean; chip?: string; title?: string; ko: boolean;
+}) {
+  const p = prev != null && prev > 0 ? Math.min(100, Math.round((n / prev) * 100)) : null;
+  const pctTxt = p != null ? (ko ? `직전의 ${p}%` : `${p}% of prev`) : null;
+  return (
+    <div className={`bf-stage${hot ? " bf-hot" : ""}`} title={title}>
+      <div className="bf-n">{n.toLocaleString()}{chip ? <span className="bf-chip-bad"> {chip}</span> : null}</div>
+      <div className="bf-l">{label}</div>
+      {p != null && <div className="bf-track"><div className="bf-fill" style={{ width: `${p}%` }} /></div>}
+      <div className="bf-note">{[note, pctTxt].filter(Boolean).join(" · ")}</div>
+    </div>
+  );
+}
+
+function Funnel({ d, ko, stale }: { d: DispatchBoard; ko: boolean; stale: boolean }) {
+  const f = d.funnel;
+  if (!f) return null;
+  const trucks = d.pool?.n_trucks ?? null;
+  const held = d.pool?.trucks_held ?? null;
+  return (
+    <section className={`tcard${stale ? " wp-stale" : ""}`} style={{ marginBottom: 12 }}>
+      <div className="tcard-head">
+        <h3>{ko ? "배차 깔때기" : "Dispatch funnel"}
+          <span className="h3-sub">{ko
+            ? "계획 → 지시 발행 → 미배차 → 마감 도래 → 추천 — 추천이 적은 건 작업이 없어서가 아니라 '지금 시작해야 할 일'만 담기 때문"
+            : "planned → issued → unassigned → due now → recos — few recos = only what must start now, not a lack of work"}</span></h3>
+      </div>
+      <div className="tcard-body">
+        <div className="bfunnel">
+          <FunnelStage ko={ko} n={f.planned_backlog_cont} label={ko ? "계획 잔여 (컨테이너)" : "planned backlog (containers)"}
+            note={ko ? "지시 미발행 — TOS가 작업 ~1시간 전 발행" : "orders not yet cut (~1h ahead)"}
+            title={ko ? "적부계획에는 있으나 TOS 작업지시가 아직 없는 컨테이너 (큐 잔여 카운터 − 발행분)" : "planned but no TOS order yet"} />
+          <div className="bf-arrow">▸</div>
+          <FunnelStage ko={ko} n={f.issued} label={ko ? "지시 발행 (상자)" : "issued (boxes)"}
+            note={ko ? "마감 계산 완료" : "deadline computed"}
+            title={ko ? "TOS 작업지시가 있고 배차 마감이 계산된 상자(트럭 몫 — 트윈은 1로 셈)" : "issued truck-loads with a computed deadline"} />
+          <div className="bf-arrow">▸</div>
+          <FunnelStage ko={ko} n={f.unassigned} label={ko ? "TOS 미배차" : "unassigned"} prev={f.issued}
+            note={ko ? `배차됨 ${(f.issued - f.unassigned).toLocaleString()}` : `${(f.issued - f.unassigned).toLocaleString()} assigned`}
+            title={ko ? "우리 배차 대상 — TOS가 아직 트럭을 안 붙인 상자" : "our dispatch universe"} />
+          <div className="bf-arrow">▸</div>
+          <FunnelStage ko={ko} n={f.due_now} label={ko ? "마감 도래" : "due now"} prev={f.unassigned} hot
+            chip={f.overdue_now > 0 ? `🔴 ${f.overdue_now} ${ko ? "경과" : "late"}` : undefined}
+            note={ko ? "지금+5분 안 마감" : "deadline ≤ now+5m"}
+            title={ko ? "배차 마감(출항 요구 페이스 균등 배분)이 지금+5분 안에 든 미배차 상자 — 매처가 이번 틱에 담는 목록과 같은 잣대" : "deadline within now+5m — the matcher's pool criterion"} />
+          <div className="bf-arrow">▸</div>
+          <FunnelStage ko={ko} n={d.recos.length} label={ko ? "추천 (이번 틱)" : "recos (tick)"} prev={f.due_now} hot
+            note={ko ? "60초마다 재계산" : "recomputed every 60s"}
+            title={ko ? "매처 마지막 틱의 트럭↔상자 추천 수" : "matched pairs, last tick"} />
+          <div className="bf-sep" />
+          <div className="bf-stage bf-side" title={ko ? "후보 트럭이 도래 작업보다 많으면 남긴다 — 조기 배차(크레인 앞 대기)를 만들지 않기 위한 설계" : "surplus trucks are held — no early dispatch by design"}>
+            <div className="bf-n">{trucks != null ? trucks.toLocaleString() : "–"}</div>
+            <div className="bf-l">{ko ? "후보 트럭" : "candidate trucks"}</div>
+            <div className="bf-note">{ko ? `남김 ${held ?? "–"}대 (억지로 채우지 않음)` : `${held ?? "–"} held (no force-fill)`}</div>
+          </div>
+        </div>
+        <div className="lvp-note" style={{ marginTop: 8 }}>{ko
+          ? "마감은 출항 요구 페이스 균등 배분이라 '지금 시작해야 할 일'이 현장 처리속도만큼만 매 틱 도래한다. 추천이 실배차로 반영되지 않으면 그 상자는 다음 틱에 다시 담긴다 — 반복 배차는 이미 이 구조 안에 있다."
+          : "Deadlines are paced to departure demand, so work comes due at the rate it must start. Unapplied recos re-enter the pool next tick — the loop is already continuous."}</div>
+      </div>
+    </section>
+  );
+}
+
 export default function BoardPage({ lang }: { lang: Lang }) {
   const ko = lang === "ko";
   const [d, setD] = useState<DispatchBoard | null>(null);
@@ -96,10 +164,9 @@ export default function BoardPage({ lang }: { lang: Lang }) {
         </div>
       </div>
 
-      <div className="stats-row" style={{ display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: 10, marginBottom: 12 }}>
-        <Stat label={ko ? "추천(이번 틱)" : "recos (tick)"} val={String(d?.recos.length ?? "–")} />
-        <Stat label={ko ? "남긴 트럭" : "trucks held"} val={String(d?.pool?.trucks_held ?? "–")} unit={ko ? "대" : ""} />
-        <Stat label={ko ? "마감 경과 작업" : "overdue works"} val={String(d?.pool?.overdue ?? "–")} />
+      {d && <Funnel d={d} ko={ko} stale={stale} />}
+
+      <div className="stats-row" style={{ display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: 10, marginBottom: 12 }}>
         <Stat
           label={ko ? "채택률(상자·24h)" : "adoption (box·24h)"}
           val={pct(ad?.box_pct)}

@@ -28,13 +28,25 @@
     </tbody>
   </table></div>
 
-  <h2>2. 위쪽 숫자 5개</h2>
+  <h2>2. 배차 깔때기 — 추천이 적어 보이는 이유</h2>
+  <p>맨 위의 깔때기는 "일이 어디까지 와서 추천이 되는가"를 단계별 숫자로 보여줍니다 (2026-08-10 추가):</p>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th>단계</th><th>무슨 뜻인가</th></tr></thead>
+    <tbody>
+      <tr><td><strong>계획 잔여</strong> (컨테이너)</td><td>배에 싣고 내릴 계획에는 있지만 TOS가 아직 작업지시를 안 만든 컨테이너 — TOS는 지시를 작업 <strong>한 시간쯤 전에야</strong> 만듭니다</td></tr>
+      <tr><td><strong>지시 발행</strong> (상자)</td><td>작업지시가 있고 배차 마감이 계산된 상자(트럭 한 대 몫 — 트윈 2개는 1로 셈)</td></tr>
+      <tr><td><strong>TOS 미배차</strong></td><td>그중 아직 트럭이 안 붙은 상자 = <strong>우리가 배차할 대상 전체</strong></td></tr>
+      <tr><td><strong>마감 도래</strong></td><td>배차 마감(출항을 맞추기 위한 페이스 배분)이 지금+5분 안에 든 상자 — 계산이 이번 판에 담는 바로 그 목록. 🔴는 이미 지난 것</td></tr>
+      <tr><td><strong>추천(이번 틱)</strong></td><td>이번 계산(1분 주기)에서 트럭과 짝지어진 수</td></tr>
+      <tr><td><strong>후보 트럭 · 남김</strong></td><td>쓸 수 있는 트럭과, 급한 일이 없어 <strong>일부러 보내지 않고 남겨둔</strong> 트럭 — 미리 보내 크레인 앞에 세워두는 낭비를 막는 동작</td></tr>
+    </tbody>
+  </table></div>
+  <div class="kc-cal note"><span class="h">추천이 항상 10개 안팎인 이유</span><p>마감은 "출항까지 남은 시간 ÷ 남은 일"로 고르게 배분되므로, <strong>"지금 시작해야 할 일"은 현장이 실제로 처리하는 속도만큼만 매 분 생깁니다.</strong> 뒤의 수백 개는 없는 게 아니라 줄을 서 있는 것이고, 1분마다 다시 계산되며 앞으로 당겨집니다. 크레인이 밀리면 마감이 자동으로 급해져 더 많이 담깁니다.</p></div>
+
+  <h2>2-1. 채택률 숫자 2개</h2>
   <div class="kc-tablewrap"><table>
     <thead><tr><th>값</th><th>무슨 뜻인가</th></tr></thead>
     <tbody>
-      <tr><td><strong>추천(이번 틱)</strong></td><td>이번 계산(1분 주기)에서 나온 추천 수</td></tr>
-      <tr><td><strong>남긴 트럭</strong></td><td>급한 일이 없어 <strong>일부러 보내지 않고 남겨둔</strong> 트럭 수 — 미리 보내 세워두는 낭비를 막는 동작</td></tr>
-      <tr><td><strong>마감 경과 작업</strong></td><td>마감이 이미 지난 작업 수 (출항이 빠듯한 배의 일)</td></tr>
       <tr><td><strong>채택률(상자·24h)</strong></td><td>최근 24시간에 우리가 추천한 컨테이너 중, 추천 후 <strong>20분 안에 TOS가 실제로 배차</strong>한 비율</td></tr>
       <tr><td><strong>트럭까지 일치</strong></td><td>그중 <strong>트럭 선택까지</strong> 우리 추천과 같았던 비율</td></tr>
     </tbody>

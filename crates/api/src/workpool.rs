@@ -1924,8 +1924,20 @@ struct BoardReco {
 #[derive(Serialize, sqlx::FromRow)]
 struct BoardPoolStat {
     n_works: Option<i32>,
+    n_trucks: Option<i32>,
     trucks_held: Option<i32>,
     overdue: Option<i32>,
+}
+/// 배차 깔때기 — "추천이 왜 이 수뿐인가"의 답을 단계별 계수로. 발행/미배차/도래는
+/// 상자(트럭 몫) 단위, planned_backlog_cont 만 컨테이너 단위(계획 카운터 − 발행분).
+/// '마감 도래'는 매처와 같은 잣대(livemap::POOL_MARGIN_S)로 센 라이브 값이다.
+#[derive(Serialize)]
+struct BoardFunnel {
+    planned_backlog_cont: i64,
+    issued: i32,
+    unassigned: i32,
+    due_now: i32,
+    overdue_now: i32,
 }
 #[derive(Serialize, sqlx::FromRow)]
 struct BoardAdoption {
@@ -1950,6 +1962,7 @@ pub struct DispatchBoardOut {
     age_s: Option<i64>,
     recos: Vec<BoardReco>,
     pool: Option<BoardPoolStat>,
+    funnel: Option<BoardFunnel>,
     adoption: Option<BoardAdoption>,
     /// 채택률 시계열(시간당 ~1점, 최근 7일 — mig 0144)
     adoption_trend: Vec<AdoptionPt>,
@@ -1975,11 +1988,40 @@ pub async fn dispatch_board(State(pool): State<PgPool>) -> Result<Json<DispatchB
         None => Vec::new(),
     };
     let pool_stat: Option<BoardPoolStat> = sqlx::query_as(
-        "SELECT n_works, trucks_held_n AS trucks_held, pool_overdue_n AS overdue
+        "SELECT n_works, n_trucks, trucks_held_n AS trucks_held, pool_overdue_n AS overdue
            FROM stage2_solver_shadow WHERE pool_mode = 3 ORDER BY ts DESC LIMIT 1",
     )
     .fetch_optional(&pool)
     .await?;
+    // 깔때기 — 매처 틱과 무관하게 지금 시점 라이브로 센다(같은 산식·같은 여유 상수).
+    // 발행 상자는 stage2_work_candidates 의 상자 경로(contno 有), 마감 도래는 미배차 중
+    // dispatch_deadline_ts ≤ now + POOL_MARGIN_S. 잔여 계획은 컨테이너 단위라 따로 표기.
+    let funnel = match stage2_work_candidates(pool.clone()).await {
+        Ok((wpo, cand)) => {
+            let now = Utc::now();
+            let margin = chrono::Duration::seconds(crate::livemap::POOL_MARGIN_S);
+            let (mut issued, mut unassigned, mut due_now, mut overdue_now) = (0i32, 0i32, 0i32, 0i32);
+            let mut issued_cont: i64 = 0;
+            for w in &cand {
+                if w.contno.is_none() { continue }
+                issued += 1;
+                issued_cont += w.contnos.len().max(1) as i64;
+                if w.tos_assigned { continue }
+                unassigned += 1;
+                if let Some(dd) = w.dispatch_deadline_ts {
+                    if dd <= now + margin {
+                        due_now += 1;
+                        if dd < now { overdue_now += 1; }
+                    }
+                }
+            }
+            Some(BoardFunnel {
+                planned_backlog_cont: (wpo.total_remaining - issued_cont).max(0),
+                issued, unassigned, due_now, overdue_now,
+            })
+        }
+        Err(_) => None,
+    };
     // 채택률 — contno 는 mig 0142(2026-08-10)부터 기록되므로 24h 창은 그때부터 찬다.
     // 프로브 인덱스: stage2_match_shadow(contno, ts) = mig 0143.
     let adoption: Option<BoardAdoption> = sqlx::query_as(
@@ -2022,6 +2064,7 @@ pub async fn dispatch_board(State(pool): State<PgPool>) -> Result<Json<DispatchB
         age_s,
         recos,
         pool: pool_stat,
+        funnel,
         adoption,
         adoption_trend,
     }))

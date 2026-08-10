@@ -293,7 +293,12 @@ export interface DispatchBoard {
   generated_at: string | null;
   age_s: number | null;
   recos: BoardReco[];
-  pool: { n_works: number | null; trucks_held: number | null; overdue: number | null } | null;
+  pool: { n_works: number | null; n_trucks: number | null; trucks_held: number | null; overdue: number | null } | null;
+  /** 배차 깔때기 — 계획잔여(컨테이너) → 발행 → 미배차 → 마감 도래(상자·트럭 몫 단위, 매처와 같은 여유 상수) */
+  funnel: {
+    planned_backlog_cont: number; issued: number; unassigned: number;
+    due_now: number; overdue_now: number;
+  } | null;
   adoption: {
     boxes_reco: number; boxes_dispatched: number;
     box_pct: number | null; ytno_match_pct: number | null;

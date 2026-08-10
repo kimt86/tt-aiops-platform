@@ -238,6 +238,22 @@ td.mono { font-family: "JetBrains Mono", monospace; color: var(--text); }
 .vessel-card.clickable:hover .vmore { color: var(--brand); }
 
 /* modern QC popup */
+/* 배차 깔때기 (BoardPage) — 단계 타일 + 직전 단계 대비 미터(단일 색). 숫자는 텍스트 토큰,
+   색은 비율(브랜드 단일 색)과 상태(경과=--bad, 아이콘+라벨 동반)만 담는다. */
+.bfunnel { display: flex; align-items: stretch; gap: 6px; flex-wrap: wrap; }
+.bf-stage { flex: 1 1 128px; min-width: 122px; background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius-md); padding: 10px 12px; display: flex; flex-direction: column; gap: 3px; }
+.bf-stage.bf-hot { border-color: var(--brand-deep); }
+.bf-stage.bf-side { background: var(--surface); border-style: dashed; }
+.bf-n { font-family: "Manrope", sans-serif; font-size: 22px; font-weight: 800; line-height: 1.1; }
+.bf-l { font-size: 11px; color: var(--text-dim); font-weight: 600; }
+.bf-note { font-size: 9.5px; color: var(--text-mute); margin-top: auto; }
+.bf-track { height: 4px; background: var(--bg-soft); border-radius: 999px; overflow: hidden; margin-top: 2px; }
+.bf-fill { height: 100%; background: var(--brand); border-radius: 999px; }
+.bf-hot .bf-fill { background: var(--brand-deep); }
+.bf-arrow { align-self: center; color: var(--text-mute); font-size: 13px; flex: 0 0 auto; }
+.bf-sep { width: 1px; background: var(--border); margin: 6px 4px; flex: 0 0 auto; }
+.bf-chip-bad { font-size: 10.5px; color: var(--bad); font-weight: 700; }
+
 /* 맨 위로 플로팅 버튼 — 긴 페이지(TT Dispatch 등)에서 600px 이상 내려가면 나타난다.
    헤더(30)·탭바(20) 위, 모달 백드롭(200) 아래. */
 .scrolltop { position: fixed; right: 22px; bottom: 22px; z-index: 40; width: 40px; height: 40px;
