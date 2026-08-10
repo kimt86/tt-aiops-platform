@@ -55,6 +55,13 @@ const DEADMAN: &[(&str, &str, i64)] = &[
     // nothing means our poll is broken, not that the terminal went quiet.
     ("qc_move_log", "comp_ts", 30),
     ("rtg_move_log", "comp_ts", 30),
+    // The extractor landing tables dispatch actually eats (2026-08-10 gap check: nothing watched
+    // these — a silently stalled pool tick keeps recommendations running on stale demand, and the
+    // zero-production alert never fires as long as production continues). Empty table → max() is
+    // NULL → skipped, so a genuinely drained pool between vessels cannot false-fire.
+    ("tos_handover_label", "comp_ts", 30), // 60s collector; 494-922 rows/h, max natural gap 20min over 48h (measured 2026-08-10). comp_ts indexed
+    ("live_workqueue", "as_of_ts", 10),    // full refresh every 60s pool tick → 10 misses
+    ("live_stow_plan", "as_of_ts", 180),   // delta touches changed rows only, but hourly recon restamps every row → 3 recon misses
 ];
 
 /// Retention checks: the prune ran without error but did not actually delete anything. A prune
