@@ -199,9 +199,47 @@ const POOL_CAP: usize = 80;
 /// `GET /api/workpool` — the live per-QC work pool (Postgres snapshot, ~90s fresh).
 /// 상자별 권위 마감(box_deadlines)을 같이 실어 프론트의 로컬 마감 재계산을 없앤다(P2).
 pub async fn workpool(State(pool): State<PgPool>) -> Result<Json<WorkpoolOut>, AppError> {
+    // ── 표시 필터: 접안 중인 선박만 (2026-08-11 사용자 결정) ─────────────────────────────
+    // 추출 창(workqueue.sql: UPD_DT ~1일)이 접안 전 선박의 계획 큐까지 담아, 화면 선박의
+    // 절반이 미접안이었다(실측 15/28척·최대 +43h 뒤 접안 예정). 여기(HTTP 응답 조립)서만
+    // 거른다 — 매처·예측 로거는 stage2_work_candidates() 를 직접 쓰므로 측정에 영향이 없고,
+    // 접안 전 선박은 발행 지시가 0건이라(실측) 매칭 풀에는 원래 들어오지 않는다.
+    // 가상선박(RHXX 등)은 스케줄 행 자체가 없어 같은 조건으로 함께 걸러진다.
+    // 큐가 voyage 를 들고 있으면 (vessel,voyage) 정확 일치 — 같은 배의 지난 항차 잔재 큐가
+    // 되살아나지 않게. voyage 없는 큐만 선박명 폴백.
+    let berthed: Vec<(String, Option<String>)> = sqlx::query_as(
+        "SELECT vessel, voyage FROM live_vessel_schedule
+          WHERE actber_ts IS NOT NULL AND actdep_ts IS NULL",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap_or_default();
     let (mut wp, cand) = stage2_work_candidates(pool).await?;
+    // 빈 접안 목록은 "터미널이 비었다"보다 스케줄 피드 문제일 가능성이 크다 — 그때는 거르지
+    // 않는다(fail-open). 낡은 화면이 빈 화면보다 낫고, OutageBanner 가 피드 정지를 따로 알린다.
+    let berth_names: std::collections::HashSet<String> = if berthed.is_empty() {
+        Default::default()
+    } else {
+        let pairs: std::collections::HashSet<(&str, &str)> = berthed
+            .iter()
+            .filter_map(|(v, voy)| voy.as_deref().map(|y| (v.as_str(), y)))
+            .collect();
+        let names: std::collections::HashSet<&str> = berthed.iter().map(|(v, _)| v.as_str()).collect();
+        for qc in &mut wp.qcs {
+            qc.queues.retain(|q| match q.voyage.as_deref() {
+                Some(voy) => pairs.contains(&(q.vessel.as_str(), voy)),
+                None => names.contains(q.vessel.as_str()),
+            });
+            qc.remaining = qc.queues.iter().map(|q| q.remaining as i64).sum();
+        }
+        wp.qcs.retain(|qc| !qc.queues.is_empty() || !qc.moves.is_empty());
+        wp.qc_count = wp.qcs.len();
+        wp.total_remaining = wp.qcs.iter().map(|q| q.remaining).sum();
+        berthed.iter().map(|(v, _)| v.clone()).collect()
+    };
     wp.box_deadlines = cand
         .into_iter()
+        .filter(|w| berth_names.is_empty() || berth_names.contains(&w.vessel))
         .filter_map(|w| {
             w.contno.map(|contno| BoxDeadlineOut {
                 qc: w.qc,
