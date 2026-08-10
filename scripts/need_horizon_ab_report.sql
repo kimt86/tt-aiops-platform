@@ -31,8 +31,8 @@ WITH m AS (
   SELECT m.*, d.comp
     FROM m JOIN LATERAL (
       SELECT q.comp_ts AS comp FROM qc_move_log q
-       WHERE q.machno = m.qc AND q.queuename = m.queuename AND q.st_ts > m.ts
-       ORDER BY q.st_ts LIMIT 1) d ON true
+       WHERE q.machno = m.qc AND q.queuename = m.queuename AND q.dispatch_ts > m.ts
+       ORDER BY q.dispatch_ts LIMIT 1) d ON true
 )
 SELECT jobtype AS 작업, need_horizon_on AS "지평 ON", count(*) AS n,
        round(percentile_cont(0.5) WITHIN GROUP (ORDER BY our_h))                            AS "우리 마감",

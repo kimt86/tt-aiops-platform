@@ -56,8 +56,8 @@ WITH m AS (
   SELECT m.*, extract(epoch FROM d.comp - m.ts) AS truth_h
     FROM m JOIN LATERAL (
       SELECT q.comp_ts AS comp FROM qc_move_log q
-       WHERE q.machno = m.qc AND q.queuename = m.queuename AND q.st_ts > m.ts
-       ORDER BY q.st_ts LIMIT 1) d ON true
+       WHERE q.machno = m.qc AND q.queuename = m.queuename AND q.dispatch_ts > m.ts
+       ORDER BY q.dispatch_ts LIMIT 1) d ON true
 )
 SELECT jobtype AS 작업, count(*) AS n,
        round(percentile_cont(0.5) WITHIN GROUP (ORDER BY truth_h))            AS "실제(초)",
@@ -83,8 +83,8 @@ WITH m AS (
   SELECT m.*, extract(epoch FROM d.comp - m.ts) AS truth_h
     FROM m JOIN LATERAL (
       SELECT q.comp_ts AS comp FROM qc_move_log q
-       WHERE q.machno = m.qc AND q.queuename = m.queuename AND q.st_ts > m.ts
-       ORDER BY q.st_ts LIMIT 1) d ON true
+       WHERE q.machno = m.qc AND q.queuename = m.queuename AND q.dispatch_ts > m.ts
+       ORDER BY q.dispatch_ts LIMIT 1) d ON true
 )
 SELECT jobtype AS 작업, count(*) AS n,
        round(avg(abs(old_h - truth_h)))     AS "옛 축",
@@ -104,8 +104,8 @@ WITH m AS (
   SELECT m.*, extract(epoch FROM d.comp - m.ts) AS truth_h
     FROM m JOIN LATERAL (
       SELECT q.comp_ts AS comp FROM qc_move_log q
-       WHERE q.machno = m.qc AND q.queuename = m.queuename AND q.st_ts > m.ts
-       ORDER BY q.st_ts LIMIT 1) d ON true
+       WHERE q.machno = m.qc AND q.queuename = m.queuename AND q.dispatch_ts > m.ts
+       ORDER BY q.dispatch_ts LIMIT 1) d ON true
 )
 SELECT to_char(date_trunc('hour', ts AT TIME ZONE 'Asia/Kuala_Lumpur'), 'HH24시') AS "현지 시각",
        jobtype AS 작업, count(*) AS n,

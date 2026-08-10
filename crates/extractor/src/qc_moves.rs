@@ -5,14 +5,17 @@
 //! that backfills/corrects the websocket-estimated cycle timestamps. Incremental via etl_watermark
 //! (stream='qc_move'). See architecture/cycle-decomposition (§5) and rtg_moves.
 //!
-//! ⚠⚠ `st_ts` (ST_DT) IS THE DISPATCH INSTANT, NOT A PHYSICAL START. It equals
+//! ⚠⚠ ST_DT IS THE DISPATCH INSTANT, NOT A PHYSICAL START. It equals
 //! JOB_ORDER_HISTORY.YT_DIS_DT to the second (measured 2026-08-03: 98.9% of DS rows, 99.6% of LD),
-//! is written retroactively when the move completes, and consecutive same-crane [st_ts, comp_ts]
+//! is written retroactively when the move completes, and consecutive same-crane [ST_DT, comp_ts]
 //! intervals OVERLAP 90.6% of the time — impossible for a crane that lifts one box at a time.
-//! Only `comp_ts` is a physical event here. Never use st_ts as a truth label for "when did the
-//! crane work this container"; mig 0113 did and had to be reverted by mig 0115.
+//! Only `comp_ts` is a physical event here. Never use it as a truth label for "when did the
+//! crane work this container"; mig 0113 did and had to be reverted by mig 0115. The landing
+//! column was renamed `st_ts` → `dispatch_ts` (mig 0147, 2026-08-10) so the name says what the
+//! value is; the crane's true start exists NOWHERE in TOS (2026-08-10 발굴조사) — estimate it
+//! (sql/local/l_qc_q.sql) if you need it.
 //! ⚠ This is a QC-only property. In `rtg_moves` the same ST_DT column IS a physical start
-//! (intervals overlap 1.3%, comp−st median ~60s). Do not carry this warning over to the yard.
+//! (intervals overlap 1.3%, comp−st median ~60s) and stays named `st_ts` there on purpose.
 
 use anyhow::{Context, Result};
 use chrono::{NaiveDate, NaiveDateTime};
@@ -119,21 +122,19 @@ pub async fn tick_qc_moves(pool: &PgPool, target: &str) -> Result<()> {
                 continue;
             };
             let Some(comp_ts) = parse_etw(comp_dt) else { continue };
-            let st_ts = r.st_dt.as_deref().and_then(parse_etw);
-            // comp − st on a QC row is the TOS DISPATCH LEAD (dispatch → handover), NOT crane service
-            // time — median DS ~466s / LD ~1654s vs a real lift cycle of ~85s. Kept because the
-            // lead is exactly what Stage-2 feasibility needs (learn_dispatch_lead, mig 0116).
-            // The cap was 3600s, which silently NULLed 9.32% of LD rows — and every dropped row was a
-            // LONG one, so the surviving median read 1530s instead of 1654s. Raised to 4h; consumers
-            // still window it themselves. Rows already NULLed keep comp_ts/st_ts, so anything that
-            // needs the true value should subtract the two columns rather than trust dur_s.
-            let dur_s = st_ts.map(|st| (comp_ts - st).num_seconds()).filter(|&d| (0..=14_400).contains(&d));
+            // TOS ST_DT = 트럭 배정 시각(완료 시 소급 기입) — 크레인 시작이 아니다(mig0115).
+            // 이름이 계속 사고를 불러서 컬럼을 dispatch_ts 로 개명했다(mig0147, 2026-08-10).
+            // dur_s(comp−st)는 채움 중단: '무브 소요'처럼 읽히는 이름에 배정 리드가 들어 있었고,
+            // 소비자가 전부 사라졌다 — learn_dispatch_lead 는 처음부터 두 컬럼을 직접 빼고
+            // (mig0116 주석), scengen 은 2026-08-10 추정 시작으로 이관. 과거 행 값은 보존.
+            // 배정 리드가 필요하면 comp_ts − dispatch_ts 를 직접 뺄 것.
+            let dispatch_ts = r.st_dt.as_deref().and_then(parse_etw);
             let bdate = NaiveDate::parse_from_str(comp_dt.get(..8).unwrap_or(""), "%Y%m%d").unwrap_or(run_date);
             let res = sqlx::query(
                 "INSERT INTO qc_move_log
-                   (machno, contno, seqno, jobtype, trk_id, st_ts, comp_ts, dur_s, business_date, status,
+                   (machno, contno, seqno, jobtype, trk_id, dispatch_ts, comp_ts, business_date, status,
                     queuename, vessel, voyage)
-                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
                  ON CONFLICT (machno, contno, seqno) DO NOTHING",
             )
             .bind(machno.trim())
@@ -141,9 +142,8 @@ pub async fn tick_qc_moves(pool: &PgPool, target: &str) -> Result<()> {
             .bind(seqno.trim())
             .bind(r.jobtype.as_deref().map(str::trim))
             .bind(r.trk_id.as_deref().map(str::trim).filter(|s| !s.is_empty()))
-            .bind(st_ts)
+            .bind(dispatch_ts)
             .bind(comp_ts)
-            .bind(dur_s.map(|d| d as i32))
             .bind(bdate)
             .bind(r.status.as_deref().map(str::trim).filter(|s| !s.is_empty()))
             // Empty-string filter, like trk_id/status: Oracle hands back '' for unset VARCHAR2 in

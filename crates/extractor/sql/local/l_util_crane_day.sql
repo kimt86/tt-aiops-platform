@@ -3,7 +3,7 @@
 -- vessel/voyage partition -- the original doesn't partition by vessel either).
 -- $1 = business date.
 --
--- ★2026-08-10 QC 절반 재정의(사용자 지시): qc_move_log.st_ts 는 크레인 시작이 아니라
+-- ★2026-08-10 QC 절반 재정의(사용자 지시): qc_move_log.dispatch_ts(구명 st_ts·mig0147)는 크레인 시작이 아니라
 -- 트럭 배정 시각이라, [st_ts, comp_ts] 병합은 트럭 이동시간까지 크레인 가동으로 세어
 -- 가동률을 약 2배 부풀렸다(실측 63~69% → 추정 시작 기준 35~38%). QC 는 트윈을
 -- 들어올림으로 접고 추정 물리 시작(greatest(직전 들어올림 완료, 완료−학습 무브시간))으로

@@ -168,8 +168,10 @@ systemctl --user restart tt-api
 
 ### 정답지(ground truth) — 틀리기 쉬운 것
 
-- **작업 도달 시각**: `qc_move_log.comp_ts`. ⚠ 같은 표의 `st_ts`는 크레인 시작이 아니라
-  **배차 시각**이다. RTG(`rtg_move_log`)의 동명 컬럼은 반대로 진짜 물리 시작이니 혼동 금지.
+- **작업 도달 시각**: `qc_move_log.comp_ts`. ⚠ 같은 표의 배정시각 컬럼은 2026-08-10에
+  `dispatch_ts`로 개명됐다(구명 `st_ts` — "시작"으로 읽혀 사고가 반복돼 값에 이름을 맞춤,
+  mig0147). **크레인 물리 시작은 TOS 어디에도 없다**(발굴조사 확정) — 필요하면 추정
+  (`sql/local/l_qc_q.sql`). RTG(`rtg_move_log`)의 `st_ts`는 반대로 진짜 물리 시작이니 혼동 금지.
 - **트럭이 자유로워진 시각**: `tt_move_log.free_ts`(TOS). GPS `tt_cycle_log.dropped_at`은
   33%를 놓치므로 채점에 쓰지 않는다.
 - 새 정답지를 채택하기 전 **KC 문서(`kc/data/tos-db-reference.html` 등)를 먼저 읽는다.**

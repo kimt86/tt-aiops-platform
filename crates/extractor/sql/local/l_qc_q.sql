@@ -1,7 +1,7 @@
 -- K_QC_Q / K_QC_NOMOVE (shift path). $1,$2 = window start/end (timestamptz UTC), on comp_ts.
 --
 -- ★2026-08-10 재정의(사용자 지시): 바쁨 구간의 시작을 st_ts 로 쓰지 않는다.
--- qc_move_log.st_ts 는 크레인 시작이 아니라 **트럭 배정 시각**(TOS ST_DT 소급기입)이라,
+-- qc_move_log.dispatch_ts(구명 st_ts·mig0147 개명)는 크레인 시작이 아니라 **트럭 배정 시각**(TOS ST_DT 소급기입)이라,
 -- [st_ts, comp_ts] 를 바쁨으로 치면 트럭이 달려오는 시간(양하 중앙 ~7분·적하 ~24분)까지
 -- 크레인이 일한 것이 되어 굶김을 1/10 로 숨겼다(실측: 5분+ 갭 34~87 → 649~831건/일).
 -- TOS 는 크레인 물리 시작을 어디에도 기록하지 않으므로(2026-08-10 발굴조사: MCH_OPERATION

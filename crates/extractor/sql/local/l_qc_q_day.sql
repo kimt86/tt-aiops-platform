@@ -1,6 +1,6 @@
 -- K_QC_NOMOVE / K_QC_Q (nightly-day path) → raw_k_qc_q. $1 = business date.
 -- 산식은 l_qc_q.sql(shift path)과 동일 — 그 파일 머리의 ★2026-08-10 재정의 설명을 볼 것.
--- (요지: st_ts=트럭 배정이라 쓰지 않는다. 트윈을 들어올림으로 접고, 추정 물리 시작 =
+-- (요지: 배정시각(dispatch_ts·구명 st_ts)은 쓰지 않는다. 트윈을 들어올림으로 접고, 추정 물리 시작 =
 --  greatest(직전 들어올림 완료, 완료 − learn_qc_move_time) 으로 바쁨 구간을 만든다.)
 -- 다른 점: 창이 business_date 하나·HAVING=10(원본 day-path 그대로).
 -- ⚠ 2026-08-10 이전의 raw_k_qc_q 행은 옛 산식(st_ts) 값 그대로 보존 — 기간 조회가
