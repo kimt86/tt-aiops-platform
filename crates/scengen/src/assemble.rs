@@ -115,8 +115,9 @@ pub async fn build(pool: &PgPool, ws: DateTime<Utc>, we: DateTime<Utc>) -> Resul
     // moves, the move_hist path only 1,493 — so 57 moves collapsed into a nameless vessel that a
     // consumer would read as one more ship. move_hist stays as the fallback because it still covers
     // windows older than the columns.
-    // start_ts/service_s 는 st_ts/dur_s 를 쓰지 않는다(2026-08-10 사용자 지시): qc_move_log 의
-    // st_ts 는 크레인 시작이 아니라 **트럭 배정 시각**(TOS ST_DT 소급기입)이라 dur_s(=comp−st)를
+    // start_ts/service_s 는 배정시각/dur_s 를 쓰지 않는다(2026-08-10 사용자 지시): qc_move_log 의
+    // dispatch_ts(구명 st_ts·mig0147 개명)는 크레인 시작이 아니라 **트럭 배정 시각**(TOS ST_DT
+    // 소급기입)이라 dur_s(=comp−배정, 같은 날 채움 중단·mig0147)를
     // 서비스 시간으로 내보내면 적하가 중앙 ~24분짜리 무브가 된다. TOS 에 QC 물리 시작은 없으므로
     // (mig0146 컬럼 주석·발굴조사) KPI 절체와 같은 식으로 추정한다: 들어올림(트윈=같은
     // (machno,seqno), lift_size 가 이미 그 키를 쓴다) 단위로
