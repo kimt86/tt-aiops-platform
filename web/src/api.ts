@@ -90,6 +90,9 @@ export interface WpQueue {
   deadline_ts?: string | null; // SHADOW: when this bay must finish (deadline distribution)
   work_eta_ts?: string | null; // SHADOW: when the QC starts this bay (now + work before it)
   proc_s?: number | null;      // SHADOW: this bay's total processing seconds
+  // 크레인 단일 타임라인에서의 자리(0-based) — 구역 나열은 seq 가 아니라 이걸로 정렬한다
+  // (seq 는 선박별 재시작 + 큐이름이 선박 간 재사용되므로).
+  timeline_pos?: number | null;
 }
 export interface WpQc {
   qc: string; vessels: string[]; active_moves: number; remaining: number;
@@ -102,8 +105,11 @@ export interface WpCandidate {
   moves_until: number; active: boolean;
 }
 /** 상자별 권위 배차 마감 (P2) — 프론트는 마감을 재계산하지 않고 이 값을 그대로 쓴다. */
+// 상자(트럭 몫) 단위 권위 행 — 마감(출항 페이스 균등 배분)·순번(적부계획 축)·배차 여부.
 export interface WpBoxDeadline {
-  contno: string; jobtype: string;
+  qc: string; vessel: string; queuename: string;
+  contno: string; contnos: string[]; jobtype: string;
+  slot_idx: number | null; tos_assigned: boolean;
   dispatch_deadline_ts: string | null; dd_lead_s: number | null;
 }
 export interface WorkpoolResponse {
@@ -297,6 +303,7 @@ export interface DispatchBoard {
 }
 export interface Stage2Advisory {
   ytno: string; qc: string | null; jobtype: string | null; src_block: string | null;
+  queuename?: string | null; contno?: string | null; ts?: string; // 행 단위 정확 귀속 + 신선도
   dest_lat: number | null; dest_lon: number | null; src_lat: number | null; src_lon: number | null;
   arrival_s: number | null; feasible: boolean | null;
 }

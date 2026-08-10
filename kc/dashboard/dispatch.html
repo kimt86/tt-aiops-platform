@@ -74,19 +74,26 @@
   <p>soon_idle/도착 트럭 옆에 <strong>"곧 빔 ~N분"</strong> 추정이 붙을 수 있습니다 — 몇 분 뒤에 빈 차가 될지의 추정.</p>
   <div class="kc-cal note"><span class="h">화면 값 = 배차 계산이 실제로 쓴 값 (2026-08-10)</span><p>예전엔 화면의 이 숫자가 <strong>표시 전용 상수</strong>였고, 배차 계산은 따로 학습한 값을 썼습니다 — 같은 트럭인데 화면과 계산이 다른 숫자를 볼 수 있었습니다. 지금은 <strong>배차 계산(60초마다 한 번)이 쓴 값을 그대로 화면에 실어줍니다</strong>. 값을 정하는 순서: ① 양하 트럭은 크레인이 실어준 시각부터 남은 시간을 내려 세는 <strong>작업 기록 기준</strong>이 먼저 ② 드랍 지점에 멈춰 있으면 <strong>정차 실측 중앙값</strong> ③ 이동 중이면 <strong>단계별 학습값</strong>(mig 0084–86) ④ 계산이 잠시 멈춘 사이에만 옛 상수. 그리고 GPS가 2분 넘게 조용해도 작업 기록이 "아직 일하는 중"이라 하면 그 트럭은 <strong>후보에서 빼지 않고 유지</strong>합니다 — TT 페이지 후보 카드에 "GPS 침묵"으로 표시됩니다. 상세 <a href="/kc/dashboard/learning.html">러닝 센터</a>.</p></div>
 
-  <h2>4. 작업 풀 융합 — "계획(TOS) + 실측(GPS)"</h2>
-  <p>작업 풀은 <strong>TOS의 "지금 할 일"</strong>(60초마다 갱신)과 <strong>websocket 실측</strong>을 합칩니다.</p>
+  <h2>4. TT Dispatch 페이지 — 우리 배차의 실황판 (2026-08-10 전면 개편)</h2>
+  <p>이 페이지는 <strong>우리 배차 계산이 지금 어떻게 돌고 있는지</strong>를 보여줍니다.
+  네 개의 카드가 있고, 화면의 모든 숫자는 배차 계산이 실제로 쓴 값을 그대로 실어온 것입니다
+  (화면이 따로 계산하지 않습니다).</p>
   <div class="kc-tablewrap"><table>
-    <thead><tr><th>화면 값</th><th>출처</th><th>뜻</th></tr></thead>
+    <thead><tr><th>카드</th><th>무엇을 보여주나</th><th>읽는 법</th></tr></thead>
     <tbody>
-      <tr><td>QC별 작업 큐 / 순서</td><td><code>JOB_QUEUE_SCHEDULE.JOB_QUE_SEQ</code></td><td>크레인이 큐를 처리하는 순서</td></tr>
-      <tr><td>잔여(백로그)</td><td><code>TOTALQTY − COMPQTY</code></td><td>그 큐에 남은 작업 수</td></tr>
-      <tr><td>ETW(크레인 준비 시각)</td><td><code>JOB_ORDER_LIST.JOB_ODR_ETW_DT</code></td><td><code>ETW − 현재</code> = 시급도</td></tr>
-      <tr><td>배정 트럭</td><td><code>JOB_ODR_YTNO</code>(=GPS device)</td><td>그 작업을 맡은 트럭 + 실시간 상태 점</td></tr>
-      <tr><td>크레인 가동 배지</td><td><code>ctab</code>(PLC 신선)</td><td>"이 QC 지금 물리적으로 돈다"</td></tr>
-      <tr><td>작업 상태</td><td><code>JOB_ODR_JOBSTATUS</code></td><td>A 활성 · <strong>Q 대기(미배정 백로그)</strong> · P 계획 · C 완료</td></tr>
+      <tr><td><strong>① 배차 압력</strong></td><td>배(급한 순서)마다, 크레인마다 지금 얼마나 급한가</td><td>큰 숫자 = <strong>배차 마감이 지났는데 아직 트럭이 안 붙은 상자 수</strong>(0이면 초록). 신호등은 배차 계산과 같은 잣대: 🔴 지금 속도로는 못 끝냄 · 🟡 여유 30분 미만 · 🟢 충분 · ⚪ 출항 정보 없음</td></tr>
+      <tr><td><strong>② QC 작업 타임라인</strong></td><td>크레인이 일할 순서대로 상자를 나열</td><td>순서 = 배 안 짐 배치 계획(적부계획)의 순번 — TOS 스스로도 이 순번으로 트럭을 배차한다. 상자마다 🏁 배차 마감 카운트다운, 배정 트럭(실시간 상태 점), 🤖 우리 추천</td></tr>
+      <tr><td><strong>③ 후보 차량 풀</strong></td><td>배차 계산이 이번 판에 쓸 수 있는 트럭</td><td>지금 노는 트럭 + 곧 비는 트럭(비는 시각은 계산이 실제 쓴 값). GPS가 조용해도 작업 기록상 일하는 중이면 풀에 남는다</td></tr>
+      <tr><td><strong>④ 작업 중 차량</strong></td><td>이미 일이 있어 계산이 건너뛰는 트럭</td><td>빈 차로 이동 · 싣고 운반 · 배차 후 대기 중</td></tr>
     </tbody>
   </table></div>
+  <div class="kc-cal note"><span class="h">"발행 n / 남은 m" — 목록이 짧아 보이는 이유</span><p>TOS는 작업지시를 <strong>작업 한 시간쯤 전에야</strong> 만듭니다. 그래서 타임라인의 상자 목록은
+  곧 할 것만 보이고, 나머지는 "남은 m"(TOS 진행 카운터)으로만 셉니다 — 없는 게 아니라 아직 지시가 안 나온 것입니다.
+  또 크레인이 이미 처리한 양하 상자(트럭이 야드로 운반 중)는 큐가 아니라 ④ 차량 카드에 있습니다.</p></div>
+  <div class="kc-cal note"><span class="h">배는 크레인을 나눠 쓴다</span><p>크레인 절반 이상이 두 척 이상을 맡습니다. 그래서 화면은 <strong>배 × 크레인</strong> 칸으로
+  갈라, 진행률·트럭 수·여유가 다른 배와 섞이지 않게 합니다. 다음 순서 배의 칸에는 "대기"가 붙습니다.</p></div>
+  <p>원천 데이터: TOS의 큐 진행표(<code>JOB_QUEUE_SCHEDULE</code>)와 작업지시(<code>JOB_ORDER_LIST</code>,
+  A 활성 · Q 대기)를 ~90초마다 미러 + websocket GPS/PLC 실측(3초 폴). 배정 트럭 칩의 상태 점은 GPS에서 옵니다.</p>
 
   <h2>5. 라이브맵 오버레이 (레이어 토글)</h2>
   <div class="kc-tablewrap"><table>
@@ -103,10 +110,10 @@
   </table></div>
   <div class="kc-cal tip"><span class="h">메트릭 격자는 클라이언트 계산</span><p>메트릭 격자는 백엔드 없이 <strong>지금 화면의 트럭 위치에서 즉석 계산</strong>합니다 — 라이브 위치가 갱신될 때마다 같이 바뀝니다.</p></div>
 
-  <h2>6. (참고) TtPage의 트럭 칩</h2>
+  <h2>6. (참고) TT Dispatch의 트럭 칩</h2>
   <ul>
-    <li><strong>상태별 트럭 수</strong>: 위 6개 상태의 카운트.</li>
-    <li><strong>DS 적재 칩 (<code>적재 N분</code>)</strong>: 양하 트럭이 컨테이너를 실은 뒤 경과 시간 — TOS <code>ACTV_DT</code> 기준. DS 전용.</li>
+    <li><strong>배정 트럭 칩</strong>: 상자 옆 트럭 번호 + 상태 점(위 배차 상태 색) + 지금 어디서 뭘 하는지 한 줄.</li>
+    <li><strong>🤖 우리 추천 칩</strong>: 우리 계산이 보낼 트럭. TOS가 이미 배정한 상자에는 "우리라면 누구"를 나란히 — 같으면 ✓, 다르면 도착이 얼마나 빠른지/느린지. 추천이 3분 넘게 낡으면(계산 정지) 표시를 멈추고 알린다.</li>
   </ul>
 
   <hr>

@@ -126,6 +126,10 @@ struct QueueOut {
     eta_bias_s: i64,
     /// SHADOW: this bay's total processing seconds (moves + transition overhead).
     proc_s: Option<i64>,
+    /// 크레인 단일 타임라인에서 이 큐의 자리(0-based) — 활성 선박 블록 먼저, 다음 블록은 마감
+    /// 이른 순, 블록 안은 seq 순. 화면의 구역 나열은 seq 가 아니라 이 값으로 정렬해야 한다
+    /// (seq 는 선박별로 1부터 다시 시작 + 큐이름이 선박 간 재사용된다).
+    timeline_pos: Option<i32>,
     /// SHADOW(직렬화 제외·pool_mode=3): 크레인 타임라인에서 이 큐보다 앞에 남은 무브 수(들어올림 환산).
     #[serde(skip)]
     pace_before_n: Option<i64>,
@@ -152,13 +156,23 @@ struct QcOut {
     slack_s: Option<i64>,
 }
 
-/// 상자별 권위 배차 마감 (P2 재편, 2026-08-10). 프론트가 옛 식(작업ETA − 상수 리드,
-/// idx/rem×proc 안분)으로 로컬 재계산하던 것을 끊는다 — 마감은 백엔드 한 곳에서만 계산한다
-/// (현행 = 출항 요구 페이스 균등 배분, pool_mode=3).
+/// 상자별 권위 배차 마감 + 순서 (P2 재편 2026-08-10, 같은 날 확장). 프론트가 옛 식으로
+/// 로컬 재계산하던 것을 끊는다 — 마감·순번은 백엔드 한 곳에서만 계산한다
+/// (마감 = 출항 요구 페이스 균등 배분 pool_mode=3 · 순번 = 적부계획 planseq 축 mig 0128).
 #[derive(Serialize)]
 pub struct BoxDeadlineOut {
+    qc: String,
+    vessel: String,
+    queuename: String,
+    /// 트윈 대표 상자(= min contno).
     contno: String,
+    /// 이 트럭 몫의 상자 전부(트윈=2·단독=1) — 화면이 어느 상자 번호로도 이 행을 찾게 한다.
+    contnos: Vec<String>,
     jobtype: String,
+    /// 구역 안 순번(0-based) — 적부계획 planseq 축, 계획에 없는 상자만 발행순 폴백.
+    slot_idx: Option<i32>,
+    /// TOS 가 이미 트럭을 붙였는가 (배차 진척 표시용).
+    tos_assigned: bool,
     dispatch_deadline_ts: Option<DateTime<Utc>>,
     dd_lead_s: Option<i64>,
 }
@@ -190,8 +204,14 @@ pub async fn workpool(State(pool): State<PgPool>) -> Result<Json<WorkpoolOut>, A
         .into_iter()
         .filter_map(|w| {
             w.contno.map(|contno| BoxDeadlineOut {
+                qc: w.qc,
+                vessel: w.vessel,
+                queuename: w.queuename,
+                contnos: if w.contnos.is_empty() { vec![contno.clone()] } else { w.contnos },
                 contno,
                 jobtype: w.jobtype,
+                slot_idx: w.slot_idx,
+                tos_assigned: w.tos_assigned,
                 dispatch_deadline_ts: w.dispatch_deadline_ts,
                 dd_lead_s: w.dd_lead_s,
             })
@@ -326,6 +346,7 @@ pub(crate) async fn build_workpool(pool: PgPool) -> Result<WorkpoolOut, AppError
                     work_eta_ts: None,
                     eta_bias_s: 0,
                     proc_s: None,
+                    timeline_pos: None,
                     pace_before_n: None,
                     pace_total_n: None,
                     pace_finish_by: None,
@@ -605,6 +626,8 @@ pub(crate) async fn build_workpool(pool: PgPool) -> Result<WorkpoolOut, AppError
                     last_of.insert(qc.queues[i].vessel.clone(), k);
                 }
                 for (k, &qi) in idxs.iter().enumerate() {
+                    // 타임라인 자리는 스케줄 유무와 무관하게 모든 큐가 갖는다(화면 정렬용).
+                    qc.queues[qi].timeline_pos = Some(k as i32);
                     let vessel = qc.queues[qi].vessel.clone();
                     // 스케줄 없는 선박은 예측을 내지 않는다(작업 시간은 위에서 이미 타임라인에 반영됨).
                     let Some(&finish_by) = finish_by_v.get(&vessel) else { continue };
@@ -1042,6 +1065,9 @@ pub(crate) struct Stage2Work {
     pub(crate) tos_assigned: bool,
     /// 트윈 대표 상자 = min(contno). 채점 조인 키.
     pub(crate) contno: Option<String>,
+    /// 이 트럭 몫의 상자 전부(트윈=2·단독=1·집계 버킷=0). contno 가 대표 하나뿐이라
+    /// 화면의 상자별 마감 칩이 트윈 두 번째 상자에서 사라졌었다(2026-08-10 실측: 행의 24%).
+    pub(crate) contnos: Vec<String>,
 }
 
 /// Build the Stage-2 work-demand list from the same engine the dispatch page uses (build_workpool):
@@ -1135,6 +1161,7 @@ pub(crate) async fn stage2_work_candidates(
             move_s: None,
             tos_assigned: false,
             contno: None,
+            contnos: Vec::new(),
         });
     }
     // ── TOS 가 이미 배차한 작업도 담는다 (mig 0121) ──────────────────────────────────────────
@@ -1221,13 +1248,14 @@ pub(crate) async fn stage2_work_candidates(
     //   실측: 양하 배차분 196건이 100% 이 상태였고, 빼지 않으면 구역별 산술이 9곳에서 깨졌다.
     // 트윈은 상자 2개·트럭 1대다. **트럭 한 대 몫**을 한 줄로 만들기 위해 twinkey 로 먼저 합친다
     // (mig 0124). twinkey 가 빈 행은 그 자체가 한 대 몫이다.
-    let per_box: Vec<(String, String, String, String, Option<String>, String, i64, bool)> = sqlx::query_as(
+    let per_box: Vec<(String, String, String, String, Option<String>, String, i64, bool, Vec<String>)> = sqlx::query_as(
         "WITH loads AS (                            -- 트럭 한 대 몫 = 트윈 쌍 하나 또는 단독 상자 하나
            SELECT w.qc, w.vessel, w.voyage, w.queuename, w.jobtype,
                   min(CASE WHEN w.jobtype = 'LD' THEN NULLIF(left(w.yt_topos, 3), '') END) AS src_block,
                   min(w.seqno)   AS seqno,
                   min(w.cre_ts)  AS cre_ts,
                   min(w.contno)  AS contno,
+                  array_agg(DISTINCT w.contno) AS contnos,   -- 트윈이면 두 상자 모두 (화면 조회용)
                   bool_or(w.ytno IS NOT NULL AND w.ytno <> '') AS tos_assigned
              FROM live_workpool w
             WHERE w.jobtype IN ('DS','LD') AND w.qc IS NOT NULL AND w.qc <> ''
@@ -1261,14 +1289,14 @@ pub(crate) async fn stage2_work_candidates(
                                       ORDER BY NULLIF(l.seqno,'') NULLS LAST,
                                                l.cre_ts NULLS LAST, l.contno) - 1)::int8
                 ) AS slot_idx,
-                l.tos_assigned
+                l.tos_assigned, l.contnos
            FROM loads l
            LEFT JOIN pp ON pp.vessel = l.vessel AND pp.voyage = l.voyage
                        AND pp.queuename = l.queuename AND pp.contno = l.contno
            LEFT JOIN tw ON tw.vessel = l.vessel",
     )
     .fetch_all(&pool_for_lead).await.unwrap_or_default();
-    for (qc, vessel, queuename, jt, src_block, contno, slot_idx, tos_assigned) in per_box {
+    for (qc, vessel, queuename, jt, src_block, contno, slot_idx, tos_assigned, contnos) in per_box {
         let lead = lead_realized.get(&jt).copied()
             .unwrap_or(if jt == "LD" { LEAD_LD_S } else { LEAD_DS_S });
         // 걸음 사슬: 크레인별 학습 → 전역('*') 학습 → 벽시계/활동 리듬 → 상수 (mig 0139)
@@ -1311,6 +1339,7 @@ pub(crate) async fn stage2_work_candidates(
             move_s: Some(move_s),
             tos_assigned,   // ⚠ 행마다 정확히 — live_workpool 은 배차됨(A)·미배차(Q) 를 둘 다 담는다
             contno: Some(contno),
+            contnos,
         });
     }
     Ok((wp, out))
@@ -1441,6 +1470,11 @@ pub async fn stage2_shadow(State(pool): State<PgPool>) -> Result<Json<Stage2Shad
 pub struct S2Advisory {
     ytno: String,
     qc: Option<String>,
+    /// 어느 상자에 보내는 추천인지 — 화면이 행 단위로 정확히 귀속하게 한다(종전엔 QC+방향
+    /// 첫-적합 근사였다). ts 는 신선도 표시용(매처 정지 시 낡은 추천 흐리게).
+    queuename: Option<String>,
+    contno: Option<String>,
+    ts: DateTime<Utc>,
     jobtype: Option<String>,
     src_block: Option<String>,
     dest_lat: Option<f64>,
@@ -1454,7 +1488,7 @@ pub struct S2Advisory {
 /// `GET /api/stage2/advisory` — latest recommended moves (with endpoints) for the live-map overlay.
 pub async fn stage2_advisory(State(pool): State<PgPool>) -> Result<Json<Vec<S2Advisory>>, AppError> {
     let rows: Vec<S2Advisory> = sqlx::query_as(
-        "SELECT ytno, qc, jobtype, src_block, dest_lat, dest_lon, src_lat, src_lon, arrival_s, feasible
+        "SELECT ytno, qc, queuename, contno, ts, jobtype, src_block, dest_lat, dest_lon, src_lat, src_lon, arrival_s, feasible
            FROM stage2_match_shadow
           WHERE ts = (SELECT max(ts) FROM stage2_match_shadow) AND dest_lat IS NOT NULL",
     )
