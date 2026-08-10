@@ -10,7 +10,7 @@ WITH m0 AS (
          CASE WHEN EXTRACT(EPOCH FROM (comp_ts - LAG(comp_ts) OVER (PARTITION BY machno ORDER BY comp_ts))) <= 2
               THEN 0 ELSE 1 END AS new_lift
     FROM qc_move_log
-   WHERE machno ~ '^C[0-9]+$'
+   WHERE machno ~ '^[CMZ][0-9]+$'
      AND jobtype IN ('LD', 'DS')
      AND business_date = $1
 ),
@@ -88,4 +88,4 @@ SELECT qc,
  GROUP BY qc
 HAVING count(*) >= 10  -- mirrors the Oracle day-path QCQ_HAVING=10
  ORDER BY count(*) DESC
- LIMIT 30
+-- (LIMIT 30 제거 2026-08-10 — 원본(f2)과 동시 제거)

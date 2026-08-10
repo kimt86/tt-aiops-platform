@@ -24,9 +24,10 @@ SELECT vessel,
        to_char(min(comp_ts) AT TIME ZONE 'Asia/Kuala_Lumpur', 'YYYYMMDDHH24MISS') AS first_move,
        to_char(max(comp_ts) AT TIME ZONE 'Asia/Kuala_Lumpur', 'YYYYMMDDHH24MISS') AS last_move
   FROM qc_move_log
- WHERE machno ~ '^C[0-9]+$'
+ WHERE machno ~ '^[CMZ][0-9]+$'
    AND jobtype IN ('LD', 'DS')
    AND comp_ts >= $1 AND comp_ts < $2
  GROUP BY vessel, voyage, machno
  ORDER BY moves DESC
- LIMIT 30
+-- (LIMIT 30 제거 2026-08-10 — 사전조사 탐색 질의의 상한 잔재. 그룹이 30개를 넘는 교대에서
+--  작은 선박이 vessel_shift 패널에서 통째로 사라졌다(실측: 36그룹 중 6개 절단·MTIB 소실).)

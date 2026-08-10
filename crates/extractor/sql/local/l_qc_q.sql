@@ -20,7 +20,7 @@ WITH m0 AS (
          CASE WHEN EXTRACT(EPOCH FROM (comp_ts - LAG(comp_ts) OVER (PARTITION BY machno ORDER BY comp_ts))) <= 2
               THEN 0 ELSE 1 END AS new_lift
     FROM qc_move_log
-   WHERE machno ~ '^C[0-9]+$'
+   WHERE machno ~ '^[CMZ][0-9]+$'
      AND jobtype IN ('LD', 'DS')
      AND comp_ts >= $1 AND comp_ts < $2
 ),
@@ -98,4 +98,4 @@ SELECT qc,
  GROUP BY qc
 HAVING count(*) >= 2  -- mirrors the Oracle shift-path QCQ_HAVING=2 (day path uses 10)
  ORDER BY count(*) DESC
- LIMIT 30  -- mirrors the original's `FETCH FIRST 30 ROWS ONLY`
+-- (LIMIT 30 제거 2026-08-10 — 원본(f2)과 동시 제거, 패리티 유지)

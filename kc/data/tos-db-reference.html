@@ -54,7 +54,7 @@ websocket   ──(SSH 터널 → API 인제스트)▶ 메모리(라이브맵·�
   <div class="kc-tablewrap"><table>
     <thead><tr><th>컬럼</th><th>의미</th></tr></thead>
     <tbody>
-      <tr><td><code>MCH_OPER_MACHNO</code></td><td><code>^C[0-9]+$</code> = QC(안벽), RTG·M·Z 등.</td></tr>
+      <tr><td><code>MCH_OPER_MACHNO</code></td><td><code>^[CMZ][0-9]+$</code> = QC(안벽 STS — 장비 마스터 <code>CDY_MACHINE_TYPE</code> 확인 2026-08-10: C·M·Z 셋 다 QC이고 M·Z는 저번호 선석 담당), <code>RTG%</code> = 야드 크레인.</td></tr>
       <tr><td><code>ST_DT</code></td><td>move 시작(단, 완료 시 소급 기록되는 큐잉 시각).</td></tr>
       <tr><td><code>COMPDATE + COMPTIME</code></td><td>완료(물리적 완료). 인덱스 술어 = COMPDATE.</td></tr>
       <tr><td><code>TRK_ID</code></td><td>이 move를 처리한 트럭(TT) ID.</td></tr>

@@ -53,7 +53,7 @@
   <div class="kc-tablewrap"><table>
     <thead><tr><th></th><th>테이블</th><th>구분 키</th><th>시작/완료</th></tr></thead>
     <tbody>
-      <tr><td>QC(안벽)</td><td><code>MCH_OPERATION</code>(권위·사후)</td><td><code>MACHNO ^C[0-9]+$</code></td><td><code>COMP</code>만 물리 이벤트 ○ / <code>ST_DT</code>=배차시각 ✕ (쌍이 아니다)</td></tr>
+      <tr><td>QC(안벽)</td><td><code>MCH_OPERATION</code>(권위·사후)</td><td><code>MACHNO ^[CMZ][0-9]+$</code>(M·Z도 QC — 2026-08-10 확인)</td><td><code>COMP</code>만 물리 이벤트 ○ / <code>ST_DT</code>=배차시각 ✕ (쌍이 아니다)</td></tr>
       <tr><td>RTG(블록)</td><td><code>JOB_ORDER_HISTORY</code>(대기 기반·사후)</td><td><code>ARMGC</code>(RTG/ES)</td><td><code>YT_DIS_DT→ACTV_DT</code> 대기만</td></tr>
     </tbody>
   </table></div>

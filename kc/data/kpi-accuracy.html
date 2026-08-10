@@ -42,7 +42,7 @@ container1 변경(nonempty→다른값)을 셈     →  ~574/시간   (✓ 현�
   <div class="kc-cal warn"><span class="h">정직한 한계 — 아티팩트·150m 편향·유휴 포함</span><p>실측(1h): 진짜 배달 236 vs 아티팩트 66 ≈ <strong>78% 진짜</strong>(건수 노출). 150m 컷은 초단거리 하울을 잘라 median을 <strong>약간 위로</strong> 편향(이 지표가 "상한·방향성"인 이유, 100–150m 근접 기각 건수 별도 노출). 배달→배달 간격은 잠깐의 유휴도 포함 → <strong>활성 사이클의 상한</strong>이라 화면 라벨도 "배달간격". n≥20부터만 median 표시·항상 IQR과 함께.</p></div>
 
   <h3>조치 — TOS로도 트럭 사이클 근사 (GPS와 교차검증)</h3>
-  <p>GPS는 실시간 전용이라, <strong>TOS DB만으로도</strong> 트럭 사이클을 근사. 핵심은 <strong><code>MCH_OPERATION</code></strong>: 크레인 move마다 <strong>트럭 ID(<code>TRK_ID</code>)</strong>와 완료시각이 남습니다(≥35일). QC move(<code>^C##</code>, LD/DS)만 골라 TRK_ID별 완료시각 정렬 → 연속 move 간격 = 한 사이클.</p>
+  <p>GPS는 실시간 전용이라, <strong>TOS DB만으로도</strong> 트럭 사이클을 근사. 핵심은 <strong><code>MCH_OPERATION</code></strong>: 크레인 move마다 <strong>트럭 ID(<code>TRK_ID</code>)</strong>와 완료시각이 남습니다(≥35일). QC move(<code>^[CMZ]##</code>, LD/DS — 2026-08-10부터 M·Z 포함)만 골라 TRK_ID별 완료시각 정렬 → 연속 move 간격 = 한 사이클.</p>
   <div class="kc-cal note"><span class="h">교차검증 — 독립된 두 방법이 일치</span><p>실측(n=160): <strong>TOS MCH_OPERATION ≈14.2분</strong>, 같은 시기 <strong>GPS ≈13분</strong>. 완전히 다른 출처가 ~13–14분으로 <strong>수렴</strong> — 둘 다 옳은 트럭 사이클을 잰다는 강한 증거이자 TOS의 40분 span과 명백히 다름. 파이프라인 구현 완료(<code>c10_k_tt_cycle.sql</code> → <code>raw_k_tt_cycle</code> → K_CYCLE 카드). <em>(참고: 이 GPS 사이클 기반 cycle-time은 2026-07-15 tt_move_log로 배차→완료 두 TOS 앵커로 재산출됨 — <a href="/kc/dispatch/research-log.html">조사 기록</a>.)</em></p></div>
 
   <h2>K_MPH · K_QC_NOMOVE · K_UTIL 실시간</h2>
