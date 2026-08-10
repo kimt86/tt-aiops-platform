@@ -150,11 +150,14 @@ async fn src_stowplan_snapshot(
             if q.is_empty() || c.is_empty() {
                 continue;
             }
+            // 무결성 키(vessel,voyage,contno,disload)로 병합 — 델타 경로와 동일(mig 0135·0145).
+            // 같은 배치 안에서 한 상자가 두 구역으로 오면 마지막 행이 이긴다(전에는 옛 PK 를
+            // 겨냥해 무결성 키 쪽 유니크 위반으로 트랜잭션째 굴렀다).
             sqlx::query(
                 "INSERT INTO live_stow_plan (vessel, voyage, queuename, disload, contno, planseq, as_of_ts)
                  VALUES ($1,$2,$3,$4,$5,$6,$7)
-                 ON CONFLICT (vessel, voyage, queuename, contno) DO UPDATE SET
-                   disload = EXCLUDED.disload, planseq = EXCLUDED.planseq,
+                 ON CONFLICT (vessel, voyage, contno, disload) DO UPDATE SET
+                   queuename = EXCLUDED.queuename, planseq = EXCLUDED.planseq,
                    as_of_ts = EXCLUDED.as_of_ts",
             )
             .bind(&r.vessel)
@@ -426,11 +429,12 @@ pub async fn reconcile_stowplan(pool: &PgPool, target: &str) -> Result<()> {
             if q.is_empty() || c.is_empty() {
                 continue;
             }
+            // 스냅샷 경로와 동일하게 무결성 키로 병합(mig 0135·0145) — 배치 안 중복은 마지막 행 승리.
             sqlx::query(
                 "INSERT INTO live_stow_plan (vessel, voyage, queuename, disload, contno, planseq, as_of_ts)
                  VALUES ($1,$2,$3,$4,$5,$6,$7)
-                 ON CONFLICT (vessel, voyage, queuename, contno) DO UPDATE SET
-                   disload = EXCLUDED.disload, planseq = EXCLUDED.planseq,
+                 ON CONFLICT (vessel, voyage, contno, disload) DO UPDATE SET
+                   queuename = EXCLUDED.queuename, planseq = EXCLUDED.planseq,
                    as_of_ts = EXCLUDED.as_of_ts",
             )
             .bind(&r.vessel)

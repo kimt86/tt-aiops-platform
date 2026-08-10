@@ -14,6 +14,13 @@
 qc 부착 828/828·dispatch_pred_sample 95s 내·api 에러 0. ⚠주의: 만료 시(30분마다) 한 틱은
 전 항차 재요청으로 예전처럼 ~20초 걸린다 — 정상이다.
 
+## 후속 경화 (2026-08-10 최종 점검에서 나온 2건 — 사용자 승인 후 수행)
+
+| 항목 | 내용 | 검증 |
+|---|---|---|
+| 스트림 데드맨 | api DEADMAN(crates/api/src/db.rs)에 추출기 착지 3표 추가: `tos_handover_label`(comp_ts·30분·실측 시간당 494~922행·48h 최대공백 20분), `live_workqueue`(as_of_ts·10분), `live_stow_plan`(as_of_ts·180분=recon 3회 미스). 빈 표는 NULL→skip이라 오경보 없음. 감시자가 추출기 유닛 **밖**(api 상주)에 있어 유닛 전멸도 잡는다 | 재시작 후 120s 주기 평가·피드 게이트 열림(0s)·오경보 0 |
+| stow 키 통일 | 유니크 제약 2개 공존(옛 PK+mig0135 무결성 키)이 스냅샷·recon UPSERT를 유니크 위반으로 굴릴 수 있던 잠재 엣지 해소: 쓰기 3경로 전부 무결성 키(vessel,voyage,contno,disload)를 ON CONFLICT 대상으로 통일 + 옛 PK 제거(mig0145). **순서 주의: 새 바이너리 먼저, PK 제거는 그 뒤**(역순이면 옛 recon이 죽는다) | 배포 전후 recon·델타 틱 각 성공(drift 406→33)·정기 틱 4회 무오류·api 소비자는 q_idx 축이라 무영향 |
+
 ## STATUS (2026-08-06 마감)
 
 | 청크 | 상태 | 커밋 |
