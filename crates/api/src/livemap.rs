@@ -4420,13 +4420,25 @@ const MATCH_TICK_SEC: u32 = 15;
 /// ① `interval` 은 단조시계 기반이라 벽시계와 NTP 로 어긋나면 위상이 서서히 흐른다
 /// ② 한 틱이 60초를 넘겨도 다음 경계로 **건너뛴다** — `interval` 의 기본 동작(Burst)은
 ///    밀린 틱을 몰아쳐서, 느린 틱 하나가 낡은 목록으로 도는 연쇄를 만든다.
-fn phase_delay_ms(sec_of_min: u32, subsec_ms: u32, target_sec: u32) -> u64 {
-    let now_ms = i64::from(sec_of_min) * 1000 + i64::from(subsec_ms);
+///
+/// ⚠ ②의 대가: `tick` 카운터가 더 이상 "경과 분"이 아니다. Burst 였을 때는 본체가 밀려도
+///   따라잡기 틱이 나와 `tick` ≈ 경과 분이었는데, 이제 60초를 넘긴 분은 통째로 건너뛰고
+///   카운터도 안 오른다. `tick % N` 을 쓰는 곳은 전부 로그와 프룬(`tick % 30`)이라 기능
+///   영향은 없지만, **프룬 주기가 30분보다 늘어질 수 있다**.
+///
+/// 시각을 통째로 받는 이유: `(초, 밀리초)` 를 따로 받으면 둘 다 `u32` 라 호출부에서 뒤바꿔도
+/// 산술 테스트가 전부 통과한다. 그러면 고정되는 건 산식이지 위상이 아니다.
+fn phase_delay_ms(now: &impl Timelike, target_sec: u32) -> u64 {
+    let now_ms = i64::from(now.second()) * 1000 + i64::from(now.nanosecond() / 1_000_000);
     let target_ms = i64::from(target_sec) * 1000;
     let d = target_ms - now_ms;
     // 경계에 정확히 서 있으면(d==0) 다음 분으로 넘긴다 — 같은 초에 두 번 도는 것보다 낫다.
     if d > 0 { d as u64 } else { (d + 60_000) as u64 }
 }
+
+// 위 산식은 목표가 분 안에 있을 때만 성립한다(60 이상이면 d 가 늘 양수라 위상이 안 잡힌다).
+// 런타임 방어 대신 컴파일 타임에 닫는다 — 도달 가능한 입력이 아니다.
+const _: () = assert!(MATCH_TICK_SEC < 60);
 
 pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
     tokio::spawn(async move {
@@ -4445,13 +4457,8 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
             // 위상 고정: 작업목록 착지 직후(:15)에만 돈다. 근거는 MATCH_TICK_SEC 주석.
             // 재시작 직후 첫 틱이 최대 59초 늦어지지만, 어차피 바로 아래 GPS 게이트가 웹소켓
             // 연결까지 틱을 흘려보내므로 실질 공백은 없다.
-            let now_wall = Utc::now();
-            tokio::time::sleep(Duration::from_millis(phase_delay_ms(
-                now_wall.second(),
-                now_wall.timestamp_subsec_millis(),
-                MATCH_TICK_SEC,
-            )))
-            .await;
+            tokio::time::sleep(Duration::from_millis(phase_delay_ms(&Utc::now(), MATCH_TICK_SEC)))
+                .await;
             tick += 1;
             if !lm.connected.load(Ordering::Relaxed) {
                 continue;
@@ -5156,6 +5163,19 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
 /// reconstruct the truck pool AT the dispatch instant (T1=upd_ts) from `truck_pos_hist`, then — for
 /// that one work — recompute OUR pick (closest available truck to the pickup) and TOS's truck arrival
 /// from the SAME T1 positions. Same instant, same pool, same work → a clean 1:1 comparison.
+///
+/// ⚠ **"T1=upd_ts 가 배차 순간"은 틀렸다 — 2026-08-11 mig0148 이 반증했다.** `upd_ts` 는 행의
+///   마지막 갱신 시각이라 배차 이후의 갱신에 밀린다. 라이브 실측(같은 날): 배차행 175건 중
+///   90건(51.4%)이 `upd_ts <> yt_dis_ts` 이고 격차 p90 2,170초(36분). 진짜 배차 순간은
+///   `live_workpool.yt_dis_ts`(= TOS `YT_DIS_DT`)다.
+///
+///   파급(측정 아님·추정): T1 이 실제 배차보다 크게 뒤인 행은 `truck_pos_hist` 6분 창 밖으로
+///   나가 `latest_pos` 폴백을 타고, 아래 fair_compare 의 `upd_ts > now()-15분` 창에도 "방금
+///   배차"로 잘못 들어온다. 이 값은 고객 화면(VS TOS 상자 단위 비교)에 실린다.
+///
+///   **고치지 않고 남겨둔다** — 이 비교기의 판정 기준을 바꾸는 일이라 사용자 승인이 필요하다
+///   (2026-08-11 코드리뷰에서 올림). 바꿀 때는 여기와 fair_compare 창, workpool.rs 의 D_tos
+///   시드 **셋을 같이** 봐야 한다. 세 곳 다 같은 대리값을 쓴다.
 pub fn spawn_dispatch_compare(lm: Arc<LiveMap>, pool: PgPool) {
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(Duration::from_secs(60));
@@ -5939,6 +5959,22 @@ mod workpool_freshness_tests {
 #[cfg(test)]
 mod match_tick_phase_tests {
     use super::{phase_delay_ms, MATCH_TICK_SEC};
+    use chrono::{TimeZone, Timelike, Utc};
+
+    /// 라이브 호출부와 **같은 타입**(`DateTime<Utc>`)으로 시각을 만든다. 초·밀리초를 따로
+    /// 넘기면 둘 다 u32 라 호출부에서 뒤바꿔도 테스트가 통과해버린다.
+    fn 시각(sec: u32, ms: u32) -> chrono::DateTime<Utc> {
+        Utc.with_ymd_and_hms(2026, 8, 11, 12, 34, sec)
+            .unwrap()
+            .with_nanosecond(ms * 1_000_000)
+            .unwrap()
+    }
+
+    fn 도착_ms(sec: u32, ms: u32) -> u64 {
+        let t = 시각(sec, ms);
+        let d = phase_delay_ms(&t, MATCH_TICK_SEC);
+        (u64::from(t.second()) * 1000 + u64::from(t.nanosecond() / 1_000_000) + d) % 60_000
+    }
 
     /// 어느 초에 시작하든 **다음 :15 에 정확히 도달**해야 한다.
     /// 이게 이 변경의 전부다 — 종전에는 도착 지점이 프로세스 시작 초였다.
@@ -5946,12 +5982,10 @@ mod match_tick_phase_tests {
     fn 어느_초에_시작해도_목표_초에_도달한다() {
         for start_sec in 0..60u32 {
             for start_ms in [0u32, 1, 499, 999] {
-                let d = phase_delay_ms(start_sec, start_ms, MATCH_TICK_SEC);
-                let landed_ms = (u64::from(start_sec) * 1000 + u64::from(start_ms) + d) % 60_000;
                 assert_eq!(
-                    landed_ms,
+                    도착_ms(start_sec, start_ms),
                     u64::from(MATCH_TICK_SEC) * 1000,
-                    "{start_sec}.{start_ms:03} 에서 출발해 {landed_ms}ms 에 내렸다 — :15 가 아니다"
+                    "{start_sec}.{start_ms:03} 에서 출발해 :15 가 아닌 곳에 내렸다"
                 );
             }
         }
@@ -5962,7 +5996,7 @@ mod match_tick_phase_tests {
     fn 대기는_한_주기_안에_있다() {
         for start_sec in 0..60u32 {
             for start_ms in [0u32, 500, 999] {
-                let d = phase_delay_ms(start_sec, start_ms, MATCH_TICK_SEC);
+                let d = phase_delay_ms(&시각(start_sec, start_ms), MATCH_TICK_SEC);
                 assert!(d > 0 && d <= 60_000, "{start_sec}.{start_ms:03} → {d}ms 는 한 주기 밖이다");
             }
         }
@@ -5972,10 +6006,7 @@ mod match_tick_phase_tests {
     /// 도착 초가 달라졌다. 2026-08-11 실측: 12:00:29 시작 → 틱 :29.
     #[test]
     fn 재시작_시각이_위상을_바꾸지_않는다() {
-        let 도착: Vec<u64> = [0u32, 7, 15, 16, 29, 45, 55, 59]
-            .iter()
-            .map(|&s| (u64::from(s) * 1000 + phase_delay_ms(s, 0, MATCH_TICK_SEC)) % 60_000)
-            .collect();
+        let 도착: Vec<u64> = [0u32, 7, 15, 16, 29, 45, 55, 59].iter().map(|&s| 도착_ms(s, 0)).collect();
         assert!(
             도착.windows(2).all(|w| w[0] == w[1]),
             "시작 초에 따라 도착 초가 갈렸다: {도착:?}"
@@ -5985,8 +6016,20 @@ mod match_tick_phase_tests {
     /// 경계에 정확히 서 있으면 다음 분으로 넘긴다 — 같은 초에 두 번 도는 것보다 낫다.
     #[test]
     fn 경계에_정확히_서_있으면_다음_분으로_넘긴다() {
-        assert_eq!(phase_delay_ms(MATCH_TICK_SEC, 0, MATCH_TICK_SEC), 60_000);
-        assert_eq!(phase_delay_ms(MATCH_TICK_SEC, 1, MATCH_TICK_SEC), 59_999);
+        assert_eq!(phase_delay_ms(&시각(MATCH_TICK_SEC, 0), MATCH_TICK_SEC), 60_000);
+        assert_eq!(phase_delay_ms(&시각(MATCH_TICK_SEC, 1), MATCH_TICK_SEC), 59_999);
+    }
+
+    /// ★호출부가 **초와 밀리초를 뒤바꿔** 넘기던 실수를 이제는 잡는다. 종전 시그니처
+    /// `(u32, u32, u32)` 에서는 뒤바꿔도 위 테스트가 전부 통과했다(리뷰 지적).
+    /// 시각을 통째로 받으므로 이 실수는 **타입이 막는다** — 아래는 그 성질을 못 박는다:
+    /// 밀리초만 달라진 두 시각은 대기가 정확히 그 차이만큼만 달라야 한다.
+    #[test]
+    fn 밀리초는_초로_해석되지_않는다() {
+        let a = phase_delay_ms(&시각(0, 0), MATCH_TICK_SEC);
+        let b = phase_delay_ms(&시각(0, 500), MATCH_TICK_SEC);
+        assert_eq!(a - b, 500, "밀리초 500 이 500ms 가 아닌 무언가로 해석됐다");
+        // 초 500 은 애초에 만들 수 없다(초는 0..60) — 그게 타입이 막는다는 뜻이다.
     }
 
     /// 착지(:00~:02, 관측 최대 :09)보다 뒤여야 새 목록을 받는다. 이 값을 착지 앞으로
