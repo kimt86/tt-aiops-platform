@@ -4488,7 +4488,8 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
             // 돈다. 그때 나이는 ~75초라 300초 게이트에 안 걸리고, 경보도 로그도 없이 조용히
             // 품질만 떨어진다. 틱마다 한 칸 적어두면 그 퇴화가 사후 질의로 잡힌다.
             //
-            // 정상 대역 = 15~16초(위상 :15 - 착지 :00). 이 값이 60초대로 튀면 위상이 풀린 것이다.
+            // 정상 대역 = 6~15초(위상 :15 − 착지, 착지 지터 −9s~+14s 포함).
+            // 이 값이 60초대로 튀면 위상이 풀린 것이다.
             // ⚠낡아서 건너뛴 틱은 아래에서 continue 하므로 행 자체가 안 남는다 — 즉 이 컬럼은
             //   "매칭이 실제로 쓴 목록의 나이"만 담는다(그게 재고 싶은 값이다).
             let workpool_age_s: Option<i32> =
@@ -5172,22 +5173,20 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
 }
 
 /// TOS-vs-ours dispatch comparison (SHADOW). Timing-skew-free: for works TOS just assigned, we
-/// reconstruct the truck pool AT the dispatch instant (T1=upd_ts) from `truck_pos_hist`, then — for
+/// reconstruct the truck pool AT the dispatch instant (T1) from `truck_pos_hist`, then — for
 /// that one work — recompute OUR pick (closest available truck to the pickup) and TOS's truck arrival
 /// from the SAME T1 positions. Same instant, same pool, same work → a clean 1:1 comparison.
 ///
-/// ⚠ **"T1=upd_ts 가 배차 순간"은 틀렸다 — 2026-08-11 mig0148 이 반증했다.** `upd_ts` 는 행의
-///   마지막 갱신 시각이라 배차 이후의 갱신에 밀린다. 라이브 실측(같은 날): 배차행 175건 중
-///   90건(51.4%)이 `upd_ts <> yt_dis_ts` 이고 격차 p90 2,170초(36분). 진짜 배차 순간은
-///   `live_workpool.yt_dis_ts`(= TOS `YT_DIS_DT`)다.
+/// **T1 = `live_workpool.yt_dis_ts`(= TOS `YT_DIS_DT`, 배차 시각 실물)** — 2026-08-11 절체,
+/// 사용자 승인, mig 0149. 종전에는 `upd_ts`(행 마지막 갱신)를 T1 로 썼는데 그건 배차 이후의
+/// 갱신에 밀린다: 실측 배차행 175건 중 90건(51.4%)이 둘이 다르고 격차 p90 2,170초(36분)였다.
+/// 절반가량을 실제 배차가 아닌 순간의 트럭 위치로 비교하고 있었다는 뜻이다.
 ///
-///   파급(측정 아님·추정): T1 이 실제 배차보다 크게 뒤인 행은 `truck_pos_hist` 6분 창 밖으로
-///   나가 `latest_pos` 폴백을 타고, 아래 fair_compare 의 `upd_ts > now()-15분` 창에도 "방금
-///   배차"로 잘못 들어온다. 이 값은 고객 화면(VS TOS 상자 단위 비교)에 실린다.
+/// 같이 봐야 하는 자리(전부 같은 절체를 받았다): 아래 fair_compare 의 15분 창 ·
+/// `workpool.rs` 의 D_tos 시드. `dispatch_pred_sample` 은 컬럼을 갈랐다(mig 0151).
 ///
-///   **고치지 않고 남겨둔다** — 이 비교기의 판정 기준을 바꾸는 일이라 사용자 승인이 필요하다
-///   (2026-08-11 코드리뷰에서 올림). 바꿀 때는 여기와 fair_compare 창, workpool.rs 의 D_tos
-///   시드 **셋을 같이** 봐야 한다. 세 곳 다 같은 대리값을 쓴다.
+/// 판별자: `t1_ver` (1=yt_dis_ts · 0=폴백 · NULL=경계 이전), 실제 쓴 값은 `t1_ts`(mig 0152).
+/// 집계는 반드시 `t1_ver` 로 먼저 가른다.
 pub fn spawn_dispatch_compare(lm: Arc<LiveMap>, pool: PgPool) {
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(Duration::from_secs(60));
@@ -5230,8 +5229,18 @@ pub fn spawn_dispatch_compare(lm: Arc<LiveMap>, pool: PgPool) {
             }
             // each truck's MOST-RECENT position+state — fallback when the T1 snapshot doesn't contain
             // a given truck (captured a frame apart) or for assignments older than the history window.
+            //
+            // ★나이 상한은 **스냅샷 창과 분리**한다(2026-08-11 2차 리뷰). 위 창을 6분→60분으로
+            //   넓혔더니 이 폴백 후보풀까지 같이 넓어져, 마지막 GPS 고정이 최대 60분 된 트럭이
+            //   낡은 위치·낡은 상태로 후보에 들어왔다(실측 411대 중 196대 = 48%가 6분 초과).
+            //   `best` 는 후보 위의 최소값이라 후보를 더하면 our_arrival 은 **단조 감소**하고
+            //   delta_s 는 단조 증가한다 — 즉 **비교기가 우리 편을 드는 방향으로만** 움직인다.
+            //   T1 을 되감는 데 필요한 창(60분)과 "지금 이 트럭이 어디 있나"의 유효기간(6분)은
+            //   서로 다른 값이다.
+            const LATEST_POS_MAX_AGE_S: i64 = 360;
+            let latest_cut = Utc::now().timestamp_millis() - LATEST_POS_MAX_AGE_S * 1000;
             let mut latest_pos: HashMap<String, (f64, f64, String)> = HashMap::new();
-            for trucks in snaps.values() {
+            for (_, trucks) in snaps.range(latest_cut..) {
                 for (yt, la, lo, st) in trucks {
                     latest_pos.insert(yt.clone(), (*la, *lo, st.clone()));
                 }
@@ -5252,7 +5261,7 @@ pub fn spawn_dispatch_compare(lm: Arc<LiveMap>, pool: PgPool) {
             };
             // EVERY truck TOS has assigned that we haven't compared yet (one row per bay×truck). No
             // time window → covers the whole current backlog, not just the last few minutes.
-            let rows = sqlx::query_as::<_, (String, String, String, String, DateTime<Utc>, DateTime<Utc>, Option<String>)>(
+            let rows = sqlx::query_as::<_, (String, String, String, String, DateTime<Utc>, DateTime<Utc>, Option<DateTime<Utc>>, Option<String>)>(
                 // ★T1 = yt_dis_ts (배차 시각 실물·mig 0148). 종전엔 upd_ts 를 T1 로 썼는데 그건 행
                 //   마지막 갱신이라 배차 이후 갱신에 밀린다 — 그만큼 엉뚱한 순간의 트럭 위치로
                 //   비교하게 된다. **키(tos_upd)는 그대로 둔다**: 중복 제거용 토큰으로는 여전히
@@ -5260,7 +5269,7 @@ pub fn spawn_dispatch_compare(lm: Arc<LiveMap>, pool: PgPool) {
                 //   yt_dis_ts 가 비면(있으면 안 되지만) upd_ts 로 떨어져 행을 잃지 않는다.
                 "SELECT DISTINCT ON (w.qc, w.queuename, w.ytno)
                         w.qc, w.queuename, w.jobtype, w.ytno, w.upd_ts,
-                        coalesce(w.yt_dis_ts, w.upd_ts) AS t1, w.yt_topos
+                        coalesce(w.yt_dis_ts, w.upd_ts) AS t1, w.yt_dis_ts AS dis_raw, w.yt_topos
                    FROM live_workpool w
                   WHERE w.ytno IS NOT NULL AND w.ytno <> '' AND w.qc IS NOT NULL
                     AND w.jobtype IN ('DS','LD')
@@ -5270,7 +5279,7 @@ pub fn spawn_dispatch_compare(lm: Arc<LiveMap>, pool: PgPool) {
                   ORDER BY w.qc, w.queuename, w.ytno, w.upd_ts DESC",
             )
             .fetch_all(&pool).await.unwrap_or_default();
-            for (qc, queue, jobtype, tos_ytno, tos_upd, tos_dis, yt_topos) in rows {
+            for (qc, queue, jobtype, tos_ytno, tos_upd, tos_dis, dis_raw, yt_topos) in rows {
                 // pickup coord: LD = the source block centroid, DS = the QC crane (live or learned)
                 let coord = if jobtype == "LD" {
                     yt_topos.as_deref().and_then(|t| centroids.get(t).or_else(|| centroids.get(block_prefix(t))).copied())
@@ -5282,7 +5291,13 @@ pub fn spawn_dispatch_compare(lm: Arc<LiveMap>, pool: PgPool) {
                 // PRECISE = the snapshot ≤ T1 exists AND contains the TOS truck → tos + our pool are
                 // read from that same instant (timing-skew-free). Otherwise fall back to each truck's
                 // latest position (a "now-estimate", reason='now') so EVERY assignment still gets a pick.
-                let at_t1 = snaps.range(..=t1).next_back().map(|(_, v)| v);
+                // ★스냅샷이 T1 보다 얼마나 일러도 되는지에 상한을 둔다(2026-08-11 2차 리뷰).
+                //   창이 6분일 때는 창 자체가 상한이었는데 60분으로 넓히면서 사라졌다. GPS 피드에
+                //   결손이 나면 T1 보다 수십 분 이른 스냅샷을 집고도 "timing-skew-free"로 라벨된다.
+                //   최근 2일 실측은 결손 0(최대 간격 57초)이라 지금 일어나진 않지만, 이 저장소에는
+                //   2026-07-16 케이블 단선 전례가 있고 그때 이 오류는 **무증상**이다.
+                const T1_SNAP_MAX_SKEW_S: i64 = 180;
+                let at_t1 = snaps.range(t1 - T1_SNAP_MAX_SKEW_S * 1000..=t1).next_back().map(|(_, v)| v);
                 let tos_at_t1 = at_t1.and_then(|tk| tk.iter().find(|(yt, _, _, _)| *yt == tos_ytno).map(|(_, la, lo, _)| (*la, *lo)));
                 let precise = tos_at_t1.is_some();
                 // OUR pick = closest available (idle/soon-free) truck to the pickup. From the T1 snapshot
@@ -5313,16 +5328,30 @@ pub fn spawn_dispatch_compare(lm: Arc<LiveMap>, pool: PgPool) {
                     else if agree { "same" }
                     else if tos_arrival.map(|t| our_arrival < t).unwrap_or(false) { "ours_closer" }
                     else { "tos_closer" };
-                let _ = sqlx::query(
-                    // t1_ver=1 → T1 이 yt_dis_ts(배차 시각 실물)라는 표시. NULL 구간(2026-08-11
-                    // 경계 이전)은 T1 이 upd_ts 였다 — 집계 시 반드시 가를 것(mig 0149).
+                // t1_ver: 1 = T1 이 yt_dis_ts(배차 시각 실물) · 0 = upd_ts 로 폴백 ·
+                // NULL = 2026-08-11 경계 이전(mig 0149).
+                // ⚠판별은 **원시 컬럼의 NULL 여부**로 한다. `tos_dis == tos_upd` 로 재면
+                //   틀린다 — mig 0148 실측이 두 값의 격차 **중앙 0초·61.7%가 5초 이내**라고
+                //   적어뒀다. 즉 "같다"는 폴백 신호가 아니라 **정상적으로 흔한 경우**다.
+                //   (이 방식으로 처음 배포했다가 11행이 폴백으로 오라벨됐다 — mig 0152 에서 정정.)
+                let t1_ver: i16 = if dis_raw.is_some() { 1 } else { 0 };
+                let ins = sqlx::query(
+                    // t1_ts = **실제로 되감은 시각**(mig 0152). PK 는 tos_upd 라 TOS 가 UPD_DT 를
+                    // 밀 때마다 같은 배차가 새 행으로 들어오는데(실측 47%가 2행 이상), 이 컬럼이
+                    // 없으면 사후 중복 제거가 불가능하고 자주 갱신되는 배차가 그만큼 가중된다.
                     "INSERT INTO dispatch_compare_shadow
-                       (qc,queuename,jobtype,tos_ytno,tos_arrival_s,our_ytno,our_arrival_s,agree,reason,delta_s,tos_upd,t1_ver)
-                     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,1) ON CONFLICT (qc,queuename,tos_ytno,tos_upd) DO NOTHING",
+                       (qc,queuename,jobtype,tos_ytno,tos_arrival_s,our_ytno,our_arrival_s,agree,reason,delta_s,tos_upd,t1_ver,t1_ts)
+                     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) ON CONFLICT (qc,queuename,tos_ytno,tos_upd) DO NOTHING",
                 )
                 .bind(&qc).bind(&queue).bind(&jobtype).bind(&tos_ytno).bind(tos_arrival.map(|x| x as i32))
                 .bind(&our_ytno).bind(our_arrival as i32).bind(agree).bind(reason).bind(delta.map(|x| x as i32)).bind(tos_upd)
+                .bind(t1_ver).bind(tos_dis)
                 .execute(&pool).await;
+                // ⚠`let _ =` 로 버리면 마이그레이션 미적용 시 INSERT 가 **전건 조용히 실패**한다.
+                // 같은 사이클의 게이지 커밋이 논증한 바로 그 유형이라 여기도 소리를 내게 한다.
+                if let Err(e) = ins {
+                    tracing::warn!(error = %e, "dispatch_compare_shadow INSERT 실패 (마이그레이션 미적용?)");
+                }
             }
             crate::db::prune(&pool, "dispatch_compare_shadow", "DELETE FROM dispatch_compare_shadow WHERE ts < now() - interval '21 days'").await;
         }
