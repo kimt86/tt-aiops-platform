@@ -1,0 +1,20 @@
+# tkadmin 사용자 crontab — systemd 타이머로 옮기지 않은 두 건.
+#
+# 왜 저장소에 있어야 하나: 이 두 줄은 호스트에만 있었다. 특히 첫 줄(도로망 재추론)은
+# **배차 비용의 본체를 생산한다** — 멈추면 모든 OD 이동시간이 맨해튼 거리 폴백으로 떨어져
+# 매칭 품질과 cost_tier 지표가 동시에 조용히 왜곡된다. 알아챌 신호가 따로 없다.
+#
+# 확인:  crontab -l
+# 적용:  crontab -l > /tmp/ct && cat deploy/crontab.example >> /tmp/ct && crontab /tmp/ct
+#        (중복 등록 주의 — 이미 있는 줄인지 먼저 볼 것)
+#
+# 건강 신호: 도로망 총연장은 data/roadgraph_stats.tsv 에 매시 쌓인다. 2026-08-11 기준
+# 정상은 200~220km 이고 3초 GPS 가 쌓이며 서서히 는다(07-29 170km → 08-11 216km).
+# 370~480km 로 튀면 2026-07-28 OOM 사고 때의 오염 서명이다.
+
+# 매시 11분 — GPS 로 도로망 재추론 → web/{public,dist}/livemap-roadgraph.geojson
+#   + road_node/road_edge(배차 라우터가 읽는 표) + congestion_edge
+11 * * * * bash /home/tkadmin/projects/tt-aiops-platform/scripts/reinfer_roadgraph.sh >> /home/tkadmin/projects/tt-aiops-platform/data/reinfer.log 2>&1
+
+# 15분마다 — 이동시간 GBM 그림자 학습(배차에 미배선·B2 항목). 꺼도 배차는 돈다.
+*/15 * * * * cd /home/tkadmin/projects/tt-aiops-platform && PGPASSWORD=wp .venv-geo/bin/python scripts/travel_gbm_shadow.py >> data/travel_gbm_shadow.log 2>&1

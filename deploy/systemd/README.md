@@ -143,3 +143,22 @@ forward to "now", which turns the gap into permanent data loss.
   queue behind a scenario query.
 - Watch the admin page's per-run health column: there is no Oracle-side statement timeout, so a
   query plan flipping to a full scan shows up only as a quietly repeating slow poll.
+
+## 형상관리 밖에 있던 것 (2026-08-11 회수)
+
+세 가지가 호스트에만 있었다. 이관·재해복구 절차가 성립하려면 저장소에 있어야 한다.
+
+| 대상 | 저장소 위치 | 왜 중요한가 |
+|---|---|---|
+| GPS 웹소켓 터널 | `wp-ws-bridge.service.example` | 위치 파이프라인의 **단일 장애점**. 끊기면 트럭 좌표가 멈추고 배차 추천도 함께 선다 |
+| ETW 게이트웨이 터널 | `wp-etw-bridge.service.example` | 끊겨도 추출기가 **warn 만 남기고 조용히 건너뛴다** — 마감 정밀도가 티 안 나게 나빠진다 |
+| crontab 2건 | `../crontab.example` | 도로망 재추론이 **배차 비용의 본체**를 만든다. 멈추면 전 OD 가 맨해튼 폴백으로 떨어진다 |
+
+⚠ 터널 둘은 `.example` 이다 — 실제 유닛에는 내부망 주소(경유 호스트·계정)가 박혀 있고 이
+저장소에는 GitHub 원격이 있어, 그대로 커밋하면 내부 망 구성이 밖으로 나간다. 주소는 `.env`
+(gitignore 대상)에 두고 systemd 가 `ExecStart` 에서 치환하도록 바꿨다. 필요한 키는 각
+`.example` 파일 머리말에 적혀 있고, **현재 운영값은 호스트의
+`~/.config/systemd/user/wp-*-bridge.service`** 에 있다.
+
+⚠ 돌고 있는 터널을 이 `.example` 로 덮어쓸 이유는 없다. 특히 ETW 게이트웨이는 **다른
+시스템도 함께 쓰므로** 주기·질의·중단을 우리 판단으로 바꾸지 않는다(2026-08-05 지시).
