@@ -4364,6 +4364,38 @@ const HELD_NEAR_DROP_M: f64 = 120.0; // ...only if its last position is within t
 /// 실배차 전환의 **운영 상태**이지 실험 레버가 아니다 — 값은 유닛 파일에 있다.
 static DISPATCH_ACTIVE: AtomicBool = AtomicBool::new(false);
 
+/// 작업목록(Oracle 미러)이 이보다 오래되면 매칭을 돌리지 않는다.
+///
+/// 정상 대역은 **12~62초 톱니**다(`tt-workpool` 타이머가 매분 :55 에 1회 — 2026-08-11 실측
+/// 10초 간격 9회: 61·12·22·32·42·52·62·12·22). 300초는 5회 연속 결손에 해당해 한두 번의
+/// Oracle 지연(같은 질의 2.0~15.2초 관측)으로는 걸리지 않는다. 프론트가 화면을 FROZEN 으로
+/// 판정하는 임계와 같은 값이라, 화면이 "멈춤"이라고 말하는 순간과 매칭이 서는 순간이 갈리지 않는다.
+const WORKPOOL_MAX_AGE_S: i64 = 300;
+
+/// 작업목록 신선도 **판정** — 조회 결과를 받아 건너뛸 이유를 낸다(`None` = 신선).
+///
+/// 부수효과 없는 순수 함수로 떼어낸 이유: 이 판정이 과민하면 배차가 통째로 서고, 둔감하면
+/// 낡은 목록으로 지시를 낸다. 라이브에서 두 방향을 다 시험하려면 운영 표를 건드려야 하므로
+/// 판정만 떼어 테스트로 고정한다.
+///
+/// 인자 = `(추출이 마지막으로 성공한 뒤 경과초, 표 나이초)`, 조회 자체가 실패하면 `Err`.
+/// **판정 불능은 전부 "낡음"으로 닫는다** — 모를 때는 멈추는 쪽이 안전하다.
+fn workpool_stale_reason(res: Result<(Option<i64>, Option<i64>), String>) -> Option<String> {
+    match res {
+        Ok((Some(age), _)) if age <= WORKPOOL_MAX_AGE_S => None,
+        Ok((Some(age), table_age)) => {
+            let rows = table_age.map_or("빈 표".to_string(), |a| format!("{a}초"));
+            Some(format!(
+                "작업목록 추출이 {age}초째 성공하지 못했다 (임계 {WORKPOOL_MAX_AGE_S}초, 표 나이 {rows})"
+            ))
+        }
+        Ok((None, _)) => {
+            Some("작업목록 신선도 기록이 없다 (data_freshness 에 WORKPOOL 행 없음)".to_string())
+        }
+        Err(e) => Some(format!("작업목록 신선도 조회 실패: {e}")),
+    }
+}
+
 pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
     tokio::spawn(async move {
         DISPATCH_ACTIVE.store(
@@ -4374,6 +4406,8 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
         let mut tick = 0u64;
         // 추천 생산 0(트럭·작업은 있는데) 연속 틱 수 — 3틱이면 경보 (mig 0142)
         let mut zero_streak: u32 = 0;
+        // 작업목록이 낡아 건너뛴 연속 틱 수 (경보·로그를 한 줄로 접기 위한 것)
+        let mut stale_streak: u32 = 0;
         // 티어 히스테리시스 상태(틱마다 현재 키 집합으로 통째 교체 = 누수 없음)
         let mut prev_tier: HashMap<(String, String, String), u8> = HashMap::new();
         loop {
@@ -4381,6 +4415,49 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
             tick += 1;
             if !lm.connected.load(Ordering::Relaxed) {
                 continue;
+            }
+            // 작업목록 신선도 게이트 — 위의 GPS 게이트와 짝이다. 종전에는 위치 피드만 검사하고
+            // **Oracle 미러가 낡은 것은 아무도 보지 않았다**: 추출 타이머가 죽어도 매칭은 옛
+            // 목록으로 추천을 계속 냈다. 지금은 그림자라 기록 오염에 그치지만, 실배차로 올리면
+            // 그대로 "이미 끝난 상자로 트럭을 부르는" 지시가 된다.
+            //
+            // 신선도 출처가 data_freshness(WORKPOOL)인 이유: 이 표는 추출이 **성공적으로 돌았는지**
+            // 를 담는다. live_workpool 의 max(as_of_ts) 로 재면 표가 빌 때 NULL 이라 "진짜로 일이
+            // 없다"와 "추출이 죽었다"가 한 값으로 뭉개진다. 표 나이는 진단용으로만 함께 읽는다.
+            // (data_freshness.is_stale 컬럼은 쓰지 않는다 — 5일 묵은 행도 f 로 남아 있어 관리되지
+            //  않는 값이다. 2026-08-11 확인.)
+            let stale_why = workpool_stale_reason(
+                sqlx::query_as::<_, (Option<i64>, Option<i64>)>(
+                    "SELECT (SELECT EXTRACT(epoch FROM now() - last_success_at)::int8
+                               FROM data_freshness WHERE kpi_key = 'WORKPOOL'),
+                            (SELECT EXTRACT(epoch FROM now() - max(as_of_ts))::int8 FROM live_workpool)",
+                )
+                .fetch_one(&pool)
+                .await
+                .map_err(|e| e.to_string()),
+            );
+            if let Some(why) = stale_why {
+                stale_streak += 1;
+                // 첫 틱과 이후 10틱(=10분)마다만 남긴다 — 장애가 길어져도 로그가 한 줄씩만 는다.
+                if stale_streak == 1 || stale_streak % 10 == 0 {
+                    tracing::warn!(streak = stale_streak, why = %why, "작업목록이 낡아 매칭을 건너뛴다");
+                    crate::db::alert(
+                        &pool,
+                        "stage2_reco",
+                        "stale_workpool",
+                        "crit",
+                        "작업목록이 낡아 배차 추천을 중단했다",
+                        Some(&why),
+                    )
+                    .await;
+                }
+                // 건너뛰면 stage2_solver_shadow 에 이번 틱 행이 남지 않는다. 장기화되면 그 표의
+                // DEADMAN(30분)이 백스톱으로 받고, 화면은 마지막 계산 나이로 이미 회색이 된다.
+                continue;
+            }
+            if stale_streak > 0 {
+                tracing::info!(skipped = stale_streak, "작업목록 신선도 회복 — 매칭 재개");
+                stale_streak = 0;
             }
             let now = Utc::now().timestamp_millis();
             // previous-tick recommendation per vehicle (ytno → work bucket key) for anti-thrash.
@@ -5654,6 +5731,53 @@ pub fn spawn_fair_compare(lm: Arc<LiveMap>, pool: PgPool) {
             }
         }
     });
+}
+
+#[cfg(test)]
+mod workpool_freshness_tests {
+    use super::{workpool_stale_reason, WORKPOOL_MAX_AGE_S};
+
+    /// 정상 대역을 통과시킨다. 2026-08-11 실측 톱니(10초 간격 9회)를 그대로 넣는다 —
+    /// 임계를 잘못 낮추면 여기가 먼저 깨진다.
+    #[test]
+    fn 실측_정상_대역은_통과한다() {
+        for age in [61, 12, 22, 32, 42, 52, 62, 12, 22] {
+            assert!(
+                workpool_stale_reason(Ok((Some(age), Some(age + 5)))).is_none(),
+                "정상 대역 {age}초를 낡음으로 판정했다 — 매칭이 평시에 선다"
+            );
+        }
+    }
+
+    /// 경계: 임계 자체는 통과, 1초만 넘겨도 막는다.
+    #[test]
+    fn 임계_경계에서_뒤집힌다() {
+        assert!(workpool_stale_reason(Ok((Some(WORKPOOL_MAX_AGE_S), None))).is_none());
+        assert!(workpool_stale_reason(Ok((Some(WORKPOOL_MAX_AGE_S + 1), None))).is_some());
+    }
+
+    /// 이 게이트가 존재하는 이유 그 자체 — 추출이 죽어 목록이 낡으면 매칭을 막는다.
+    /// 사유 문자열에 실제 나이가 들어가야 장애 때 로그만 보고 원인을 안다.
+    #[test]
+    fn 추출이_죽으면_막고_나이를_사유에_적는다() {
+        let why = workpool_stale_reason(Ok((Some(1800), Some(1805)))).expect("막아야 한다");
+        assert!(why.contains("1800"), "사유에 경과초가 없다: {why}");
+    }
+
+    /// 판정 불능은 전부 "낡음"으로 닫는다 — 모를 때 멈추는 쪽이 안전하다.
+    /// 신선도 행이 없는 경우와 조회 실패를 각각 고정한다(둘 다 과거에 통과시키던 형태다).
+    #[test]
+    fn 판정_불능은_막는_쪽으로_닫힌다() {
+        assert!(workpool_stale_reason(Ok((None, Some(10)))).is_some(), "신선도 행이 없으면 막아야 한다");
+        assert!(workpool_stale_reason(Err("연결 끊김".into())).is_some(), "조회 실패면 막아야 한다");
+    }
+
+    /// 표가 비어도 신선도 기록이 최신이면 통과 — "진짜로 일이 없다"와 "추출이 죽었다"는
+    /// 다른 상태다. 이 둘을 뭉개면 한산한 시간대마다 헛경보가 난다.
+    #[test]
+    fn 일이_없어_표가_비었을_뿐이면_통과한다() {
+        assert!(workpool_stale_reason(Ok((Some(30), None))).is_none());
+    }
 }
 
 #[cfg(test)]
