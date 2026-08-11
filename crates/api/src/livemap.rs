@@ -18,7 +18,7 @@ use std::time::Duration;
 use axum::extract::State;
 use axum::Json;
 use sqlx::PgPool;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Timelike, Utc};
 use futures_util::{SinkExt, StreamExt};
 use serde::Serialize;
 use tokio::sync::{Mutex, RwLock};
@@ -4396,13 +4396,44 @@ fn workpool_stale_reason(res: Result<(Option<i64>, Option<i64>), String>) -> Opt
     }
 }
 
+/// 매칭 틱이 도는 **분 안의 초**. 작업목록 착지 직후에 고정한다.
+///
+/// 종전에는 `tokio::time::interval(60초)` 라 위상이 **`tt-api` 프로세스가 시작한 초**였다
+/// (2026-08-11 실측: 12:00:29 시작 → 틱 :29). 재배포마다 0~59초에서 다시 굴러가고, 운이
+/// 나쁘면 목록 착지 직전에 돌아 **한 세대 낡은 목록**을 쓴다 — 실패가 아니라 조용한 퇴화라
+/// 신선도 게이트(300초)에도 안 걸린다.
+///
+/// :15 의 근거 = `tt-workpool`(매분 :55 시작) 착지 지연 실측(6시간·n=710):
+/// p50 +5초 · p90 +6초 · p99 +7초 · **최대 +14초**(= :09 착지). 관측 최대보다 6초 뒤라
+/// 느린 Oracle 틱(같은 질의 2~15초 편차)에도 새 목록을 받는다.
+///
+/// ⚠ 추출 타이머(`deploy/systemd/tt-workpool.timer`, `OnCalendar=*-*-* *:*:55`)의 초를
+///   옮기면 이 값도 같이 옮겨야 한다. 두 값은 한 쌍이다.
+const MATCH_TICK_SEC: u32 = 15;
+
+/// 다음 `target_sec` 경계까지 남은 밀리초 — 위상 고정용 **순수 함수**.
+///
+/// 계산만 떼어낸 이유: 라이브에서 위상을 시험하려면 프로세스를 재시작해야 하고, 위상이
+/// 틀려도 조용히 낡은 목록을 쓸 뿐이라 증상이 안 보인다. 테스트로 고정한다.
+///
+/// 매 틱 다시 계산하는 이유는 두 가지다:
+/// ① `interval` 은 단조시계 기반이라 벽시계와 NTP 로 어긋나면 위상이 서서히 흐른다
+/// ② 한 틱이 60초를 넘겨도 다음 경계로 **건너뛴다** — `interval` 의 기본 동작(Burst)은
+///    밀린 틱을 몰아쳐서, 느린 틱 하나가 낡은 목록으로 도는 연쇄를 만든다.
+fn phase_delay_ms(sec_of_min: u32, subsec_ms: u32, target_sec: u32) -> u64 {
+    let now_ms = i64::from(sec_of_min) * 1000 + i64::from(subsec_ms);
+    let target_ms = i64::from(target_sec) * 1000;
+    let d = target_ms - now_ms;
+    // 경계에 정확히 서 있으면(d==0) 다음 분으로 넘긴다 — 같은 초에 두 번 도는 것보다 낫다.
+    if d > 0 { d as u64 } else { (d + 60_000) as u64 }
+}
+
 pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
     tokio::spawn(async move {
         DISPATCH_ACTIVE.store(
             std::env::var("DISPATCH_MODE").unwrap_or_default() == "active",
             Ordering::Relaxed,
         );
-        let mut ticker = tokio::time::interval(Duration::from_secs(60));
         let mut tick = 0u64;
         // 추천 생산 0(트럭·작업은 있는데) 연속 틱 수 — 3틱이면 경보 (mig 0142)
         let mut zero_streak: u32 = 0;
@@ -4411,7 +4442,16 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
         // 티어 히스테리시스 상태(틱마다 현재 키 집합으로 통째 교체 = 누수 없음)
         let mut prev_tier: HashMap<(String, String, String), u8> = HashMap::new();
         loop {
-            ticker.tick().await;
+            // 위상 고정: 작업목록 착지 직후(:15)에만 돈다. 근거는 MATCH_TICK_SEC 주석.
+            // 재시작 직후 첫 틱이 최대 59초 늦어지지만, 어차피 바로 아래 GPS 게이트가 웹소켓
+            // 연결까지 틱을 흘려보내므로 실질 공백은 없다.
+            let now_wall = Utc::now();
+            tokio::time::sleep(Duration::from_millis(phase_delay_ms(
+                now_wall.second(),
+                now_wall.timestamp_subsec_millis(),
+                MATCH_TICK_SEC,
+            )))
+            .await;
             tick += 1;
             if !lm.connected.load(Ordering::Relaxed) {
                 continue;
@@ -5893,6 +5933,71 @@ mod workpool_freshness_tests {
     #[test]
     fn 일이_없어_표가_비었을_뿐이면_통과한다() {
         assert!(workpool_stale_reason(Ok((Some(30), None))).is_none());
+    }
+}
+
+#[cfg(test)]
+mod match_tick_phase_tests {
+    use super::{phase_delay_ms, MATCH_TICK_SEC};
+
+    /// 어느 초에 시작하든 **다음 :15 에 정확히 도달**해야 한다.
+    /// 이게 이 변경의 전부다 — 종전에는 도착 지점이 프로세스 시작 초였다.
+    #[test]
+    fn 어느_초에_시작해도_목표_초에_도달한다() {
+        for start_sec in 0..60u32 {
+            for start_ms in [0u32, 1, 499, 999] {
+                let d = phase_delay_ms(start_sec, start_ms, MATCH_TICK_SEC);
+                let landed_ms = (u64::from(start_sec) * 1000 + u64::from(start_ms) + d) % 60_000;
+                assert_eq!(
+                    landed_ms,
+                    u64::from(MATCH_TICK_SEC) * 1000,
+                    "{start_sec}.{start_ms:03} 에서 출발해 {landed_ms}ms 에 내렸다 — :15 가 아니다"
+                );
+            }
+        }
+    }
+
+    /// 대기는 항상 (0, 60초] 안이다. 0 이면 같은 초에 두 번 돌고, 60초를 넘으면 틱을 통째 빠뜨린다.
+    #[test]
+    fn 대기는_한_주기_안에_있다() {
+        for start_sec in 0..60u32 {
+            for start_ms in [0u32, 500, 999] {
+                let d = phase_delay_ms(start_sec, start_ms, MATCH_TICK_SEC);
+                assert!(d > 0 && d <= 60_000, "{start_sec}.{start_ms:03} → {d}ms 는 한 주기 밖이다");
+            }
+        }
+    }
+
+    /// 위상이 **재시작 시각과 무관**함을 고정한다. 종전 동작(= interval)이라면 시작 초마다
+    /// 도착 초가 달라졌다. 2026-08-11 실측: 12:00:29 시작 → 틱 :29.
+    #[test]
+    fn 재시작_시각이_위상을_바꾸지_않는다() {
+        let 도착: Vec<u64> = [0u32, 7, 15, 16, 29, 45, 55, 59]
+            .iter()
+            .map(|&s| (u64::from(s) * 1000 + phase_delay_ms(s, 0, MATCH_TICK_SEC)) % 60_000)
+            .collect();
+        assert!(
+            도착.windows(2).all(|w| w[0] == w[1]),
+            "시작 초에 따라 도착 초가 갈렸다: {도착:?}"
+        );
+    }
+
+    /// 경계에 정확히 서 있으면 다음 분으로 넘긴다 — 같은 초에 두 번 도는 것보다 낫다.
+    #[test]
+    fn 경계에_정확히_서_있으면_다음_분으로_넘긴다() {
+        assert_eq!(phase_delay_ms(MATCH_TICK_SEC, 0, MATCH_TICK_SEC), 60_000);
+        assert_eq!(phase_delay_ms(MATCH_TICK_SEC, 1, MATCH_TICK_SEC), 59_999);
+    }
+
+    /// 착지(:00~:02, 관측 최대 :09)보다 뒤여야 새 목록을 받는다. 이 값을 착지 앞으로
+    /// 당기면 조용히 한 세대 낡은 목록을 쓰게 된다.
+    #[test]
+    fn 목표_초는_관측된_최대_착지보다_뒤에_있다() {
+        const 관측_최대_착지_초: u32 = 9; // :55 시작 + 14초 (6시간·n=710)
+        assert!(
+            MATCH_TICK_SEC > 관측_최대_착지_초,
+            "MATCH_TICK_SEC={MATCH_TICK_SEC} 이 관측 최대 착지 :{관측_최대_착지_초} 보다 앞이다"
+        );
     }
 }
 
