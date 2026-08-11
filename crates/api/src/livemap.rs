@@ -4473,16 +4473,27 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
             // 없다"와 "추출이 죽었다"가 한 값으로 뭉개진다. 표 나이는 진단용으로만 함께 읽는다.
             // (data_freshness.is_stale 컬럼은 쓰지 않는다 — 5일 묵은 행도 f 로 남아 있어 관리되지
             //  않는 값이다. 2026-08-11 확인.)
-            let stale_why = workpool_stale_reason(
-                sqlx::query_as::<_, (Option<i64>, Option<i64>)>(
-                    "SELECT (SELECT EXTRACT(epoch FROM now() - last_success_at)::int8
-                               FROM data_freshness WHERE kpi_key = 'WORKPOOL'),
-                            (SELECT EXTRACT(epoch FROM now() - max(as_of_ts))::int8 FROM live_workpool)",
-                )
-                .fetch_one(&pool)
-                .await
-                .map_err(|e| e.to_string()),
-            );
+            let freshness = sqlx::query_as::<_, (Option<i64>, Option<i64>)>(
+                "SELECT (SELECT EXTRACT(epoch FROM now() - last_success_at)::int8
+                           FROM data_freshness WHERE kpi_key = 'WORKPOOL'),
+                        (SELECT EXTRACT(epoch FROM now() - max(as_of_ts))::int8 FROM live_workpool)",
+            )
+            .fetch_one(&pool)
+            .await
+            .map_err(|e| e.to_string());
+            // ★게이지로 남긴다 (mig 0150). 이 값은 게이트가 이미 재놓고 **버리던** 숫자다.
+            //
+            // 왜 필요한가: 위상(:15)이 착지(:00~:02)보다 뒤라는 전제가 깨지면 — 추출이 느려
+            // :15 를 넘겨 착지하거나, 타이머의 초를 옮기거나 — 매칭은 **한 세대 낡은 목록**으로
+            // 돈다. 그때 나이는 ~75초라 300초 게이트에 안 걸리고, 경보도 로그도 없이 조용히
+            // 품질만 떨어진다. 틱마다 한 칸 적어두면 그 퇴화가 사후 질의로 잡힌다.
+            //
+            // 정상 대역 = 15~16초(위상 :15 - 착지 :00). 이 값이 60초대로 튀면 위상이 풀린 것이다.
+            // ⚠낡아서 건너뛴 틱은 아래에서 continue 하므로 행 자체가 안 남는다 — 즉 이 컬럼은
+            //   "매칭이 실제로 쓴 목록의 나이"만 담는다(그게 재고 싶은 값이다).
+            let workpool_age_s: Option<i32> =
+                freshness.as_ref().ok().and_then(|(age, _)| *age).map(|a| a as i32);
+            let stale_why = workpool_stale_reason(freshness);
             if let Some(why) = stale_why {
                 stale_streak += 1;
                 // 첫 틱과 이후 10틱(=10분)마다만 남긴다 — 장애가 길어져도 로그가 한 줄씩만 는다.
@@ -5083,8 +5094,8 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
             }
             let gap_pct = if opt_cost > 0 { 100.0 * (greedy_cost - opt_cost) as f64 / opt_cost as f64 } else { 0.0 };
             let solver_ins = sqlx::query(
-                "INSERT INTO stage2_solver_shadow (ts,tick,n_trucks,n_works,greedy_n,greedy_cost_s,optimal_n,optimal_cost_s,gap_pct,greedy_miss,optimal_miss,dep_tier_on,dep_tier0_n,dep_urgent_slots,dep_null_n,dep_demoted_n,ab_block,ab_warmup,works_raw,need_horizon_on,works_no_eta,works_no_coord,pool_new_n,pool_overlap_n,trucks_held_n,pool_overdue_n,pool_mode,due_buckets_n,self_cover_n)
-                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29) ON CONFLICT (ts) DO NOTHING",
+                "INSERT INTO stage2_solver_shadow (ts,tick,n_trucks,n_works,greedy_n,greedy_cost_s,optimal_n,optimal_cost_s,gap_pct,greedy_miss,optimal_miss,dep_tier_on,dep_tier0_n,dep_urgent_slots,dep_null_n,dep_demoted_n,ab_block,ab_warmup,works_raw,need_horizon_on,works_no_eta,works_no_coord,pool_new_n,pool_overlap_n,trucks_held_n,pool_overdue_n,pool_mode,due_buckets_n,self_cover_n,workpool_age_s)
+                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30) ON CONFLICT (ts) DO NOTHING",
             )
             .bind(ts).bind(tick as i64).bind(vehicles.len() as i32).bind(driving.len() as i32)
             .bind(greedy_n).bind(greedy_cost).bind(assign.len() as i32).bind(opt_cost).bind(gap_pct as f32)
@@ -5104,6 +5115,7 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
             .bind(pool_mode)
             .bind(due_buckets_n)                                                           // mig 0133
             .bind(self_cover_n)                                                            // mig 0142
+            .bind(workpool_age_s)                                                          // mig 0150
             .execute(&pool).await;
             // 생산 0 경보 (mig 0142): 트럭도 작업도 있는데 추천이 3틱 연속 0이면 매칭이 죽은
             // 것이다. 총정지는 stage2_match_shadow DEADMAN(30분)이 백스톱으로 잡지만, 이건
