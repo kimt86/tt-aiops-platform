@@ -34,6 +34,12 @@ SELECT
                                                     -- 실제 작업'을 추정이 아니라 실측하려고 값으로도 뽑는다.
                                                     -- ⚠ DATE 를 그대로 두면 툴박스가 JSON 숫자로 바꿔
                                                     --   Option<String> 디코드가 배치째 실패한다 → TO_CHAR 필수.
+  l.YT_DIS_DT          AS yt_dis_dt,  -- ★TOS 가 이 트럭을 배차한 시각(권위값·mig 0148).
+                                      -- 위 upd_dt 는 "≈ 배차 시각"인 대리값일 뿐 — 행이 나중에
+                                      -- 또 갱신되면 뒤로 밀린다(실측 중앙 0초지만 p90 1,382초).
+                                      -- 배차 시점을 앵커로 쓸 때는 이 컬럼을 쓴다.
+                                      -- ⚠ VARCHAR2(14) 라 TO_CHAR 금지(ALL_TAB_COLUMNS 실측).
+                                      --   이미 'YYYYMMDDHH24MISS' 문자열이다. seqno 와 같은 경우.
   SUBSTR(l.JOB_ODR_CONTNO, 1, 11) AS contno,
   l.JOB_ODR_MSNSEQ     AS msnseq,   -- ⚠ 항상 비어 있다(660/660). 순번처럼 보이지만 쓸 수 없다.
   l.JOB_ODR_SEQNO      AS seqno,    -- ★크레인 작업 순번. 배치 발행시각 꼴 문자열이라 사전순=시간순.

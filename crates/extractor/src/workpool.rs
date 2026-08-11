@@ -81,6 +81,10 @@ pub struct MoveRow {
     pub actv_dt: Option<String>, // JOB_ODR_ACTV_DT: order/RTG activation (soon-idle handover-start, esp. DS)
     pub upd_dt: Option<String>,  // UPD_DT (TO_CHAR'd): TOS row last-update ≈ truck-assignment time (D_tos)
     pub cre_dt: Option<String>,  // CRE_DT (TO_CHAR'd): 작업지시 생성 시각. 재고 깊이를 실측하려고 뽑는다
+    /// YT_DIS_DT — TOS 가 이 트럭을 배차한 시각(권위값·mig 0148). `upd_dt` 는 대리값일 뿐이라
+    /// 행이 나중에 또 갱신되면 뒤로 밀린다(실측 중앙 0초·p90 1,382초·최대 12,757초).
+    /// ⚠ VARCHAR2(14) 라 TO_CHAR 를 걸지 않는다 — 이미 'YYYYMMDDHH24MISS' 문자열이다.
+    pub yt_dis_dt: Option<String>,
     pub contno: Option<String>,
     pub msnseq: Option<String>,
     /// JOB_ODR_SEQNO — 크레인 작업 순번(배치 발행시각 꼴 문자열, 사전순=시간순). 구역 안 순서의
@@ -119,6 +123,7 @@ pub struct PoolTickRow {
     pub actv_dt: Option<String>,
     pub upd_dt: Option<String>,
     pub cre_dt: Option<String>,
+    pub yt_dis_dt: Option<String>,
     pub contno: Option<String>,
     pub msnseq: Option<String>,
     pub seqno: Option<String>,
@@ -166,6 +171,7 @@ fn split_pool_tick(rows: Vec<PoolTickRow>) -> (Vec<QueueRow>, Vec<MoveRow>) {
                 actv_dt: r.actv_dt,
                 upd_dt: r.upd_dt,
                 cre_dt: r.cre_dt,
+                yt_dis_dt: r.yt_dis_dt,
                 contno: r.contno,
                 msnseq: r.msnseq,
                 seqno: r.seqno,
@@ -465,16 +471,19 @@ async fn src_workpool(pool: &PgPool, rows: &[MoveRow], date: chrono::NaiveDate, 
                     let actv_ts = r.actv_dt.as_deref().and_then(parse_etw);
                     let upd_ts = r.upd_dt.as_deref().and_then(parse_etw);
                     let cre_ts = r.cre_dt.as_deref().and_then(parse_etw);
+                    // YT_DIS_DT 도 같은 시각 꼴이지만 Oracle 쪽이 VARCHAR2 라 TO_CHAR 를 안 걸었다.
+                    let yt_dis_ts = r.yt_dis_dt.as_deref().and_then(parse_etw);
                     sqlx::query(
                         "INSERT INTO live_workpool
                            (queuename, vessel, voyage, jobtype, jobstatus, yt_status, ytno, armgc,
-                            etw_ts, etw_raw, actv_ts, actv_raw, contno, msnseq, yt_topos, from_pos, to_pos, twintandem, as_of_ts, upd_ts, cre_ts, twinkey, seqno)
-                         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)",
+                            etw_ts, etw_raw, actv_ts, actv_raw, contno, msnseq, yt_topos, from_pos, to_pos, twintandem, as_of_ts, upd_ts, cre_ts, twinkey, seqno, yt_dis_ts)
+                         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24)",
                     )
                     .bind(&r.queuename).bind(&r.vessel).bind(&r.voyage)
                     .bind(&r.jobtype).bind(&r.jobstatus).bind(&r.yt_status).bind(&r.ytno).bind(&r.armgc)
                     .bind(etw_ts).bind(&r.etw_dt).bind(actv_ts).bind(&r.actv_dt).bind(&r.contno).bind(&r.msnseq).bind(&r.yt_topos)
                     .bind(&r.from_pos).bind(&r.to_pos).bind(&r.twintandem).bind(as_of).bind(upd_ts).bind(cre_ts).bind(&r.twinkey).bind(&r.seqno)
+                    .bind(yt_dis_ts)
                     .execute(&mut *tx).await.context("insert live_workpool")?;
                     active += 1;
                 }
@@ -505,16 +514,20 @@ async fn src_workpool(pool: &PgPool, rows: &[MoveRow], date: chrono::NaiveDate, 
                     let actv_ts = r.actv_dt.as_deref().and_then(parse_etw);
                     let upd_ts = r.upd_dt.as_deref().and_then(parse_etw);
                     let cre_ts = r.cre_dt.as_deref().and_then(parse_etw);
+                    // 미배차 행이라 보통 비어 있다. 그래도 그대로 담는다 — 채워져 있는데 ytno 가
+                    // 비었다면 그 자체가 관측할 값이 있는 상태다(재발행 등).
+                    let yt_dis_ts = r.yt_dis_dt.as_deref().and_then(parse_etw);
                     sqlx::query(
                         "INSERT INTO live_workpool
                            (queuename, vessel, voyage, jobtype, jobstatus, yt_status, ytno, armgc,
-                            etw_ts, etw_raw, actv_ts, actv_raw, contno, msnseq, yt_topos, from_pos, to_pos, twintandem, as_of_ts, upd_ts, cre_ts, twinkey, seqno)
-                         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)",
+                            etw_ts, etw_raw, actv_ts, actv_raw, contno, msnseq, yt_topos, from_pos, to_pos, twintandem, as_of_ts, upd_ts, cre_ts, twinkey, seqno, yt_dis_ts)
+                         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24)",
                     )
                     .bind(&r.queuename).bind(&r.vessel).bind(&r.voyage)
                     .bind(&r.jobtype).bind(&r.jobstatus).bind(&r.yt_status).bind(Option::<String>::None).bind(&r.armgc)
                     .bind(etw_ts).bind(&r.etw_dt).bind(actv_ts).bind(&r.actv_dt).bind(&r.contno).bind(&r.msnseq).bind(&r.yt_topos)
                     .bind(&r.from_pos).bind(&r.to_pos).bind(&r.twintandem).bind(as_of).bind(upd_ts).bind(cre_ts).bind(&r.twinkey).bind(&r.seqno)
+                    .bind(yt_dis_ts)
                     .execute(&mut *tx).await.context("insert live_workpool (Q unassigned)")?;
                 }
                 _ => {}
