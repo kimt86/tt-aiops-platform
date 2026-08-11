@@ -156,6 +156,29 @@ function drawEquipIcon(ctx: CanvasRenderingContext2D, prims: Prim[], s: number, 
   }
   ctx.restore();
 }
+// ── 안벽 현황 아이콘: QC 글리프(상태색) + 선박 상갑판(top-view) 선체 ──
+// 배 모양: 뾰족한 선수(오른쪽 +x)·둥근 선미 + 갑판 컨테이너 스택. icon-rotate 로 안벽
+// 방향에 맞춰 눕힌다(rot 은 데이터 효과에서 안벽선 주축으로 계산).
+const SHIP_ICON: Prim[] = [
+  { k: "poly", pts: [[2, 8], [16.5, 8], [23, 12], [16.5, 16], [2, 16], [1, 14.2], [1, 9.8]] }, // hull
+  { k: "rect", x: 3.2, y: 9.7, w: 3.2, h: 4.6, r: 0.4, dark: true }, // container stacks
+  { k: "rect", x: 7.4, y: 9.7, w: 3.2, h: 4.6, r: 0.4, dark: true },
+  { k: "rect", x: 11.6, y: 9.7, w: 3.2, h: 4.6, r: 0.4, dark: true },
+];
+const QUAY_STATE_COLOR: Record<string, string> = { work: "#22c55e", wait: "#ef4444", idle: "#64748b" };
+function addQuayIcons(map: maplibregl.Map) {
+  const S = 46;
+  const put = (name: string, prims: Prim[], color: string) => {
+    if (map.hasImage(name)) return;
+    const cv = document.createElement("canvas"); cv.width = S; cv.height = S;
+    const ctx = cv.getContext("2d"); if (!ctx) return;
+    drawEquipIcon(ctx, prims, S, color);
+    map.addImage(name, ctx.getImageData(0, 0, S, S), { pixelRatio: 2 });
+  };
+  for (const [st, color] of Object.entries(QUAY_STATE_COLOR)) put(`qq-${st}`, EQUIP_ICON.QC, color);
+  put("qv-ship", SHIP_ICON, "#38bdf8");
+}
+
 // register one raster per (equipment icon × state color) so icon-image can pick by feature.
 function addEquipIcons(map: maplibregl.Map) {
   const S = 46; // canvas px; pixelRatio 2 → 23px logical source
@@ -754,17 +777,18 @@ export default function LiveMapPage({ lang, internal = false }: { lang: Lang; in
       // ── 안벽 현황 (관제 뷰 기본 레이어): QC 상태색 + 접안 선박 ──
       // QC 점: 초록=작업중(활성 무브 있음) · 빨강=트럭 없음(잔여 있는데 무브 0 = 굶는 중) ·
       // 회색 작은 점=유휴(대기열 없음). 선박: 담당 QC 작업지점 평균의 바다쪽 80m.
+      addQuayIcons(map); // QC 글리프(상태색)·선박 선체 아이콘 — 레이어보다 먼저 등록
       map.addSource("quay-qc", { type: "geojson", data: EMPTY_FC });
       map.addLayer({
-        id: "qq-dot", type: "circle", source: "quay-qc",
-        paint: {
-          "circle-radius": ["interpolate", ["linear"], ["zoom"],
-            12, ["case", ["==", ["get", "st"], "idle"], 2.5, 5],
-            17, ["case", ["==", ["get", "st"], "idle"], 5, 10]],
-          "circle-color": ["match", ["get", "st"], "work", "#22c55e", "wait", "#ef4444", "#475569"],
-          "circle-opacity": ["case", ["==", ["get", "st"], "idle"], 0.5, 0.9],
-          "circle-stroke-width": 1.5, "circle-stroke-color": "#0a0f1d",
+        id: "qq-dot", type: "symbol", source: "quay-qc",
+        layout: {
+          "icon-image": ["concat", "qq-", ["get", "st"]],
+          "icon-size": ["interpolate", ["linear"], ["zoom"],
+            12, ["case", ["==", ["get", "st"], "idle"], 0.4, 0.6],
+            17, ["case", ["==", ["get", "st"], "idle"], 0.8, 1.15]],
+          "icon-allow-overlap": true, "icon-ignore-placement": true,
         },
+        paint: { "icon-opacity": ["case", ["==", ["get", "st"], "idle"], 0.55, 1] },
       });
       map.addLayer({
         id: "qq-lbl", type: "symbol", source: "quay-qc", filter: ["!=", ["get", "st"], "idle"],
@@ -776,16 +800,18 @@ export default function LiveMapPage({ lang, internal = false }: { lang: Lang; in
       });
       map.addSource("quay-vessel", { type: "geojson", data: EMPTY_FC });
       map.addLayer({
-        id: "qv-dot", type: "circle", source: "quay-vessel",
-        paint: {
-          "circle-radius": ["interpolate", ["linear"], ["zoom"], 12, 7, 17, 16],
-          "circle-color": "#0ea5e9", "circle-opacity": 0.35,
-          "circle-stroke-width": 2, "circle-stroke-color": "#38bdf8",
+        id: "qv-dot", type: "symbol", source: "quay-vessel",
+        layout: {
+          "icon-image": "qv-ship",
+          "icon-size": ["interpolate", ["linear"], ["zoom"], 12, 0.9, 17, 2.4],
+          // 안벽 방향으로 눕힘 — rot 은 안벽선 주축에서 계산해 지리 기준으로 고정
+          "icon-rotate": ["get", "rot"], "icon-rotation-alignment": "map",
+          "icon-allow-overlap": true, "icon-ignore-placement": true,
         },
       });
       map.addLayer({
         id: "qv-lbl", type: "symbol", source: "quay-vessel",
-        layout: { "text-field": ["get", "lbl"], "text-size": 11.5, "text-offset": [0, -1.1], "text-anchor": "bottom", "text-allow-overlap": true },
+        layout: { "text-field": ["get", "lbl"], "text-size": 11.5, "text-offset": [0, -1.7], "text-anchor": "bottom", "text-allow-overlap": true },
         paint: { "text-color": "#7dd3fc", "text-halo-color": "#0a0f1d", "text-halo-width": 1.4 },
       });
 
@@ -1050,6 +1076,7 @@ export default function LiveMapPage({ lang, internal = false }: { lang: Lang; in
         // 바다쪽 오프셋: 크레인 점들의 주축(안벽 방향) 법선 중 블록 평균 반대쪽으로 80m
         const cs = [...crane.values()];
         let offLon = 0, offLat = 0;
+        let rotDeg = 0; // 선박 아이콘 회전(시계방향 °) — 안벽선 주축과 나란히
         if (cs.length >= 2 && bk > 0) {
           const mLat = cs.reduce((s, c) => s + c[1], 0) / cs.length;
           const mLon = cs.reduce((s, c) => s + c[0], 0) / cs.length;
@@ -1060,6 +1087,9 @@ export default function LiveMapPage({ lang, internal = false }: { lang: Lang; in
           const l1 = tr / 2 + disc;
           let dx = Math.abs(sxy) > 1e-9 ? l1 - syy : 1, dy = Math.abs(sxy) > 1e-9 ? sxy : 0;
           const nrm = Math.hypot(dx, dy) || 1; dx /= nrm; dy /= nrm;
+          // 아이콘 선체는 +x(동쪽) 방향으로 그려져 있고 icon-rotate 는 시계방향 → 주축
+          // 방위각(동쪽 기준 반시계)을 부호 반전해 넘긴다.
+          rotDeg = (-Math.atan2(dy, dx) * 180) / Math.PI;
           let nx = -dy, ny = dx;
           const bxm = (bx / bk - mLon) * kx, bym = (by / bk - mLat) * ky;
           if (bxm * nx + bym * ny > 0) { nx = -nx; ny = -ny; } // 블록쪽이면 뒤집어 바다쪽으로
@@ -1084,7 +1114,7 @@ export default function LiveMapPage({ lang, internal = false }: { lang: Lang; in
           const lon = pts.reduce((s, c) => s + c[0], 0) / pts.length + offLon;
           const lat = pts.reduce((s, c) => s + c[1], 0) / pts.length + offLat;
           const lbl = `${vessel}\n${ko2 ? "잔여" : "left"} ${a.remaining}`;
-          vFeats.push({ type: "Feature", geometry: { type: "Point", coordinates: [lon, lat] }, properties: { lbl } });
+          vFeats.push({ type: "Feature", geometry: { type: "Point", coordinates: [lon, lat] }, properties: { lbl, rot: rotDeg } });
         }
         (map.getSource("quay-qc") as maplibregl.GeoJSONSource | undefined)?.setData({ type: "FeatureCollection", features: qcFeats });
         (map.getSource("quay-vessel") as maplibregl.GeoJSONSource | undefined)?.setData({ type: "FeatureCollection", features: vFeats });
@@ -1422,7 +1452,7 @@ export default function LiveMapPage({ lang, internal = false }: { lang: Lang; in
             <section className="llp-sec">
               <header>{ko ? "안벽 (QUAY)" : "Quay"}</header>
               <Row on={showQuay} color="#38bdf8" label={ko ? "안벽 현황 (QC 상태 · 접안 선박)" : "Quay status (QC state · vessels)"} onChange={setShowQuay} />
-              <div className="llp-hint">{ko ? "초록=작업중 · 빨강=트럭 없음(굶는 중) · 회색=유휴 · 파랑=접안 선박(잔여 무브)" : "green=working · red=no truck (starving) · gray=idle · blue=berthed vessel (moves left)"}</div>
+              <div className="llp-hint">{ko ? "초록 QC=작업중 · 빨강 QC=트럭 없음(굶는 중) · 회색 QC=유휴 · 파란 배=접안 선박(잔여 무브)" : "green QC=working · red QC=no truck (starving) · gray QC=idle · blue ship=berthed vessel (moves left)"}</div>
             </section>
             <section className="llp-sec">
               <header>{ko ? "배차 (DISPATCH)" : "Dispatch"}</header>
