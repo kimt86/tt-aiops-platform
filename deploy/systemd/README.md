@@ -144,21 +144,27 @@ forward to "now", which turns the gap into permanent data loss.
 - Watch the admin page's per-run health column: there is no Oracle-side statement timeout, so a
   query plan flipping to a full scan shows up only as a quietly repeating slow poll.
 
-## 형상관리 밖에 있던 것 (2026-08-11 회수)
+## `tt-*` 가 아닌 것들 — 터널 2개와 crontab
 
-세 가지가 호스트에만 있었다. 이관·재해복구 절차가 성립하려면 저장소에 있어야 한다.
+이 저장소의 `deploy/systemd/` 는 대부분 `tt-*` 이지만, 아래 셋은 이름도 성격도 다르다.
+셋 다 **멈추면 조용히 나빠지는** 종류라 따로 적어둔다.
 
-| 대상 | 저장소 위치 | 왜 중요한가 |
+| 대상 | 위치 | 멈추면 |
 |---|---|---|
-| GPS 웹소켓 터널 | `wp-ws-bridge.service.example` | 위치 파이프라인의 **단일 장애점**. 끊기면 트럭 좌표가 멈추고 배차 추천도 함께 선다 |
-| ETW 게이트웨이 터널 | `wp-etw-bridge.service.example` | 끊겨도 추출기가 **warn 만 남기고 조용히 건너뛴다** — 마감 정밀도가 티 안 나게 나빠진다 |
-| crontab 2건 | `../crontab.example` | 도로망 재추론이 **배차 비용의 본체**를 만든다. 멈추면 전 OD 가 맨해튼 폴백으로 떨어진다 |
+| GPS 웹소켓 터널 | `wp-ws-bridge.service` | 위치 파이프라인의 **단일 장애점**. 트럭 좌표가 멈추고, 매칭이 GPS 미연결 틱을 건너뛰므로 배차 추천도 함께 선다 |
+| ETW 게이트웨이 터널 | `wp-etw-bridge.service` | 추출기가 **warn 만 남기고 조용히 건너뛴다** — 마감 정밀도가 티 안 나게 나빠진다 |
+| crontab 2건 | `../crontab.example` | 도로망 재추론이 **배차 비용의 본체**를 만든다. 멈추면 전 OD 가 맨해튼 폴백으로 떨어져 매칭 품질과 `cost_tier` 가 동시에 왜곡된다 |
 
-⚠ 터널 둘은 `.example` 이다 — 실제 유닛에는 내부망 주소(경유 호스트·계정)가 박혀 있고 이
-저장소에는 GitHub 원격이 있어, 그대로 커밋하면 내부 망 구성이 밖으로 나간다. 주소는 `.env`
-(gitignore 대상)에 두고 systemd 가 `ExecStart` 에서 치환하도록 바꿨다. 필요한 키는 각
-`.example` 파일 머리말에 적혀 있고, **현재 운영값은 호스트의
-`~/.config/systemd/user/wp-*-bridge.service`** 에 있다.
+이름이 `wp-*` 로 남은 것은 개명 결정상 터널은 그대로 두기로 했기 때문이다(2026-07-23).
 
-⚠ 돌고 있는 터널을 이 `.example` 로 덮어쓸 이유는 없다. 특히 ETW 게이트웨이는 **다른
-시스템도 함께 쓰므로** 주기·질의·중단을 우리 판단으로 바꾸지 않는다(2026-08-05 지시).
+⚠ **ETW 게이트웨이는 다른 시스템도 함께 쓴다** — 주기·질의·중단을 우리 판단으로 바꾸지
+않는다(2026-08-05 지시). 돌고 있는 터널을 저장소 사본으로 덮어쓸 이유도 없다.
+
+⚠ crontab 만 `.example` 이다. systemd 유닛과 달리 파일을 복사하는 방식이 아니라 기존
+crontab 에 **덧붙이는** 것이라, 중복 등록을 피하려면 `crontab -l` 로 먼저 확인해야 한다.
+
+> **2026-08-11 정정**: 이 절을 처음 쓸 때 "터널 유닛 2개가 형상관리 밖에 있다"고 적고
+> `.example` 템플릿까지 만들었는데 **틀렸다.** 두 유닛은 이미 2026-07-28 커밋 `5a24c7e`(⑤항)
+> 으로 저장소에 들어와 있었다. 2026-07-22 디스커버리 문서의 "저장소에 없음" 서술을 그대로
+> 믿고 현물을 확인하지 않은 탓이다. 잘못 만든 `.example` 2개는 지웠다.
+> **실제로 빠져 있던 것은 crontab 2건뿐이다.**
