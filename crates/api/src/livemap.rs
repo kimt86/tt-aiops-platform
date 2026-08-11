@@ -4974,6 +4974,13 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                 let extra_s = lead_extra.get(&w.jobtype).copied().unwrap_or(0);
                 let arrival_at = now + (arr_p90 + extra_s) * 1000;
                 let slack = (deadline - arrival_at) / 1000;
+                // ★ 마감을 못 맞추는 매칭도 **그대로 추천한다** — 라벨이지 필터가 아니다.
+                //   실배차 전환을 앞두고 사용자가 명시적으로 결정했다(2026-08-11): "늦는 추천도
+                //   실배차에 내보낸다". 종전에는 "아직 필터를 안 달았다"는 미결 상태였고, 이 줄이
+                //   그 상태를 결정으로 바꾼다. 근거: 늦었다고 안 보내면 그 상자는 아무도 안 가져가
+                //   더 늦어진다. 늦음은 **감추는 것이 아니라 보이게** 다룬다 — 보드가 마감 경과를
+                //   🔴 칩으로, 지도 추천선이 주황으로 표시한다.
+                //   ⇒ 여기에 `if !feasible { continue }` 를 넣으려는 충동이 들면 이 결정을 먼저 뒤집을 것.
                 let feasible = arrival_at <= deadline;
                 if !feasible {
                     opt_miss += 1;
