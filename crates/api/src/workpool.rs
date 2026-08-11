@@ -44,6 +44,8 @@ struct MoveRow {
     to_pos: Option<String>,
     twintandem: Option<String>,
     upd_ts: Option<DateTime<Utc>>,
+    /// TOS 가 이 트럭을 배차한 시각(YT_DIS_DT·mig 0148). `upd_ts` 는 행 갱신에 밀리는 대리값이다.
+    yt_dis_ts: Option<DateTime<Utc>>,
 }
 
 #[derive(Serialize, Clone)]
@@ -68,9 +70,13 @@ struct MoveOut {
     from_pos: Option<String>,
     to_pos: Option<String>,
     twintandem: Option<String>,
-    /// TOS row last-update ≈ truck-assignment time (D_tos); internal (validation logger), not in JSON
+    /// TOS row last-update; internal (validation logger), not in JSON.
+    /// ⚠ 배차 시각이 **아니다** — 그건 아래 `yt_dis_ts` 다(mig 0148).
     #[serde(skip)]
     upd_ts: Option<DateTime<Utc>>,
+    /// D_tos(= TOS 가 이 트럭을 배차한 시각)의 권위값. internal, not in JSON.
+    #[serde(skip)]
+    yt_dis_ts: Option<DateTime<Utc>>,
 }
 
 #[derive(sqlx::FromRow)]
@@ -272,7 +278,7 @@ pub(crate) async fn build_workpool(pool: PgPool) -> Result<WorkpoolOut, AppError
         "SELECT w.qc, w.queuename, w.vessel, w.jobtype, w.yt_status, w.ytno, w.armgc, w.etw_ts,
                 coalesce(e.qc_etw_utc, e.vessel_etw_utc) AS etw_accurate,
                 e.expires_at_utc AS etw_expires, w.actv_ts,
-                w.contno, w.yt_topos, w.from_pos, w.to_pos, w.twintandem, w.upd_ts
+                w.contno, w.yt_topos, w.from_pos, w.to_pos, w.twintandem, w.upd_ts, w.yt_dis_ts
            FROM live_workpool w
            LEFT JOIN tos_etw_cntr e
                   ON e.vessel = w.vessel AND e.voyage = w.voyage AND e.cntr_no = w.contno",
@@ -304,6 +310,7 @@ pub(crate) async fn build_workpool(pool: PgPool) -> Result<WorkpoolOut, AppError
         to_pos: m.to_pos.clone(),
         twintandem: m.twintandem.clone(),
         upd_ts: m.upd_ts,
+        yt_dis_ts: m.yt_dis_ts,
     };
 
     // which QCs are "working now": have an active move, or a started queue (comp>0).
@@ -832,13 +839,20 @@ pub fn spawn_dispatch_pred_logger(pool: PgPool) {
             // run BEFORE the resolve below, else a container assigned+worked within one tick gap
             // stays NULL and would be mis-read as "never assigned". GROUP BY dedups twin/duplicate
             // contno so each gets one deterministic upd.
-            let (mut as_c, mut as_u): (Vec<String>, Vec<Option<DateTime<Utc>>>) = (Vec::new(), Vec::new());
+            //
+            // ★tos_dis_ts 도 여기서 같이 채운다(mig 0151). block(3) 과 **같은 두 컬럼을 같은
+            //   뜻으로** 써야 한다 — 한쪽만 바꿨다가 tos_upd_dt 한 칸에 UPD_DT 와 YT_DIS_DT 가
+            //   섞였고, 두 경로가 `became_assigned_at IS NULL` 로 상호배타라 눈에 안 띄었다.
+            #[allow(clippy::type_complexity)]
+            let (mut as_c, mut as_u, mut as_d): (Vec<String>, Vec<Option<DateTime<Utc>>>, Vec<Option<DateTime<Utc>>>) =
+                (Vec::new(), Vec::new(), Vec::new());
             for qc in &wp.qcs {
                 for m in &qc.moves {
                     if m.ytno.as_deref().map(|s| !s.trim().is_empty()).unwrap_or(false) {
                         if let Some(c) = &m.contno {
                             as_c.push(c.clone());
                             as_u.push(m.upd_ts);
+                            as_d.push(m.yt_dis_ts);
                         }
                     }
                 }
@@ -846,14 +860,18 @@ pub fn spawn_dispatch_pred_logger(pool: PgPool) {
             if !as_c.is_empty() {
                 let _ = sqlx::query(
                     "UPDATE dispatch_pred_sample d
-                        SET became_assigned_at = now(), became_assigned_tick = $3, tos_upd_dt = v.upd
-                       FROM (SELECT contno, min(upd) AS upd
-                               FROM (SELECT unnest($1::text[]) AS contno, unnest($2::timestamptz[]) AS upd) z
+                        SET became_assigned_at = now(), became_assigned_tick = $4,
+                            tos_upd_dt = v.upd, tos_dis_ts = v.dis
+                       FROM (SELECT contno, min(upd) AS upd, min(dis) AS dis
+                               FROM (SELECT unnest($1::text[]) AS contno,
+                                            unnest($2::timestamptz[]) AS upd,
+                                            unnest($3::timestamptz[]) AS dis) z
                               GROUP BY contno) v
                       WHERE d.contno = v.contno AND d.resolved_at IS NULL AND d.became_assigned_at IS NULL",
                 )
                 .bind(&as_c)
                 .bind(&as_u)
+                .bind(&as_d)
                 .bind(tick as i64)
                 .execute(&pool)
                 .await;
@@ -932,14 +950,20 @@ pub fn spawn_dispatch_pred_logger(pool: PgPool) {
             // predictions. pred_ver=2 tags these rows so analysis never mixes them with the
             // legacy population (mig 0130).
             let cand = match stage2_work_candidates(pool.clone()).await { Ok(v) => v.1, Err(_) => continue };
-            // contno → upd_ts (TOS UPD_DT) seed for D_tos — same source/filter as block (0) above.
-            let upd_of: HashMap<String, Option<DateTime<Utc>>> = {
-                let mut m: HashMap<String, Option<DateTime<Utc>>> = HashMap::new();
+            // contno → (UPD_DT, 배차 시각) — same source/filter as block (0) above.
+            //
+            // ★두 값을 **각자의 컬럼에** 담는다(mig 0151). 2026-08-11 에 여기만 yt_dis_ts 로
+            //   바꿨다가 tos_upd_dt 한 컬럼에 두 정의가 섞였다 — block(0) 은 UPD_DT 를 쓰는데
+            //   두 경로가 `became_assigned_at IS NULL` 로 상호배타라 눈에 안 띄었고, 가르는 선이
+            //   **배차 시점 자체와 상관**돼 D_tos 분석이 조용히 두 정의를 섞었다(2차 리뷰 지적).
+            //   tos_upd_dt = UPD_DT(상한·원래 뜻) / tos_dis_ts = YT_DIS_DT(권위값).
+            let dtos_of: HashMap<String, (Option<DateTime<Utc>>, Option<DateTime<Utc>>)> = {
+                let mut m: HashMap<String, (Option<DateTime<Utc>>, Option<DateTime<Utc>>)> = HashMap::new();
                 for qc in &wp.qcs {
                     for mv in &qc.moves {
                         if mv.ytno.as_deref().map(|s| !s.trim().is_empty()).unwrap_or(false) {
                             if let Some(c) = &mv.contno {
-                                m.insert(c.clone(), mv.upd_ts);
+                                m.insert(c.clone(), (mv.upd_ts, mv.yt_dis_ts));
                             }
                         }
                     }
@@ -976,18 +1000,20 @@ pub fn spawn_dispatch_pred_logger(pool: PgPool) {
                     let Some(lead) = w.dd_lead_s else { continue };
                     let assigned = w.tos_assigned;
                     // if already assigned at first log, seed D_tos now (else NULL → captured later by (0))
-                    let (ba_at, ba_tick, ba_upd): (Option<DateTime<Utc>>, Option<i64>, Option<DateTime<Utc>>) =
+                    #[allow(clippy::type_complexity)]
+                    let (ba_at, ba_tick, ba_upd, ba_dis): (Option<DateTime<Utc>>, Option<i64>, Option<DateTime<Utc>>, Option<DateTime<Utc>>) =
                         if assigned {
-                            (Some(Utc::now()), Some(tick as i64), upd_of.get(contno).copied().flatten())
+                            let (u, d) = dtos_of.get(contno).copied().unwrap_or((None, None));
+                            (Some(Utc::now()), Some(tick as i64), u, d)
                         } else {
-                            (None, None, None)
+                            (None, None, None, None)
                         };
                     let _ = sqlx::query(
                         // pred_ver=3: 걸음이 learn_qc_slot_step 로 바뀐 판 (2026-08-10, mig 0139).
                         // 2와 slot 의미는 같다 — 집계는 pred_ver 로 가른다.
                         "INSERT INTO dispatch_pred_sample
-                           (qc, vessel, contno, queuename, jobtype, pred_work_eta_ts, dispatch_deadline_ts, assigned, slack_s, lead_s, became_assigned_at, became_assigned_tick, tos_upd_dt, etw_qc_ts, applied_bias_s, bias_ver, pred_ver, slot_idx)
-                         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,2,3,$16)",
+                           (qc, vessel, contno, queuename, jobtype, pred_work_eta_ts, dispatch_deadline_ts, assigned, slack_s, lead_s, became_assigned_at, became_assigned_tick, tos_upd_dt, etw_qc_ts, applied_bias_s, bias_ver, pred_ver, slot_idx, tos_dis_ts)
+                         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,2,3,$16,$17)",
                     )
                     .bind(&w.qc)
                     .bind(&w.vessel)
@@ -1005,6 +1031,7 @@ pub fn spawn_dispatch_pred_logger(pool: PgPool) {
                     .bind(None::<DateTime<Utc>>)
                     .bind(0i32)
                     .bind(w.slot_idx)
+                    .bind(ba_dis) // mig 0151
                     .execute(&pool)
                     .await;
                 }
@@ -1724,7 +1751,7 @@ pub async fn stage2_compare_picks(State(pool): State<PgPool>) -> Result<Json<Vec
         "SELECT DISTINCT ON (qc, queuename, tos_ytno)
                 qc, queuename, tos_ytno, our_ytno, our_arrival_s, tos_arrival_s, agree, delta_s
            FROM dispatch_compare_shadow
-          WHERE ts > now() - interval '3 hours'
+          WHERE ts > now() - interval '3 hours' AND t1_ver = 1  -- mig 0149/0152
           ORDER BY qc, queuename, tos_ytno, ts DESC",
     )
     .fetch_all(&pool)
@@ -1780,7 +1807,7 @@ pub async fn stage2_work_points(State(pool): State<PgPool>) -> Result<Json<Vec<W
                   array_agg(DISTINCT tos_ytno)                  AS tos_trucks,  -- all trucks TOS dispatched here (last hour)
                   array_remove(array_agg(DISTINCT our_ytno), NULL) AS our_trucks   -- all trucks WE'd have dispatched
              FROM dispatch_compare_shadow
-            WHERE ts > now() - interval '60 minutes'
+            WHERE ts > now() - interval '60 minutes' AND t1_ver = 1  -- mig 0149/0152
             GROUP BY qc, queuename
          )
          SELECT a.qc, a.queuename, a.jobtype, c.lat, c.lon, c.src_block,
@@ -1938,13 +1965,17 @@ pub async fn dispatch_compare(State(pool): State<PgPool>) -> Result<Json<Dispatc
                 count(*) FILTER (WHERE reason='same') AS same_n,
                 count(*) FILTER (WHERE reason='ours_closer') AS ours_closer_n,
                 count(*) FILTER (WHERE reason='tos_closer') AS tos_closer_n
-           FROM dispatch_compare_shadow WHERE ts > now() - interval '24 hours' AND reason <> 'now'",
+           FROM dispatch_compare_shadow WHERE ts > now() - interval '24 hours' AND reason <> 'now'
+                  -- t1_ver 로 가른다(mig 0149/0152): NULL 구간은 T1 이 upd_ts 라 절반가량이
+                  -- 실제 배차가 아닌 순간으로 되감겨 있다. 판별자를 달아놓고 안 거르면 계약이 아니다.
+                  AND t1_ver = 1",
     )
     .fetch_one(&pool)
     .await?;
     let recent: Vec<CompareRow> = sqlx::query_as(
         "SELECT ts, qc, queuename, jobtype, tos_ytno, tos_arrival_s, our_ytno, our_arrival_s, agree, reason, delta_s
            FROM dispatch_compare_shadow WHERE ts > now() - interval '24 hours' AND NOT agree AND reason <> 'now'
+            AND t1_ver = 1   -- mig 0149/0152
           ORDER BY ts DESC LIMIT 25",
     )
     .fetch_all(&pool)
