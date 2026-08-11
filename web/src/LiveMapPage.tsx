@@ -470,10 +470,6 @@ export default function LiveMapPage({ lang, internal = false }: { lang: Lang; in
   const [tpos, setTpos] = useState(0);
   const filterRef = useRef<{ equip: Set<EquipKey>; state: string | null; dispatch: Dispatch | null }>({ equip: equipSet, state: stateFilter, dispatch: null });
   filterRef.current = { equip: equipSet, state: stateFilter, dispatch: dispatchFilter };
-  // QC 단일 표현: 안벽 현황이 켜져 있으면 작업지점 아이콘이 유일한 QC 마커다 — 같은 QC 의
-  // GPS 마커는 렌더 루프에서 숨긴다(작업지점 없는 크레인만 GPS 로 남음). 렌더 루프가 ref 기반이라 미러.
-  const quayQcRef = useRef<Set<string>>(new Set());
-  const showQuayRef = useRef(showQuay); showQuayRef.current = showQuay;
   const toggleEquip = (k: EquipKey) => setEquipSet((s) => { const n = new Set(s); n.has(k) ? n.delete(k) : n.add(k); return n; });
 
   // live feed: poll /api/livemap/positions; fall back to replay when it's empty/down.
@@ -843,16 +839,6 @@ export default function LiveMapPage({ lang, internal = false }: { lang: Lang; in
       map.on("mouseenter", "veh", () => { map.getCanvas().style.cursor = "pointer"; });
       map.on("mouseleave", "veh", () => { map.getCanvas().style.cursor = ""; });
 
-      // 안벽 QC 아이콘 클릭 → 같은 차량 상세 패널 (GPS 마커 대신 이게 QC 의 단일 표현)
-      map.on("click", "qq-dot", (e) => {
-        const f = e.features?.[0]; if (!f) return;
-        const pr = f.properties as { qc: string };
-        const c = (f.geometry as GeoJSON.Point).coordinates as [number, number];
-        pickRef.current(pr.qc, c[0], c[1], 0);
-      });
-      map.on("mouseenter", "qq-dot", () => { map.getCanvas().style.cursor = "pointer"; });
-      map.on("mouseleave", "qq-dot", () => { map.getCanvas().style.cursor = ""; });
-
       // click popups for learned overlays + metric-grid cells (koRef/gridMRef = fresh values)
       const lpop = new maplibregl.Popup({ closeButton: true, closeOnClick: true, maxWidth: "260px", className: "lm-popup" });
       const showPopup = (at: [number, number] | maplibregl.LngLat, html: string) => lpop.setLngLat(at).setHTML(html).addTo(map);
@@ -1051,16 +1037,13 @@ export default function LiveMapPage({ lang, internal = false }: { lang: Lang; in
     if (map.getLayer("dm-bub")) map.setLayoutProperty("dm-bub", "visibility", vis(toggles.demand));
   }, [toggles, ready]);
 
-  // 안벽 현황 표시 전환 — QC 아이콘은 장비 탭의 QC 선택과도 연동(QC 를 끄면 함께 꺼짐),
-  // 선박은 장비가 아니라 안벽 토글만 따른다.
+  // 안벽 현황 표시 전환
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !ready) return;
-    const qcVis = showQuay && equipSet.has("QC") ? "visible" : "none";
-    const vVis = showQuay ? "visible" : "none";
-    for (const id of ["qq-dot", "qq-lbl"]) if (map.getLayer(id)) map.setLayoutProperty(id, "visibility", qcVis);
-    for (const id of ["qv-dot", "qv-lbl"]) if (map.getLayer(id)) map.setLayoutProperty(id, "visibility", vVis);
-  }, [showQuay, equipSet, ready]);
+    const vis = showQuay ? "visible" : "none";
+    for (const id of ["qq-dot", "qq-lbl", "qv-dot", "qv-lbl"]) if (map.getLayer(id)) map.setLayoutProperty(id, "visibility", vis);
+  }, [showQuay, ready]);
 
   // 안벽 현황 데이터: 크레인 작업지점(learn_topos, 5분 주기 영구화) × 워크풀(90초 스냅샷,
   // 접안 중 선박으로 이미 필터됨). QC 상태 = 활성무브>0 → 작업중 / 잔여>0 → 트럭 없음(굶는 중)
@@ -1088,9 +1071,8 @@ export default function LiveMapPage({ lang, internal = false }: { lang: Lang; in
           const q = byQc.get(qc);
           const st = q ? (q.active_moves > 0 ? "work" : q.remaining > 0 ? "wait" : "idle") : "idle";
           const lbl = q ? `${qc} · ${q.remaining}` : qc;
-          qcFeats.push({ type: "Feature", geometry: { type: "Point", coordinates: coord }, properties: { st, lbl, qc } });
+          qcFeats.push({ type: "Feature", geometry: { type: "Point", coordinates: coord }, properties: { st, lbl } });
         }
-        quayQcRef.current = new Set(crane.keys()); // 이 아이콘들이 QC 의 단일 표현 — GPS 중복 숨김용
         // 바다쪽 오프셋: 크레인 점들의 주축(안벽 방향) 법선 중 블록 평균 반대쪽으로 80m
         const cs = [...crane.values()];
         let offLon = 0, offLat = 0;
@@ -1236,7 +1218,6 @@ export default function LiveMapPage({ lang, internal = false }: { lang: Lang; in
             if (p.state === "moving") moving++; else if (p.state === "idle") idle++; else off++;
             const eq = equip(e.cls);
             if (!ef.has(eq)) continue;
-            if (eq === "QC" && showQuayRef.current && quayQcRef.current.has(id)) continue; // 안벽 아이콘과 중복 제거
             const dsp = disp.get(id);
             if (df && eq === "TT" && dsp !== df) continue;
             if (sf && p.state !== sf) continue;
@@ -1250,7 +1231,6 @@ export default function LiveMapPage({ lang, internal = false }: { lang: Lang; in
             if (st === "moving") moving++; else if (st === "idle") idle++; else off++;
             const eq = equip(d.cls);
             if (!ef.has(eq)) continue; // equipment multi-select
-            if (eq === "QC" && showQuayRef.current && quayQcRef.current.has(d.id)) continue; // 안벽 아이콘과 중복 제거
             if (df && eq === "TT" && d.dispatch !== df) continue; // pool filter — TT only
             if (sf && st !== sf) continue;
             feats.push({ type: "Feature", geometry: { type: "Point", coordinates: [d.lon, d.lat] }, properties: { id: d.id, state: st, eq, speed: d.speed, dispatch: d.dispatch ?? "" } });
