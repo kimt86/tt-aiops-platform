@@ -1,5 +1,6 @@
 /target
 /.env
+/.claude/
 *.log
 web/node_modules
 web/dist
