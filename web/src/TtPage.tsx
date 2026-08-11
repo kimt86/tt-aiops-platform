@@ -62,13 +62,14 @@ function useWorkpool(ms = 15000) {
 }
 
 // dispatch-state colors (shared with the live map / vehicle pool)
+// ★트럭 작업 4단계 용어(무부하주행→픽업→부하주행→드랍오프, 2026-08-04 지정)로 표기.
 const DSP_META: Record<string, { ko: string; en: string; color: string }> = {
   idle: { ko: "유휴 (배차 가능)", en: "Idle (available)", color: "#22c55e" },
-  staging: { ko: "배차·대기", en: "Assigned·staging", color: "#0ea5e9" },
-  soon_idle: { ko: "곧유휴·임박", en: "Imminent", color: "#f59e0b" },
-  delivering: { ko: "적재 이동", en: "Delivering", color: "#64748b" },
-  wait_rtg: { ko: "도착·RTG 대기", en: "Arrived·wait RTG", color: "#ef4444" },
-  empty_travel: { ko: "공차 주행 중", en: "Empty traveling", color: "#94a3b8" },
+  staging: { ko: "배차됨·픽업 대기", en: "Assigned·pickup wait", color: "#0ea5e9" },
+  soon_idle: { ko: "드랍오프 중·곧 빔", en: "Drop-off·soon free", color: "#f59e0b" },
+  delivering: { ko: "부하주행", en: "Laden haul", color: "#64748b" },
+  wait_rtg: { ko: "블록 도착·드랍오프 대기", en: "At block·drop-off wait", color: "#ef4444" },
+  empty_travel: { ko: "무부하주행", en: "Empty haul", color: "#94a3b8" },
 };
 
 // ETW countdown from the accurate TOS ETW RPC (qc_etw_utc via the tos_etw_gateway). The

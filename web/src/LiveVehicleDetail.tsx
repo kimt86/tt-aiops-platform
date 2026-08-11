@@ -19,7 +19,7 @@ export type SelVeh = {
   cur_loc?: string;
   topos1?: string;
   arrival?: string;
-  dispatch?: "idle" | "staging" | "empty_travel" | "delivering" | "soon_idle" | "approaching" | "wait_rtg";
+  dispatch?: "idle" | "staging" | "empty_travel" | "delivering" | "soon_idle" | "wait_rtg";
   dispatch_reason?: string;
   nearest_rtg_m?: number;
   free_in_s?: number;
@@ -43,22 +43,19 @@ export type SelVeh = {
 };
 
 // dispatch state → label + colors (matches the live-map rings)
+// ★트럭 작업 4단계 용어(무부하주행→픽업→부하주행→드랍오프, 2026-08-04 지정)로 표기.
 const DSP: Record<string, { ko: string; en: string; color: string; bg: string }> = {
   idle: { ko: "유휴 (배차 가능)", en: "Idle (available)", color: "#16a34a", bg: "rgba(34,197,94,0.12)" },
-  staging: { ko: "배차됨 · 대기", en: "Assigned · staging", color: "#0284c7", bg: "rgba(14,165,233,0.12)" },
-  soon_idle: { ko: "곧유휴 · 임박", en: "Imminent", color: "#d97706", bg: "rgba(245,158,11,0.14)" },
-  approaching: { ko: "접근 · 적재됨", en: "Approaching", color: "#ca8a04", bg: "rgba(252,211,77,0.16)" },
-  wait_rtg: { ko: "도착 · RTG 대기", en: "Arrived · waiting RTG", color: "#dc2626", bg: "rgba(239,68,68,0.12)" },
-  delivering: { ko: "적재 이동 중", en: "Delivering", color: "#475569", bg: "rgba(100,116,139,0.12)" },
-  empty_travel: { ko: "공차 주행 중", en: "Empty traveling", color: "#475569", bg: "rgba(100,116,139,0.12)" },
+  staging: { ko: "배차됨 · 픽업 대기", en: "Assigned · pickup wait", color: "#0284c7", bg: "rgba(14,165,233,0.12)" },
+  soon_idle: { ko: "드랍오프 중 · 곧 빔", en: "Drop-off · soon free", color: "#d97706", bg: "rgba(245,158,11,0.14)" },
+  wait_rtg: { ko: "블록 도착 · 드랍오프 대기", en: "At block · drop-off wait", color: "#dc2626", bg: "rgba(239,68,68,0.12)" },
+  delivering: { ko: "부하주행 중", en: "Laden haul", color: "#475569", bg: "rgba(100,116,139,0.12)" },
+  empty_travel: { ko: "무부하주행 중", en: "Empty haul", color: "#475569", bg: "rgba(100,116,139,0.12)" },
 };
 
 // localized dispatch detail, built from structured fields (not the backend's Korean
 // dispatch_reason). The state label already conveys the gist; this adds RTG distance.
 function dispatchWhy(v: SelVeh, ko: boolean): string | null {
-  if (v.dispatch === "approaching") {
-    return ko ? "QC 양하 완료 후 · RTG 대기 (~12분 후 유휴)" : "after QC discharge · waiting RTG (~12m to free)";
-  }
   if (v.dispatch === "soon_idle") {
     if (v.nearest_rtg_m != null) {
       const m = Math.round(v.nearest_rtg_m);

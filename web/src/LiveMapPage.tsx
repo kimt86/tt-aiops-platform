@@ -27,7 +27,7 @@ type Device = { id: string; cls: string; pts: Pt[] };
 type Replay = { meta: { window_s: number; center: [number, number]; n_devices: number }; devices: Device[] };
 
 // live feed from /api/livemap/positions (GPS via the SSH tunnel)
-type Dispatch = "idle" | "staging" | "empty_travel" | "delivering" | "soon_idle" | "approaching" | "wait_rtg";
+type Dispatch = "idle" | "staging" | "empty_travel" | "delivering" | "soon_idle" | "wait_rtg";
 type LiveDev = { id: string; cls: string; lat: number; lon: number; speed: number; engine: number; age_s: number; dispatch?: Dispatch; jobtype?: string; topos1?: string };
 type LiveSnap = { source: string; connected: boolean; count: number; as_of: string | null; dispatch_counts?: Record<string, number>; devices: LiveDev[] };
 
@@ -51,14 +51,17 @@ function metersBetween(la1: number, lo1: number, la2: number, lo2: number): numb
 
 // dispatch-state highlight on the map (TT pool building)
 // dispatch pools — filter the map by vehicle-pool type (TT only)
-const DISPATCH_POOLS: { key: Dispatch; ko: string; en: string; color: string }[] = [
-  { key: "idle", ko: "유휴", en: "Idle", color: "#22c55e" },
-  { key: "staging", ko: "배차·대기", en: "Staging", color: "#0ea5e9" },
-  { key: "soon_idle", ko: "곧유휴·임박", en: "Imminent", color: "#f59e0b" },
-  { key: "approaching", ko: "접근·적재됨", en: "Approaching", color: "#fcd34d" },
-  { key: "delivering", ko: "적재이동", en: "Deliver", color: "#38bdf8" },
-  { key: "wait_rtg", ko: "RTG대기", en: "Wait RTG", color: "#ef4444" },
-  { key: "empty_travel", ko: "공차 주행 중", en: "Empty traveling", color: "#94a3b8" },
+// 2026-08-11 현행화: ★트럭 작업 4단계 용어(무부하주행→픽업→부하주행→드랍오프, 2026-08-04
+// 지정)로 개칭하고 사이클 순서로 정렬. approaching 칩 제거(분류기가 더는 내지 않는 은퇴
+// 상태 — TtPage 는 2026-08-10 에 정리했는데 여기만 남아 항상 0 이었다).
+// cand = 매처(spawn_stage2_shadow)가 실제 배차 후보로 쓰는 상태(TtPage CANDIDATE_STATES 와 동일).
+const DISPATCH_POOLS: { key: Dispatch; ko: string; en: string; color: string; cand?: boolean }[] = [
+  { key: "idle", ko: "유휴", en: "Idle", color: "#22c55e", cand: true },
+  { key: "empty_travel", ko: "무부하주행", en: "Empty haul", color: "#94a3b8" },
+  { key: "staging", ko: "픽업 대기", en: "Pickup wait", color: "#0ea5e9" },
+  { key: "delivering", ko: "부하주행", en: "Laden haul", color: "#38bdf8" },
+  { key: "wait_rtg", ko: "드랍오프 대기", en: "Drop-off wait", color: "#ef4444", cand: true },
+  { key: "soon_idle", ko: "드랍오프 중·곧 빔", en: "Dropping·soon free", color: "#f59e0b", cand: true },
 ];
 
 type EquipKey = "TT" | "RTG" | "QC" | "ETC";
@@ -1402,6 +1405,9 @@ export default function LiveMapPage({ lang, internal = false }: { lang: Lang; in
               className={`dpf${dispatchFilter === pl.key ? " active" : ""}`}
               style={dispatchFilter === pl.key ? { borderColor: pl.color, background: `${pl.color}22`, color: pl.color } : undefined}
               onClick={() => setDispatchFilter(dispatchFilter === pl.key ? null : pl.key)}
+              title={pl.cand
+                ? (ko ? "후보 차량 — 매처가 배차 후보로 쓰는 상태 (유휴·드랍오프 대기·드랍오프 중)" : "Candidate — states the matcher dispatches from")
+                : (ko ? "작업 중 단계 — 배차 후보 아님" : "Mid-cycle stage — not a dispatch candidate")}
             >
               <i style={{ background: pl.color }} />{ko ? pl.ko : pl.en}<span className="dpf-n">{dispatchCounts[pl.key] ?? 0}</span>
             </button>
