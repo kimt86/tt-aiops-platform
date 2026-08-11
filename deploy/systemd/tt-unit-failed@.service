@@ -1,0 +1,14 @@
+[Unit]
+Description=유닛 실행 실패를 ops_alert 에 기록 (%i 의 OnFailure 훅)
+# 인스턴스 이름 %i 는 실패한 유닛의 전체 이름이다(OnFailure=tt-unit-failed@%n.service).
+# 이 유닛 자신에게는 OnFailure 를 걸지 않는다 — 경보가 실패하면 다시 경보를 부르는 고리가 된다.
+After=network-online.target
+
+[Service]
+Type=oneshot
+# 폭발 반경 제한(2026-07-28 OOM 장애 재발방지 규율). psql 한 번이라 여유는 충분하다.
+MemoryMax=256M
+MemorySwapMax=0
+WorkingDirectory=%h/projects/tt-aiops-platform
+ExecStart=%h/projects/tt-aiops-platform/scripts/unit_failed_alert.sh %i
+Nice=10

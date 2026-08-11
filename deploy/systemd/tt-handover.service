@@ -1,6 +1,8 @@
 [Unit]
 Description=tt-aiops-platform authoritative soon-idle labels (JOB_ORDER_HISTORY completions -> Postgres)
 After=network-online.target
+# 실패하면 ops_alert 에 남긴다 — oneshot 이라 재시도가 없어 조용히 결손된다.
+OnFailure=tt-unit-failed@%n.service
 
 [Service]
 # 폭발 반경 제한(2026-07-28 OOM 장애 재발방지). 실측 최고치 17M 대비 넉넉하다.
