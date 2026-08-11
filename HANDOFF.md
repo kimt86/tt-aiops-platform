@@ -42,6 +42,9 @@
 
 ## IN SCOPE
 
+> ★사이클 도중 **사용자 승인으로 2건이 추가**됐다(2026-08-11, 1차 코드리뷰가 올림).
+> 아래 A1·A3 뒤에 「추가 승인분」 절이 있다.
+
 ### A1 — 매칭 틱 위상 고정 (`crates/api/src/livemap.rs:4405`)
 
 `spawn_stage2_shadow` 의 틱을 **매분 :15 에 고정**한다. 첫 틱 전에 다음 :15 까지 재우고 이후 60초.
@@ -85,6 +88,17 @@
 
 ---
 
+### ★추가 승인분 ① — 비교기 T1 절체 (mig0149·0151·0152)
+
+`upd_ts`(행 마지막 갱신)를 배차 순간으로 쓰던 곳을 `yt_dis_ts`(실물)로. 실측 배차행 175건 중
+90건(51.4%)이 둘이 다르고 격차 p90 2,170초였다. 4곳(비교기 T1 · fair_compare 창 · D_tos 시드 ·
+`dispatch_pred_sample` 컬럼 분리) + 위치 이력 창 6분→60분 + `latest_pos` 나이 상한 분리.
+
+### ★추가 승인분 ② — 목록 나이 게이지 (mig0150)
+
+매칭이 실제로 쓴 작업목록의 나이를 틱마다 `stage2_solver_shadow.workpool_age_s` 에.
+신선도 게이트가 이미 재놓고 버리던 값이다. 경보는 안 달았다(임계는 대역이 쌓인 뒤).
+
 ## OUT OF SCOPE
 
 - **A2 (workpool 폴링 60초 → 30초) — 다음 세션으로 확정 이월**(사용자 결정 2026-08-11).
@@ -109,7 +123,7 @@
 
 ```bash
 cargo build --release -p tt-api && cargo build --release -p tt-extractor
-cargo test --workspace          # 61 통과 · 실패 0  (현재 59 + 위상 테스트 2건)
+cargo test --workspace          # 65 통과 · 실패 0  (59 + 위상 테스트 6건)
 systemctl --user is-active tt-api
 ```
 
