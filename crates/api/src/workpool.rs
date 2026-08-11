@@ -44,6 +44,8 @@ struct MoveRow {
     to_pos: Option<String>,
     twintandem: Option<String>,
     upd_ts: Option<DateTime<Utc>>,
+    /// TOS 가 이 트럭을 배차한 시각(YT_DIS_DT·mig 0148). `upd_ts` 는 행 갱신에 밀리는 대리값이다.
+    yt_dis_ts: Option<DateTime<Utc>>,
 }
 
 #[derive(Serialize, Clone)]
@@ -68,9 +70,13 @@ struct MoveOut {
     from_pos: Option<String>,
     to_pos: Option<String>,
     twintandem: Option<String>,
-    /// TOS row last-update ≈ truck-assignment time (D_tos); internal (validation logger), not in JSON
+    /// TOS row last-update; internal (validation logger), not in JSON.
+    /// ⚠ 배차 시각이 **아니다** — 그건 아래 `yt_dis_ts` 다(mig 0148).
     #[serde(skip)]
     upd_ts: Option<DateTime<Utc>>,
+    /// D_tos(= TOS 가 이 트럭을 배차한 시각)의 권위값. internal, not in JSON.
+    #[serde(skip)]
+    yt_dis_ts: Option<DateTime<Utc>>,
 }
 
 #[derive(sqlx::FromRow)]
@@ -272,7 +278,7 @@ pub(crate) async fn build_workpool(pool: PgPool) -> Result<WorkpoolOut, AppError
         "SELECT w.qc, w.queuename, w.vessel, w.jobtype, w.yt_status, w.ytno, w.armgc, w.etw_ts,
                 coalesce(e.qc_etw_utc, e.vessel_etw_utc) AS etw_accurate,
                 e.expires_at_utc AS etw_expires, w.actv_ts,
-                w.contno, w.yt_topos, w.from_pos, w.to_pos, w.twintandem, w.upd_ts
+                w.contno, w.yt_topos, w.from_pos, w.to_pos, w.twintandem, w.upd_ts, w.yt_dis_ts
            FROM live_workpool w
            LEFT JOIN tos_etw_cntr e
                   ON e.vessel = w.vessel AND e.voyage = w.voyage AND e.cntr_no = w.contno",
@@ -304,6 +310,7 @@ pub(crate) async fn build_workpool(pool: PgPool) -> Result<WorkpoolOut, AppError
         to_pos: m.to_pos.clone(),
         twintandem: m.twintandem.clone(),
         upd_ts: m.upd_ts,
+        yt_dis_ts: m.yt_dis_ts,
     };
 
     // which QCs are "working now": have an active move, or a started queue (comp>0).
@@ -932,14 +939,17 @@ pub fn spawn_dispatch_pred_logger(pool: PgPool) {
             // predictions. pred_ver=2 tags these rows so analysis never mixes them with the
             // legacy population (mig 0130).
             let cand = match stage2_work_candidates(pool.clone()).await { Ok(v) => v.1, Err(_) => continue };
-            // contno → upd_ts (TOS UPD_DT) seed for D_tos — same source/filter as block (0) above.
+            // contno → 배차 시각 seed for D_tos — same source/filter as block (0) above.
+            // ★2026-08-11: 원천을 upd_ts(UPD_DT) → yt_dis_ts(YT_DIS_DT)로 바꿨다. UPD_DT 는 행
+            // 마지막 갱신이라 배차 이후 갱신에 밀린다(실측: 배차행 175건 중 90건이 다르고 격차
+            // p90 2,170초). D_tos 는 "TOS 가 언제 배차했나"이므로 밀리지 않는 값이 맞다(mig 0148).
             let upd_of: HashMap<String, Option<DateTime<Utc>>> = {
                 let mut m: HashMap<String, Option<DateTime<Utc>>> = HashMap::new();
                 for qc in &wp.qcs {
                     for mv in &qc.moves {
                         if mv.ytno.as_deref().map(|s| !s.trim().is_empty()).unwrap_or(false) {
                             if let Some(c) = &mv.contno {
-                                m.insert(c.clone(), mv.upd_ts);
+                                m.insert(c.clone(), mv.yt_dis_ts);
                             }
                         }
                     }

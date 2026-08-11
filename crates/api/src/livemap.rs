@@ -5198,9 +5198,18 @@ pub fn spawn_dispatch_compare(lm: Arc<LiveMap>, pool: PgPool) {
                     }
                 }
             };
-            // truck pool snapshots (last 6 min), keyed by snapshot time → reconstruct T1 state
+            // truck pool snapshots, keyed by snapshot time → reconstruct T1 state.
+            //
+            // ★창 6분 → 60분 (2026-08-11, T1 절체와 한 쌍). T1 이 upd_ts 였을 때는 값이 늘 최근이라
+            //   6분이면 닿았는데, 진짜 배차 시각으로 바꾸니 T1 이 훨씬 과거로 갔다. 실측(같은 날,
+            //   비교 대상 배차행 152건의 T1 나이): 중앙 11.5분 · p90 44.9분 —
+            //   6분 창은 48건(31.6%)밖에 못 덮고 나머지는 조용히 latest_pos 폴백을 탔다
+            //   (스냅샷 적중 41.0% → 15.8% 실측). 자료가 없어서가 아니라 안 읽어서였다:
+            //   truck_pos_hist 는 2일치를 보관한다(프룬 5377행).
+            //   60분이면 147건(96.7%)을 덮고 적재는 1,380 → 17,313행/틱(실측). fair_compare 는
+            //   이미 20분을 읽는다. 더 넓히면 덮는 이득이 급감한다(20분 62.5% → 60분 96.7%).
             let hist = sqlx::query_as::<_, (DateTime<Utc>, String, f64, f64, Option<String>)>(
-                "SELECT ts, ytno, lat, lon, state FROM truck_pos_hist WHERE ts > now() - interval '6 minutes'",
+                "SELECT ts, ytno, lat, lon, state FROM truck_pos_hist WHERE ts > now() - interval '60 minutes'",
             )
             .fetch_all(&pool).await.unwrap_or_default();
             let mut snaps: std::collections::BTreeMap<i64, Vec<(String, f64, f64, String)>> = std::collections::BTreeMap::new();
@@ -5208,7 +5217,7 @@ pub fn spawn_dispatch_compare(lm: Arc<LiveMap>, pool: PgPool) {
                 snaps.entry(t.timestamp_millis()).or_default().push((yt, la, lo, st.unwrap_or_default()));
             }
             // each truck's MOST-RECENT position+state — fallback when the T1 snapshot doesn't contain
-            // a given truck (captured a frame apart) or for assignments older than the 6-min history.
+            // a given truck (captured a frame apart) or for assignments older than the history window.
             let mut latest_pos: HashMap<String, (f64, f64, String)> = HashMap::new();
             for trucks in snaps.values() {
                 for (yt, la, lo, st) in trucks {
@@ -5231,9 +5240,15 @@ pub fn spawn_dispatch_compare(lm: Arc<LiveMap>, pool: PgPool) {
             };
             // EVERY truck TOS has assigned that we haven't compared yet (one row per bay×truck). No
             // time window → covers the whole current backlog, not just the last few minutes.
-            let rows = sqlx::query_as::<_, (String, String, String, String, DateTime<Utc>, Option<String>)>(
+            let rows = sqlx::query_as::<_, (String, String, String, String, DateTime<Utc>, DateTime<Utc>, Option<String>)>(
+                // ★T1 = yt_dis_ts (배차 시각 실물·mig 0148). 종전엔 upd_ts 를 T1 로 썼는데 그건 행
+                //   마지막 갱신이라 배차 이후 갱신에 밀린다 — 그만큼 엉뚱한 순간의 트럭 위치로
+                //   비교하게 된다. **키(tos_upd)는 그대로 둔다**: 중복 제거용 토큰으로는 여전히
+                //   유효하고, 바꾸면 PK 의미가 바뀌면서 백로그 77만 행이 통째로 재비교된다.
+                //   yt_dis_ts 가 비면(있으면 안 되지만) upd_ts 로 떨어져 행을 잃지 않는다.
                 "SELECT DISTINCT ON (w.qc, w.queuename, w.ytno)
-                        w.qc, w.queuename, w.jobtype, w.ytno, w.upd_ts, w.yt_topos
+                        w.qc, w.queuename, w.jobtype, w.ytno, w.upd_ts,
+                        coalesce(w.yt_dis_ts, w.upd_ts) AS t1, w.yt_topos
                    FROM live_workpool w
                   WHERE w.ytno IS NOT NULL AND w.ytno <> '' AND w.qc IS NOT NULL
                     AND w.jobtype IN ('DS','LD')
@@ -5243,7 +5258,7 @@ pub fn spawn_dispatch_compare(lm: Arc<LiveMap>, pool: PgPool) {
                   ORDER BY w.qc, w.queuename, w.ytno, w.upd_ts DESC",
             )
             .fetch_all(&pool).await.unwrap_or_default();
-            for (qc, queue, jobtype, tos_ytno, tos_upd, yt_topos) in rows {
+            for (qc, queue, jobtype, tos_ytno, tos_upd, tos_dis, yt_topos) in rows {
                 // pickup coord: LD = the source block centroid, DS = the QC crane (live or learned)
                 let coord = if jobtype == "LD" {
                     yt_topos.as_deref().and_then(|t| centroids.get(t).or_else(|| centroids.get(block_prefix(t))).copied())
@@ -5251,7 +5266,7 @@ pub fn spawn_dispatch_compare(lm: Arc<LiveMap>, pool: PgPool) {
                     cranes.get(&qc).or_else(|| centroids.get(&qc)).copied()
                 };
                 let Some((dlat, dlon)) = coord else { continue };
-                let t1 = tos_upd.timestamp_millis();
+                let t1 = tos_dis.timestamp_millis(); // 배차 시각(mig 0148) — upd_ts 아님
                 // PRECISE = the snapshot ≤ T1 exists AND contains the TOS truck → tos + our pool are
                 // read from that same instant (timing-skew-free). Otherwise fall back to each truck's
                 // latest position (a "now-estimate", reason='now') so EVERY assignment still gets a pick.
@@ -5287,9 +5302,11 @@ pub fn spawn_dispatch_compare(lm: Arc<LiveMap>, pool: PgPool) {
                     else if tos_arrival.map(|t| our_arrival < t).unwrap_or(false) { "ours_closer" }
                     else { "tos_closer" };
                 let _ = sqlx::query(
+                    // t1_ver=1 → T1 이 yt_dis_ts(배차 시각 실물)라는 표시. NULL 구간(2026-08-11
+                    // 경계 이전)은 T1 이 upd_ts 였다 — 집계 시 반드시 가를 것(mig 0149).
                     "INSERT INTO dispatch_compare_shadow
-                       (qc,queuename,jobtype,tos_ytno,tos_arrival_s,our_ytno,our_arrival_s,agree,reason,delta_s,tos_upd)
-                     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) ON CONFLICT (qc,queuename,tos_ytno,tos_upd) DO NOTHING",
+                       (qc,queuename,jobtype,tos_ytno,tos_arrival_s,our_ytno,our_arrival_s,agree,reason,delta_s,tos_upd,t1_ver)
+                     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,1) ON CONFLICT (qc,queuename,tos_ytno,tos_upd) DO NOTHING",
                 )
                 .bind(&qc).bind(&queue).bind(&jobtype).bind(&tos_ytno).bind(tos_arrival.map(|x| x as i32))
                 .bind(&our_ytno).bind(our_arrival as i32).bind(agree).bind(reason).bind(delta.map(|x| x as i32)).bind(tos_upd)
@@ -5635,12 +5652,15 @@ pub fn spawn_fair_compare(lm: Arc<LiveMap>, pool: PgPool) {
                 (cr, cem)
             };
             // the window's TOS decisions (distinct bay×truck, most recent first, capped)
+            // ★창·정렬·T1 전부 yt_dis_ts(배차 시각 실물·mig 0148) 기준. 종전엔 upd_ts 라, 배차는
+            //   30분 전인데 무관한 갱신으로 UPD_DT 만 밀린 행이 "방금 배차"로 창에 들어왔다.
             let rows = sqlx::query_as::<_, (String, String, String, String, DateTime<Utc>, Option<String>)>(
-                "SELECT DISTINCT ON (w.qc, w.queuename, w.ytno) w.qc, w.queuename, w.jobtype, w.ytno, w.upd_ts, w.yt_topos
+                "SELECT DISTINCT ON (w.qc, w.queuename, w.ytno) w.qc, w.queuename, w.jobtype, w.ytno,
+                        coalesce(w.yt_dis_ts, w.upd_ts) AS t1, w.yt_topos
                    FROM live_workpool w
                   WHERE w.ytno IS NOT NULL AND w.ytno <> '' AND w.qc IS NOT NULL AND w.jobtype IN ('DS','LD')
-                    AND w.upd_ts > now() - interval '15 minutes'
-                  ORDER BY w.qc, w.queuename, w.ytno, w.upd_ts DESC LIMIT 400",
+                    AND coalesce(w.yt_dis_ts, w.upd_ts) > now() - interval '15 minutes'
+                  ORDER BY w.qc, w.queuename, w.ytno, coalesce(w.yt_dis_ts, w.upd_ts) DESC LIMIT 400",
             )
             .fetch_all(&pool).await.unwrap_or_default();
             // Group TOS assignments by the snapshot instant just before each. Only trucks that were
