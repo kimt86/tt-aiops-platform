@@ -431,6 +431,7 @@ export default function LiveMapPage({ lang, internal = false }: { lang: Lang; in
   const [stateFilter, setStateFilter] = useState<string | null>(null);
   const [dispatchFilter, setDispatchFilter] = useState<Dispatch | null>(null);
   const [toggles, setToggles] = useState<Toggles>(DEFAULT_TOGGLES);
+  const [showQuay, setShowQuay] = useState(true); // 안벽 현황(QC 상태색·접안 선박) — 관제 뷰 기본 ON
   const [showWorkPts, setShowWorkPts] = useState(false); // dispatched work points (TOS vs ours)
   const [showAdvisory, setShowAdvisory] = useState(false); // 라이브 추천선(P3 복원): 지금 이 트럭을 여기로
   const workPtsRef = useRef<WorkPoint[]>([]);
@@ -750,6 +751,44 @@ export default function LiveMapPage({ lang, internal = false }: { lang: Lang; in
         },
       });
 
+      // ── 안벽 현황 (관제 뷰 기본 레이어): QC 상태색 + 접안 선박 ──
+      // QC 점: 초록=작업중(활성 무브 있음) · 빨강=트럭 없음(잔여 있는데 무브 0 = 굶는 중) ·
+      // 회색 작은 점=유휴(대기열 없음). 선박: 담당 QC 작업지점 평균의 바다쪽 80m.
+      map.addSource("quay-qc", { type: "geojson", data: EMPTY_FC });
+      map.addLayer({
+        id: "qq-dot", type: "circle", source: "quay-qc",
+        paint: {
+          "circle-radius": ["interpolate", ["linear"], ["zoom"],
+            12, ["case", ["==", ["get", "st"], "idle"], 2.5, 5],
+            17, ["case", ["==", ["get", "st"], "idle"], 5, 10]],
+          "circle-color": ["match", ["get", "st"], "work", "#22c55e", "wait", "#ef4444", "#475569"],
+          "circle-opacity": ["case", ["==", ["get", "st"], "idle"], 0.5, 0.9],
+          "circle-stroke-width": 1.5, "circle-stroke-color": "#0a0f1d",
+        },
+      });
+      map.addLayer({
+        id: "qq-lbl", type: "symbol", source: "quay-qc", filter: ["!=", ["get", "st"], "idle"],
+        layout: { "text-field": ["get", "lbl"], "text-size": 10, "text-offset": [0, 1.2], "text-anchor": "top", "text-allow-overlap": true },
+        paint: {
+          "text-color": ["match", ["get", "st"], "work", "#86efac", "#fca5a5"],
+          "text-halo-color": "#0a0f1d", "text-halo-width": 1.2,
+        },
+      });
+      map.addSource("quay-vessel", { type: "geojson", data: EMPTY_FC });
+      map.addLayer({
+        id: "qv-dot", type: "circle", source: "quay-vessel",
+        paint: {
+          "circle-radius": ["interpolate", ["linear"], ["zoom"], 12, 7, 17, 16],
+          "circle-color": "#0ea5e9", "circle-opacity": 0.35,
+          "circle-stroke-width": 2, "circle-stroke-color": "#38bdf8",
+        },
+      });
+      map.addLayer({
+        id: "qv-lbl", type: "symbol", source: "quay-vessel",
+        layout: { "text-field": ["get", "lbl"], "text-size": 11.5, "text-offset": [0, -1.1], "text-anchor": "bottom", "text-allow-overlap": true },
+        paint: { "text-color": "#7dd3fc", "text-halo-color": "#0a0f1d", "text-halo-width": 1.4 },
+      });
+
       // metric grid: filled cells colored by a live metric (avg speed / density), client-side.
 
       map.addSource("vehicles", { type: "geojson", data: { type: "FeatureCollection", features: [] } });
@@ -972,6 +1011,90 @@ export default function LiveMapPage({ lang, internal = false }: { lang: Lang; in
     if (map.getLayer("dm-bub")) map.setLayoutProperty("dm-bub", "visibility", vis(toggles.demand));
   }, [toggles, ready]);
 
+  // 안벽 현황 표시 전환
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !ready) return;
+    const vis = showQuay ? "visible" : "none";
+    for (const id of ["qq-dot", "qq-lbl", "qv-dot", "qv-lbl"]) if (map.getLayer(id)) map.setLayoutProperty(id, "visibility", vis);
+  }, [showQuay, ready]);
+
+  // 안벽 현황 데이터: 크레인 작업지점(learn_topos, 5분 주기 영구화) × 워크풀(90초 스냅샷,
+  // 접안 중 선박으로 이미 필터됨). QC 상태 = 활성무브>0 → 작업중 / 잔여>0 → 트럭 없음(굶는 중)
+  // / 그 외 → 유휴. 선박 위치 = 담당 QC 작업지점 평균 + 안벽선 법선의 바다쪽 80m
+  // (바다쪽 = 야드 블록 평균의 반대쪽).
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !ready || !showQuay) return;
+    let alive = true;
+    const load = async () => {
+      try {
+        const [t, wp] = await Promise.all([api.learnTopos(), api.workpool()]);
+        if (!alive || !mapRef.current) return;
+        const ko2 = koRef.current;
+        const crane = new Map<string, [number, number]>();
+        let bx = 0, by = 0, bk = 0; // 야드(비크레인) 점 평균 = 육지쪽 기준
+        for (const p of t.points) {
+          if (p.is_crane) crane.set(p.topos, [p.lon, p.lat]);
+          else { bx += p.lon; by += p.lat; bk++; }
+        }
+        // QC 상태 점
+        const byQc = new Map(wp.qcs.map((q) => [q.qc, q]));
+        const qcFeats: GeoJSON.Feature[] = [];
+        for (const [qc, coord] of crane) {
+          const q = byQc.get(qc);
+          const st = q ? (q.active_moves > 0 ? "work" : q.remaining > 0 ? "wait" : "idle") : "idle";
+          const lbl = q ? `${qc} · ${q.remaining}` : qc;
+          qcFeats.push({ type: "Feature", geometry: { type: "Point", coordinates: coord }, properties: { st, lbl } });
+        }
+        // 바다쪽 오프셋: 크레인 점들의 주축(안벽 방향) 법선 중 블록 평균 반대쪽으로 80m
+        const cs = [...crane.values()];
+        let offLon = 0, offLat = 0;
+        if (cs.length >= 2 && bk > 0) {
+          const mLat = cs.reduce((s, c) => s + c[1], 0) / cs.length;
+          const mLon = cs.reduce((s, c) => s + c[0], 0) / cs.length;
+          const kx = 111320 * Math.cos((mLat * Math.PI) / 180), ky = 111320; // 경위도→m
+          let sxx = 0, syy = 0, sxy = 0;
+          for (const [lo, la] of cs) { const x = (lo - mLon) * kx, y = (la - mLat) * ky; sxx += x * x; syy += y * y; sxy += x * y; }
+          const tr = sxx + syy, disc = Math.sqrt(Math.max(0, (tr * tr) / 4 - (sxx * syy - sxy * sxy)));
+          const l1 = tr / 2 + disc;
+          let dx = Math.abs(sxy) > 1e-9 ? l1 - syy : 1, dy = Math.abs(sxy) > 1e-9 ? sxy : 0;
+          const nrm = Math.hypot(dx, dy) || 1; dx /= nrm; dy /= nrm;
+          let nx = -dy, ny = dx;
+          const bxm = (bx / bk - mLon) * kx, bym = (by / bk - mLat) * ky;
+          if (bxm * nx + bym * ny > 0) { nx = -nx; ny = -ny; } // 블록쪽이면 뒤집어 바다쪽으로
+          const OFF_M = 80;
+          offLon = (nx * OFF_M) / kx; offLat = (ny * OFF_M) / ky;
+        }
+        // 접안 선박: 선박별 담당 QC(중복 제거) 작업지점 평균 + 오프셋
+        const ves = new Map<string, { qcs: Map<string, [number, number]>; remaining: number }>();
+        for (const q of wp.qcs) {
+          const coord = crane.get(q.qc);
+          for (const queue of q.queues) {
+            const a = ves.get(queue.vessel) ?? { qcs: new Map(), remaining: 0 };
+            a.remaining += queue.remaining;
+            if (coord) a.qcs.set(q.qc, coord);
+            ves.set(queue.vessel, a);
+          }
+        }
+        const vFeats: GeoJSON.Feature[] = [];
+        for (const [vessel, a] of ves) {
+          const pts = [...a.qcs.values()];
+          if (!pts.length) continue; // 작업지점을 모르는 선박은 못 그린다 (다음 단계: 선석 위치)
+          const lon = pts.reduce((s, c) => s + c[0], 0) / pts.length + offLon;
+          const lat = pts.reduce((s, c) => s + c[1], 0) / pts.length + offLat;
+          const lbl = `${vessel}\n${ko2 ? "잔여" : "left"} ${a.remaining}`;
+          vFeats.push({ type: "Feature", geometry: { type: "Point", coordinates: [lon, lat] }, properties: { lbl } });
+        }
+        (map.getSource("quay-qc") as maplibregl.GeoJSONSource | undefined)?.setData({ type: "FeatureCollection", features: qcFeats });
+        (map.getSource("quay-vessel") as maplibregl.GeoJSONSource | undefined)?.setData({ type: "FeatureCollection", features: vFeats });
+      } catch { /* keep last good data */ }
+    };
+    load();
+    const iv = setInterval(load, 30000);
+    return () => { alive = false; clearInterval(iv); };
+  }, [showQuay, ready]);
+
   // learned-layout (work-points / lanes) + dispatch demand overlays: fetch + build GeoJSON while toggled on.
   useEffect(() => {
     const map = mapRef.current;
@@ -1133,11 +1256,11 @@ export default function LiveMapPage({ lang, internal = false }: { lang: Lang; in
   const liveActive = mapMode === "live";
   const staleAge = asOfAge == null ? "?" : asOfAge >= 3600 ? `${Math.floor(asOfAge / 3600)}${ko ? "시간" : "h"}` : asOfAge >= 60 ? `${Math.floor(asOfAge / 60)}${ko ? "분" : "m"}` : `${asOfAge}${ko ? "초" : "s"}`;
   const set = (k: LayerKey, v: boolean) => setToggles((t) => ({ ...t, [k]: v }));
-  // 고객 모드는 패널에 보이는 4개(영역·추천선·작업지점·수요)만 정직하게 센다
+  // 고객 모드는 패널에 보이는 5개(영역·안벽·추천선·작업지점·수요)만 정직하게 센다
   const activeCount = internal
     ? Object.values(toggles).filter(Boolean).length
-    : [toggles.areas, showAdvisory, showWorkPts, toggles.demand].filter(Boolean).length;
-  const layerTotal = internal ? LAYER_TOTAL : 4;
+    : [toggles.areas, showQuay, showAdvisory, showWorkPts, toggles.demand].filter(Boolean).length;
+  const layerTotal = internal ? LAYER_TOTAL : 5;
   const dispatchViewOn = showAdvisory || showWorkPts || toggles.demand;
 
   return (
@@ -1296,6 +1419,11 @@ export default function LiveMapPage({ lang, internal = false }: { lang: Lang; in
                 )}
               </section>
             )}
+            <section className="llp-sec">
+              <header>{ko ? "안벽 (QUAY)" : "Quay"}</header>
+              <Row on={showQuay} color="#38bdf8" label={ko ? "안벽 현황 (QC 상태 · 접안 선박)" : "Quay status (QC state · vessels)"} onChange={setShowQuay} />
+              <div className="llp-hint">{ko ? "초록=작업중 · 빨강=트럭 없음(굶는 중) · 회색=유휴 · 파랑=접안 선박(잔여 무브)" : "green=working · red=no truck (starving) · gray=idle · blue=berthed vessel (moves left)"}</div>
+            </section>
             <section className="llp-sec">
               <header>{ko ? "배차 (DISPATCH)" : "Dispatch"}</header>
               <Row on={showAdvisory} color="#a78bfa" label={ko ? "배차 추천선 (지금 이 트럭 → 여기)" : "Live recommendations (truck → work)"} onChange={setShowAdvisory} />
