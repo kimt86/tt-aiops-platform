@@ -5740,6 +5740,107 @@ pub fn spawn_fair_compare(lm: Arc<LiveMap>, pool: PgPool) {
     });
 }
 
+/// 배정 알고리즘(2단계 비용행렬 매칭)의 회귀 테스트.
+///
+/// 이 함수는 "어느 트럭을 어느 작업에 보낼지"를 실제로 정하는 곳인데 테스트가 0건이었다.
+/// 그림자인 동안에는 틀려도 기록만 지저분해지지만, 실배차로 올리면 **틀린 배정이 그대로
+/// 현장 지시**가 된다. 고칠 때 실수를 잡아줄 안전망으로 최소한을 고정한다.
+///
+/// 비용 단위는 초(트럭이 자유로워지는 시각 + 공차 주행). 값 자체가 아니라 **성질**을 고정한다 —
+/// 상수를 바꾸면 깨지는 테스트는 상수를 바꿀 때마다 무의미하게 깨지기 때문이다.
+#[cfg(test)]
+mod optimal_assign_tests {
+    use super::optimal_assign;
+
+    /// 배정 결과의 총비용. 간선 목록에서 되짚어 잰다.
+    fn cost_of(assign: &[(usize, usize)], edges: &[(usize, usize, i64)]) -> i64 {
+        assign
+            .iter()
+            .map(|&(t, b)| {
+                edges
+                    .iter()
+                    .find(|&&(u, v, _)| u == t && v == b)
+                    .map(|&(_, _, c)| c)
+                    .expect("배정된 쌍에 대응하는 간선이 없다")
+            })
+            .sum()
+    }
+
+    /// ★핵심 — 눈앞의 최선(탐욕)이 전체 최선이 아닌 고전 사례를 고정한다.
+    ///
+    /// 트럭0 은 작업0 이 가깝고(10), 트럭1 은 작업0 밖에 갈 수 없다(20).
+    /// 탐욕이 트럭0 에게 작업0 을 주면 트럭1 은 갈 곳이 없어 작업1 이 빈다.
+    /// 최적은 트럭0 을 작업1(30) 로 보내고 트럭1 에게 작업0(20) 을 줘 **둘 다** 채운다.
+    /// 이 성질이 깨지면 매칭이 탐욕으로 퇴화한 것이다.
+    #[test]
+    fn 탐욕이_지는_사례에서_둘_다_채운다() {
+        let edges = [(0, 0, 10), (0, 1, 30), (1, 0, 20)];
+        let assign = optimal_assign(2, &[1, 1], &edges);
+        assert_eq!(assign.len(), 2, "두 작업을 모두 채워야 한다: {assign:?}");
+        assert!(assign.contains(&(1, 0)), "트럭1 은 작업0 밖에 못 간다: {assign:?}");
+        assert!(assign.contains(&(0, 1)), "트럭0 이 양보해야 둘 다 찬다: {assign:?}");
+        assert_eq!(cost_of(&assign, &edges), 50);
+    }
+
+    /// 선택지가 겹치지 않으면 각자 가장 싼 곳으로 간다(기본 동작).
+    ///
+    /// ⚠ 간선을 **비싼 것부터** 넣는다. 싼 것부터 넣으면 비용을 통째로 무시하는 구현도
+    /// 간선 순서 운으로 통과한다 — 실제로 돌연변이 시험에서 그렇게 살아남았다(2026-08-11).
+    /// 이 순서라면 비용을 안 보는 구현은 반드시 170 을 내놓는다.
+    #[test]
+    fn 같은_수를_배정하더라도_더_싼_쪽을_고른다() {
+        let edges = [(0, 1, 90), (0, 0, 10), (1, 0, 80), (1, 1, 20)];
+        let assign = optimal_assign(2, &[1, 1], &edges);
+        assert_eq!(assign.len(), 2);
+        assert_eq!(
+            cost_of(&assign, &edges),
+            30,
+            "10+20=30 이어야 한다. 170 이면 비용을 안 보고 간선 순서대로 집은 것이다: {assign:?}"
+        );
+    }
+
+    /// 트럭이 모자라면 **가장 싼 조합**을 고른다 — 비용을 무시하면 여기서 갈린다.
+    /// 트럭 1대가 갈 수 있는 두 작업의 비용 차가 크고, 비싼 쪽 간선을 먼저 넣었다.
+    #[test]
+    fn 트럭이_모자라면_가장_싼_작업을_고른다() {
+        let edges = [(0, 0, 900), (0, 1, 10)];
+        let assign = optimal_assign(1, &[1, 1], &edges);
+        assert_eq!(assign, vec![(0, 1)], "싼 작업1(10)을 두고 작업0(900)을 골랐다: {assign:?}");
+    }
+
+    /// 작업 묶음의 수요(cap)를 넘겨 보내지 않는다. 넘기면 크레인 한 대에 트럭이 몰린다.
+    #[test]
+    fn 묶음_수요를_초과해_보내지_않는다() {
+        let edges = [(0, 0, 10), (1, 0, 11), (2, 0, 12)];
+        let assign = optimal_assign(3, &[2], &edges);
+        assert_eq!(assign.len(), 2, "수요가 2인데 {}대를 보냈다", assign.len());
+        // 남길 트럭은 가장 비싼 트럭2 여야 한다
+        assert!(!assign.iter().any(|&(t, _)| t == 2), "더 싼 트럭을 두고 비싼 트럭을 보냈다: {assign:?}");
+    }
+
+    /// 갈 수 있는 작업이 없는 트럭은 배정되지 않는다(억지로 내보내지 않는다).
+    #[test]
+    fn 간선이_없는_트럭은_남는다() {
+        let assign = optimal_assign(2, &[1], &[(0, 0, 10)]);
+        assert_eq!(assign, vec![(0, 0)]);
+    }
+
+    /// 빈 입력에서 죽지 않는다 — 한산한 시간대에 실제로 들어오는 값이다.
+    #[test]
+    fn 빈_입력은_빈_결과다() {
+        assert!(optimal_assign(0, &[1, 2], &[]).is_empty());
+        assert!(optimal_assign(3, &[], &[]).is_empty());
+        assert!(optimal_assign(3, &[0, 0], &[(0, 0, 5)]).is_empty(), "수요 0 인 묶음에 보내면 안 된다");
+    }
+
+    /// 한 트럭이 두 작업에 동시에 배정되지 않는다(cap 1 층이 살아 있는지).
+    #[test]
+    fn 한_트럭은_한_작업만_받는다() {
+        let assign = optimal_assign(1, &[5, 5], &[(0, 0, 10), (0, 1, 11)]);
+        assert_eq!(assign.len(), 1, "트럭 하나가 두 곳에 갔다: {assign:?}");
+    }
+}
+
 #[cfg(test)]
 mod workpool_freshness_tests {
     use super::{workpool_stale_reason, WORKPOOL_MAX_AGE_S};
