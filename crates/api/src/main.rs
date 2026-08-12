@@ -133,7 +133,7 @@ async fn main() -> anyhow::Result<()> {
     livemap::spawn_qc_handover_logger(livemap.clone(), pool.clone()); // 10s: LD 핸드오버 엣지 섀도(mig0087, 탐지 검증)
     livemap::spawn_wp_arrival_logger(livemap.clone(), pool.clone()); // 5s: 타이트 작업지점 도착+앞대수 섀도(mig0088, 유휴시각 재설계 검증)
     livemap::spawn_selfcal_refresh(livemap.clone(), pool.clone()); // 15min: ⑤곧빔게이트·⑥유휴분 잔차 자가보정(mig0084)
-    livemap::spawn_stage2_shadow(livemap.clone(), pool.clone()); // 60s: Stage-2 매칭 그림자(stage2_match_shadow)
+    livemap::spawn_stage2_shadow(livemap.clone(), pool.clone()); // 작업목록 착지마다(안 오면 150s): Stage-2 매칭 그림자(stage2_match_shadow)
     livemap::spawn_mapmatch_shadow(livemap.clone(), pool.clone()); // 5s: 도로망 맵매칭 그림자(mm_arrival_shadow, 도착 포착 개선 측정)
     livemap::spawn_pos_hist(livemap.clone(), pool.clone()); // 30s: 트럭 위치·상태 이력(truck_pos_hist)
     livemap::spawn_pos_hist_hifreq(livemap.clone(), pool.clone()); // 3s: 도로망 추론용 고빈도 GPS(truck_pos_hifreq)

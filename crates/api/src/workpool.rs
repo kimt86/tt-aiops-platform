@@ -1620,7 +1620,11 @@ pub async fn health_dispatch(State(pool): State<PgPool>) -> Result<Json<HealthDi
     )
     .fetch_one(&pool)
     .await?;
-    let up = last_tick_age_s.map(|a| a < 120).unwrap_or(false);
+    // 임계 180초 = 하트비트(150초) + 틱 본체 여유. 2026-08-12 이전에는 매칭이 고정 60초 주기라
+    // 120초(2회 결손)가 맞았으나, 지금은 **작업목록 착지마다** 돌고 착지가 없으면 150초 하트비트가
+    // 받는다. 120초로 두면 하트비트가 뜰 때마다 정상인데 "죽었다"고 표시된다(리뷰 지적).
+    // 진짜 총정지는 stage2_match_shadow DEADMAN(30분)이 별도로 잡는다.
+    let up = last_tick_age_s.map(|a| a < 180).unwrap_or(false);
 
     let (thrash_pct, feasible_pct, feasible_crane_pct, routed_pct, arr_p50_s, arr_p90_s): (
         Option<f64>, Option<f64>, Option<f64>, Option<f64>, Option<f64>, Option<f64>,

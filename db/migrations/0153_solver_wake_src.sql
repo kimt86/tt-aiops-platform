@@ -3,7 +3,7 @@
 -- ■ 왜
 -- 이 사이클에 매칭 틱의 깨어나는 방식을 바꿨다: 고정 초(:15)에서 **작업목록 착지 신호**로.
 --   착지로 깨어난 틱  → 목록 나이 0~3초 (원하는 상태)
---   폴백으로 깨어난 틱 → 목록 나이 60초 안팎 (60초를 기다려도 새 목록이 안 온 것)
+--   폴백으로 깨어난 틱 → 목록 나이 150초 이상 (150초를 기다려도 새 목록이 안 온 것)
 --
 -- 이 둘을 `workpool_age_s` 값으로 갈라 읽으면 안 된다. "나이가 크면 폴백"으로 가르는 것은
 -- **결과에서 파생된 변수로 층화**하는 것이라, 그 뒤에 "착지 틱은 나이가 작다"고 보고하면
@@ -13,7 +13,7 @@
 --
 -- ■ 값
 --   'landing'  — data_freshness(WORKPOOL).last_success_at 이 앞으로 가서 깨어남
---   'fallback' — 최대 대기(60초)를 채워 깨어남. 목록은 직전 틱과 같다.
+--   'fallback' — 최대 대기(150초 = 하트비트)를 채워 깨어남. 목록은 직전 틱과 같다.
 --   'startup'  — 프로세스 기동 직후 첫 회. 기준선이 없어 지금 있는 목록으로 한 번 돈다.
 --   NULL       — 경계 이전(고정 위상 :15) 행
 --
@@ -41,7 +41,7 @@ ALTER TABLE stage2_solver_shadow ADD COLUMN IF NOT EXISTS wake_src text;
 
 COMMENT ON COLUMN stage2_solver_shadow.wake_src IS
   '매칭 틱이 깨어난 이유. landing=작업목록 착지 신호(data_freshness(WORKPOOL).last_success_at 전진) / '
-  'fallback=최대 대기 60초 소진(목록 그대로) / startup=프로세스 기동 직후 첫 회(나이가 임의라 landing 에 섞지 말 것) / '
+  'fallback=최대 대기 150초(하트비트) 소진(목록 그대로) / startup=프로세스 기동 직후 첫 회(나이가 임의라 landing 에 섞지 말 것) / '
   'NULL=2026-08-12 경계 이전(고정 위상 :15). '
   'workpool_age_s 를 집계할 때는 반드시 이 컬럼으로 먼저 가른다 — 나이로 이유를 추정하면 동어반복이다.';
 

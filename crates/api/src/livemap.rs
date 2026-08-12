@@ -4438,6 +4438,19 @@ const WAKE_POLL_MS: u64 = 2_000;
 /// 매칭 결과는 달라진다.
 const WAKE_MAX_WAIT_MS: u64 = 150_000;
 
+/// 안티스래시가 "직전에 이 트럭에 뭘 시켰나"를 찾는 창(초).
+///
+/// ⚠ **하트비트보다 반드시 커야 한다.** 종전에는 이 값이 150초 리터럴로 SQL 안에 박혀 있었고,
+/// 하트비트를 150초로 올린 첫 판에서 **두 값이 같아졌다.** 그러면 하트비트 틱에서는 직전 틱의
+/// 행이 항상 창 밖이라(틱의 `ts` 는 본체 끝에 찍히고 하트비트는 그 뒤부터 센다) `prev` 가 비고,
+/// `switched` 가 전부 false 가 되어 `SWITCH_PENALTY_S`·`COMMIT_LOCK_S` 가 통째로 꺼진다
+/// ⇒ **가장 낡은 목록으로 도는 그 틱이 유일하게 제동 없이 전 트럭을 재배정하는 틱**이 된다.
+/// 2026-08-12 2차 리뷰에서 잡혔다. 테스트 `안티스래시_창은_하트비트보다_넓다` 가 고정한다.
+///
+/// 하트비트 + 정상 틱 1회분(≈60초) 여유. 옛 주석의 "~2.5 틱"이라는 의도는 그대로다
+/// (착지 간격 실측 중앙 60~66초 기준 ≈3.2틱).
+const PREV_WINDOW_S: u64 = WAKE_MAX_WAIT_MS / 1000 + 60;
+
 /// 매칭 틱이 깨어난 이유 — `stage2_solver_shadow.wake_src` 에 그대로 적는다 (mig 0153).
 ///
 /// 값으로 사후 추정하지 않고 원천에 적는 이유: `landing` 과 `fallback` 을 `workpool_age_s`
@@ -4609,7 +4622,10 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
             let stale_why = workpool_stale_reason(freshness);
             if let Some(why) = stale_why {
                 stale_streak += 1;
-                // 첫 틱과 이후 10틱(=10분)마다만 남긴다 — 장애가 길어져도 로그가 한 줄씩만 는다.
+                // 첫 틱과 이후 10틱마다만 남긴다 — 장애가 길어져도 로그가 한 줄씩만 는다.
+                // ⚠ 여기서 10틱은 **10분이 아니다**: 추출이 죽으면 이 구간의 틱은 전부
+                //   하트비트(150초)라 10틱 ≈ **25분**이다. 최초 탐지는 첫 틱이라 영향 없고,
+                //   늘어나는 것은 후속 반복 로그와 ops_alert.last_ts 갱신 간격뿐이다.
                 if stale_streak == 1 || stale_streak % 10 == 0 {
                     tracing::warn!(streak = stale_streak, why = %why, "작업목록이 낡아 매칭을 건너뛴다");
                     crate::db::alert(
@@ -4632,10 +4648,12 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
             }
             let now = Utc::now().timestamp_millis();
             // previous-tick recommendation per vehicle (ytno → work bucket key) for anti-thrash.
-            // ts-based (restart-safe), latest per vehicle within the last ~2.5 ticks.
+            // ts-based (restart-safe), latest per vehicle within PREV_WINDOW_S.
             let prev: HashMap<String, (String, String, String)> = sqlx::query_as::<_, (String, String, String, String)>(
-                "SELECT DISTINCT ON (ytno) ytno, coalesce(qc,''), coalesce(vessel,''), coalesce(queuename,'')
-                   FROM stage2_match_shadow WHERE ts > now() - interval '150 seconds' ORDER BY ytno, ts DESC",
+                &format!(
+                    "SELECT DISTINCT ON (ytno) ytno, coalesce(qc,''), coalesce(vessel,''), coalesce(queuename,'')
+                       FROM stage2_match_shadow WHERE ts > now() - interval '{PREV_WINDOW_S} seconds' ORDER BY ytno, ts DESC"
+                ),
             )
             .fetch_all(&pool).await.unwrap_or_default()
             .into_iter().map(|(yt, q, v, qn)| (yt, (q, v, qn))).collect();
@@ -6137,7 +6155,7 @@ mod workpool_freshness_tests {
 
 #[cfg(test)]
 mod wake_on_landing_tests {
-    use super::{should_wake, WakeSrc, WakeStep, WAKE_MAX_WAIT_MS, WORKPOOL_MAX_AGE_S};
+    use super::{should_wake, WakeSrc, WakeStep, PREV_WINDOW_S, WAKE_MAX_WAIT_MS, WORKPOOL_MAX_AGE_S};
     use chrono::{DateTime, TimeZone, Utc};
     use std::time::Duration;
 
@@ -6227,16 +6245,59 @@ mod wake_on_landing_tests {
     /// 밀어냈다. 이 테스트는 그 값으로 되돌리는 것을 막는다.
     #[test]
     fn 폴백_대기는_관측된_착지_간격보다_뒤에_있다() {
-        const 관측_착지간격_p90_초: u64 = 140; // 2026-08-12 실측(중앙 66 · 최대 238)
+        // 착지 간격 실측(etl_run_log, kpi_key=WORKPOOL·status=OK).
+        // **24시간 창**(n=1,413): p50 60.0 · p90 66.2 초.
+        // **최악 1시간 창**(2026-08-12 00:00Z): p50 83.8 · p90 136.3 · 최대 238.3 초.
+        // 여기서는 최악 창 쪽을 기준으로 잡는다 — 그 시간대에도 폴백이 착지를 앞지르면 안 된다.
+        const 관측_착지간격_p90_초: u64 = 140; // 최악 1시간 창 기준(24시간 창이면 67)
         let 대기_초 = WAKE_MAX_WAIT_MS / 1000;
         assert!(
             대기_초 > 관측_착지간격_p90_초,
             "폴백 대기 {대기_초}초가 관측 착지 간격 p90 {관측_착지간격_p90_초}초보다 앞이다 — 정상 운전에서 폴백이 착지를 앞지른다"
         );
+        // 게이트(300초) 전에 하트비트가 **최소 한 번은** 남아야 한다. `대기 < 300` 만으로는
+        // 부족하다 — 299초도 통과하는데 그 값에서는 0번 남는다(2차 리뷰 지적).
         assert!(
-            대기_초 < WORKPOOL_MAX_AGE_S as u64,
-            "폴백 대기 {대기_초}초가 신선도 게이트 {WORKPOOL_MAX_AGE_S}초보다 뒤다 — 게이트가 닫히기 전에 하트비트가 한 번도 안 남는다"
+            대기_초 * 2 <= WORKPOOL_MAX_AGE_S as u64,
+            "폴백 대기 {대기_초}초 × 2 가 신선도 게이트 {WORKPOOL_MAX_AGE_S}초를 넘는다 — 게이트가 닫히기 전에 하트비트가 한 번도 안 남을 수 있다"
         );
+    }
+
+    /// ★안티스래시 창은 하트비트보다 **넓어야** 한다.
+    ///
+    /// 같으면(첫 판에서 둘 다 150초였다) 하트비트 틱에서 직전 틱의 행이 항상 창 밖이라
+    /// `prev` 가 비고, `switched` 가 전부 false 가 되어 전환 벌점이 통째로 꺼진다.
+    /// ⇒ **가장 낡은 목록으로 도는 틱이 유일하게 제동 없이 전 트럭을 재배정하는 틱**이 된다.
+    #[test]
+    fn 안티스래시_창은_하트비트보다_넓다() {
+        assert!(
+            PREV_WINDOW_S > WAKE_MAX_WAIT_MS / 1000,
+            "prev 창 {PREV_WINDOW_S}초가 하트비트 {}초 이하다 — 하트비트 틱에서 안티스래시가 꺼진다",
+            WAKE_MAX_WAIT_MS / 1000
+        );
+    }
+
+    /// ★폭주 방지 불변식: **깨어나면 반드시 `landed` 가 있거나(= 호출부가 `seen` 을 전진시킨다)
+    /// 최대 대기를 채웠다(= 그 자체가 속도 제한이다).**
+    ///
+    /// 실제로 폭주를 막는 것은 호출부의 `if landed.is_some() { *seen = landed }` 인데 그건
+    /// 순수 함수 밖이라 테스트가 못 본다(2차 리뷰 지적). 그래서 성질 쪽을 못 박는다 —
+    /// 이 성질을 깨는 Wake 팔을 새로 붙이면 여기서 걸린다.
+    #[test]
+    fn 깨어나면_seen_이_전진하거나_최대_대기를_채운다() {
+        let 최대 = Duration::from_millis(WAKE_MAX_WAIT_MS);
+        for seen in [None, Some(시각(10))] {
+            for landed in [None, Some(시각(5)), Some(시각(10)), Some(시각(20))] {
+                for waited in [잠깐, 최대 - Duration::from_millis(1), 최대] {
+                    if let WakeStep::Wake(src) = should_wake(seen, landed, waited) {
+                        assert!(
+                            landed.is_some() || waited >= 최대,
+                            "{src:?} 가 seen 전진도 최대 대기도 없이 깨웠다 (seen={seen:?} landed={landed:?} waited={waited:?}) — 대기 루프가 sleep 없이 폭주한다"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     /// DB 에 적히는 문자열을 못 박는다. 오타 하나면 판별자가 통째로 거짓말을 하는데,
