@@ -43,7 +43,11 @@ const DEADMAN: &[(&str, &str, i64)] = &[
     // table, timestamp column, alert if the newest row is older than N minutes
     ("congestion_edge", "hour", 240), // hourly cron; `hour` lags ~1-2h by design, so 4h = 2+ misses
     ("road_route_eval", "ts", 90),    // spawn_roadgraph_eval, 10min → 9 misses
-    ("stage2_match_shadow", "ts", 30), // spawn_stage2_shadow, 60s → 30 misses
+    // spawn_stage2_shadow. 2026-08-12 부터 고정 60초가 아니라 **작업목록 착지마다** 돈다
+    // (착지 간격 실측 중앙 66초, 안 오면 150초 하트비트) → 30분이면 최소 12회 결손.
+    // ⚠ 짝인 stage2_solver_shadow 는 여기 없다 — 그 표만 INSERT 가 깨지면(새 컬럼 배포 시
+    //   마이그레이션 누락 등) 경보가 없고 warn 로그만 남는다.
+    ("stage2_match_shadow", "ts", 30),
     // The two crane handover logs. These are TOS ground truth for every cycle timestamp, they poll
     // every 60s, and until now NOTHING watched them: absent from DEADMAN and RETENTION, and no code
     // alerts on etl_run_log.status='FAILED' or data_freshness.last_status (the only reader is a plain

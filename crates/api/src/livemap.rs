@@ -13,12 +13,12 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use axum::extract::State;
 use axum::Json;
 use sqlx::PgPool;
-use chrono::{DateTime, Timelike, Utc};
+use chrono::{DateTime, Utc};
 use futures_util::{SinkExt, StreamExt};
 use serde::Serialize;
 use tokio::sync::{Mutex, RwLock};
@@ -4396,49 +4396,167 @@ fn workpool_stale_reason(res: Result<(Option<i64>, Option<i64>), String>) -> Opt
     }
 }
 
-/// 매칭 틱이 도는 **분 안의 초**. 작업목록 착지 직후에 고정한다.
+/// 신선도·착지 시각을 한 번에 읽는 질의. 대기 루프와 게이트가 **같은 결과**를 쓴다.
 ///
-/// 종전에는 `tokio::time::interval(60초)` 라 위상이 **`tt-api` 프로세스가 시작한 초**였다
-/// (2026-08-11 실측: 12:00:29 시작 → 틱 :29). 재배포마다 0~59초에서 다시 굴러가고, 운이
-/// 나쁘면 목록 착지 직전에 돌아 **한 세대 낡은 목록**을 쓴다 — 실패가 아니라 조용한 퇴화라
-/// 신선도 게이트(300초)에도 안 걸린다.
-///
-/// :15 의 근거 = `tt-workpool`(매분 :55 시작) 착지 지연 실측(6시간·n=710):
-/// p50 +5초 · p90 +6초 · p99 +7초 · **최대 +14초**(= :09 착지). 관측 최대보다 6초 뒤라
-/// 느린 Oracle 틱(같은 질의 2~15초 편차)에도 새 목록을 받는다.
-///
-/// ⚠ 추출 타이머(`deploy/systemd/tt-workpool.timer`, `OnCalendar=*-*-* *:*:55`)의 초를
-///   옮기면 이 값도 같이 옮겨야 한다. 두 값은 한 쌍이다.
-const MATCH_TICK_SEC: u32 = 15;
+/// 셋을 한 왕복에 담는 이유: 대기 루프가 마지막으로 본 값이 곧 그 틱의 게이트 입력이자
+/// `workpool_age_s` 게이지다. 따로 읽으면 그 사이에 착지가 끼어들어 **깨어난 근거와 기록한
+/// 나이가 다른 순간**을 가리킨다.
+const SQL_WORKPOOL_FRESHNESS: &str = "
+    SELECT (SELECT EXTRACT(epoch FROM now() - last_success_at)::int8
+              FROM data_freshness WHERE kpi_key = 'WORKPOOL'),
+           (SELECT EXTRACT(epoch FROM now() - max(as_of_ts))::int8 FROM live_workpool),
+           (SELECT last_success_at FROM data_freshness WHERE kpi_key = 'WORKPOOL')";
 
-/// 다음 `target_sec` 경계까지 남은 밀리초 — 위상 고정용 **순수 함수**.
+/// 착지를 기다리며 신선도를 다시 보는 간격.
 ///
-/// 계산만 떼어낸 이유: 라이브에서 위상을 시험하려면 프로세스를 재시작해야 하고, 위상이
-/// 틀려도 조용히 낡은 목록을 쓸 뿐이라 증상이 안 보인다. 테스트로 고정한다.
+/// 실측 비용: 이 질의는 `data_freshness` PK 인덱스 히트라 **0.109ms · buffers 3**(2026-08-12
+/// EXPLAIN ANALYZE). 2초 간격이면 시간당 1,800회 ≈ DB 시간 0.2초 — 로컬 Postgres 기준으로도
+/// 무시할 수준이다. **Oracle 에는 닿지 않는다**(이 크레이트에는 Oracle 접근 수단이 없다).
+const WAKE_POLL_MS: u64 = 2_000;
+
+/// 새 목록이 안 와도 이만큼 지나면 깨어난다(폴백 = 하트비트).
 ///
-/// 매 틱 다시 계산하는 이유는 두 가지다:
-/// ① `interval` 은 단조시계 기반이라 벽시계와 NTP 로 어긋나면 위상이 서서히 흐른다
-/// ② 한 틱이 60초를 넘겨도 다음 경계로 **건너뛴다** — `interval` 의 기본 동작(Burst)은
-///    밀린 틱을 몰아쳐서, 느린 틱 하나가 낡은 목록으로 도는 연쇄를 만든다.
+/// **이것은 정상 운전에서 울리면 안 되는 값이다.** 처음에 60초로 뒀다가 라이브에서 틀렸음이
+/// 드러났다(2026-08-12 실측 2시간): 착지 간격이 중앙 66초라 60초 폴백이 **착지 6초 전에**
+/// 먼저 터져 틱의 42%가 폴백이 됐고(시간당 58 → 82.5틱), 그 폴백이 만든 낡은 판단이
+/// 0.2~58초 뒤 신선한 판단을 **안티스래시로 밀어냈다** — `prev` 창(150초)이 직전 틱을
+/// 기준점으로 삼고, 그걸 뒤집으려면 `SWITCH_PENALTY_S`(180초), 마감 임박이면
+/// `COMMIT_LOCK_S`(1200초)를 물어야 하기 때문이다. `DISPATCH_MODE=active` 에서는 더 직접적이다:
+/// 폴백 틱이 집은 상자가 자기 추천 커버(180초)에 걸려 신선 틱의 후보풀에서 빠진다.
+/// ⇒ **낡은 목록이 신선한 목록을 선점한다.**
 ///
-/// ⚠ ②의 대가: `tick` 카운터가 더 이상 "경과 분"이 아니다. Burst 였을 때는 본체가 밀려도
-///   따라잡기 틱이 나와 `tick` ≈ 경과 분이었는데, 이제 60초를 넘긴 분은 통째로 건너뛰고
-///   카운터도 안 오른다. `tick % N` 을 쓰는 곳은 전부 로그와 프룬(`tick % 30`)이라 기능
-///   영향은 없지만, **프룬 주기가 30분보다 늘어질 수 있다**.
+/// 150초의 근거는 아래 두 경계다(테스트 `폴백_대기는_관측된_착지_간격보다_뒤에_있다` 가 고정):
+/// - **아래로**: 착지 간격 실측(중앙 66초·p90 ~140초)보다 뒤여야 정상 운전에서 착지가 이긴다.
+/// - **위로**: 신선도 게이트(`WORKPOOL_MAX_AGE_S` 300초)보다 앞이어야 추출이 죽었을 때
+///   게이트가 닫히기 전에 하트비트 틱이 최소 한 번은 남는다.
 ///
-/// 시각을 통째로 받는 이유: `(초, 밀리초)` 를 따로 받으면 둘 다 `u32` 라 호출부에서 뒤바꿔도
-/// 산술 테스트가 전부 통과한다. 그러면 고정되는 건 산식이지 위상이 아니다.
-fn phase_delay_ms(now: &impl Timelike, target_sec: u32) -> u64 {
-    let now_ms = i64::from(now.second()) * 1000 + i64::from(now.nanosecond() / 1_000_000);
-    let target_ms = i64::from(target_sec) * 1000;
-    let d = target_ms - now_ms;
-    // 경계에 정확히 서 있으면(d==0) 다음 분으로 넘긴다 — 같은 초에 두 번 도는 것보다 낫다.
-    if d > 0 { d as u64 } else { (d + 60_000) as u64 }
+/// 앵커를 "마지막 착지 나이"로 옮기는 안은 기각했다 — 추출이 죽으면 나이가 이미 임계를
+/// 넘어 있어 폴링 간격마다 도는 **새 폭주**가 된다. 여기서 재는 것은 "직전 틱 이후 경과"라
+/// 그 자체가 속도 제한이다.
+///
+/// 폴백 틱에서도 매칭을 **거르지 않고 돌린다** — 작업목록이 그대로여도 트럭 GPS 가 바뀌므로
+/// 매칭 결과는 달라진다.
+const WAKE_MAX_WAIT_MS: u64 = 150_000;
+
+/// 안티스래시가 "직전에 이 트럭에 뭘 시켰나"를 찾는 창(초).
+///
+/// ⚠ **하트비트보다 반드시 커야 한다.** 종전에는 이 값이 150초 리터럴로 SQL 안에 박혀 있었고,
+/// 하트비트를 150초로 올린 첫 판에서 **두 값이 같아졌다.** 그러면 하트비트 틱에서는 직전 틱의
+/// 행이 항상 창 밖이라(틱의 `ts` 는 본체 끝에 찍히고 하트비트는 그 뒤부터 센다) `prev` 가 비고,
+/// `switched` 가 전부 false 가 되어 `SWITCH_PENALTY_S`·`COMMIT_LOCK_S` 가 통째로 꺼진다
+/// ⇒ **가장 낡은 목록으로 도는 그 틱이 유일하게 제동 없이 전 트럭을 재배정하는 틱**이 된다.
+/// 2026-08-12 2차 리뷰에서 잡혔다. 테스트 `안티스래시_창은_하트비트보다_넓다` 가 고정한다.
+///
+/// 하트비트 + 정상 틱 1회분(≈60초) 여유. 옛 주석의 "~2.5 틱"이라는 의도는 그대로다
+/// (착지 간격 실측 중앙 60~66초 기준 ≈3.2틱).
+const PREV_WINDOW_S: u64 = WAKE_MAX_WAIT_MS / 1000 + 60;
+
+/// 매칭 틱이 깨어난 이유 — `stage2_solver_shadow.wake_src` 에 그대로 적는다 (mig 0153).
+///
+/// 값으로 사후 추정하지 않고 원천에 적는 이유: `landing` 과 `fallback` 을 `workpool_age_s`
+/// 크기로 가르면 **결과에서 파생된 변수로 층화**하는 것이라, 뒤이어 "착지 틱은 나이가 작다"고
+/// 보고하는 순간 동어반복이 된다(2026-08-03 에 같은 함정을 한 번 밟았다).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum WakeSrc {
+    /// 프로세스 기동 직후 첫 회. 목록 나이가 임의라 `landing` 집계에 섞으면 안 된다.
+    Startup,
+    /// 작업목록이 새로 착지했다 — 원하는 경로.
+    Landing,
+    /// 최대 대기를 채웠다. 목록은 직전 틱과 같다.
+    Fallback,
 }
 
-// 위 산식은 목표가 분 안에 있을 때만 성립한다(60 이상이면 d 가 늘 양수라 위상이 안 잡힌다).
-// 런타임 방어 대신 컴파일 타임에 닫는다 — 도달 가능한 입력이 아니다.
-const _: () = assert!(MATCH_TICK_SEC < 60);
+impl WakeSrc {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Startup => "startup",
+            Self::Landing => "landing",
+            Self::Fallback => "fallback",
+        }
+    }
+}
+
+/// 대기 루프의 한 번의 판정.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum WakeStep {
+    Wake(WakeSrc),
+    KeepWaiting,
+}
+
+/// 지금 깨어날 것인가 — 대기 루프의 **순수 함수**.
+///
+/// 종전(`phase_delay_ms`)에서 배운 것을 그대로 적용한다: 라이브에서 위상을 시험하려면
+/// 프로세스를 재시작해야 하고, 틀려도 조용히 낡은 목록을 쓸 뿐이라 증상이 안 보인다.
+/// 판정만 떼어 테스트로 고정한다.
+///
+/// 인자 = `(직전 틱이 쓴 착지 시각, 방금 조회한 착지 시각, 기다린 시간)`.
+/// 앞의 둘이 같은 타입이라 뒤바꿀 수 있지만, 뒤바꾸면 "새 착지가 왔는데도 안 깨어난다" 쪽으로
+/// 무너져 테스트가 잡는다(`새_착지가_오면_깨어난다`).
+///
+/// ⚠ **착지 시각을 모를 때(`None`)는 깨우지 않는다** — 조회가 실패했거나 `data_freshness` 에
+///   행이 없는 경우다. 그대로 폴백까지 기다리면 신선도 게이트가 "판정 불능 = 낡음"으로 닫는다.
+fn should_wake(
+    seen: Option<DateTime<Utc>>,
+    landed: Option<DateTime<Utc>>,
+    waited: Duration,
+) -> WakeStep {
+    match (seen, landed) {
+        // 기동 직후: 기준선이 없다. 지금 있는 목록으로 한 번 돌고 그것을 기준선으로 삼는다.
+        //
+        // ⚠ **`landed` 가 있을 때만** 깨운다. `(None, None)` 에서 깨우면 호출부가 `seen` 을
+        //   전진시킬 값이 없어 영원히 `None` 으로 남고, 이 함수는 매 회차 첫 폴에서 즉시
+        //   Wake 를 내며, 바깥 루프의 두 `continue` 경로(GPS 미연결·목록 낡음)에는 sleep 이
+        //   없다 ⇒ **sleep 없는 폭주**가 된다. 도달 가능한 상태다: `last_success_at` 은
+        //   nullable 이고 추출기가 첫 실행 실패 시 NULL 로 넣는다(`extractor/src/db.rs`).
+        //   여기서 깨우지 않으면 아래 폴백까지 기다렸다가 신선도 게이트가 정상적으로 닫는다.
+        (None, Some(_)) => WakeStep::Wake(WakeSrc::Startup),
+        (Some(seen), Some(landed)) if landed > seen => WakeStep::Wake(WakeSrc::Landing),
+        _ if waited >= Duration::from_millis(WAKE_MAX_WAIT_MS) => WakeStep::Wake(WakeSrc::Fallback),
+        _ => WakeStep::KeepWaiting,
+    }
+}
+
+/// 작업목록이 새로 착지할 때까지 기다린다. 반환 = `(깨어난 이유, 마지막 신선도 조회 결과)`.
+///
+/// 마지막 조회 결과를 그대로 돌려주므로 **틱당 추가 질의는 없다** — 게이트와 게이지가 이 값을
+/// 재사용한다.
+///
+/// `seen` 전진 규칙과 그 대가:
+/// - 착지를 **봤으면** 깨어난 이유와 무관하게 전진시킨다. 바깥 루프가 GPS 미연결이나 낡은
+///   목록으로 `continue` 해 그 틱을 버리더라도 마찬가지다. ⚠ **대가**: 버려진 틱이 착지
+///   하나를 흔적 없이 소모하므로, 기동 직후 첫 매칭이 최대 한 착지 간격만큼 늦을 수 있다.
+///   그래도 전진시키는 쪽이 옳다 — 안 그러면 다음 회차가 이미 쓸모없어진 같은 착지로 즉시
+///   깨어나 폴링 간격마다 도는 루프가 된다.
+/// - **못 봤으면**(조회 실패 등) 그대로 둔다. 다음 성공 조회가 그 착지를 정상적으로 잡는다.
+///   이 비대칭은 의도된 것이다.
+async fn wait_for_workpool_landing(
+    pool: &PgPool,
+    seen: &mut Option<DateTime<Utc>>,
+) -> (WakeSrc, Result<(Option<i64>, Option<i64>), String>) {
+    let start = Instant::now();
+    loop {
+        let row = sqlx::query_as::<_, (Option<i64>, Option<i64>, Option<DateTime<Utc>>)>(
+            SQL_WORKPOOL_FRESHNESS,
+        )
+        .fetch_one(pool)
+        .await
+        .map_err(|e| e.to_string());
+        let landed = row.as_ref().ok().and_then(|&(_, _, at)| at);
+        let gate_input = row.map(|(age, table_age, _)| (age, table_age));
+
+        match should_wake(*seen, landed, start.elapsed()) {
+            WakeStep::Wake(src) => {
+                if landed.is_some() {
+                    *seen = landed;
+                }
+                return (src, gate_input);
+            }
+            WakeStep::KeepWaiting => {
+                tokio::time::sleep(Duration::from_millis(WAKE_POLL_MS)).await;
+            }
+        }
+    }
+}
 
 pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
     tokio::spawn(async move {
@@ -4453,12 +4571,20 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
         let mut stale_streak: u32 = 0;
         // 티어 히스테리시스 상태(틱마다 현재 키 집합으로 통째 교체 = 누수 없음)
         let mut prev_tier: HashMap<(String, String, String), u8> = HashMap::new();
+        // 직전 틱이 쓴 작업목록의 착지 시각. 이 값이 앞으로 가는 것이 곧 "새 목록이 왔다"다.
+        let mut seen_landing: Option<DateTime<Utc>> = None;
         loop {
-            // 위상 고정: 작업목록 착지 직후(:15)에만 돈다. 근거는 MATCH_TICK_SEC 주석.
-            // 재시작 직후 첫 틱이 최대 59초 늦어지지만, 어차피 바로 아래 GPS 게이트가 웹소켓
-            // 연결까지 틱을 흘려보내므로 실질 공백은 없다.
-            tokio::time::sleep(Duration::from_millis(phase_delay_ms(&Utc::now(), MATCH_TICK_SEC)))
-                .await;
+            // ── 깨어나기: 고정 초가 아니라 **작업목록 착지**를 기다린다 (2026-08-12, C안) ──
+            //
+            // 종전에는 매분 :15 에 돌았다. 그 위상의 전제는 "착지가 :00~:09 에 몰린다"(6시간
+            // 표본, 착지 지연 최대 +14초)였는데 **하루 만에 깨졌다**: tt-workpool 실행이
+            // 60초를 넘기면(실측 p90 65초·최대 84초) systemd 가 곧바로 다음 회차를 시작해
+            // 착지 초가 자유주행한다(실측 분포 :15~:59). 그러면 매칭은 한 세대 낡은 목록을
+            // 쓰는데, 나이가 ~70초라 300초 게이트에 안 걸린다 — 조용한 퇴화다.
+            //
+            // 고정 초를 어디로 옮겨도 자유주행을 따라갈 수 없으므로 **상수를 없앤다**.
+            // 이제 tt-workpool.timer 의 초와 짝을 맞출 필요도 없다.
+            let (wake_src, freshness) = wait_for_workpool_landing(&pool, &mut seen_landing).await;
             tick += 1;
             if !lm.connected.load(Ordering::Relaxed) {
                 continue;
@@ -4473,23 +4599,22 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
             // 없다"와 "추출이 죽었다"가 한 값으로 뭉개진다. 표 나이는 진단용으로만 함께 읽는다.
             // (data_freshness.is_stale 컬럼은 쓰지 않는다 — 5일 묵은 행도 f 로 남아 있어 관리되지
             //  않는 값이다. 2026-08-11 확인.)
-            let freshness = sqlx::query_as::<_, (Option<i64>, Option<i64>)>(
-                "SELECT (SELECT EXTRACT(epoch FROM now() - last_success_at)::int8
-                           FROM data_freshness WHERE kpi_key = 'WORKPOOL'),
-                        (SELECT EXTRACT(epoch FROM now() - max(as_of_ts))::int8 FROM live_workpool)",
-            )
-            .fetch_one(&pool)
-            .await
-            .map_err(|e| e.to_string());
+            //
+            // 조회는 위 대기 루프가 **이미 했다**(`freshness`). 여기서 다시 읽지 않는 이유는
+            // 비용이 아니라 정합이다: 다시 읽으면 깨어난 근거와 게이트가 본 값이 서로 다른
+            // 순간을 가리킬 수 있다.
+            //
             // ★게이지로 남긴다 (mig 0150). 이 값은 게이트가 이미 재놓고 **버리던** 숫자다.
             //
-            // 왜 필요한가: 위상(:15)이 착지(:00~:02)보다 뒤라는 전제가 깨지면 — 추출이 느려
-            // :15 를 넘겨 착지하거나, 타이머의 초를 옮기거나 — 매칭은 **한 세대 낡은 목록**으로
-            // 돈다. 그때 나이는 ~75초라 300초 게이트에 안 걸리고, 경보도 로그도 없이 조용히
-            // 품질만 떨어진다. 틱마다 한 칸 적어두면 그 퇴화가 사후 질의로 잡힌다.
+            // ⚠ 이 값은 "목록이 담은 터미널 상태의 나이"가 **아니다**. 추출기는 Oracle 조회
+            //   **전에** as_of 를 찍고 조회에 평균 ~20초가 든다(`extractor/src/workpool.rs`).
+            //   즉 여기서 재는 것은 **착지 이후 경과**이고, 내용의 나이는 그보다 ~20초 많다.
+            //   재고 싶은 것(= 우리가 착지를 얼마나 빨리 따라가는가)에는 이게 맞는 축이다.
             //
-            // 정상 대역 = 6~15초(위상 :15 − 착지, 착지 지터 −9s~+14s 포함).
-            // 이 값이 60초대로 튀면 위상이 풀린 것이다.
+            // 정상 대역: `wake_src='landing'` 이면 **0~3초**(착지 신호 → 폴링 간격 2초 안에
+            // 깨어난다), `fallback` 이면 150초 이상이다. **두 모집단을 섞어서 평균 내지 말 것**
+            // — 반드시 `wake_src` 로 먼저 가른다(mig 0153). 종전 고정 위상(:15) 구간의
+            // 대역은 6~15초였다.
             // ⚠낡아서 건너뛴 틱은 아래에서 continue 하므로 행 자체가 안 남는다 — 즉 이 컬럼은
             //   "매칭이 실제로 쓴 목록의 나이"만 담는다(그게 재고 싶은 값이다).
             let workpool_age_s: Option<i32> =
@@ -4497,7 +4622,10 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
             let stale_why = workpool_stale_reason(freshness);
             if let Some(why) = stale_why {
                 stale_streak += 1;
-                // 첫 틱과 이후 10틱(=10분)마다만 남긴다 — 장애가 길어져도 로그가 한 줄씩만 는다.
+                // 첫 틱과 이후 10틱마다만 남긴다 — 장애가 길어져도 로그가 한 줄씩만 는다.
+                // ⚠ 여기서 10틱은 **10분이 아니다**: 추출이 죽으면 이 구간의 틱은 전부
+                //   하트비트(150초)라 10틱 ≈ **25분**이다. 최초 탐지는 첫 틱이라 영향 없고,
+                //   늘어나는 것은 후속 반복 로그와 ops_alert.last_ts 갱신 간격뿐이다.
                 if stale_streak == 1 || stale_streak % 10 == 0 {
                     tracing::warn!(streak = stale_streak, why = %why, "작업목록이 낡아 매칭을 건너뛴다");
                     crate::db::alert(
@@ -4520,10 +4648,12 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
             }
             let now = Utc::now().timestamp_millis();
             // previous-tick recommendation per vehicle (ytno → work bucket key) for anti-thrash.
-            // ts-based (restart-safe), latest per vehicle within the last ~2.5 ticks.
+            // ts-based (restart-safe), latest per vehicle within PREV_WINDOW_S.
             let prev: HashMap<String, (String, String, String)> = sqlx::query_as::<_, (String, String, String, String)>(
-                "SELECT DISTINCT ON (ytno) ytno, coalesce(qc,''), coalesce(vessel,''), coalesce(queuename,'')
-                   FROM stage2_match_shadow WHERE ts > now() - interval '150 seconds' ORDER BY ytno, ts DESC",
+                &format!(
+                    "SELECT DISTINCT ON (ytno) ytno, coalesce(qc,''), coalesce(vessel,''), coalesce(queuename,'')
+                       FROM stage2_match_shadow WHERE ts > now() - interval '{PREV_WINDOW_S} seconds' ORDER BY ytno, ts DESC"
+                ),
             )
             .fetch_all(&pool).await.unwrap_or_default()
             .into_iter().map(|(yt, q, v, qn)| (yt, (q, v, qn))).collect();
@@ -5095,8 +5225,8 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
             }
             let gap_pct = if opt_cost > 0 { 100.0 * (greedy_cost - opt_cost) as f64 / opt_cost as f64 } else { 0.0 };
             let solver_ins = sqlx::query(
-                "INSERT INTO stage2_solver_shadow (ts,tick,n_trucks,n_works,greedy_n,greedy_cost_s,optimal_n,optimal_cost_s,gap_pct,greedy_miss,optimal_miss,dep_tier_on,dep_tier0_n,dep_urgent_slots,dep_null_n,dep_demoted_n,ab_block,ab_warmup,works_raw,need_horizon_on,works_no_eta,works_no_coord,pool_new_n,pool_overlap_n,trucks_held_n,pool_overdue_n,pool_mode,due_buckets_n,self_cover_n,workpool_age_s)
-                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30) ON CONFLICT (ts) DO NOTHING",
+                "INSERT INTO stage2_solver_shadow (ts,tick,n_trucks,n_works,greedy_n,greedy_cost_s,optimal_n,optimal_cost_s,gap_pct,greedy_miss,optimal_miss,dep_tier_on,dep_tier0_n,dep_urgent_slots,dep_null_n,dep_demoted_n,ab_block,ab_warmup,works_raw,need_horizon_on,works_no_eta,works_no_coord,pool_new_n,pool_overlap_n,trucks_held_n,pool_overdue_n,pool_mode,due_buckets_n,self_cover_n,workpool_age_s,wake_src)
+                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31) ON CONFLICT (ts) DO NOTHING",
             )
             .bind(ts).bind(tick as i64).bind(vehicles.len() as i32).bind(driving.len() as i32)
             .bind(greedy_n).bind(greedy_cost).bind(assign.len() as i32).bind(opt_cost).bind(gap_pct as f32)
@@ -5117,6 +5247,7 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
             .bind(due_buckets_n)                                                           // mig 0133
             .bind(self_cover_n)                                                            // mig 0142
             .bind(workpool_age_s)                                                          // mig 0150
+            .bind(wake_src.as_str())                                                       // mig 0153
             .execute(&pool).await;
             // 생산 0 경보 (mig 0142): 트럭도 작업도 있는데 추천이 3틱 연속 0이면 매칭이 죽은
             // 것이다. 총정지는 stage2_match_shadow DEADMAN(30분)이 백스톱으로 잡지만, 이건
@@ -5162,7 +5293,12 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                 }
             }
             if let Err(e) = solver_ins {
-                tracing::warn!(error = %e, "stage2_solver_shadow insert failed — 0104 마이그레이션 적용 여부 확인");
+                // ⚠ 새 컬럼을 더한 배포에서 psql 보다 restart 가 먼저 오면 이 INSERT 가 전건
+                //   실패한다. 그런데 DEADMAN 은 stage2_match_shadow 만 보고 이 표는 안 본다
+                //   (crates/api/src/db.rs) — 경보가 안 뜨니 사람이 읽는 건 이 줄뿐이다.
+                //   그래서 **최근 마이그레이션 번호를 여기 같이 적는다**(0104 = 표 신설,
+                //   0150 = workpool_age_s, 0153 = wake_src).
+                tracing::warn!(error = %e, "stage2_solver_shadow insert failed — 마이그레이션 0104/0150/0153 적용 여부 확인");
             }
             if tick % 30 == 0 {
                 crate::db::prune(&pool, "stage2_match_shadow", "DELETE FROM stage2_match_shadow WHERE ts < now() - interval '21 days'").await;
@@ -6018,90 +6154,159 @@ mod workpool_freshness_tests {
 }
 
 #[cfg(test)]
-mod match_tick_phase_tests {
-    use super::{phase_delay_ms, MATCH_TICK_SEC};
-    use chrono::{TimeZone, Timelike, Utc};
+mod wake_on_landing_tests {
+    use super::{should_wake, WakeSrc, WakeStep, PREV_WINDOW_S, WAKE_MAX_WAIT_MS, WORKPOOL_MAX_AGE_S};
+    use chrono::{DateTime, TimeZone, Utc};
+    use std::time::Duration;
 
-    /// 라이브 호출부와 **같은 타입**(`DateTime<Utc>`)으로 시각을 만든다. 초·밀리초를 따로
-    /// 넘기면 둘 다 u32 라 호출부에서 뒤바꿔도 테스트가 통과해버린다.
-    fn 시각(sec: u32, ms: u32) -> chrono::DateTime<Utc> {
-        Utc.with_ymd_and_hms(2026, 8, 11, 12, 34, sec)
-            .unwrap()
-            .with_nanosecond(ms * 1_000_000)
-            .unwrap()
+    fn 시각(sec: u32) -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(2026, 8, 12, 12, 34, sec).unwrap()
     }
+    const 잠깐: Duration = Duration::from_millis(0);
+    const 최대대기: Duration = Duration::from_millis(WAKE_MAX_WAIT_MS);
 
-    fn 도착_ms(sec: u32, ms: u32) -> u64 {
-        let t = 시각(sec, ms);
-        let d = phase_delay_ms(&t, MATCH_TICK_SEC);
-        (u64::from(t.second()) * 1000 + u64::from(t.nanosecond() / 1_000_000) + d) % 60_000
-    }
-
-    /// 어느 초에 시작하든 **다음 :15 에 정확히 도달**해야 한다.
-    /// 이게 이 변경의 전부다 — 종전에는 도착 지점이 프로세스 시작 초였다.
+    /// 이 변경의 전부다: **새 목록이 착지하면 그때 깨어난다.**
+    ///
+    /// 인자 뒤바꿈(직전↔이번)도 여기서 잡힌다 — 뒤바꾸면 `landed > seen` 이 거짓이 되어
+    /// KeepWaiting 으로 무너진다.
     #[test]
-    fn 어느_초에_시작해도_목표_초에_도달한다() {
-        for start_sec in 0..60u32 {
-            for start_ms in [0u32, 1, 499, 999] {
-                assert_eq!(
-                    도착_ms(start_sec, start_ms),
-                    u64::from(MATCH_TICK_SEC) * 1000,
-                    "{start_sec}.{start_ms:03} 에서 출발해 :15 가 아닌 곳에 내렸다"
-                );
+    fn 새_착지가_오면_깨어난다() {
+        assert_eq!(
+            should_wake(Some(시각(10)), Some(시각(11)), 잠깐),
+            WakeStep::Wake(WakeSrc::Landing)
+        );
+    }
+
+    /// 같은 착지를 두 번 쓰지 않는다. 이게 무너지면 매칭이 폴링 간격(2초)마다 도는
+    /// 폭주 루프가 된다 — 라이브에서 제일 비싼 실패 방향이다.
+    #[test]
+    fn 같은_착지로는_다시_깨어나지_않는다() {
+        assert_eq!(should_wake(Some(시각(10)), Some(시각(10)), 잠깐), WakeStep::KeepWaiting);
+    }
+
+    /// 착지 시각이 **뒤로 가도** 깨우지 않는다(시계 되돌림·행 재기입).
+    #[test]
+    fn 착지가_뒤로_가면_깨우지_않는다() {
+        assert_eq!(should_wake(Some(시각(20)), Some(시각(10)), 잠깐), WakeStep::KeepWaiting);
+    }
+
+    /// 새 목록이 영영 안 와도 최대 대기를 채우면 깨어난다. 이게 없으면 추출이 죽었을 때
+    /// 매칭이 **조용히 멈춘다** — 경보도 게이지도 없이.
+    #[test]
+    fn 최대_대기를_채우면_폴백으로_깨어난다() {
+        assert_eq!(
+            should_wake(Some(시각(10)), Some(시각(10)), 최대대기),
+            WakeStep::Wake(WakeSrc::Fallback)
+        );
+        // 경계 바로 앞에서는 아직 기다린다.
+        assert_eq!(
+            should_wake(Some(시각(10)), Some(시각(10)), 최대대기 - Duration::from_millis(1)),
+            WakeStep::KeepWaiting
+        );
+    }
+
+    /// 착지 시각을 **모를 때**(조회 실패·data_freshness 행 없음)는 깨우지 않는다.
+    /// 그대로 폴백까지 기다리면 신선도 게이트가 "판정 불능 = 낡음"으로 닫는다.
+    #[test]
+    fn 착지_시각을_모르면_폴백까지_기다린다() {
+        assert_eq!(should_wake(Some(시각(10)), None, 잠깐), WakeStep::KeepWaiting);
+        assert_eq!(
+            should_wake(Some(시각(10)), None, 최대대기),
+            WakeStep::Wake(WakeSrc::Fallback)
+        );
+    }
+
+    /// 기동 직후 **착지 시각을 읽을 수 있으면** 즉시 돈다. 이 틱은 `startup` 이지 `landing` 이
+    /// 아니다 — 목록 나이가 임의라 landing 집계에 섞이면 p99 가 오염된다.
+    #[test]
+    fn 기동_직후_첫_회는_startup_으로_즉시_돈다() {
+        assert_eq!(should_wake(None, Some(시각(10)), 잠깐), WakeStep::Wake(WakeSrc::Startup));
+    }
+
+    /// ★회귀 방지: 기준선도 착지도 없으면 **즉시 깨우면 안 된다.**
+    ///
+    /// 여기서 `Wake` 를 내면 호출부가 `seen` 을 전진시킬 값이 없어 영원히 `None` 으로 남고,
+    /// 매 회차가 첫 폴에서 즉시 반환되는데 바깥 루프의 `continue` 경로에는 sleep 이 없다
+    /// ⇒ **sleep 없는 폭주**(DB 질의 초당 수천 건). 2026-08-12 리뷰에서 잡힌 실제 결함이고,
+    /// 그때 이 자리의 테스트가 오히려 폭주를 사양으로 못 박고 있었다.
+    /// 도달 가능한 상태다: `data_freshness.last_success_at` 은 nullable 이고 추출기가 첫
+    /// 실행 실패 시 NULL 로 넣는다.
+    #[test]
+    fn 착지를_모르면_기동_때도_즉시_깨우지_않는다() {
+        assert_eq!(should_wake(None, None, 잠깐), WakeStep::KeepWaiting);
+        // 폴백까지는 기다렸다가 깨어난다 — 그래야 신선도 게이트가 정상적으로 닫는다.
+        assert_eq!(should_wake(None, None, 최대대기), WakeStep::Wake(WakeSrc::Fallback));
+    }
+
+    /// 폴백은 **정상 운전에서 울리면 안 되는** 하트비트다. 두 경계를 못 박는다.
+    ///
+    /// 60초였을 때 실제로 무너졌다(라이브 2시간): 착지 간격 중앙 66초라 폴백이 착지 6초 전에
+    /// 먼저 터져 틱의 42%가 폴백이 됐고, 그 낡은 판단이 직후의 신선한 판단을 안티스래시로
+    /// 밀어냈다. 이 테스트는 그 값으로 되돌리는 것을 막는다.
+    #[test]
+    fn 폴백_대기는_관측된_착지_간격보다_뒤에_있다() {
+        // 착지 간격 실측(etl_run_log, kpi_key=WORKPOOL·status=OK).
+        // **24시간 창**(n=1,413): p50 60.0 · p90 66.2 초.
+        // **최악 1시간 창**(2026-08-12 00:00Z): p50 83.8 · p90 136.3 · 최대 238.3 초.
+        // 여기서는 최악 창 쪽을 기준으로 잡는다 — 그 시간대에도 폴백이 착지를 앞지르면 안 된다.
+        const 관측_착지간격_p90_초: u64 = 140; // 최악 1시간 창 기준(24시간 창이면 67)
+        let 대기_초 = WAKE_MAX_WAIT_MS / 1000;
+        assert!(
+            대기_초 > 관측_착지간격_p90_초,
+            "폴백 대기 {대기_초}초가 관측 착지 간격 p90 {관측_착지간격_p90_초}초보다 앞이다 — 정상 운전에서 폴백이 착지를 앞지른다"
+        );
+        // 게이트(300초) 전에 하트비트가 **최소 한 번은** 남아야 한다. `대기 < 300` 만으로는
+        // 부족하다 — 299초도 통과하는데 그 값에서는 0번 남는다(2차 리뷰 지적).
+        assert!(
+            대기_초 * 2 <= WORKPOOL_MAX_AGE_S as u64,
+            "폴백 대기 {대기_초}초 × 2 가 신선도 게이트 {WORKPOOL_MAX_AGE_S}초를 넘는다 — 게이트가 닫히기 전에 하트비트가 한 번도 안 남을 수 있다"
+        );
+    }
+
+    /// ★안티스래시 창은 하트비트보다 **넓어야** 한다.
+    ///
+    /// 같으면(첫 판에서 둘 다 150초였다) 하트비트 틱에서 직전 틱의 행이 항상 창 밖이라
+    /// `prev` 가 비고, `switched` 가 전부 false 가 되어 전환 벌점이 통째로 꺼진다.
+    /// ⇒ **가장 낡은 목록으로 도는 틱이 유일하게 제동 없이 전 트럭을 재배정하는 틱**이 된다.
+    #[test]
+    fn 안티스래시_창은_하트비트보다_넓다() {
+        assert!(
+            PREV_WINDOW_S > WAKE_MAX_WAIT_MS / 1000,
+            "prev 창 {PREV_WINDOW_S}초가 하트비트 {}초 이하다 — 하트비트 틱에서 안티스래시가 꺼진다",
+            WAKE_MAX_WAIT_MS / 1000
+        );
+    }
+
+    /// ★폭주 방지 불변식: **깨어나면 반드시 `landed` 가 있거나(= 호출부가 `seen` 을 전진시킨다)
+    /// 최대 대기를 채웠다(= 그 자체가 속도 제한이다).**
+    ///
+    /// 실제로 폭주를 막는 것은 호출부의 `if landed.is_some() { *seen = landed }` 인데 그건
+    /// 순수 함수 밖이라 테스트가 못 본다(2차 리뷰 지적). 그래서 성질 쪽을 못 박는다 —
+    /// 이 성질을 깨는 Wake 팔을 새로 붙이면 여기서 걸린다.
+    #[test]
+    fn 깨어나면_seen_이_전진하거나_최대_대기를_채운다() {
+        let 최대 = Duration::from_millis(WAKE_MAX_WAIT_MS);
+        for seen in [None, Some(시각(10))] {
+            for landed in [None, Some(시각(5)), Some(시각(10)), Some(시각(20))] {
+                for waited in [잠깐, 최대 - Duration::from_millis(1), 최대] {
+                    if let WakeStep::Wake(src) = should_wake(seen, landed, waited) {
+                        assert!(
+                            landed.is_some() || waited >= 최대,
+                            "{src:?} 가 seen 전진도 최대 대기도 없이 깨웠다 (seen={seen:?} landed={landed:?} waited={waited:?}) — 대기 루프가 sleep 없이 폭주한다"
+                        );
+                    }
+                }
             }
         }
     }
 
-    /// 대기는 항상 (0, 60초] 안이다. 0 이면 같은 초에 두 번 돌고, 60초를 넘으면 틱을 통째 빠뜨린다.
+    /// DB 에 적히는 문자열을 못 박는다. 오타 하나면 판별자가 통째로 거짓말을 하는데,
+    /// 값은 21일 남는다.
     #[test]
-    fn 대기는_한_주기_안에_있다() {
-        for start_sec in 0..60u32 {
-            for start_ms in [0u32, 500, 999] {
-                let d = phase_delay_ms(&시각(start_sec, start_ms), MATCH_TICK_SEC);
-                assert!(d > 0 && d <= 60_000, "{start_sec}.{start_ms:03} → {d}ms 는 한 주기 밖이다");
-            }
-        }
-    }
-
-    /// 위상이 **재시작 시각과 무관**함을 고정한다. 종전 동작(= interval)이라면 시작 초마다
-    /// 도착 초가 달라졌다. 2026-08-11 실측: 12:00:29 시작 → 틱 :29.
-    #[test]
-    fn 재시작_시각이_위상을_바꾸지_않는다() {
-        let 도착: Vec<u64> = [0u32, 7, 15, 16, 29, 45, 55, 59].iter().map(|&s| 도착_ms(s, 0)).collect();
-        assert!(
-            도착.windows(2).all(|w| w[0] == w[1]),
-            "시작 초에 따라 도착 초가 갈렸다: {도착:?}"
-        );
-    }
-
-    /// 경계에 정확히 서 있으면 다음 분으로 넘긴다 — 같은 초에 두 번 도는 것보다 낫다.
-    #[test]
-    fn 경계에_정확히_서_있으면_다음_분으로_넘긴다() {
-        assert_eq!(phase_delay_ms(&시각(MATCH_TICK_SEC, 0), MATCH_TICK_SEC), 60_000);
-        assert_eq!(phase_delay_ms(&시각(MATCH_TICK_SEC, 1), MATCH_TICK_SEC), 59_999);
-    }
-
-    /// ★호출부가 **초와 밀리초를 뒤바꿔** 넘기던 실수를 이제는 잡는다. 종전 시그니처
-    /// `(u32, u32, u32)` 에서는 뒤바꿔도 위 테스트가 전부 통과했다(리뷰 지적).
-    /// 시각을 통째로 받으므로 이 실수는 **타입이 막는다** — 아래는 그 성질을 못 박는다:
-    /// 밀리초만 달라진 두 시각은 대기가 정확히 그 차이만큼만 달라야 한다.
-    #[test]
-    fn 밀리초는_초로_해석되지_않는다() {
-        let a = phase_delay_ms(&시각(0, 0), MATCH_TICK_SEC);
-        let b = phase_delay_ms(&시각(0, 500), MATCH_TICK_SEC);
-        assert_eq!(a - b, 500, "밀리초 500 이 500ms 가 아닌 무언가로 해석됐다");
-        // 초 500 은 애초에 만들 수 없다(초는 0..60) — 그게 타입이 막는다는 뜻이다.
-    }
-
-    /// 착지(:00~:02, 관측 최대 :09)보다 뒤여야 새 목록을 받는다. 이 값을 착지 앞으로
-    /// 당기면 조용히 한 세대 낡은 목록을 쓰게 된다.
-    #[test]
-    fn 목표_초는_관측된_최대_착지보다_뒤에_있다() {
-        const 관측_최대_착지_초: u32 = 9; // :55 시작 + 14초 (6시간·n=710)
-        assert!(
-            MATCH_TICK_SEC > 관측_최대_착지_초,
-            "MATCH_TICK_SEC={MATCH_TICK_SEC} 이 관측 최대 착지 :{관측_최대_착지_초} 보다 앞이다"
-        );
+    fn 판별자_문자열이_마이그레이션과_같다() {
+        assert_eq!(WakeSrc::Startup.as_str(), "startup");
+        assert_eq!(WakeSrc::Landing.as_str(), "landing");
+        assert_eq!(WakeSrc::Fallback.as_str(), "fallback");
     }
 }
 
