@@ -126,7 +126,7 @@ pub async fn build(pool: &PgPool, ws: DateTime<Utc>, we: DateTime<Utc>) -> Resul
     let vessels_txt: Option<String> = sqlx::query_scalar(
         r#"
         WITH q0 AS (
-          SELECT machno, contno, seqno, jobtype, comp_ts, vessel, voyage,
+          SELECT machno, contno, seqno, jobtype, comp_ts, vessel, voyage, queuename,
                  count(*) OVER (PARTITION BY machno, seqno) AS lift_size,
                  row_number() OVER (PARTITION BY machno ORDER BY comp_ts, seqno) AS crane_seq
             FROM qc_move_log
@@ -182,22 +182,56 @@ pub async fn build(pool: &PgPool, ws: DateTime<Utc>, we: DateTime<Utc>) -> Resul
                    -- covered 813 of those same 1,201 (67.7%) the whole time and was simply not read here.
                    -- Vocabularies are identical (verified: size is twenty/forty/forty_five on both,
                    -- iso is the same ISO 6346 code), so this is a coalesce, not a mapping.
-                   'iso', COALESCE(c.iso, cs.iso), 'size', COALESCE(c.size, cs.size),
+                   'iso', COALESCE(c.iso, cs.iso, ca.iso), 'size', COALESCE(c.size, cs.size, ca.size),
                    -- Which source answered. Everything below this line comes from the manifest ALONE
                    -- and stays null without it, so a box with a size but no weight is a yard-sourced
                    -- one, not a data error — say so rather than leaving the reader to infer it.
                    'size_source', CASE WHEN COALESCE(c.iso, c.size) IS NOT NULL THEN 'manifest'
-                                       WHEN COALESCE(cs.iso, cs.size) IS NOT NULL THEN 'yard' END,
+                                       WHEN COALESCE(cs.iso, cs.size) IS NOT NULL THEN 'yard'
+                                       WHEN COALESCE(ca.iso, ca.size) IS NOT NULL THEN 'manifest_other_call' END,
                    'height', c.height, 'family', c.family, 'fill', c.fill,
                    'gross_kg', c.gross_kg, 'reefer_temp', c.reefer_temp, 'imdg', c.imdg, 'un_no', c.un_no, 'oog', c.oog,
                    'pod', c.pod, 'pol', c.pol, 'operator', c.operator,
                    'ship_cell', CASE WHEN c.ship_bay IS NOT NULL THEN jsonb_build_object(
                         'bay', c.ship_bay, 'row', c.ship_row, 'tier', c.ship_tier,
-                        -- 50, not 80. Cross-checked against the queuename D/H letter that TOS itself
-                        -- writes, over 2,094 discharge moves: 'H' rows are ship_tier 2..22 and 'D'
-                        -- rows are 66..94, with the 25..65 band empty. The old threshold put tiers
-                        -- 66..78 — 33.6% of all deck containers — into 'hold'.
-                        'deck_hold', CASE WHEN c.ship_tier >= 50 THEN 'deck' ELSE 'hold' END) END,
+                        -- EXPLICIT, not a tier threshold. TOS names every work queue
+                        -- `<bay><D|H>-<D|L>` (e.g. '18D-D' = bay 18, Deck, Discharge) and every QC
+                        -- move carries that name, so the deck/hold split is a stored value and not
+                        -- something to infer. Measured on 2026-08-05: parseable on 21,167/21,167
+                        -- moves — including the 43.6% of moves that have no ship_cell at all, where
+                        -- no tier rule could have answered.
+                        --
+                        -- The threshold this replaces was 50, itself a correction of an older 80.
+                        -- Against the explicit letter, over the 11,940 moves that have BOTH: the 50
+                        -- rule missed 22 (0.18%), the 80 rule missed 1,129 (9.5%). The consumer's
+                        -- "9.4% off" is that same 80-vs-50 gap, measured against our derived column
+                        -- and not against TOS — the queuename is what settles it either way.
+                        --
+                        -- The tier rule stays as the fallback for rows whose queue name does not
+                        -- parse (spec: convention is allowed only where no explicit value exists).
+                        'deck_hold', COALESCE(
+                             CASE substring(q.queuename from '^[0-9]+([DH])-')
+                                  WHEN 'D' THEN 'deck' WHEN 'H' THEN 'hold' END,
+                             CASE WHEN c.ship_tier >= 50 THEN 'deck' ELSE 'hold' END)) END,
+                   -- R2: where the box actually sat. Discharge = the slot this move PUT it in,
+                   -- load = the slot this move TOOK it from, matching the gate section's meaning.
+                   -- The quay log and the yard log share no key (machno is the QC on one side and
+                   -- the RTG/ES on the other), so they are joined on the box and the direction of
+                   -- time: for discharge the yard placement follows the quay handover, for load it
+                   -- precedes it. Measured coverage on 2026-08-05: discharge 11,805/11,842 (99.7%),
+                   -- load 9,306/9,325 (99.8%); median separation ~13 min, p99 78 min, which is the
+                   -- truck cycle and is why 12h is a bound against a LATER CALL of the same box
+                   -- rather than a tolerance.
+                   --
+                   -- Do NOT substitute scenario.move_hist.yard_block here. That column holds the
+                   -- COUNTERPARTY machine, so it is a yard block for discharge and the QUAY CRANE
+                   -- for load: on the same day it equalled the QC on 9,262 of 9,325 load moves and
+                   -- was a real block on 0 of them. The name is only true for discharge.
+                   'yard_slot', CASE WHEN ys.tier IS NOT NULL THEN jsonb_build_object(
+                        'block', ysb.block, 'bay_idx', ys.bay_idx,
+                        'row', CASE WHEN ys.row_idx BETWEEN 0 AND 25 THEN chr(65 + ys.row_idx)
+                                    ELSE ys.row_idx::text END,
+                        'tier', ys.tier) END,
                    'out_vessel', c.out_vessel, 'out_voyage', c.out_voyage
                  ) AS cobj
             FROM q
@@ -209,6 +243,33 @@ pub async fn build(pool: &PgPool, ws: DateTime<Utc>, we: DateTime<Utc>) -> Resul
             -- Keyed on the box alone: a container has one physical size regardless of which call it
             -- is on, which is exactly why this source survives the manifest's timing problem.
             LEFT JOIN scenario.container_spec cs ON cs.contno = q.contno
+            -- Last resort for size ONLY, and for the same reason as container_spec above: the ISO
+            -- type is a permanent property of the box, so ANY manifest row for that number answers
+            -- it even when the row belongs to a different call or the opposite direction. This
+            -- exists because the spec makes "size or iso" a hard validation rule and three moves
+            -- failed it: two were boxes whose manifest sat under the OTHER leg of the same visit
+            -- (one a discharge-then-reload on the same call, one discharged off a different ship),
+            -- so the vessel/voyage/disload-keyed join above could never see them. Nothing but size
+            -- is taken from here — weight, port and fill belong to a specific call and would be
+            -- wrong to borrow.
+            LEFT JOIN LATERAL (
+              SELECT c2.iso, c2.size FROM scenario.container c2
+               WHERE c2.contno = q.contno AND (c2.iso IS NOT NULL OR c2.size IS NOT NULL)
+               ORDER BY c2.captured_at DESC LIMIT 1
+            ) ca ON true
+            LEFT JOIN LATERAL (
+              SELECT ym.block_id, ym.bay_idx, ym.row_idx, ym.tier
+                FROM scenario.yard_move ym
+               WHERE ym.contno = q.contno AND ym.jobtype = q.jobtype
+                 AND (q.jobtype = 'DS' AND ym.comp_ts >= q.comp_ts
+                                       AND ym.comp_ts <  q.comp_ts + interval '12 hours'
+                   OR q.jobtype = 'LD' AND ym.comp_ts <= q.comp_ts
+                                       AND ym.comp_ts >  q.comp_ts - interval '12 hours')
+               ORDER BY CASE WHEN q.jobtype = 'DS' THEN ym.comp_ts END ASC,
+                        CASE WHEN q.jobtype = 'LD' THEN ym.comp_ts END DESC
+               LIMIT 1
+            ) ys ON true
+            LEFT JOIN scenario.yard_block ysb ON ysb.block_id = ys.block_id
         )
         SELECT coalesce(jsonb_agg(vobj ORDER BY sp NULLS LAST), '[]'::jsonb)::text FROM (
           SELECT vc.startpos_m AS sp, jsonb_build_object(
@@ -429,7 +490,7 @@ pub async fn build(pool: &PgPool, ws: DateTime<Utc>, we: DateTime<Utc>) -> Resul
             FROM qs GROUP BY machno, vessel, voyage, grp
         ),
         ym AS (
-          SELECT machno, block_id, comp_ts FROM scenario.yard_move
+          SELECT machno, block_id, comp_ts, jobtype FROM scenario.yard_move
            WHERE comp_ts >= $1 AND comp_ts < $2
         ),
         yb AS (
@@ -440,9 +501,45 @@ pub async fn build(pool: &PgPool, ws: DateTime<Utc>, we: DateTime<Utc>) -> Resul
             FROM ym WINDOW w AS (PARTITION BY machno ORDER BY comp_ts)
         ),
         ys AS (SELECT *, sum(brk) OVER (PARTITION BY machno ORDER BY comp_ts) grp FROM yb),
-        yspan AS (
-          SELECT machno, block_id, min(comp_ts) st, max(comp_ts) en, count(*) n
+        yspan0 AS (
+          SELECT machno, block_id, grp, min(comp_ts) st, max(comp_ts) en, count(*) n
             FROM ys GROUP BY machno, block_id, grp
+        ),
+        -- R3(c): a span is a stretch of one machine on one block, so it mixes work codes freely.
+        -- Reporting only the total is what left 34% of yard-crane load unattributable, so each span
+        -- carries its own code histogram and the section carries the window's.
+        yspan_code AS (
+          SELECT machno, block_id, grp, jobtype, count(*) c FROM ys GROUP BY 1,2,3,4
+        ),
+        yspan_codes AS (
+          SELECT machno, block_id, grp, jsonb_object_agg(jobtype, c) bc
+            FROM yspan_code GROUP BY 1,2,3
+        ),
+        yspan AS (
+          SELECT s.machno, s.block_id, s.st, s.en, s.n, c.bc
+            FROM yspan0 s
+            LEFT JOIN yspan_codes c
+              ON c.machno = s.machno AND c.block_id IS NOT DISTINCT FROM s.block_id AND c.grp = s.grp
+        ),
+        -- R3(b): the internal transfer, as one record per box rather than two loose legs. MO is
+        -- the pick and MI the place — measured, not assumed: of 1,342 boxes with both on
+        -- 2026-08-05, MO came first on 1,341, the median separation was 1,113s (a truck cycle),
+        -- and 1,484 of 1,486 pairs changed block. Unpaired legs are the window's own edges and are
+        -- emitted with the missing end null rather than dropped.
+        imv AS (
+          SELECT o.contno, o.comp_ts AS from_ts, i.comp_ts AS to_ts,
+                 o.machno AS from_machine, i.machno AS to_machine,
+                 ofb.block AS from_block, o.bay_idx AS from_bay, o.row_idx AS from_row, o.tier AS from_tier,
+                 itb.block AS to_block,  i.bay_idx AS to_bay,  i.row_idx AS to_row,  i.tier AS to_tier
+            FROM scenario.yard_move o
+            LEFT JOIN LATERAL (
+              SELECT * FROM scenario.yard_move i2
+               WHERE i2.contno = o.contno AND i2.jobtype = 'MI' AND i2.comp_ts >= o.comp_ts
+                 AND i2.comp_ts < o.comp_ts + interval '12 hours'
+               ORDER BY i2.comp_ts LIMIT 1) i ON true
+            LEFT JOIN scenario.yard_block ofb ON ofb.block_id = o.block_id
+            LEFT JOIN scenario.yard_block itb ON itb.block_id = i.block_id
+           WHERE o.jobtype = 'MO' AND o.comp_ts >= $1 AND o.comp_ts < $2
         ),
         tbk AS (
           SELECT generate_series($1, $2 - interval '{FLEET_BUCKET_MIN} min',
@@ -468,9 +565,28 @@ pub async fn build(pool: &PgPool, ws: DateTime<Utc>, we: DateTime<Utc>) -> Resul
                   ORDER BY machno, st), '[]'::jsonb) FROM qspan),
           'rtg', (SELECT coalesce(jsonb_agg(jsonb_build_object(
                     'machine', yspan.machno, 'block', ybk.block, 'block_id', yspan.block_id,
-                    'start_ts', yspan.st, 'end_ts', yspan.en, 'moves', yspan.n)
+                    'start_ts', yspan.st, 'end_ts', yspan.en, 'moves', yspan.n,
+                    'by_code', yspan.bc)
                   ORDER BY yspan.machno, yspan.st), '[]'::jsonb)
                     FROM yspan LEFT JOIN scenario.yard_block ybk ON ybk.block_id = yspan.block_id),
+          -- R3(c): the window's yard-crane moves by work code. This is the denominator the
+          -- consumer could not decompose — quay + gate moves never summed to it because rehandle,
+          -- internal transfer and the two rare codes were never named.
+          'yard_moves_by_code', (SELECT coalesce(jsonb_object_agg(jobtype, n), '{{}}'::jsonb)
+                                   FROM (SELECT jobtype, count(*) n FROM ym GROUP BY jobtype) z),
+          'yard_internal_moves', (SELECT coalesce(jsonb_agg(jsonb_build_object(
+                    'container_id', contno,
+                    'from_ts', from_ts, 'to_ts', to_ts,
+                    'from_machine', from_machine, 'to_machine', to_machine,
+                    'from_slot', CASE WHEN from_tier IS NOT NULL THEN jsonb_build_object(
+                         'block', from_block, 'bay_idx', from_bay,
+                         'row', CASE WHEN from_row BETWEEN 0 AND 25 THEN chr(65 + from_row)
+                                     ELSE from_row::text END, 'tier', from_tier) END,
+                    'to_slot', CASE WHEN to_tier IS NOT NULL THEN jsonb_build_object(
+                         'block', to_block, 'bay_idx', to_bay,
+                         'row', CASE WHEN to_row BETWEEN 0 AND 25 THEN chr(65 + to_row)
+                                     ELSE to_row::text END, 'tier', to_tier) END)
+                  ORDER BY from_ts), '[]'::jsonb) FROM imv),
           'tt_fleet', jsonb_build_object(
              'bucket_minutes', {FLEET_BUCKET_MIN},
              'trucks_total', (SELECT count(DISTINCT ytno) FROM tcy),
@@ -574,7 +690,28 @@ pub async fn build(pool: &PgPool, ws: DateTime<Utc>, we: DateTime<Utc>) -> Resul
     .await?;
 
     let scenario_out = json!({
-        "meta": { "window": [ws.to_rfc3339(), we.to_rfc3339()], "home_port": "MYPKG", "source": "scengen" },
+        "meta": {
+            "window": [ws.to_rfc3339(), we.to_rfc3339()], "home_port": "MYPKG", "source": "scengen",
+            "note": concat!(
+                "deck_hold is the EXPLICIT value TOS writes, not a tier convention: every quay-crane ",
+                "move carries a work-queue name of the form <bay><D|H>-<D|L>, and the D/H letter is ",
+                "taken from it. A tier threshold is used only where that name does not parse. ",
+                "yard_slot on quay moves is joined from the yard move stream on the box and the ",
+                "direction of time (discharge: the placement AFTER the quay handover; load: the pick ",
+                "BEFORE it); see summary.yard_slot_* for coverage, and note that a box whose partner ",
+                "yard move falls outside the window has none. ",
+                "No restow moves are reported because the quay-crane move log has no restow code: ",
+                "over its whole history it carries only DS/LD/MI/MO/LC/GI, and the source query does ",
+                "not filter job types, so this is the absence of the code and not of the extract. ",
+                "equipment.yard_moves_by_code and equipment.yard_internal_moves are additions: the ",
+                "first decomposes every yard-crane move in the window by work code, the second pairs ",
+                "MO (pick) with MI (place) into one internal-transfer record. Which TOS work code ",
+                "means what is NOT asserted here — only what was measured. ",
+                "summary.size_unknown counts moves with neither size nor iso; those boxes appear in ",
+                "no manifest of any call and in no yard size record, so the size is not known rather ",
+                "than withheld."
+            ),
+        },
         "vessels": vessels,
         "cranes": cranes,
         "landside": landside,
@@ -845,8 +982,34 @@ pub async fn build(pool: &PgPool, ws: DateTime<Utc>, we: DateTime<Utc>) -> Resul
               AND c.disload = CASE q.jobtype WHEN 'DS' THEN 'D' WHEN 'LD' THEN 'L' ELSE q.jobtype END
              LEFT JOIN scenario.container_spec cs ON cs.contno = q.contno"#,
     ).bind(ws).bind(we).fetch_one(pool).await?;
+    // Coverage of the fields the consumer validates against, counted on the OUTPUT rather than
+    // re-queried. These describe the file that ships, so a later change to the query above cannot
+    // leave the numbers describing something else.
+    let (mut slot_ds, mut slot_ld, mut cnt_ds, mut cnt_ld, mut size_unknown) = (0i64, 0i64, 0i64, 0i64, 0i64);
+    for v in scenario_out.get("vessels").and_then(Value::as_array).into_iter().flatten() {
+        for c in v.get("containers").and_then(Value::as_array).into_iter().flatten() {
+            let has_slot = c.get("yard_slot").is_some_and(|s| !s.is_null());
+            match c.get("move_type").and_then(Value::as_str).unwrap_or("") {
+                "discharge" => { cnt_ds += 1; if has_slot { slot_ds += 1 } }
+                "load" => { cnt_ld += 1; if has_slot { slot_ld += 1 } }
+                _ => {}
+            }
+            let sized = c.get("size").is_some_and(|s| !s.is_null())
+                || c.get("iso").is_some_and(|s| !s.is_null());
+            if !sized { size_unknown += 1 }
+        }
+    }
     let summary = json!({
         "vessels": nv, "containers": nc, "ds": nds, "ld": nld, "cranes": ncr, "twin_moves": ntw,
+        // R2: the quay-side yard slot. Discharge = where the box was PUT, load = where it was TAKEN
+        // from. Split by direction because the two are joined in opposite time directions and a
+        // blended number would hide one side failing.
+        "yard_slot_ds": slot_ds, "yard_slot_ld": slot_ld,
+        "yard_slot_ds_pct": if cnt_ds > 0 { slot_ds * 100 / cnt_ds } else { 0 },
+        "yard_slot_ld_pct": if cnt_ld > 0 { slot_ld * 100 / cnt_ld } else { 0 },
+        // Moves carrying neither size nor iso — the spec makes this a hard validation rule, so the
+        // count travels with the file instead of being discovered by the consumer's validator.
+        "size_unknown": size_unknown,
         // enriched_pct is MANIFEST coverage — weight, hazmat, discharge port, ship cell. It is
         // structurally low for load because MOVINS arrives after we enrich the call, and that is a
         // real limit of what is known at the time, not a collection gap.
