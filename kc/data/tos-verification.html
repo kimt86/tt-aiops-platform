@@ -68,7 +68,7 @@
       <tr><td><strong>B</strong></td><td>크레인 부하분산</td><td>↩️ <strong>되돌림</strong> — 설계 위배로 제거. 분산은 1단계 크레인당 수요 캡이 담당</td></tr>
       <tr><td><strong>C</strong></td><td>committed window(near-lock)</td><td>✅ <strong>유지</strong> <code>COMMIT_LOCK 1200</code> — anti-thrash라 2단계에 남김</td></tr>
       <tr><td><strong>D</strong></td><td>무브타임 shift(주/야)별 + ALL 폴백</td><td>✅ <strong>구현</strong> 야간 ~10-16% 느림. 1단계 마감정렬 반영</td></tr>
-      <tr><td><strong>E</strong></td><td>특별취급(냉동·위험물·OOG) 제약</td><td>⏸️ <strong>보류</strong> — 실배차 롤아웃 시 특별 컨테이너를 범위에서 제외</td></tr>
+      <tr><td><strong>E</strong></td><td>특별취급(냉동·위험물·OOG) 제약</td><td>⏭️ <strong>생략</strong> — 빼지 않기로 결정(2026-08-11). TOS 배차 경로에도 특별취급이 없음을 확인(2026-08-18) — <a href="/kc/dispatch/dispatch-deadline.html">배차 마감</a> 참조</td></tr>
     </tbody>
   </table></div>
 
