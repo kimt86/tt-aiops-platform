@@ -1,98 +1,78 @@
-# HANDOFF — 다음 사이클
+# HANDOFF — 이번 사이클
 
-마지막 갱신 2026-08-18. 앞선 사이클: ETW 가 배차에 쓰이는지 전수 확인 → **후보 2·3번을 코드 변경
-없이 닫음**(사용자 결정: 유닛 분리 대신 기록).
+마지막 갱신 2026-08-18. 앞선 사이클: 시스템 상태 평가 → **자문(Phase 1)은 가능, 실배차(Phase 2)는
+불가** 판정. 막는 것은 안정성이 아니라 ①TOS 채널·계약 없음 ②출력의 본체인 **"시점"이 현장 눈금으로
+검증되지 않음** ③"낫다"의 합의된 증거 없음. 이번 사이클은 ②를 우리 손으로 재는 것이다.
 
 > 상시 사실·기준선·함정은 `~/.claude/notes/tt-aiops-platform.md` 에 있다(150줄·상한 도달).
-> 이 파일은 **다음에 무엇을 할지**만 담는다.
+> 이 파일은 **이번 사이클의 정의**만 담는다.
 
 ---
 
-## DONE CRITERIA (작업을 끝냈다고 말하기 전에 전부 돌릴 것)
+## GOAL
+
+"우리 추천대로 그 시각에 그 트럭을 보냈다면 크레인 앞에서 몇 분 기다렸을까(또는 몇 분 늦었을까)"를
+최근 7일 **상자 단위**로 재서, TOS 실제 배차와 **같은 잣대**의 숫자로 나란히 놓는다.
+
+## IN SCOPE
+
+1. 반복 실행 가능한 측정 질의 1개 — `sql/local/` 아래 새 파일. 입력은 이미 있는 표만:
+   - 우리 추천: `stage2_match_shadow`(ts·ytno·contno·jobtype·arrival_s·lead_extra_s).
+     **상자당 첫 추천**이 헤드라인("보냈다면 즉시 출발"), TOS 배차 직전 마지막 추천은 민감도.
+   - 정답지: `tt_move_log`(dispatch_ts) ⋈ `qc_move_log.comp_ts` — 크레인이 그 상자를 다룬 시각.
+   - 우리 트럭의 QC 도착 추정 = 추천시각 + `arrival_s` (+ 적하는 `lead_extra_s`).
+2. 낼 숫자(분모를 문장으로 적어 보고):
+   - **상한** = `comp_ts − 우리 도착` (크레인 순서 고정 가정 → 우리 트럭 대기, 음수면 늦음)
+   - **하한** = `그 크레인의 직전 무브 comp_ts − 우리 도착` (앞 상자가 끝나기 전 도착이면 확실히 기다림)
+   - **같은 상자의 TOS**: `comp_ts − dispatch_ts`(배차→처리·기존 실측 중앙 양하 6.7 / 적하 31.7분)와
+     `우리 추천→처리`를 나란히 — 차이가 곧 우리가 더한 대기.
+   - 양하/적하 분리 · 크레인 굶김 유무(직전 무브 간격 5분↑)로 층화.
+3. **위약**: 같은 잣대를 TOS 배차에 적용(`dispatch_compare_shadow.tos_arrival_s` 로 TOS 트럭 도착
+   추정) → 대기 중앙값이 ~0 부근이어야 한다. 안 오면 **잣대가 틀린 것**이지 우리가 이른 게 아니다.
+4. 결과 기록: 이 파일 + 노트 "측정 기준선" 절. **KC 게시는 안 한다**(사용자 결정 — 판정 문턱을 정한
+   뒤 다음 사이클에).
+
+## OUT OF SCOPE
+
+- 배차 로직·마감·풀 변경 일체. 라이브 게이지·매뷰·타이머 신설 없음.
+- 예측 정확도(크레인 처리 시각 ±10~20분) 개선 없음.
+- TOS 세션 자료(`docs/tos-integration-handoff.md`) 갱신 없음. KC 문서 변경 없음.
+
+## DONE CRITERIA
 
 ```bash
-cargo build --release -p tt-api && cargo build --release -p tt-extractor
-cargo test --workspace                      # 70 통과 · 실패 0 이 기준
-systemctl --user is-active tt-api           # active
+psql -h 127.0.0.1 -p 5433 -U wp -d wp_tt -f sql/local/<파일>.sql     # 60초 안(SET LOCAL statement_timeout)
 ```
-```sql
--- 매칭이 착지를 따라가고 있는가. ★반드시 wake_src 로 가른다(나이로 이유를 추정하면 동어반복)
-SELECT wake_src, count(*) AS 틱, round(avg(workpool_age_s),1) AS 평균,
-       percentile_cont(0.99) WITHIN GROUP (ORDER BY workpool_age_s) AS p99,
-       count(*) FILTER (WHERE workpool_age_s > 45) AS 초과45
-  FROM stage2_solver_shadow WHERE ts > now()-interval '2 hours' GROUP BY 1;
+- 출력 한 표에 양하·적하 각각: **분모 상자 수 · 대기 상한/하한 중앙·p90 · TOS 배차→처리 중앙 ·
+  우리 추천→처리 중앙**.
+- 위약(TOS 자기 배차에 같은 잣대) 대기 중앙값이 같은 표에 있다.
+- 층화 변수(굶김 유무)가 결과(대기)에서 파생되지 않았음을 한 줄로 밝힌다(직전 무브 간격은 우리 도착과
+  무관 — 일치율로 확인).
+- 판정 문장 하나: "우리 추천대로면 트럭 대기 중앙 X분 (TOS 대비 +Y분)". **수치를 낼 뿐, 문턱 통과
+  여부는 이번에 정하지 않는다.**
+- 상시 점검(변경 없어도 돌린다): `cargo test --workspace` 70 통과 · `systemctl --user is-active tt-api`
+  active · 유닛 드리프트 0.
 
--- 파이프라인 생존 (틱 55~62/시간 · 경보 0)
-SELECT EXTRACT(epoch FROM now()-max(ts))::int AS 마지막틱_초전,
-       (SELECT count(*) FROM stage2_solver_shadow WHERE ts > now()-interval '1 hour') AS 최근1h_틱,
-       (SELECT count(*) FROM ops_alert WHERE last_ts > now()-interval '3 hours') AS 최근3h_경보
-  FROM stage2_solver_shadow;
-```
-```bash
-# 유닛 드리프트 0 (저장소 == 설치본)
-for f in deploy/systemd/*.service deploy/systemd/*.timer; do
-  b=$(basename "$f"); i="$HOME/.config/systemd/user/$b"
-  [ -f "$i" ] || { echo "미설치: $b"; continue; }
-  diff -q "$f" "$i" >/dev/null || echo "차이: $b"
-done
-# KC 문서가 실제로 서빙되는가 (포트는 deploy/systemd/tt-api.service 의 API_ADDR)
-curl -s -o /dev/null -w '%{http_code}\n' localhost:8080/kc/dispatch/dispatch-deadline.html   # 200
-```
+## UNKNOWNS
+
+- `stage2_match_shadow` 보존 기간이 7일 이상인지(프룬 설정 미확인) — 첫 질의에서 `min(ts)` 로 확인.
+- 적하 `lead_extra_s` 가 최근 행에 채워져 있는지 — NULL 이면 `learn_dispatch_lead` 중앙값으로 대체하고
+  그 사실을 표에 적는다.
+- 크레인이 실제로 굶은 상자에서는 `comp_ts` 자체가 TOS 배차의 결과라 상한이 과대다 — 그래서 하한을
+  같이 낸다. 더 좁히려면 순서 재배열 가정이 필요한데 이번엔 안 한다.
 
 ---
-
-## 지금 참인 것 (전에는 아니었던 것)
-
-- **ETW 는 표시 전용이다.** `work_eta`·마감·매칭 산식에 없다. 읽는 곳은 화면 정렬 2곳과 프론트 칩뿐.
-  유일한 간접 경로(ETW 정렬 → 활성 선박 → 구역 정렬)는 **무브 기준 다선박 QC 가 0** 이라 안 열린다.
-  ⇒ **후보 2번(ETW 가 착지 뒤에 온다) 소멸** — 낡아도 배차 숫자를 못 건드린다.
-- **★후보 3번은 오측정이었다 — 철회.** `tt-workpool` 실행 소요는 **평균 6.49초**(저널 360회)이고
-  시작 간격은 60.00초로 타이머를 정확히 지킨다. 매 분 ~53초 여유가 있다. 종전 기준선
-  "평균 60.3초·주기를 못 지킨다"는 **착지 간격을 실행 소요로 읽은 것**이었다.
-- **`dispatch_pred_sample.etw_qc_ts` 는 죽은 컬럼** — 삽입부가 `None` 하드코딩이라 7일 0/126,527행.
-  mig0084 가 의도한 "ETW vs 우리 예측" 비교는 한 번도 가능한 적이 없었다.
-- KC 는 손대지 않았다 — 확인 결과 ETW 를 "TOS 가 주는 값"으로만 설명하고 있어 틀린 서술이 없다
-  (우리 마감 문서 `dispatch-deadline.html` 에는 ETW 언급 자체가 없다).
-
-## 일부러 안 한 것
-
-- **ETW 를 별도 유닛으로 떼지 않았다**(사용자 결정). 이득이 "여유 53초짜리 틱에서 평균 2.5초"로
-  줄어 라이브 배선을 건드릴 명분이 없어졌다. 되살리려면 근거부터 다시 세울 것.
-- **죽은 컬럼 `etw_qc_ts` 를 치우지 않았다** — 아래 후보 6번.
-- **냉동 전원 해제가 트럭을 기다리게 하는지 재지 않았다**(사용자 결정: TOS 팀과 직접 회의에서 확인).
-
-## 이번 사이클에서 나온 범위 밖 발견
-
-- **노트의 함정 항목에 있던 `tt-etw` 유닛은 존재하지 않는다.** 우리 쪽은 `tt-workpool` 안의 ETW
-  단계 + 터널 `wp-etw-bridge` 뿐이다. 노트를 고쳤다(사용자 지시 자체는 그대로 유효).
-- **내가 상관 서브쿼리를 라이브 DB 에 던져 2분 넘게 안 끝나 취소했다**(`pg_cancel_backend`).
-  파이프라인 피해는 없었다(취소 직후 ETW 38초 전·WORKPOOL 43초 전·솔버 정상). 노트에 함정으로 적음.
 
 ## 이월된 미해소 항목 (지우지 말 것)
 
 - **미해소 래치 경보 `deadman/road_route_eval`** — 마지막 08-11 08:34. 아직 안 봤다.
-- **`disk/filesystem` crit 이 계속 뛰고 있다** — 07-29 이후 212회, 마지막 08-18 07:31.
-  "디스크 여유 17GiB 미만". root 권한자 몫이라 우리가 못 고친다(후보 8번).
-- **`web/public/livemap-roadgraph.geojson` 은 매시 크론이 다시 쓴다** — `git status` 에 **항상**
-  modified 로 뜬다. 저장소가 더럽다는 근거로 쓰지 말고, 커밋에 딸려 들어가지 않게 경로를 지정할 것.
-
-## 다음 후보 (한 줄 근거)
-
-1. **TOS 기술 세션** — `docs/tos-integration-handoff.md` 의 7개 질문. 기술 쪽 유일한 크리티컬 패스.
-   ★이번 사이클로 물을 것이 둘 늘었다: **"기록에 안 남는 사람 규칙이 있는가"**(위험물 무전 승인 등)와
-   **"적하 냉동의 전원 해제가 트럭을 기다리게 하는가"**(사흘 300건 관측·트럭 대기는 미측정).
-2. **운영자 채택/기각 기록 장치** — 파일럿 Phase 1→2 통과 기준이 "운영자 수용"인데 재는 장치가 없다.
-   지금의 채택률은 "TOS 와 같은 상자"이지 사람의 판단이 아니다.
-3. **비교기 지표 재측정** — T1 절체(`t1_ver=1`) 후 평시 표본이 쌓였을 것이다.
-4. **한산한 시간대 DEADMAN 오경보 해소** — `stage2_match_shadow` 가 "지금 할 일이 있는가"를 안 본다.
-5. **`deadman/road_route_eval` 래치 경보 확인** — 08-11 이후 아무도 안 봤다.
-6. **죽은 배선 정리 2건** — `etw_qc_ts`(`None` 하드코딩)와 `stage2_solver_shadow` 가 DEADMAN 밖인 것.
-   둘 다 "있다고 착각하게 만드는" 종류라 지우거나 채우거나 둘 중 하나.
-7. **평문 비밀번호 정리** — `scripts/*.sh` 의 `PGPASSWORD=wp`. GitHub 원격이 있다.
-8. **디스크 root 영역** — 여유 17GiB 밑. root 권한자 몫.
-9. **다 머지된 워크트리 2개 정리**(`kc-journal`·`ws-coverage-kc`) — 미머지 커밋 0·작업트리 깨끗.
+- **`disk/filesystem` crit** — `/` 98%·여유 24GiB(08-18 실측). root 권한자 몫.
+- **`web/public/livemap-roadgraph.geojson` 은 매시 크론이 다시 쓴다** — 항상 modified. 커밋에 딸려
+  들어가지 않게 경로를 지정할 것.
+- 다 머지된 워크트리 2개(`kc-journal`·`ws-coverage-kc`) — 미머지 0·깨끗. 정리 여부는 사용자 결정.
 
 ## 사용자가 답해야 하는 것
 
-- **`DISPATCH_MODE=active` 를 언제 켤 것인가?** 코드 작업은 없다. 켜는 순간의 유일한 효과는
-  "직전 180초에 우리가 추천한 상자를 풀에서 뺀다"이고, TOS 소비 채널이 없는 지금은 얻는 것이 없다.
+- **`DISPATCH_MODE=active` 를 언제 켤 것인가?** 코드 작업은 없다. TOS 소비 채널이 없는 지금은
+  얻는 것이 없다.
+- (다음 사이클) 이번 측정값에 어떤 **문턱**을 걸어 "시점을 팔 수 있다"로 볼 것인가.
