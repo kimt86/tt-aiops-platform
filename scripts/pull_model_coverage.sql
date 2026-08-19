@@ -299,7 +299,10 @@ SELECT CASE WHEN prev_free IS NULL THEN 'a) 8일 안 이전 자유 없음(신규
 \echo '    자유(원천 드랍 로그) 뒤 live_assigned_tt 에 처음 나타난 스냅샷이다. 분모 = 그런 (자유→첫 등재) 사건. 재현율 = 그 등재 틱 직전(≤150초)에 풀에 있었나.'
 -- ★판별자: 풀 규칙 판(pool_ver)이 바뀌면 모집단이 바뀐다. 최신 판의 첫 틱 이후만 잰다.
 CREATE TEMP TABLE pv AS SELECT max(pool_ver) AS ver, min(ts) FILTER (WHERE pool_ver = (SELECT max(pool_ver) FROM stage2_pool_truck_shadow)) AS t_from FROM stage2_pool_truck_shadow;
-CREATE TEMP TABLE ah AS SELECT as_of_ts, ytno, jobstatus FROM assigned_tt_hist WHERE as_of_ts > (SELECT t_from FROM pv);
+CREATE TEMP TABLE ah AS
+SELECT as_of_ts, ytno, jobstatus,
+       lag(as_of_ts) OVER (PARTITION BY ytno ORDER BY as_of_ts) AS prev_as_of   -- 같은 트럭의 직전 등재 스냅샷
+  FROM assigned_tt_hist WHERE as_of_ts > (SELECT t_from FROM pv);
 CREATE INDEX ON ah (ytno, as_of_ts); ANALYZE ah;
 CREATE TEMP TABLE fr AS
 SELECT ytno, f FROM (
@@ -308,11 +311,12 @@ SELECT ytno, f FROM (
 CREATE INDEX ON fr (ytno, f); ANALYZE fr;
 WITH win AS (SELECT min(as_of_ts) t0, max(as_of_ts) t1 FROM ah),
 ev2 AS (
-  -- 자유 사건마다: 그 뒤 처음 등재된 스냅샷 (자유 전 스냅샷에는 없었어야 함 = 정말 새 배차)
-  SELECT f.ytno, f.f AS free_ts,
-         (SELECT min(a.as_of_ts) FROM ah a WHERE a.ytno=f.ytno AND a.as_of_ts > f.f
-             AND NOT EXISTS (SELECT 1 FROM ah b WHERE b.ytno=f.ytno AND b.as_of_ts < a.as_of_ts AND b.as_of_ts >= f.f)) AS ask_ts
-    FROM fr f, win WHERE f.f > win.t0 AND f.f < win.t1 - interval '2 minutes'
+  -- 자유 사건마다: 그 뒤 처음 등재된 스냅샷 = 자유 뒤 첫 등재이면서 그 직전 등재가 자유 이전(또는 없음). 인덱스 LATERAL.
+  SELECT f.ytno, f.f AS free_ts, a.as_of_ts AS ask_ts
+    FROM fr f, win
+    LEFT JOIN LATERAL (SELECT as_of_ts FROM ah WHERE ah.ytno=f.ytno AND ah.as_of_ts > f.f AND (ah.prev_as_of IS NULL OR ah.prev_as_of < f.f)
+                        ORDER BY as_of_ts LIMIT 1) a ON true
+   WHERE f.f > win.t0 AND f.f < win.t1 - interval '2 minutes'
 ), ev3 AS (
   SELECT e.*, p.reason FROM ev2 e
     LEFT JOIN LATERAL (SELECT reason FROM pool WHERE pool.ytno=e.ytno AND pool.ts <= e.ask_ts AND pool.ts > e.ask_ts - interval '150 seconds' ORDER BY pool.ts DESC LIMIT 1) p ON e.ask_ts IS NOT NULL
@@ -332,10 +336,11 @@ SELECT count(*) AS "자유 사건", count(ask_ts) AS "그 뒤 등재됨(=물어�
 \echo '════ ⑯ ⑮에서 놓친 것 — 등재 직전 틱에서 그 트럭을 우리는 어떻게 보고 있었나 ════'
 WITH win AS (SELECT min(as_of_ts) t0, max(as_of_ts) t1 FROM ah),
 ev2 AS (
-  SELECT f.ytno, f.f AS free_ts,
-         (SELECT min(a.as_of_ts) FROM ah a WHERE a.ytno=f.ytno AND a.as_of_ts > f.f
-             AND NOT EXISTS (SELECT 1 FROM ah b WHERE b.ytno=f.ytno AND b.as_of_ts < a.as_of_ts AND b.as_of_ts >= f.f)) AS ask_ts
-    FROM fr f, win WHERE f.f > win.t0 AND f.f < win.t1 - interval '2 minutes'
+  SELECT f.ytno, f.f AS free_ts, a.as_of_ts AS ask_ts
+    FROM fr f, win
+    LEFT JOIN LATERAL (SELECT as_of_ts FROM ah WHERE ah.ytno=f.ytno AND ah.as_of_ts > f.f AND (ah.prev_as_of IS NULL OR ah.prev_as_of < f.f)
+                        ORDER BY as_of_ts LIMIT 1) a ON true
+   WHERE f.f > win.t0 AND f.f < win.t1 - interval '2 minutes'
 ), miss AS (
   SELECT e.* FROM ev2 e WHERE e.ask_ts IS NOT NULL
      AND NOT EXISTS (SELECT 1 FROM pool WHERE pool.ytno=e.ytno AND pool.ts <= e.ask_ts AND pool.ts > e.ask_ts - interval '150 seconds')
