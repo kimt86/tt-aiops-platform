@@ -73,11 +73,24 @@ SELECT source, subject, severity, occurrences FROM ops_alert WHERE last_ts > now
 
 ---
 
-## 진행 중 조사 (백그라운드 에이전트 · 2026-08-19)
+## 파생 표 지연 전수조사 — 결과 (백그라운드 에이전트 · 2026-08-19 · `docs/cycles/2026-08-19-derived-latency-audit.md`)
 
-- **파생 표 지연 전수조사** — `tt_move_log.free_ts` 가 원천과 같은 값인데 조립 배치 탓에 185초 늦게 보였다
-  (원천 33초). 라이브가 읽는 표마다 "원천 대비 지연"을 잰다. 결과:
-  `/home/tkadmin/.claude/jobs/d9618bb4/tmp/derived_latency_audit.md`. 끝나면 여기 표로 옮길 것.
+**한 줄**: 라이브 판단 경로가 읽는 표 26개 중 **사건 시각을 파생 표에서 읽는 곳은 1개뿐** —
+`tt_move_log.free_ts`(`livemap.rs:4711` 인플라이트 앵커). 지연 DS 180/300초 · LD 192/314초(중앙/p90) vs 원천
+32~36/56~60초. **같은 유형의 두 번째 사례는 없다.**
+
+| 표 | 원천/파생 | 만드는 주체·주기 | 사건→착지 중앙/p90 | 원천 같은 값 | 라이브 읽는 곳 | 판정 |
+|---|---|---|---|---|---|---|
+| **tt_move_log**(free_ts) | 파생(handover_label ⋈ qc_move_log) | tt-move-log.timer 300초 | **180/300 · 192/314** | LD `qc_move_log.comp_ts` 33/57 · DS `tos_handover_label.comp_ts` 32/56 | `livemap.rs:4711`→4763·4783·4813 | **원천으로 바꿀 것** — 이번 사이클 IN SCOPE 1 과 같은 자리 |
+| qc_move_log · rtg_move_log · tos_handover_label | 원천 | :05/:25/:45 매분 | 32~36/56~60 | — | 4703·4706 · workpool 1329 | 원천 |
+| live_workpool·workqueue·stow_plan·vessel_schedule·etw | 원천 | :55 매분 / 2~5분 | 착지 대기로 깸 | — | livemap 4407·2944 · workpool 272~1347 | 원천 |
+| learn_* 매뷰 9개 · road_* | 파생 파라미터 | 15~30분 / 야간 | 사건 시각 아님 | — | livemap 4678·4717·4321~ · workpool 466~1270 | 괜찮음 |
+| truck_pos_hist | API 30초 스냅샷 | spawn_pos_hist | 30초 양자화 | 메모리 | 5359(비교기) | 괜찮음 |
+
+부수 실측: 인플라이트 트럭 167~178대 중 **34~43대(≈20%)** 가 원천으로는 이미 자유인데 `tt_move_log` 로는 아직
+진행 중(전부 5분 미만·영구 결손 0). 그 효과는 카운트다운 값이 아니라 **"앵커 소속"**(무응답 보류 2배 연장).
+미확인: 매칭 결과 변화량 · 최근 6시간 추출 공백 840~1,020초 원인 · `data_freshness.STOWPLAN` 12일 정지(표 자체는
+신선) · `learn_qc_move_time` 야간 1회 의도 여부.
 
 ## 이월된 미해소 항목 (지우지 말 것)
 
