@@ -4726,11 +4726,13 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
             // about to free. So: GPS where it can see, this anchor where it cannot.
             let inflight: HashMap<String, i64> = sqlx::query_as::<_, (String, i64)>(
                 "WITH pick AS (
+                   -- ★status 로 거르지 않는다(2026-08-19). 종전 status='F' 는 빈 컨테이너(M·픽업의 ~35%) 트립에
+                   --   앵커를 안 줘 그 트럭이 곧 빌 트럭 풀에서 빠졌다(실측 재현율 F 95~100% vs M 54~55%).
                    SELECT trk_id AS ytno, 'DS'::text jt, comp_ts pk FROM qc_move_log
-                    WHERE jobtype='DS' AND status='F' AND comp_ts > now()-interval '3 hours' AND trk_id IS NOT NULL
+                    WHERE jobtype='DS' AND comp_ts > now()-interval '3 hours' AND trk_id IS NOT NULL
                    UNION ALL
                    SELECT trk_id, 'LD', comp_ts FROM rtg_move_log
-                    WHERE jobtype='LD' AND status='F' AND comp_ts > now()-interval '3 hours' AND trk_id IS NOT NULL
+                    WHERE jobtype='LD' AND comp_ts > now()-interval '3 hours' AND trk_id IS NOT NULL
                  ), latest AS (
                    SELECT DISTINCT ON (ytno) ytno, jt, pk FROM pick ORDER BY ytno, pk DESC
                  ), freed AS (
