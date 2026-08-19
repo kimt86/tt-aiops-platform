@@ -236,4 +236,60 @@ SELECT coalesce(state,'(안 보임)') AS "요청 순간 상태", count(*) FILTER
        round(percentile_cont(0.5) WITHIN GROUP (ORDER BY silence_s) FILTER (WHERE NOT covered)::numeric,0) AS "놓친 건 침묵 중앙(초)"
   FROM x GROUP BY 1 ORDER BY 2 DESC;
 
+\echo ''
+\echo '════ ⑫ ★풀 재현율 (mig 0154 · pool_ver 1 · 2026-08-19~) — 트럭이 요청한 순간, 직전 틱(≤150초) 우리 후보 풀에 있었나 ════'
+\echo '    분모 = 풀 기록이 시작된 뒤의 요청(DS/LD 왕복 1건). 이번 사이클(pull 1/2)의 합격 기준 ≥ 95%. 슬롯은 안 바꿨으므로 커버리지(①)와 다르다.'
+CREATE TEMP TABLE pool AS
+SELECT ts, ytno, reason, free_in_s, pos_src FROM stage2_pool_truck_shadow WHERE ts > now() - interval '7 days';
+CREATE INDEX ON pool (ytno, ts); CREATE INDEX ON pool (ts); ANALYZE pool;
+WITH win AS (SELECT min(ts) AS t0, max(ts) AS t1 FROM pool),
+e AS (
+  SELECT e.ytno, e.jobtype, e.dispatch_ts FROM ev e, win
+   WHERE e.twin_leg_seq = 1 AND e.dispatch_ts > win.t0 + interval '150 seconds' AND e.dispatch_ts <= win.t1
+), x AS (
+  SELECT e.*, p.reason, p.free_in_s, p.pos_src
+    FROM e LEFT JOIN LATERAL (SELECT reason, free_in_s, pos_src FROM pool
+                               WHERE pool.ytno = e.ytno AND pool.ts <= e.dispatch_ts AND pool.ts > e.dispatch_ts - interval '150 seconds'
+                               ORDER BY pool.ts DESC LIMIT 1) p ON true
+)
+SELECT jobtype AS 작업, count(*) AS 요청,
+       round(100.0*count(reason)/count(*),1) AS "★풀 재현율 %",
+       round(100.0*count(*) FILTER (WHERE reason='free_tos')/count(*),1) AS "free_tos %",
+       round(100.0*count(*) FILTER (WHERE reason LIKE 'inflight%')/count(*),1) AS "inflight %",
+       round(100.0*count(*) FILTER (WHERE reason='gps_free')/count(*),1) AS "gps_free %",
+       round(100.0*count(*) FILTER (WHERE reason IS NULL)/count(*),1) AS "풀 밖 %",
+       (SELECT to_char(t0 AT TIME ZONE 'Asia/Kuala_Lumpur','MM-DD HH24:MI') FROM win) AS "창 시작(MYT)",
+       (SELECT to_char(t1 AT TIME ZONE 'Asia/Kuala_Lumpur','MM-DD HH24:MI') FROM win) AS "창 끝"
+  FROM x GROUP BY 1 ORDER BY 1;
+
+\echo ''
+\echo '════ ⑬ 풀 크기 분포 (틱당 트럭 수 · 사유별) — 합격 기준 중앙 ≤ 300 ════'
+WITH t AS (
+  SELECT ts, count(*) AS n, count(*) FILTER (WHERE reason='free_tos') AS n_free, count(*) FILTER (WHERE reason LIKE 'inflight%') AS n_inf,
+         count(*) FILTER (WHERE reason='gps_free') AS n_gps, count(*) FILTER (WHERE pos_src='pos_hist') AS n_hist
+    FROM pool GROUP BY ts)
+SELECT count(*) AS 틱, round(percentile_cont(0.5) WITHIN GROUP (ORDER BY n)::numeric,0) AS "풀 중앙", max(n) AS 최대,
+       round(avg(n_free),0) AS "free_tos 평균", round(avg(n_inf),0) AS "inflight 평균", round(avg(n_gps),0) AS "gps_free 평균",
+       round(avg(n_hist),0) AS "위치=pos_hist 평균"
+  FROM t;
+
+\echo ''
+\echo '════ ⑭ 풀 밖에서 요청한 트럭 — 그 순간 TOS 로는 무엇이었나 (자유 뒤 얼마 / 배차 중) ════'
+WITH win AS (SELECT min(ts) AS t0, max(ts) AS t1 FROM pool),
+e2 AS (
+  SELECT ytno, dispatch_ts, jobtype, lag(free_ts) OVER (PARTITION BY ytno ORDER BY dispatch_ts) AS prev_free
+    FROM tt_move_log WHERE dispatch_ts > now()-interval '8 days' AND twin_leg_seq=1
+), m2 AS (
+  SELECT e2.*, EXTRACT(epoch FROM dispatch_ts - prev_free) AS free_for
+    FROM e2, win WHERE e2.jobtype IN ('DS','LD') AND e2.dispatch_ts > win.t0 + interval '150 seconds' AND e2.dispatch_ts <= win.t1
+     AND NOT EXISTS (SELECT 1 FROM pool p WHERE p.ytno=e2.ytno AND p.ts <= e2.dispatch_ts AND p.ts > e2.dispatch_ts - interval '150 seconds')
+)
+SELECT CASE WHEN prev_free IS NULL THEN 'a) 8일 안 이전 자유 없음(신규)'
+            WHEN free_for <= 60 THEN 'b) 빈 지 ≤60초(직전 틱엔 작업 중 — 예측이 못 잡음)'
+            WHEN free_for <= 180 THEN 'c) 빈 지 1~3분(원천 신호 지연 구간)'
+            WHEN free_for <= 10800 THEN 'd) 빈 지 3분~3h(신호 있었는데 못 넣음 — 위치 없음?)'
+            ELSE 'e) 빈 지 3h+(명단 밖)' END AS "풀 밖 이유",
+       count(*) AS 건, round(100.0*count(*)/sum(count(*)) OVER (),1) AS "%"
+  FROM m2 GROUP BY 1 ORDER BY 1;
+
 ROLLBACK;
