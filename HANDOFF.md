@@ -63,6 +63,15 @@ SELECT wake_src, count(*) AS 틱, round(avg(workpool_age_s),1) AS 평균, count(
 SELECT source, subject, severity, occurrences FROM ops_alert WHERE last_ts > now()-interval '3 hours';
 ```
 
+## 진행 상황 (2026-08-19 14:00 KST 배포)
+
+- 커밋 `c90f114`(풀 재정의+mig0154) → `f2af6a2`(Q 상태 배차 누락 수정) → `f1d2256`(KC·측정 절). tt-api 재기동 13:59 KST.
+- 첫 틱: 풀 320대(free_tos 247·inflight 63·gps_free 10) → **Q 배차 트럭 67대가 빈 트럭으로 새는 것 발견**
+  (`live_workpool` 은 A+(Q∧트럭 없음)만) → `live_assigned_tt`(A+Q·전 유형) 보강 후 풀 **247대**(free_tos 182·inflight 65).
+- 위치 출처: 후보의 ~75%가 `pos_hist`(장치 목록은 10분 침묵이면 지운다 — 빈 트럭 대부분이 침묵). 예상대로.
+- 슬롯(n_works)은 48→58 로 약간 늘었다(Stage-1 이 트럭 수를 보는 듯 — 이번 범위 밖, 관찰만).
+- **풀 재현율은 요청이 `tt_move_log` 에 착지한 뒤(완료+5분)에야 잴 수 있다** → 6시간 뒤(20:00 KST~) 측정.
+
 ## UNKNOWNS
 
 - H=15분에서 실제 예측 오차로 풀 재현율이 몇 %가 나오는지 — 첫 6시간 측정이 답. 모자라면 H 20~30으로
