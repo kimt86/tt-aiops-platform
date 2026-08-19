@@ -258,6 +258,13 @@ pull 구조 실측 확인(3일·왕복): 자유 → 다음 배차 중앙 **15초
   스크립트는 기존 관례대로 `scripts/` 에 뒀다(`deadline_axis_compare.sql` 등과 같은 자리).
 - `dispatch_compare_shadow` 에 `(tos_ytno, t1_ts)` 인덱스가 없어 상자↔비교기 짝짓기는 ts 로 먼저 잘라야 한다.
 
+## 진행 중 조사 (백그라운드 에이전트 · 2026-08-19)
+
+- **파생 표 지연 전수조사** — `tt_move_log.free_ts` 가 원천 `qc_move_log`/`rtg_move_log.comp_ts` 와 같은 값인데
+  조립 배치 탓에 **185초 늦게** 보였다(원천 33초). 라이브 판단이 읽는 표마다 "원천 대비 지연"을 재고 늦은
+  파생 표를 읽는 경로를 찾는다. 결과: `/home/tkadmin/.claude/jobs/d9618bb4/tmp/derived_latency_audit.md`.
+  끝나면 HANDOFF 에 표로 옮길 것.
+
 ## 이월된 미해소 항목 (지우지 말 것)
 
 - **미해소 래치 경보 `deadman/road_route_eval`** — 마지막 08-11 08:34. 아직 안 봤다.
