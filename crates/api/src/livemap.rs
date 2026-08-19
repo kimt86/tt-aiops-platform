@@ -4365,6 +4365,9 @@ const HELD_NEAR_DROP_M: f64 = 120.0; // 옛 held 가지(앵커 없을 때만): �
 /// 후보에 넣는다. 정답(TOS 자유시각) 가정 실측: 1분이면 요청 트럭 100%가 잡히나 우리 예측 오차가 4~5분이라
 /// 15분에서 시작한다(풀 ~260대). 환경변수 `POOL_FREE_HORIZON_S` 로 덮어쓴다. 첫 6시간 풀 재현율로 조정.
 const POOL_FREE_HORIZON_S: i64 = 900;
+/// 풀 규칙 판(stage2_pool_truck_shadow.pool_ver). 1 = 첫 배포(2026-08-19 12:57 MYT) · 2 = 픽업 가드 + 앵커 status 필터
+/// 제거(15:09 KST~). 재현율은 반드시 이 값으로 가른다 — 판이 다르면 모집단이 다르다.
+const POOL_VER: i16 = 2;
 
 /// 트럭 한 대에 대한 TOS 쪽 신호 (후보 풀 판정용).
 struct TosSig {
@@ -5018,11 +5021,11 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                 let ages: Vec<Option<i32>> = pool_rows.iter().map(|r| r.gps_age_s.map(|a| a.clamp(0, 2_000_000_000) as i32)).collect();
                 if let Err(e) = sqlx::query(
                     "INSERT INTO stage2_pool_truck_shadow (ts, ytno, reason, free_in_s, pos_src, gps_age_s, pool_ver)
-                     SELECT $1::timestamptz, u.ytno, u.reason, u.free_in_s, u.pos_src, u.gps_age_s, 1
+                     SELECT $1::timestamptz, u.ytno, u.reason, u.free_in_s, u.pos_src, u.gps_age_s, $7::int2
                        FROM unnest($2::text[], $3::text[], $4::int4[], $5::text[], $6::int4[]) AS u(ytno, reason, free_in_s, pos_src, gps_age_s)
                      ON CONFLICT (ts, ytno) DO NOTHING",
                 )
-                .bind(ts_now).bind(&ytnos).bind(&reasons).bind(&bases).bind(&srcs).bind(&ages)
+                .bind(ts_now).bind(&ytnos).bind(&reasons).bind(&bases).bind(&srcs).bind(&ages).bind(POOL_VER)
                 .execute(&pool).await
                 {
                     tracing::warn!(error = %e, "stage2_pool_truck_shadow 기록 실패");

@@ -12,7 +12,7 @@
 --                   gps=GPS 상태 학습값(soon_idle/wait_rtg), held=침묵+짐 실음+드랍 근접(옛 가지·앵커 없을 때만).
 -- pos_src(위치 출처): gps_live(≤120s) · gps_stale(장치 목록에 남은 낡은 픽스 ≤600s) · pos_hist(truck_pos_hist 마지막 행)
 --                   · drop_est(드랍 지점 추정).
--- pool_ver: 1 = 이 재정의(2026-08-19~). 이전 판은 이 표에 없다(NULL 구간 없음).
+-- pool_ver: 1 = 첫 배포(2026-08-19 12:57 MYT~) · 2 = 픽업 가드 + 앵커 status 필터 제거(15:09 KST~). 재현율은 판으로 가른다.
 
 CREATE TABLE IF NOT EXISTS stage2_pool_truck_shadow (
   ts         timestamptz NOT NULL,
