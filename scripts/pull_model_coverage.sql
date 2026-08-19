@@ -240,7 +240,8 @@ SELECT coalesce(state,'(안 보임)') AS "요청 순간 상태", count(*) FILTER
 \echo '════ ⑫ ★풀 재현율 (mig 0154 · pool_ver 1 · 2026-08-19~) — 트럭이 요청한 순간, 직전 틱(≤150초) 우리 후보 풀에 있었나 ════'
 \echo '    분모 = 풀 기록이 시작된 뒤의 요청(DS/LD 왕복 1건). 이번 사이클(pull 1/2)의 합격 기준 ≥ 95%. 슬롯은 안 바꿨으므로 커버리지(①)와 다르다.'
 CREATE TEMP TABLE pool AS
-SELECT ts, ytno, reason, free_in_s, pos_src FROM stage2_pool_truck_shadow WHERE ts > now() - interval '7 days';
+SELECT ts, ytno, reason, free_in_s, pos_src FROM stage2_pool_truck_shadow
+ WHERE ts > now() - interval '7 days' AND pool_ver = (SELECT max(pool_ver) FROM stage2_pool_truck_shadow);  -- 최신 판만
 CREATE INDEX ON pool (ytno, ts); CREATE INDEX ON pool (ts); ANALYZE pool;
 WITH win AS (SELECT min(ts) AS t0, max(ts) AS t1 FROM pool),
 e AS (
@@ -296,7 +297,9 @@ SELECT CASE WHEN prev_free IS NULL THEN 'a) 8일 안 이전 자유 없음(신규
 \echo '════ ⑮ ★★풀 재현율 — 요청 순간을 "자유 뒤 배차 목록에 처음 실린 틱"으로 (mig 0155 · 2026-08-19 14:42~) ════'
 \echo '    tt_move_log.dispatch_ts 는 최종 배차만 남긴다(재배정되면 첫 배차가 사라짐 — TT1272 실증). pull 에서 트럭이 물어본 순간은'
 \echo '    자유(원천 드랍 로그) 뒤 live_assigned_tt 에 처음 나타난 스냅샷이다. 분모 = 그런 (자유→첫 등재) 사건. 재현율 = 그 등재 틱 직전(≤150초)에 풀에 있었나.'
-CREATE TEMP TABLE ah AS SELECT as_of_ts, ytno, jobstatus FROM assigned_tt_hist WHERE as_of_ts > now() - interval '7 days';
+-- ★판별자: 풀 규칙 판(pool_ver)이 바뀌면 모집단이 바뀐다. 최신 판의 첫 틱 이후만 잰다.
+CREATE TEMP TABLE pv AS SELECT max(pool_ver) AS ver, min(ts) FILTER (WHERE pool_ver = (SELECT max(pool_ver) FROM stage2_pool_truck_shadow)) AS t_from FROM stage2_pool_truck_shadow;
+CREATE TEMP TABLE ah AS SELECT as_of_ts, ytno, jobstatus FROM assigned_tt_hist WHERE as_of_ts > (SELECT t_from FROM pv);
 CREATE INDEX ON ah (ytno, as_of_ts); ANALYZE ah;
 CREATE TEMP TABLE fr AS
 SELECT ytno, f FROM (
@@ -320,6 +323,7 @@ SELECT count(*) AS "자유 사건", count(ask_ts) AS "그 뒤 등재됨(=물어�
        round(100.0*count(*) FILTER (WHERE reason LIKE 'inflight%')/nullif(count(ask_ts),0),1) AS "inflight %",
        round(100.0*count(*) FILTER (WHERE reason='gps_free')/nullif(count(ask_ts),0),1) AS "gps_free %",
        round(percentile_cont(0.5) WITHIN GROUP (ORDER BY EXTRACT(epoch FROM ask_ts - free_ts))::numeric,0) AS "자유→등재 중앙(초)",
+       (SELECT ver FROM pv) AS pool_ver,
        (SELECT to_char(t0 AT TIME ZONE 'Asia/Kuala_Lumpur','MM-DD HH24:MI') FROM win) AS "창 시작(MYT)",
        (SELECT to_char(t1 AT TIME ZONE 'Asia/Kuala_Lumpur','MM-DD HH24:MI') FROM win) AS "창 끝"
   FROM ev3;
