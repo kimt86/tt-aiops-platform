@@ -4366,6 +4366,15 @@ const HELD_NEAR_DROP_M: f64 = 120.0; // 옛 held 가지(앵커 없을 때만): �
 /// 15분에서 시작한다(풀 ~260대). 환경변수 `POOL_FREE_HORIZON_S` 로 덮어쓴다. 첫 6시간 풀 재현율로 조정.
 const POOL_FREE_HORIZON_S: i64 = 900;
 
+/// 트럭 한 대에 대한 TOS 쪽 신호 (후보 풀 판정용).
+struct TosSig {
+    free: Option<DateTime<Utc>>,      // 원천 드랍 로그의 마지막 자유(3h 창)
+    dis: Option<DateTime<Utc>>,       // 작업목록(live_workpool)의 마지막 배차 시각 — A 상태 vessel 작업만 보인다
+    jobtype: Option<String>,          // 그 배차의 작업유형
+    topos: Option<String>,            // 그 배차의 목적지 코드
+    listed_at: Option<DateTime<Utc>>, // 전 유형 배차 목록(live_assigned_tt·A+Q)에 마지막으로 실린 스냅샷 시각
+}
+
 /// 이번 틱 후보 풀의 트럭 한 대 (stage2_pool_truck_shadow 한 행).
 struct PoolRow {
     ytno: String,
@@ -4772,9 +4781,12 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
             //       "20분 침묵 = 퇴근"(SILENT_HOLD_S) 가정은 폐기 — 30분+ 침묵 트럭이 요청의 8.8%를 낸다.
             // 슬롯·배정 순서는 이번에 안 바꾼다(pull 2/2). 이 풀은 stage2_pool_truck_shadow 에 틱마다 남는다.
             let pool_h_s: i64 = std::env::var("POOL_FREE_HORIZON_S").ok().and_then(|v| v.parse().ok()).unwrap_or(POOL_FREE_HORIZON_S);
-            // TOS 쪽 신호: 트럭별 마지막 자유(원천) · 마지막 배차(작업목록 yt_dis_ts) · 그 배차의 작업유형/목적지
-            let tos_sig: HashMap<String, (Option<DateTime<Utc>>, Option<DateTime<Utc>>, Option<String>, Option<String>)> =
-                sqlx::query_as::<_, (String, Option<DateTime<Utc>>, Option<DateTime<Utc>>, Option<String>, Option<String>)>(
+            // TOS 쪽 신호: 트럭별 마지막 자유(원천) · 마지막 배차(작업목록 yt_dis_ts) · 그 배차의 작업유형/목적지 ·
+            // 전 작업유형 배차 목록(live_assigned_tt·A+Q)에 실린 마지막 스냅샷 시각.
+            // ⚠live_workpool 은 "A + (Q ∧ 트럭 없음)" 만 담는다 — Q(대기) 상태로 배차된 트럭(~80대)이 거기 없어
+            //   첫 배포 틱에서 free_tos 247 중 67대가 실은 배차 중이었다. live_assigned_tt 로 막는다.
+            let tos_sig: HashMap<String, TosSig> =
+                sqlx::query_as::<_, (String, Option<DateTime<Utc>>, Option<DateTime<Utc>>, Option<String>, Option<String>, Option<DateTime<Utc>>)>(
                     "WITH freed AS (
                        SELECT ytno, max(f) f FROM (
                          SELECT trk_id ytno, comp_ts f FROM qc_move_log
@@ -4787,17 +4799,26 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                        SELECT DISTINCT ON (ytno) ytno, yt_dis_ts d, jobtype, coalesce(nullif(to_pos,''), nullif(yt_topos,'')) topos
                          FROM live_workpool WHERE ytno IS NOT NULL AND ytno <> '' AND yt_dis_ts IS NOT NULL
                         ORDER BY ytno, yt_dis_ts DESC
+                     ), asg AS (
+                       SELECT ytno, max(as_of_ts) asof FROM live_assigned_tt
+                        WHERE as_of_ts > now() - interval '5 minutes' AND ytno IS NOT NULL GROUP BY 1
+                     ), ids AS (
+                       SELECT ytno FROM freed UNION SELECT ytno FROM disp UNION SELECT ytno FROM asg
                      )
-                     SELECT coalesce(f.ytno, d.ytno), f.f, d.d, d.jobtype, d.topos
-                       FROM freed f FULL JOIN disp d ON d.ytno = f.ytno",
+                     SELECT i.ytno, f.f, d.d, d.jobtype, d.topos, a.asof
+                       FROM ids i LEFT JOIN freed f USING (ytno) LEFT JOIN disp d USING (ytno) LEFT JOIN asg a USING (ytno)",
                 )
                 .fetch_all(&pool).await
                 .inspect_err(|e| tracing::warn!(error = %e, "TOS 자유/배차 신호 질의 실패 — 이번 틱은 GPS 풀만"))
                 .unwrap_or_default()
-                .into_iter().map(|(y, f, d, jt, tp)| (y, (f, d, jt, tp))).collect();
-            // 자유(free) 이면서 새 배차 없음 = 빈 채 대기. 배차가 자유보다 뒤 = 작업 중.
-            let is_free_tos = |sig: &(Option<DateTime<Utc>>, Option<DateTime<Utc>>, Option<String>, Option<String>)| -> bool {
-                match (sig.0, sig.1) { (Some(f), Some(d)) => d <= f, (Some(_), None) => true, _ => false }
+                .into_iter().map(|(y, f, d, jt, tp, asof)| (y, TosSig { free: f, dis: d, jobtype: jt, topos: tp, listed_at: asof })).collect();
+            // 빈 채 대기 = 자유가 찍혔고, 그 뒤 새 배차(yt_dis_ts)가 없고, 자유 뒤 스냅샷에서 배차 목록에 없다.
+            // (자유가 스냅샷보다 새로우면 스냅샷은 낡은 것 — 자유를 믿는다. 작업목록 60초 지연을 흡수.)
+            let is_free_tos = |sig: &TosSig| -> bool {
+                let Some(f) = sig.free else { return false };
+                if sig.dis.is_some_and(|d| d > f) { return false; }
+                if sig.listed_at.is_some_and(|a| a >= f) { return false; }
+                true
             };
             let (vehicles, held_out, pool_rows): (Vec<(String, f64, f64, i64, &'static str)>, Vec<HeldCandidateOut>, Vec<PoolRow>) = {
                 let map = lm.devices.read().await;
@@ -4831,7 +4852,7 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                     let dev = map.get(id);
                     let age = dev.map(|p| (now - p.last_seen_ms) / 1000);
                     let free_now = is_free_tos(sig);
-                    let jt_tos: Option<&str> = sig.2.as_deref().filter(|j| matches!(*j, "LD" | "DS"));
+                    let jt_tos: Option<&str> = sig.jobtype.as_deref().filter(|j| matches!(*j, "LD" | "DS"));
                     if free_now {
                         // 빈 채 대기 — GPS 상태 라벨과 무관하게 포함. 위치는 있는 대로.
                         seen.insert(id.clone());
@@ -4879,7 +4900,7 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                             let jt = match p.jobtype.as_deref().or(p.latched_jobtype.as_deref()).or(jt_tos) { Some(j @ ("LD" | "DS")) => j, _ => "" };
                             let loaded = p.container1.as_deref().is_some_and(|s| !s.is_empty())
                                 || p.latched_container.as_deref().is_some_and(|s| !s.is_empty());
-                            let code = p.topos1.as_deref().filter(|s| !s.is_empty()).or(p.latched_topos.as_deref()).or(sig.3.as_deref());
+                            let code = p.topos1.as_deref().filter(|s| !s.is_empty()).or(p.latched_topos.as_deref()).or(sig.topos.as_deref());
                             let mut r = (i64::MAX, "delivering", "inflight_held");
                             if !jt.is_empty() && loaded {
                                 if let Some(code) = code {
