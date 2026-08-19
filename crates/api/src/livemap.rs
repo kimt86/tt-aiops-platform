@@ -4373,6 +4373,7 @@ struct TosSig {
     jobtype: Option<String>,          // 그 배차의 작업유형
     topos: Option<String>,            // 그 배차의 목적지 코드
     listed_at: Option<DateTime<Utc>>, // 전 유형 배차 목록(live_assigned_tt·A+Q)에 마지막으로 실린 스냅샷 시각
+    picked: Option<DateTime<Utc>>,    // 크레인이 이 트럭에 상자를 실어준 마지막 시각(3h 창) — 자유보다 뒤면 싣고 있다
 }
 
 /// 이번 틱 후보 풀의 트럭 한 대 (stage2_pool_truck_shadow 한 행).
@@ -4786,7 +4787,7 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
             // ⚠live_workpool 은 "A + (Q ∧ 트럭 없음)" 만 담는다 — Q(대기) 상태로 배차된 트럭(~80대)이 거기 없어
             //   첫 배포 틱에서 free_tos 247 중 67대가 실은 배차 중이었다. live_assigned_tt 로 막는다.
             let tos_sig: HashMap<String, TosSig> =
-                sqlx::query_as::<_, (String, Option<DateTime<Utc>>, Option<DateTime<Utc>>, Option<String>, Option<String>, Option<DateTime<Utc>>)>(
+                sqlx::query_as::<_, (String, Option<DateTime<Utc>>, Option<DateTime<Utc>>, Option<String>, Option<String>, Option<DateTime<Utc>>, Option<DateTime<Utc>>)>(
                     "WITH freed AS (
                        SELECT ytno, max(f) f FROM (
                          SELECT trk_id ytno, comp_ts f FROM qc_move_log
@@ -4802,20 +4803,32 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                      ), asg AS (
                        SELECT ytno, max(as_of_ts) asof FROM live_assigned_tt
                         WHERE as_of_ts > now() - interval '5 minutes' AND ytno IS NOT NULL GROUP BY 1
+                     ), picked AS (
+                       -- 크레인이 이 트럭에 상자를 실어준 마지막 시각(픽업). 자유보다 뒤면 지금 싣고 있다.
+                       -- ⚠적하 작업은 야드 픽업 직후 A/Q 에서 사라져(싣고 가는 동안 작업목록·배차목록에 없다)
+                       --   자유·배차 신호만 보면 빈 트럭으로 오판한다(첫 배포 12:57 TT1272 실증) — 이 가드가 막는다.
+                       SELECT ytno, max(p) p FROM (
+                         SELECT trk_id ytno, comp_ts p FROM qc_move_log
+                          WHERE jobtype='DS' AND comp_ts > now()-interval '3 hours' AND trk_id IS NOT NULL
+                         UNION ALL
+                         SELECT trk_id, comp_ts FROM rtg_move_log
+                          WHERE jobtype='LD' AND comp_ts > now()-interval '3 hours' AND trk_id IS NOT NULL
+                       ) u GROUP BY 1
                      ), ids AS (
-                       SELECT ytno FROM freed UNION SELECT ytno FROM disp UNION SELECT ytno FROM asg
+                       SELECT ytno FROM freed UNION SELECT ytno FROM disp UNION SELECT ytno FROM asg UNION SELECT ytno FROM picked
                      )
-                     SELECT i.ytno, f.f, d.d, d.jobtype, d.topos, a.asof
-                       FROM ids i LEFT JOIN freed f USING (ytno) LEFT JOIN disp d USING (ytno) LEFT JOIN asg a USING (ytno)",
+                     SELECT i.ytno, f.f, d.d, d.jobtype, d.topos, a.asof, pk.p
+                       FROM ids i LEFT JOIN freed f USING (ytno) LEFT JOIN disp d USING (ytno) LEFT JOIN asg a USING (ytno) LEFT JOIN picked pk USING (ytno)",
                 )
                 .fetch_all(&pool).await
                 .inspect_err(|e| tracing::warn!(error = %e, "TOS 자유/배차 신호 질의 실패 — 이번 틱은 GPS 풀만"))
                 .unwrap_or_default()
-                .into_iter().map(|(y, f, d, jt, tp, asof)| (y, TosSig { free: f, dis: d, jobtype: jt, topos: tp, listed_at: asof })).collect();
-            // 빈 채 대기 = 자유가 찍혔고, 그 뒤 새 배차(yt_dis_ts)가 없고, 자유 뒤 스냅샷에서 배차 목록에 없다.
-            // (자유가 스냅샷보다 새로우면 스냅샷은 낡은 것 — 자유를 믿는다. 작업목록 60초 지연을 흡수.)
+                .into_iter().map(|(y, f, d, jt, tp, asof, pk)| (y, TosSig { free: f, dis: d, jobtype: jt, topos: tp, listed_at: asof, picked: pk })).collect();
+            // 빈 채 대기 = 자유가 찍혔고, 그 뒤 픽업이 없고(안 실었고), 그 뒤 새 배차(yt_dis_ts)가 없고, 자유 뒤 스냅샷에서
+            // 배차 목록에 없다. (자유가 스냅샷보다 새로우면 스냅샷은 낡은 것 — 자유를 믿는다. 작업목록 60초 지연을 흡수.)
             let is_free_tos = |sig: &TosSig| -> bool {
                 let Some(f) = sig.free else { return false };
+                if sig.picked.is_some_and(|p| p > f) { return false; }
                 if sig.dis.is_some_and(|d| d > f) { return false; }
                 if sig.listed_at.is_some_and(|a| a >= f) { return false; }
                 true
