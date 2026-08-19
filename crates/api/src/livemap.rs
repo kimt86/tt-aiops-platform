@@ -5029,6 +5029,18 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                     crate::db::prune(&pool, "stage2_pool_truck_shadow", "DELETE FROM stage2_pool_truck_shadow WHERE ts < now() - interval '3 days'").await;
                 }
             }
+            // 배차 목록 스냅샷 이력 (mig 0155) — "트럭이 물어본 순간" = 자유 뒤 처음 실린 틱. tt_move_log 는 최종
+            // 배차만 남겨 재배정된 첫 배차가 사라진다. 매 틱 ~350행, ON CONFLICT 로 같은 스냅샷 중복 없음.
+            if let Err(e) = sqlx::query(
+                "INSERT INTO assigned_tt_hist (as_of_ts, ytno, jobstatus)
+                 SELECT as_of_ts, ytno, jobstatus FROM live_assigned_tt WHERE ytno IS NOT NULL
+                 ON CONFLICT (as_of_ts, ytno) DO NOTHING",
+            ).execute(&pool).await {
+                tracing::warn!(error = %e, "assigned_tt_hist 기록 실패");
+            }
+            if tick % 30 == 15 {
+                crate::db::prune(&pool, "assigned_tt_hist", "DELETE FROM assigned_tt_hist WHERE as_of_ts < now() - interval '3 days'").await;
+            }
             // publish the pool this tick ACTUALLY uses (empty included — that's the truth) so
             // positions/TT-page mirror the matcher's numbers instead of re-deriving them.
             {
