@@ -185,4 +185,55 @@ SELECT CASE WHEN gps_age_s IS NULL THEN 'e) GPS 없음' WHEN gps_age_s<=60 THEN 
        count(*) AS 요청, round(100.0*count(*) FILTER (WHERE covered)/count(*),1) AS "커버리지 %"
   FROM x GROUP BY 1 ORDER BY 1;
 
+\echo ''
+\echo '════ ⑩ ★놓친 차량은 후보 풀에 있었나, 없었나 (최근 2일·왕복 1건) ════'
+\echo '    풀 정의(livemap.rs:4729~): GPS 신선(≤120초) + classify_tt 상태가 idle/soon_idle/wait_rtg 면 후보.'
+\echo '    delivering/empty_travel/staging 는 코드에서 continue = 후보 제외. GPS 가 낡으면 아예 분류가 안 된다.'
+\echo '    truck_pos_hist.state 는 매처와 같은 classify_tt 출력이고 GPS 신선할 때만 기록되므로 풀 자격을 그대로 재현한다.'
+\echo '    (⚠ 침묵 트럭을 붙잡는 가지(soon_idle_held/anchored)는 "짐을 싣고 드랍 지점 120m 안"일 때만 걸리고,'
+\echo '     그 상태는 어디에도 기록되지 않는다 — 아래 C 의 일부는 그 가지로 풀에 있었을 수 있다.)'
+WITH e AS (
+  SELECT ytno, jobtype, dispatch_ts FROM tt_move_log
+   WHERE dispatch_ts > now()-interval '2 days' AND jobtype IN ('DS','LD') AND twin_leg_seq=1
+), x AS (
+  SELECT e.*,
+         EXISTS (SELECT 1 FROM rec r WHERE r.ytno=e.ytno AND r.ts<=e.dispatch_ts AND r.ts>e.dispatch_ts-interval '150 seconds') AS covered,
+         s.state
+    FROM e LEFT JOIN LATERAL (
+      SELECT state FROM truck_pos_hist p
+       WHERE p.ytno=e.ytno AND p.ts<=e.dispatch_ts AND p.ts>e.dispatch_ts-interval '150 seconds'
+       ORDER BY p.ts DESC LIMIT 1) s ON true
+), c AS (
+  SELECT jobtype, covered,
+         CASE WHEN state IN ('idle','soon_idle','wait_rtg') THEN 'A. 풀에 있었음'
+              WHEN state IS NOT NULL                        THEN 'B. 풀에서 제외(작업 중으로 분류)'
+              ELSE                                               'C. 아예 안 보임(GPS 침묵)' END AS bucket,
+         state
+    FROM x
+)
+SELECT jobtype AS 작업, bucket AS 구분,
+       count(*) FILTER (WHERE NOT covered) AS "놓친 건",
+       round(100.0*count(*) FILTER (WHERE NOT covered)/sum(count(*) FILTER (WHERE NOT covered)) OVER (PARTITION BY jobtype),1) AS "놓친 건 중 %",
+       count(*) FILTER (WHERE covered) AS "커버된 건",
+       round(100.0*count(*) FILTER (WHERE covered)/nullif(count(*),0),1) AS "이 구분의 커버리지 %"
+  FROM c GROUP BY 1,2 ORDER BY 1,2;
+
+\echo ''
+\echo '════ ⑪ 위 A(풀에 있었는데 못 준 건) 의 상태 내역 · C(안 보임) 의 침묵 길이 ════'
+WITH e AS (
+  SELECT ytno, jobtype, dispatch_ts FROM tt_move_log
+   WHERE dispatch_ts > now()-interval '2 days' AND jobtype IN ('DS','LD') AND twin_leg_seq=1
+), x AS (
+  SELECT e.*,
+         EXISTS (SELECT 1 FROM rec r WHERE r.ytno=e.ytno AND r.ts<=e.dispatch_ts AND r.ts>e.dispatch_ts-interval '150 seconds') AS covered,
+         s.state, EXTRACT(epoch FROM e.dispatch_ts - p.ts)::int AS silence_s
+    FROM e
+    LEFT JOIN LATERAL (SELECT state FROM truck_pos_hist p WHERE p.ytno=e.ytno AND p.ts<=e.dispatch_ts AND p.ts>e.dispatch_ts-interval '150 seconds' ORDER BY p.ts DESC LIMIT 1) s ON true
+    LEFT JOIN LATERAL (SELECT ts FROM truck_pos_hist p WHERE p.ytno=e.ytno AND p.ts<=e.dispatch_ts ORDER BY p.ts DESC LIMIT 1) p ON true
+)
+SELECT coalesce(state,'(안 보임)') AS "요청 순간 상태", count(*) FILTER (WHERE NOT covered) AS "놓친 건",
+       round(100.0*count(*) FILTER (WHERE covered)/count(*),1) AS "커버리지 %",
+       round(percentile_cont(0.5) WITHIN GROUP (ORDER BY silence_s) FILTER (WHERE NOT covered)::numeric,0) AS "놓친 건 침묵 중앙(초)"
+  FROM x GROUP BY 1 ORDER BY 2 DESC;
+
 ROLLBACK;
