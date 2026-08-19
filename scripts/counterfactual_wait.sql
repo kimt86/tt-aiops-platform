@@ -1,6 +1,15 @@
 -- 반사실 대기 측정 — "우리 추천대로 그 시각에 그 트럭을 보냈다면 크레인 앞에서 몇 분 기다렸을까".
 --   psql -h 127.0.0.1 -p 5433 -U wp -d wp_tt -f scripts/counterfactual_wait.sql
 --
+-- ⚠⚠ 2026-08-19 정정 두 건 — 먼저 읽을 것
+-- (1) **TOS 배차시각과의 비교(②)는 판정 축에서 내렸다.** 현장은 차량이 작업을 고르는 pull 구조라
+--     `dispatch_ts` 는 "TOS 가 언제 결정했나"가 아니라 **트럭이 언제 비었나**일 뿐이다(실측: 자유 →
+--     배차 중앙 15초/38초). ②는 이제 **어느 상자를 언제 크레인이 다뤘는지 찾는 기계적 연결고리**로만
+--     쓴다. 합격 기준은 `scripts/pull_model_coverage.sql` 로 옮겼다.
+-- (2) **`comp_ts` 는 인계가 끝난 시각**이라 아래 "대기"에는 크레인의 픽업/드랍 동작 시간이 들어 있다.
+--     실측(트럭 도착 → comp_ts 하위 분위수, 7일): 대기가 거의 없는 구간이 **양하 29~48초 / 적하 22~40초**.
+--     ⇒ ①에 그만큼 뺀 열을 같이 낸다(:hs_ds / :hs_ld). 크기가 작아 결론은 바뀌지 않는다.
+--
 -- ■ 무엇을 재나
 -- 시점이 곧 지시다 — 필요보다 일찍 보내면 트럭이 크레인 앞에서 기다린다. 이 스크립트는 최근 7일
 -- 우리가 **처음 추천한 상자**마다, 그 추천대로 즉시 출발했다면 트럭이 크레인 앞에 언제 도착했을지를
@@ -30,6 +39,9 @@
 
 \set ON_ERROR_STOP on
 \pset null '-'
+-- 순수 픽업/드랍 동작 시간(초) — 트럭 도착→comp_ts 의 p10(대기 없는 구간). 아래 ⑦에서 재측정한다.
+\set hs_ds 48
+\set hs_ld 40
 
 BEGIN;
 SET LOCAL statement_timeout = '60s';
@@ -137,7 +149,8 @@ SELECT jobtype AS 작업, count(*) AS 상자,
        round((percentile_cont(0.9) WITHIN GROUP (ORDER BY wait_lower_s)/60)::numeric,1) AS "하한 p90",
        round(100.0*count(*) FILTER (WHERE wait_upper_s < 0)/count(*),1)                  AS "늦음 %(상한<0)",
        round(100.0*count(*) FILTER (WHERE wait_lower_s >= 600)/count(*),1)               AS "확실히 10분+ 대기 %",
-       round(100.0*count(*) FILTER (WHERE wait_upper_s >= 600)/count(*),1)               AS "최대 10분+ 대기 %"
+       round(100.0*count(*) FILTER (WHERE wait_upper_s >= 600)/count(*),1)               AS "최대 10분+ 대기 %",
+       round((percentile_cont(0.5) WITHIN GROUP (ORDER BY wait_upper_s - CASE WHEN jobtype='DS' THEN :hs_ds ELSE :hs_ld END)/60)::numeric,1) AS "상한 중앙(동작 제외)"
   FROM cf WHERE comp_ts IS NOT NULL GROUP BY 1 ORDER BY 1;
 
 \echo ''
@@ -198,5 +211,27 @@ SELECT jobtype AS 작업, count(*) AS 상자,
        round((percentile_cont(0.5) WITHIN GROUP (ORDER BY wait_upper_last_s)/60)::numeric,1)    AS "상한 중앙(마지막 추천)",
        round((percentile_cont(0.5) WITHIN GROUP (ORDER BY EXTRACT(epoch FROM last_ts - first_ts))/60)::numeric,1) AS "첫→마지막 추천 간격 중앙"
   FROM cf WHERE comp_ts IS NOT NULL GROUP BY 1 ORDER BY 1;
+
+\echo ''
+\echo '════ ⑦ 관측 기준선 — 현행 운영에서 트럭이 크레인에 도착해 인계가 끝날 때까지 (분·GPS 도착 앵커) ════'
+\echo '    양하=빈 차 도착→QC 픽업 완료 / 적하=실은 차 도착→QC 드랍 완료. 하위 분위수 ~= 대기 없는 순수 동작.'
+\echo '    ⚠①과 구성이 다르다(여기는 GPS 실측 도착, ①은 우리 모델 추정 도착) — 나란히 놓되 같은 값처럼 읽지 말 것.'
+WITH a AS (
+  SELECT v.ytno, v.jobtype,
+         CASE WHEN v.jobtype='DS' THEN v.empty_arrived_at ELSE v.laden_arrived_at END AS arr_at
+    FROM tt_cycle_v2 v WHERE v.dropped_at > now()-interval '7 days' AND v.jobtype IN ('DS','LD')
+), j AS (
+  SELECT a.*, q.comp_ts FROM a
+  JOIN LATERAL (SELECT comp_ts FROM qc_move_log q
+                 WHERE q.trk_id = a.ytno AND q.jobtype = a.jobtype
+                   AND q.comp_ts BETWEEN a.arr_at AND a.arr_at + interval '90 minutes'
+                 ORDER BY q.comp_ts LIMIT 1) q ON a.arr_at IS NOT NULL
+)
+SELECT jobtype AS 작업, count(*) AS n,
+  round(percentile_cont(0.05) WITHIN GROUP (ORDER BY EXTRACT(epoch FROM comp_ts-arr_at))::numeric,0) AS "p05(초)",
+  round(percentile_cont(0.10) WITHIN GROUP (ORDER BY EXTRACT(epoch FROM comp_ts-arr_at))::numeric,0) AS "p10(초)",
+  round((percentile_cont(0.50) WITHIN GROUP (ORDER BY EXTRACT(epoch FROM comp_ts-arr_at))/60)::numeric,1) AS "중앙(분)",
+  round((percentile_cont(0.90) WITHIN GROUP (ORDER BY EXTRACT(epoch FROM comp_ts-arr_at))/60)::numeric,1) AS "p90(분)"
+ FROM j GROUP BY 1 ORDER BY 1;
 
 ROLLBACK;
