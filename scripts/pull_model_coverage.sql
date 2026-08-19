@@ -292,4 +292,55 @@ SELECT CASE WHEN prev_free IS NULL THEN 'a) 8일 안 이전 자유 없음(신규
        count(*) AS 건, round(100.0*count(*)/sum(count(*)) OVER (),1) AS "%"
   FROM m2 GROUP BY 1 ORDER BY 1;
 
+\echo ''
+\echo '════ ⑮ ★★풀 재현율 — 요청 순간을 "자유 뒤 배차 목록에 처음 실린 틱"으로 (mig 0155 · 2026-08-19 14:42~) ════'
+\echo '    tt_move_log.dispatch_ts 는 최종 배차만 남긴다(재배정되면 첫 배차가 사라짐 — TT1272 실증). pull 에서 트럭이 물어본 순간은'
+\echo '    자유(원천 드랍 로그) 뒤 live_assigned_tt 에 처음 나타난 스냅샷이다. 분모 = 그런 (자유→첫 등재) 사건. 재현율 = 그 등재 틱 직전(≤150초)에 풀에 있었나.'
+CREATE TEMP TABLE ah AS SELECT as_of_ts, ytno, jobstatus FROM assigned_tt_hist WHERE as_of_ts > now() - interval '7 days';
+CREATE INDEX ON ah (ytno, as_of_ts); ANALYZE ah;
+CREATE TEMP TABLE fr AS
+SELECT ytno, f FROM (
+  SELECT trk_id ytno, comp_ts f FROM qc_move_log WHERE jobtype='LD' AND comp_ts > (SELECT min(as_of_ts) FROM ah) - interval '1 hour' AND trk_id IS NOT NULL
+  UNION ALL SELECT ytno, comp_ts FROM tos_handover_label WHERE jobtype='DS' AND comp_ts > (SELECT min(as_of_ts) FROM ah) - interval '1 hour' AND ytno IS NOT NULL) u;
+CREATE INDEX ON fr (ytno, f); ANALYZE fr;
+WITH win AS (SELECT min(as_of_ts) t0, max(as_of_ts) t1 FROM ah),
+ev2 AS (
+  -- 자유 사건마다: 그 뒤 처음 등재된 스냅샷 (자유 전 스냅샷에는 없었어야 함 = 정말 새 배차)
+  SELECT f.ytno, f.f AS free_ts,
+         (SELECT min(a.as_of_ts) FROM ah a WHERE a.ytno=f.ytno AND a.as_of_ts > f.f
+             AND NOT EXISTS (SELECT 1 FROM ah b WHERE b.ytno=f.ytno AND b.as_of_ts < a.as_of_ts AND b.as_of_ts >= f.f)) AS ask_ts
+    FROM fr f, win WHERE f.f > win.t0 AND f.f < win.t1 - interval '2 minutes'
+), ev3 AS (
+  SELECT e.*, p.reason FROM ev2 e
+    LEFT JOIN LATERAL (SELECT reason FROM pool WHERE pool.ytno=e.ytno AND pool.ts <= e.ask_ts AND pool.ts > e.ask_ts - interval '150 seconds' ORDER BY pool.ts DESC LIMIT 1) p ON e.ask_ts IS NOT NULL
+)
+SELECT count(*) AS "자유 사건", count(ask_ts) AS "그 뒤 등재됨(=물어봄)",
+       round(100.0*count(reason)/nullif(count(ask_ts),0),1) AS "★풀 재현율 %",
+       round(100.0*count(*) FILTER (WHERE reason='free_tos')/nullif(count(ask_ts),0),1) AS "free_tos %",
+       round(100.0*count(*) FILTER (WHERE reason LIKE 'inflight%')/nullif(count(ask_ts),0),1) AS "inflight %",
+       round(100.0*count(*) FILTER (WHERE reason='gps_free')/nullif(count(ask_ts),0),1) AS "gps_free %",
+       round(percentile_cont(0.5) WITHIN GROUP (ORDER BY EXTRACT(epoch FROM ask_ts - free_ts))::numeric,0) AS "자유→등재 중앙(초)",
+       (SELECT to_char(t0 AT TIME ZONE 'Asia/Kuala_Lumpur','MM-DD HH24:MI') FROM win) AS "창 시작(MYT)",
+       (SELECT to_char(t1 AT TIME ZONE 'Asia/Kuala_Lumpur','MM-DD HH24:MI') FROM win) AS "창 끝"
+  FROM ev3;
+
+\echo ''
+\echo '════ ⑯ ⑮에서 놓친 것 — 등재 직전 틱에서 그 트럭을 우리는 어떻게 보고 있었나 ════'
+WITH win AS (SELECT min(as_of_ts) t0, max(as_of_ts) t1 FROM ah),
+ev2 AS (
+  SELECT f.ytno, f.f AS free_ts,
+         (SELECT min(a.as_of_ts) FROM ah a WHERE a.ytno=f.ytno AND a.as_of_ts > f.f
+             AND NOT EXISTS (SELECT 1 FROM ah b WHERE b.ytno=f.ytno AND b.as_of_ts < a.as_of_ts AND b.as_of_ts >= f.f)) AS ask_ts
+    FROM fr f, win WHERE f.f > win.t0 AND f.f < win.t1 - interval '2 minutes'
+), miss AS (
+  SELECT e.* FROM ev2 e WHERE e.ask_ts IS NOT NULL
+     AND NOT EXISTS (SELECT 1 FROM pool WHERE pool.ytno=e.ytno AND pool.ts <= e.ask_ts AND pool.ts > e.ask_ts - interval '150 seconds')
+)
+SELECT CASE WHEN ask_ts - free_ts <= interval '90 seconds' THEN 'a) 자유 뒤 90초 안 등재(직전 틱엔 작업 중 — 예측이 못 잡음)'
+            WHEN EXISTS (SELECT 1 FROM pool WHERE pool.ytno=miss.ytno AND pool.ts BETWEEN miss.free_ts AND miss.ask_ts) THEN 'b) 자유~등재 사이 풀에 있던 적 있음(직전 틱만 빠짐)'
+            ELSE 'c) 자유~등재 내내 풀 밖(위치 없음/명단 밖/오판)' END AS 이유,
+       count(*) AS 건, round(100.0*count(*)/sum(count(*)) OVER (),1) AS "%",
+       round(percentile_cont(0.5) WITHIN GROUP (ORDER BY EXTRACT(epoch FROM ask_ts-free_ts))::numeric,0) AS "자유→등재 중앙(초)"
+  FROM miss GROUP BY 1 ORDER BY 1;
+
 ROLLBACK;
