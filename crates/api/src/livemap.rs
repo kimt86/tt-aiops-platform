@@ -4356,8 +4356,24 @@ pub fn spawn_selfcal_refresh(lm: Arc<LiveMap>, pool: PgPool) {
 // ★ proactive pre-assignment: a soon-free truck goes SILENT while it waits (stopped = the GPS unit
 // reports on movement only). ~25% of trucks are stale right before they free. We MUST keep them as
 // soon-free candidates so a recommendation is always ready before TOS assigns them at the free moment.
-const SILENT_HOLD_S: i64 = 1200;     // hold a silent loaded truck up to 20min (covers 88% of waits) before assuming off-shift
-const HELD_NEAR_DROP_M: f64 = 120.0; // ...only if its last position is within this of its drop (= waiting there, last stage)
+// (2026-08-19) 종전 `SILENT_HOLD_S=1200`("20분 침묵이면 퇴근으로 본다")은 폐기 — 30분+ 침묵 트럭이
+// 요청의 8.8%를 낸다. 퇴근 판정은 GPS 가 아니라 TOS 활동(3h 창)으로 하고, 침묵 트럭의 위치는
+// truck_pos_hist 마지막 행으로 보충한다(정지한 트럭은 그 자리에 있다).
+const HELD_NEAR_DROP_M: f64 = 120.0; // 옛 held 가지(앵커 없을 때만): 마지막 위치가 드랍 지점 이 안이면 곧 빔
+
+/// pull 구조 후보 풀(mig 0154)의 "곧 빌 트럭" 지평(초). 예측 자유까지 시간이 이 값 이하인 배차 중 트럭만
+/// 후보에 넣는다. 정답(TOS 자유시각) 가정 실측: 1분이면 요청 트럭 100%가 잡히나 우리 예측 오차가 4~5분이라
+/// 15분에서 시작한다(풀 ~260대). 환경변수 `POOL_FREE_HORIZON_S` 로 덮어쓴다. 첫 6시간 풀 재현율로 조정.
+const POOL_FREE_HORIZON_S: i64 = 900;
+
+/// 이번 틱 후보 풀의 트럭 한 대 (stage2_pool_truck_shadow 한 행).
+struct PoolRow {
+    ytno: String,
+    reason: &'static str,
+    free_in_s: i64,
+    pos_src: &'static str,
+    gps_age_s: Option<i64>,
+}
 
 /// 배차 모드 (mig 0142). `DISPATCH_MODE=active` 일 때만 자기 추천 이력이 풀에서 작업을
 /// 제외한다(추천→TOS 추출 반영 사이의 재추천 방지). 기본 shadow = 계상만(게이지).
@@ -4708,7 +4724,17 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                  ), latest AS (
                    SELECT DISTINCT ON (ytno) ytno, jt, pk FROM pick ORDER BY ytno, pk DESC
                  ), freed AS (
-                   SELECT ytno, max(free_ts) f FROM tt_move_log WHERE free_ts > now()-interval '3 hours' GROUP BY 1
+                   -- ★원천 드랍 로그(2026-08-19). 종전 tt_move_log.free_ts 는 5분 조립 배치라 같은 값이
+                   --   185초(p90 305) 늦게 보였다 — 원천은 33초(p90 57). 적하 자유 = QC 가 상자를 들어감
+                   --   (qc_move_log LD) · 양하 자유 = 야드 인계(tos_handover_label DS). status 로 거르지
+                   --   않는다(빈 컨테이너 M 이 30%). 실측 일치 100%/100%(6h·tt_move_log 대비).
+                   SELECT ytno, max(f) f FROM (
+                     SELECT trk_id ytno, comp_ts f FROM qc_move_log
+                      WHERE jobtype='LD' AND comp_ts > now()-interval '3 hours' AND trk_id IS NOT NULL
+                     UNION ALL
+                     SELECT ytno, comp_ts FROM tos_handover_label
+                      WHERE jobtype='DS' AND comp_ts > now()-interval '3 hours' AND ytno IS NOT NULL
+                   ) u GROUP BY 1
                  )
                  SELECT l.ytno,
                         GREATEST(0, lr.remaining_p50 - EXTRACT(epoch FROM now() - l.pk))::int8
@@ -4725,8 +4751,55 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
             if tick % 10 == 0 {
                 tracing::info!(n = inflight.len(), "move-log in-flight anchor");
             }
-            // candidate vehicles: idle (free now) + soon-free; committed/moving (delivering/empty) skipped
-            let (vehicles, held_out): (Vec<(String, f64, f64, i64, &'static str)>, Vec<HeldCandidateOut>) = {
+            // ── 후보 트럭 풀 — pull 구조 재정의 (2026-08-19 · mig 0154 · pool_ver 1) ────────────
+            // 현장은 차량이 작업을 고른다: 트럭이 비면 TOS 에 요청하고 그 순간 받는다(자유→배차 중앙 15/38초,
+            // 요청의 51.6%가 빈 뒤 30초 안). 우리 답은 트럭이 묻기 **전에** 있어야 하고, 그러려면
+            //   (a) 이미 빈 채 서 있는 트럭은 GPS 라벨·침묵과 무관하게 전부 풀에 있어야 하고
+            //   (b) 곧 빌 트럭은 예측 자유까지 시간 ≤ H 이면 들어와야 한다.
+            // 종전 풀(GPS 상태 idle/soon_idle/wait_rtg 만)은 요청 트럭의 ~20%만 담았다 — 놓친 건의 90%가
+            // "풀에 없어서", 그중 대부분이 실제로는 빈 트럭(GPS 라벨 delivering/staging = latched 잔류,
+            // 또는 정지→침묵). 실측은 docs/cycles/2026-08-19-pull-coverage-findings.md.
+            //
+            // 규칙(우선순위 순):
+            //   free_tos     : 원천 드랍 로그(적하 qc_move_log LD · 양하 tos_handover_label DS)에 자유가 찍혔고
+            //                  그 뒤 새 배차(live_workpool.yt_dis_ts) 없음 → 자유까지 0. GPS 상태 무시.
+            //   inflight_*   : 새 배차가 자유보다 뒤(= 작업 중) → 예측 자유까지 시간 ≤ POOL_FREE_HORIZON_S 이면 포함.
+            //                  예측 = 무브로그 픽업 앵커(inflight) > GPS 상태 학습값(soon_idle/wait_rtg) > 옛 held 가지.
+            //                  그 밖("명백히 작업 중")은 제외 — 함대의 35~50%.
+            //   gps_free     : TOS 에 최근 3h 기록이 없는데 GPS 가 신선하고 빈 차로 보임(신규 투입 등) → 0.
+            // 위치: 신선 GPS > 장치 목록의 낡은 픽스(≤600s) > truck_pos_hist 마지막 행(정지한 트럭은 그 자리) >
+            //       옛 held 가지의 드랍 지점. 명단 규칙("TOS 활동 3h ∪ GPS 30분")은 위 3h 창과 GPS 조건에 녹아 있다.
+            //       "20분 침묵 = 퇴근"(SILENT_HOLD_S) 가정은 폐기 — 30분+ 침묵 트럭이 요청의 8.8%를 낸다.
+            // 슬롯·배정 순서는 이번에 안 바꾼다(pull 2/2). 이 풀은 stage2_pool_truck_shadow 에 틱마다 남는다.
+            let pool_h_s: i64 = std::env::var("POOL_FREE_HORIZON_S").ok().and_then(|v| v.parse().ok()).unwrap_or(POOL_FREE_HORIZON_S);
+            // TOS 쪽 신호: 트럭별 마지막 자유(원천) · 마지막 배차(작업목록 yt_dis_ts) · 그 배차의 작업유형/목적지
+            let tos_sig: HashMap<String, (Option<DateTime<Utc>>, Option<DateTime<Utc>>, Option<String>, Option<String>)> =
+                sqlx::query_as::<_, (String, Option<DateTime<Utc>>, Option<DateTime<Utc>>, Option<String>, Option<String>)>(
+                    "WITH freed AS (
+                       SELECT ytno, max(f) f FROM (
+                         SELECT trk_id ytno, comp_ts f FROM qc_move_log
+                          WHERE jobtype='LD' AND comp_ts > now()-interval '3 hours' AND trk_id IS NOT NULL
+                         UNION ALL
+                         SELECT ytno, comp_ts FROM tos_handover_label
+                          WHERE jobtype='DS' AND comp_ts > now()-interval '3 hours' AND ytno IS NOT NULL
+                       ) u GROUP BY 1
+                     ), disp AS (
+                       SELECT DISTINCT ON (ytno) ytno, yt_dis_ts d, jobtype, coalesce(nullif(to_pos,''), nullif(yt_topos,'')) topos
+                         FROM live_workpool WHERE ytno IS NOT NULL AND ytno <> '' AND yt_dis_ts IS NOT NULL
+                        ORDER BY ytno, yt_dis_ts DESC
+                     )
+                     SELECT coalesce(f.ytno, d.ytno), f.f, d.d, d.jobtype, d.topos
+                       FROM freed f FULL JOIN disp d ON d.ytno = f.ytno",
+                )
+                .fetch_all(&pool).await
+                .inspect_err(|e| tracing::warn!(error = %e, "TOS 자유/배차 신호 질의 실패 — 이번 틱은 GPS 풀만"))
+                .unwrap_or_default()
+                .into_iter().map(|(y, f, d, jt, tp)| (y, (f, d, jt, tp))).collect();
+            // 자유(free) 이면서 새 배차 없음 = 빈 채 대기. 배차가 자유보다 뒤 = 작업 중.
+            let is_free_tos = |sig: &(Option<DateTime<Utc>>, Option<DateTime<Utc>>, Option<String>, Option<String>)| -> bool {
+                match (sig.0, sig.1) { (Some(f), Some(d)) => d <= f, (Some(_), None) => true, _ => false }
+            };
+            let (vehicles, held_out, pool_rows): (Vec<(String, f64, f64, i64, &'static str)>, Vec<HeldCandidateOut>, Vec<PoolRow>) = {
                 let map = lm.devices.read().await;
                 let plc = lm.plc.read().await;
                 let centroids = lm.centroids.read().await;
@@ -4744,106 +4817,184 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                 };
                 let fi_bias = lm.free_in_bias.read().await; // ⑥ learned soon_idle seconds-to-idle
                 let st_free = lm.stationary_free.read().await; // 정차 앵커 (mig 0091)
-                let mut v = Vec::new();
+                let mut v: Vec<(String, f64, f64, i64, &'static str)> = Vec::new();
                 let mut held: Vec<HeldCandidateOut> = Vec::new();
-                let mut n_ds_anchor: usize = 0; // 관측 카운터 — DS 앵커 duration이 실제로 쓰였는지(mig 0132·CHUNK B)
-                for (id, p) in map.iter() {
-                    if p.cls != "TT" { continue; }
-                    let age = (now - p.last_seen_ms) / 1000;
-                    if age > STALE_AFTER_S {
-                        // ★ hold a SILENT last-stage truck as a soon-free candidate (proactive coverage):
-                        // loaded + last position near its drop + silent = it stopped waiting to be served
-                        // (the unit only reports on movement). Key it on the DROP location (where it frees),
-                        // robust to the stale GPS. Without this we miss ~25% of about-to-free trucks.
-                        //
-                        // SILENT_HOLD_S is a belief, not an observation: past 20 min of silence we ASSUME
-                        // the truck went off-shift. The move-log anchor replaces that assumption with TOS
-                        // evidence — a crane loaded it and no free_ts has landed, so it is still working.
-                        // Hold those to twice the blind limit. Trucks with no anchor keep the old cutoff.
-                        let anchored = inflight.get(id).copied();
-                        if age > if anchored.is_some() { SILENT_HOLD_S * 2 } else { SILENT_HOLD_S } { continue; }
-                        let jt = match p.jobtype.as_deref().or(p.latched_jobtype.as_deref()) { Some(j @ ("LD" | "DS")) => j, _ => continue };
-                        let loaded = p.container1.as_deref().is_some_and(|s| !s.is_empty())
-                            || p.latched_container.as_deref().is_some_and(|s| !s.is_empty());
-                        if !loaded { continue; }
-                        let code = match p.topos1.as_deref().filter(|s| !s.is_empty()).or(p.latched_topos.as_deref()) { Some(c) => c, None => continue };
-                        let is_cr = is_crane_code(code);
-                        if jt == "LD" { if !is_cr { continue; } } else if is_cr { continue; } // drop-side only (LD=crane / DS=bay)
-                        let dpos = if is_cr { cranes.get(code).copied().or_else(|| centroids.get(code).map(|c| (c.lat, c.lon))) }
-                                   else { centroids.get(code).or_else(|| centroids.get(block_prefix(code))).map(|c| (c.lat, c.lon)) };
-                        let Some((dlat, dlon)) = dpos else { continue };
-                        if dist_m((p.lat, p.lon), (dlat, dlon)) > HELD_NEAR_DROP_M { continue; }
-                        // Time-to-free for a truck the GPS cannot see. The old value here was a learned
-                        // per-jobtype CONSTANT (st_free) — the same number for every silent truck
-                        // regardless of when it actually picked up. The anchor knows that: it counts
-                        // down from this trip's own pickup. Only a constant is being replaced, so this
-                        // cannot regress the GPS estimate — that path is untouched (see the head-to-head
-                        // above: GPS wins on LD and must keep its own duration).
-                        let (base, state) = match anchored {
-                            Some(rem) => (rem.clamp(0, 3600), "soon_idle_anchored"),
-                            None => (st_free.get(jt).map(|&(m, _)| m).unwrap_or(300).clamp(30, 3600), "soon_idle_held"),
-                        };
-                        v.push((id.clone(), dlat, dlon, base, state));
-                        held.push(HeldCandidateOut { id: id.clone(), jobtype: jt.to_string(), free_in_s: base, anchored: anchored.is_some() });
-                        continue;
-                    }
-                    let c = classify_tt(p, assigned_pool.get(id), &rtgs, &plc, &cranes, &centroids, now);
-                    let base = match c.state {
-                        "idle" => 0,
-                        // ⑤⑥ time-to-free: learned per-stage median seconds (state × jobtype × RTG
-                        // bin, fallback state×jobtype, fallback the free_in constant). Replaces the
-                        // miscalibrated constants for every candidate stage (soon_idle 120→~300, etc).
-                        //
-                        // ⚠ RETIREMENT DECIDED, NOT YET DONE. The plan is: keep the GPS states for
-                        // SELECTING candidates, but drop this DURATION and take it from the move-log
-                        // predictor (learn_cycle_remaining) instead — because this value is learned
-                        // against tt_cycle_log.dropped_at, a GPS label that misses ~33% of real free
-                        // events (see the ⚠⚠ block on spawn_free_in_logger for the measurements).
-                        // Until that swap lands this is still what the matcher uses, so anyone
-                        // benchmarking "current vs new" must not mistake it for a validated baseline.
-                        s @ ("soon_idle" | "wait_rtg") => {
-                            // jobtype must use the SAME latched fallback the MV/logger key on
-                            // (free_in_sample writer + near-miss logger), else a momentary None
-                            // jobtype misses the learned bucket and collapses to the 30s floor.
-                            let jt = p.jobtype.clone().or_else(|| p.latched_jobtype.clone()).unwrap_or_default();
-                            // DS 는 무브로그 앵커가 우세하다(실측 |err| 311s vs GPS 424s — 위
-                            // 헤드투헤드 주석). 이 duration 들(st_free/fi_bias)은 GPS 라벨
-                            // (dropped_at·33% 누락)로 학습된 값이라 DS 에서 앵커가 있으면 앵커가
-                            // 이긴다. LD 는 GPS 가 우세(240s vs 659s)라 종전 그대로(mig 0132·CHUNK B).
-                            let ds_anchor = if jt == "DS" { inflight.get(id).copied() } else { None };
-                            if let Some(rem) = ds_anchor {
-                                n_ds_anchor += 1;
-                                rem.clamp(0, 3600)
-                            } else {
-                                // 정차 앵커 (mig 0091): a truck genuinely STOPPED at its drop (arrived state
-                                // + speed<idle) frees in the GPS-stationary median (LD ~141/DS ~258) —
-                                // ~half the loose-arrival free_in estimate, correctly calibrated. Moving
-                                // trucks keep free_in_bias (they still have to reach + stop).
-                                let stopped = p.speed < IDLE_SPEED_KMH;
-                                if let Some(&(med, _p90)) = st_free.get(&jt).filter(|_| stopped) {
-                                    med
-                                } else {
-                                    let bin = dist_bin_of(c.nearest_rtg_m);
-                                    fi_bias
-                                        .get(&(s.to_string(), jt.clone(), bin))
-                                        .or_else(|| fi_bias.get(&(s.to_string(), jt.clone(), -99)))
-                                        .copied()
-                                        .unwrap_or_else(|| free_in(s, (!jt.is_empty()).then_some(jt.as_str())).0.unwrap_or(0))
-                                        .clamp(30, 3600)
+                let mut rows: Vec<PoolRow> = Vec::new();
+                let mut n_ds_anchor: usize = 0;
+                let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+                // 위치를 장치 목록에서 못 찾은 후보(침묵 >600s) — 뒤에서 truck_pos_hist 로 한 번에 채운다
+                let mut need_pos: Vec<(String, i64, &'static str, &'static str, i64)> = Vec::new(); // (ytno, base, state, reason, gps_age)
+
+                // ── 1) TOS 신호가 있는 트럭(자유 or 배차 중) ──────────────────────────────
+                for (id, sig) in tos_sig.iter() {
+                    if !id.starts_with("TT") { continue; }
+                    let dev = map.get(id);
+                    let age = dev.map(|p| (now - p.last_seen_ms) / 1000);
+                    let free_now = is_free_tos(sig);
+                    let jt_tos: Option<&str> = sig.2.as_deref().filter(|j| matches!(*j, "LD" | "DS"));
+                    if free_now {
+                        // 빈 채 대기 — GPS 상태 라벨과 무관하게 포함. 위치는 있는 대로.
+                        seen.insert(id.clone());
+                        match dev {
+                            Some(p) => {
+                                let src = if age.unwrap_or(i64::MAX) <= STALE_AFTER_S { "gps_live" } else { "gps_stale" };
+                                v.push((id.clone(), p.lat, p.lon, 0, "free_tos"));
+                                rows.push(PoolRow { ytno: id.clone(), reason: "free_tos", free_in_s: 0, pos_src: src, gps_age_s: age });
+                                if age.unwrap_or(0) > STALE_AFTER_S {
+                                    held.push(HeldCandidateOut { id: id.clone(), jobtype: "-".into(), free_in_s: 0, anchored: false });
                                 }
                             }
+                            None => need_pos.push((id.clone(), 0, "free_tos", "free_tos", -1)),
                         }
-                        _ => continue,
+                        continue;
+                    }
+                    // 배차 중 — 예측 자유까지 시간
+                    let anchored = inflight.get(id).copied();
+                    let (base, state, reason): (i64, &'static str, &'static str) = match (anchored, dev) {
+                        // 앵커가 있으면 그것이 우선(TOS 권위·GPS 가 못 보는 트럭도 본다)
+                        (Some(rem), _) => (rem.clamp(0, 3600), "soon_idle_anchored", "inflight_anchor"),
+                        // 앵커 없고 GPS 신선: 상태 학습값 (soon_idle/wait_rtg 만 예측 가능; delivering 은 상수라 H 밖)
+                        (None, Some(p)) if age.unwrap_or(i64::MAX) <= STALE_AFTER_S => {
+                            let c = classify_tt(p, assigned_pool.get(id), &rtgs, &plc, &cranes, &centroids, now);
+                            match c.state {
+                                s @ ("soon_idle" | "wait_rtg") => {
+                                    let jt = p.jobtype.clone().or_else(|| p.latched_jobtype.clone()).or_else(|| jt_tos.map(|x| x.to_string())).unwrap_or_default();
+                                    let stopped = p.speed < IDLE_SPEED_KMH;
+                                    let b = if let Some(&(med, _p90)) = st_free.get(&jt).filter(|_| stopped) { med } else {
+                                        let bin = dist_bin_of(c.nearest_rtg_m);
+                                        fi_bias.get(&(s.to_string(), jt.clone(), bin))
+                                            .or_else(|| fi_bias.get(&(s.to_string(), jt.clone(), -99)))
+                                            .copied()
+                                            .unwrap_or_else(|| free_in(s, (!jt.is_empty()).then_some(jt.as_str())).0.unwrap_or(0))
+                                            .clamp(30, 3600)
+                                    };
+                                    (b, if s == "soon_idle" { "soon_idle" } else { "wait_rtg" }, "inflight_gps")
+                                }
+                                "idle" => (0, "idle", "inflight_gps"), // TOS 는 배차 중이라는데 GPS 는 빈 차 정지 — 작업목록 60초 지연 구간. 곧 빔으로 본다.
+                                _ => (i64::MAX, "delivering", "inflight_gps"),
+                            }
+                        }
+                        // 앵커 없고 GPS 낡음/없음: 옛 held 가지(짐 실음 + 드랍 120m 안)만 살린다
+                        (None, Some(p)) => {
+                            let jt = match p.jobtype.as_deref().or(p.latched_jobtype.as_deref()).or(jt_tos) { Some(j @ ("LD" | "DS")) => j, _ => "" };
+                            let loaded = p.container1.as_deref().is_some_and(|s| !s.is_empty())
+                                || p.latched_container.as_deref().is_some_and(|s| !s.is_empty());
+                            let code = p.topos1.as_deref().filter(|s| !s.is_empty()).or(p.latched_topos.as_deref()).or(sig.3.as_deref());
+                            let mut r = (i64::MAX, "delivering", "inflight_held");
+                            if !jt.is_empty() && loaded {
+                                if let Some(code) = code {
+                                    let is_cr = is_crane_code(code);
+                                    let side_ok = if jt == "LD" { is_cr } else { !is_cr };
+                                    let dpos = if is_cr { cranes.get(code).copied().or_else(|| centroids.get(code).map(|c| (c.lat, c.lon))) }
+                                               else { centroids.get(code).or_else(|| centroids.get(block_prefix(code))).map(|c| (c.lat, c.lon)) };
+                                    if side_ok {
+                                        if let Some((dlat, dlon)) = dpos {
+                                            if dist_m((p.lat, p.lon), (dlat, dlon)) <= HELD_NEAR_DROP_M {
+                                                let b = st_free.get(jt).map(|&(m, _)| m).unwrap_or(300).clamp(30, 3600);
+                                                r = (b, "soon_idle_held", "inflight_held");
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            r
+                        }
+                        (None, None) => (i64::MAX, "delivering", "inflight_held"),
                     };
-                    v.push((id.clone(), p.lat, p.lon, base, c.state));
+                    if base > pool_h_s { continue; } // 명백히 작업 중 — 이번 틱 풀 밖
+                    seen.insert(id.clone());
+                    if reason == "inflight_anchor" && jt_tos == Some("DS") { n_ds_anchor += 1; }
+                    match dev {
+                        Some(p) => {
+                            let src = if age.unwrap_or(i64::MAX) <= STALE_AFTER_S { "gps_live" } else { "gps_stale" };
+                            v.push((id.clone(), p.lat, p.lon, base, state));
+                            rows.push(PoolRow { ytno: id.clone(), reason, free_in_s: base, pos_src: src, gps_age_s: age });
+                            if age.unwrap_or(0) > STALE_AFTER_S {
+                                held.push(HeldCandidateOut { id: id.clone(), jobtype: jt_tos.unwrap_or("-").into(), free_in_s: base, anchored: anchored.is_some() });
+                            }
+                        }
+                        None => need_pos.push((id.clone(), base, state, reason, -1)),
+                    }
+                }
+                // ── 2) TOS 신호가 없는데 GPS 가 신선하고 빈 차인 트럭 (신규 투입 등) ────────────
+                for (id, p) in map.iter() {
+                    if p.cls != "TT" || seen.contains(id) || tos_sig.contains_key(id) { continue; }
+                    let age = (now - p.last_seen_ms) / 1000;
+                    if age > STALE_AFTER_S { continue; }
+                    let c = classify_tt(p, assigned_pool.get(id), &rtgs, &plc, &cranes, &centroids, now);
+                    match c.state {
+                        // TOS 가 최근 3h 아무 기록도 없다 = 배차된 적 없다. 빈 차로 보이면 빈 차다(staging 의 '배차됨'은 latched 잔류).
+                        "idle" | "staging" | "empty_travel" => {
+                            v.push((id.clone(), p.lat, p.lon, 0, "free_gps"));
+                            rows.push(PoolRow { ytno: id.clone(), reason: "gps_free", free_in_s: 0, pos_src: "gps_live", gps_age_s: Some(age) });
+                        }
+                        // 싣고 있다는데 TOS 기록이 없다 — 라벨 잔류로 본다. 이번 틱은 제외.
+                        _ => {}
+                    }
                 }
                 drop(fi_bias);
                 drop(st_free);
-                if tick % 10 == 0 {
-                    tracing::info!(n = n_ds_anchor, total = v.len(), "DS 보이는 트럭 앵커 duration 적용");
+                drop(map);
+                // ── 3) 장치 목록에 없는 후보의 위치: truck_pos_hist 마지막 행(2일) ───────────────
+                if !need_pos.is_empty() {
+                    let ids: Vec<String> = need_pos.iter().map(|x| x.0.clone()).collect();
+                    let found: HashMap<String, (f64, f64, DateTime<Utc>)> = sqlx::query_as::<_, (String, f64, f64, DateTime<Utc>)>(
+                        "SELECT DISTINCT ON (ytno) ytno, lat, lon, ts FROM truck_pos_hist
+                          WHERE ytno = ANY($1) AND ts > now() - interval '2 days' AND lat IS NOT NULL
+                          ORDER BY ytno, ts DESC",
+                    )
+                    .bind(&ids)
+                    .fetch_all(&pool).await
+                    .inspect_err(|e| tracing::warn!(error = %e, "truck_pos_hist 위치 보충 실패"))
+                    .unwrap_or_default()
+                    .into_iter().map(|(y, la, lo, t)| (y, (la, lo, t))).collect();
+                    let mut n_nopos = 0usize;
+                    for (id, base, state, reason, _) in need_pos {
+                        match found.get(&id) {
+                            Some(&(la, lo, t)) => {
+                                let age = (now - t.timestamp_millis()) / 1000;
+                                v.push((id.clone(), la, lo, base, state));
+                                rows.push(PoolRow { ytno: id.clone(), reason, free_in_s: base, pos_src: "pos_hist", gps_age_s: Some(age) });
+                                held.push(HeldCandidateOut { id, jobtype: "-".into(), free_in_s: base, anchored: reason == "inflight_anchor" });
+                            }
+                            None => { n_nopos += 1; }
+                        }
+                    }
+                    if n_nopos > 0 && tick % 10 == 0 {
+                        tracing::info!(n = n_nopos, "후보 트럭인데 2일 안 GPS 위치가 전혀 없어 뺐다");
+                    }
                 }
-                (v, held)
+                if tick % 10 == 0 {
+                    let n_free = rows.iter().filter(|r| r.reason == "free_tos").count();
+                    let n_inf = rows.iter().filter(|r| r.reason.starts_with("inflight")).count();
+                    let n_gps = rows.iter().filter(|r| r.reason == "gps_free").count();
+                    tracing::info!(total = v.len(), free_tos = n_free, inflight = n_inf, gps_free = n_gps, ds_anchor = n_ds_anchor, horizon_s = pool_h_s, "후보 풀 (pull 재정의)");
+                }
+                (v, held, rows)
             };
+            // 풀 기록 (mig 0154) — 배정 여부와 무관하게 이번 틱 풀 전부. 풀 재현율의 분모 쪽 근거.
+            if !pool_rows.is_empty() {
+                let ts_now = Utc::now();
+                let ytnos: Vec<String> = pool_rows.iter().map(|r| r.ytno.clone()).collect();
+                let reasons: Vec<String> = pool_rows.iter().map(|r| r.reason.to_string()).collect();
+                let bases: Vec<i32> = pool_rows.iter().map(|r| r.free_in_s.clamp(0, 2_000_000_000) as i32).collect();
+                let srcs: Vec<String> = pool_rows.iter().map(|r| r.pos_src.to_string()).collect();
+                let ages: Vec<Option<i32>> = pool_rows.iter().map(|r| r.gps_age_s.map(|a| a.clamp(0, 2_000_000_000) as i32)).collect();
+                if let Err(e) = sqlx::query(
+                    "INSERT INTO stage2_pool_truck_shadow (ts, ytno, reason, free_in_s, pos_src, gps_age_s, pool_ver)
+                     SELECT $1::timestamptz, u.ytno, u.reason, u.free_in_s, u.pos_src, u.gps_age_s, 1
+                       FROM unnest($2::text[], $3::text[], $4::int4[], $5::text[], $6::int4[]) AS u(ytno, reason, free_in_s, pos_src, gps_age_s)
+                     ON CONFLICT (ts, ytno) DO NOTHING",
+                )
+                .bind(ts_now).bind(&ytnos).bind(&reasons).bind(&bases).bind(&srcs).bind(&ages)
+                .execute(&pool).await
+                {
+                    tracing::warn!(error = %e, "stage2_pool_truck_shadow 기록 실패");
+                }
+                if tick % 30 == 0 {
+                    crate::db::prune(&pool, "stage2_pool_truck_shadow", "DELETE FROM stage2_pool_truck_shadow WHERE ts < now() - interval '3 days'").await;
+                }
+            }
             // publish the pool this tick ACTUALLY uses (empty included — that's the truth) so
             // positions/TT-page mirror the matcher's numbers instead of re-deriving them.
             {
