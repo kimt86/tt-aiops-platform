@@ -79,6 +79,8 @@ const RETENTION: &[(&str, &str, i64)] = &[
     ("truck_pos_hist", "ts", 4),        // 2d
     ("zone_density", "ts", 7),          // 4d
     ("stage2_match_shadow", "ts", 34),  // 21d
+    ("stage2_pool_truck_shadow", "ts", 5),   // 3d (mig 0154) — 틱당 ~270행, 프룬은 매처 루프 tick%30
+    ("assigned_tt_hist", "as_of_ts", 5),     // 3d (mig 0155) — 틱당 ~350행, 프룬은 tick%30==15
 ];
 
 /// Raise (or refresh) a persisted operational alert — see mig 0107.
