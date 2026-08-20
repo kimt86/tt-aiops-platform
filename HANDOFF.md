@@ -148,6 +148,12 @@ SELECT source, subject, severity, occurrences FROM ops_alert WHERE last_ts > now
 
 ## 이월된 미해소 항목 (지우지 말 것)
 
+- **`tt-weather-live` 단발 실패**(2026-08-21 02:51:57 KST · `Error: tomorrow.io fetch failed (curl status / key / quota)`
+  · exit 1 · OnFailure 훅이 `ops_alert` warn 1건). 앞뒤 틱은 성공·`weather_1min` 결손 0(3분 주기가 1분 격자를 11행씩
+  겹쳐 넣어 다음 틱이 메움)·이후 지금까지 OK. **외부 원인**이고 후보 풀 변경과 무관. 재시도(`Restart=on-failure`)를
+  붙일지는 사용자 판단 — 지금은 결손이 없었지만 다음엔 한 틱이 빌 수 있다.
+  ⚠교훈: `ops_alert` 를 MYT 로 출력하고 저널(KST)을 같은 숫자로 뒤지면 **1시간 어긋난 창**을 본다.
+
 - **미해소 래치 경보 `deadman/road_route_eval`** — 마지막 08-11 08:34. 아직 안 봤다.
 - **`disk/filesystem` crit** — `/` 98%·여유 24GiB. root 권한자 몫.
 - **`web/public/livemap-roadgraph.geojson` 은 매시 크론이 다시 쓴다** — 항상 modified. 커밋에 딸려 들어가지
