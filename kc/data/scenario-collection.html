@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>시나리오 수집 — 지난 하루를 다시 돌리는 재료 — TT AIOps 지식센터</title>
-  <meta name="description" content="터미널의 지난 어느 기간을 컴퓨터로 다시 돌려보기 위한 재료를 어떻게 모으고 조립하는지. 상시 조금씩 모아 두고 원할 때 그 기간만 잘라 내려받는 구조, 운영과 완전히 분리된 이유, 야드 초기 상태를 스냅샷 없이 복원하는 방법, 멈추고 다시 켤 때 반드시 지켜야 할 순서까지.">
+  <meta name="description" content="터미널의 지난 어느 기간을 컴퓨터로 다시 돌려보기 위한 재료를 어떻게 모으고 조립하는지. 필요한 하루를 요청하면 그때만 모으는 구조, 운영과 완전히 분리된 이유, 야드 초기 상태를 스냅샷 없이 복원하는 방법, 멈추고 다시 켤 때 반드시 지켜야 할 순서까지.">
   <link rel="stylesheet" href="/kc/assets/kc.css">
   <script defer src="/kc/assets/kc.js"></script>
 </head>
@@ -14,7 +14,7 @@
   <p class="kc-lede">"7월 22일 야간 교대에 트럭을 10대 더 넣었으면 어땠을까?" 같은 질문에 답하려면, 먼저 <strong>그날 실제로 무슨 일이 있었는지</strong>를 컴퓨터가 읽을 수 있는 형태로 갖고 있어야 합니다. 이 문서는 그 재료를 <strong>어떻게 모으고, 어떻게 원하는 기간만 꺼내 쓰는지</strong>를 쉬운 말로 정리합니다.</p>
   <div class="kc-meta"><span class="kc-badge kind">데이터 · 수집</span><span class="kc-badge living">코드 감사 2026-07-27</span></div>
 
-  <div class="kc-cal tip"><span class="h">Bottom line</span><p><strong>평소에 조금씩 모아 두고, 필요할 때 그 기간만 잘라 내려받습니다.</strong> 모으는 일은 정해진 주기로 자동으로 돌고(TOS에 아주 가볍게), <strong>조립은 우리 데이터베이스 안에서만</strong> 일어나 TOS를 전혀 건드리지 않습니다. 이 수집기는 운영 대시보드와 <strong>완전히 분리</strong>돼 있어서, 여기서 무슨 일이 나도 운영은 멀쩡합니다. 중단 스위치도 따로 있습니다.</p></div>
+  <div class="kc-cal tip"><span class="h">Bottom line</span><p><strong>필요한 하루를 미리 요청해 두면 그날만 모읍니다.</strong> 예전에는 늘 켜 두고 조금씩 모았지만, 시나리오는 매일 필요한 물건이 아니어서 <strong>요청받은 하루만</strong> 도는 방식으로 바꿨습니다(2026-08-21). <strong>조립은 우리 데이터베이스 안에서만</strong> 일어나 TOS를 전혀 건드리지 않습니다. 이 수집기는 운영 대시보드와 <strong>완전히 분리</strong>돼 있어서, 여기서 무슨 일이 나도 운영은 멀쩡합니다. 중단 스위치도 따로 있습니다.</p></div>
 
   <h2>0. 무엇을 만드나요</h2>
   <p>결과물은 <strong>파일 두 개</strong>입니다. 기간(예: 7월 22일 오후 4시 ~ 자정)을 고르면 그 자리에서 만들어 줍니다.</p>
@@ -30,14 +30,15 @@
   <h2>1. 큰 그림 — 왜 미리 만들어 두지 않나</h2>
   <p>하루에 오가는 컨테이너가 <strong>10만 개 규모</strong>라, 있을 법한 모든 기간의 시나리오를 미리 만들어 두는 건 낭비입니다. 그래서 구조를 이렇게 나눴습니다.</p>
   <div class="kc-flow">
-    <div class="node">① 상시 조금씩 <strong>모으기</strong><span class="sub">정해진 주기 · TOS를 가볍게</span></div>
+    <div class="node">① 요청한 하루만 <strong>모으기</strong><span class="sub">그날 24시간 · 그 외에는 쉼</span></div>
     <div class="arw">우리 데이터베이스에 쌓임</div>
     <div class="node">② 원할 때 그 기간만 <strong>조립</strong><span class="sub">TOS 접촉 0 · 몇 초</span></div>
     <div class="arw">내려받기</div>
     <div class="node accent">파일 두 개</div>
   </div>
   <ul>
-    <li><strong>모으기</strong>는 자동으로 계속 돕니다. 한 번에 조금씩만 읽고, <strong>지난번에 어디까지 읽었는지 기억</strong>해 그 다음부터만 읽습니다.</li>
+    <li><strong>모으기</strong>는 요청한 하루에만 돕니다. 요청하면 먼저 <strong>밀린 기록을 따라잡고</strong>(TOS를 보지 않고 우리 표만 읽으므로 공짜입니다), 그날이 되면 24시간 동안 전부 켜졌다가, 끝나면 스스로 멈추고 조립까지 합니다.</li>
+    <li><strong>지난 날짜는 받지 않습니다.</strong> 컨테이너 크기와 야적장 모습은 <strong>지금 야적장에 있는 것</strong>만 물어볼 수 있어서, 이미 나간 상자는 되살릴 방법이 없습니다. 그래서 원하는 날 <strong>전날까지</strong> 요청해 두셔야 온전한 하루가 나옵니다.</li>
     <li><strong>조립</strong>은 요청이 올 때만 합니다. 이미 우리 쪽에 쌓여 있는 것만 쓰므로 <strong>TOS에 전혀 부담을 주지 않습니다</strong>.</li>
     <li>한 번에 만들 수 있는 기간은 <strong>최대 7일</strong>로 제한했습니다. 조립은 결과 전체를 메모리에 올리는 방식이라, 제한이 없으면 요청 하나로 서비스가 멈출 수 있습니다.</li>
   </ul>
@@ -56,12 +57,12 @@
   <div class="kc-cal note"><span class="h">TOS 접근 순서도 양보합니다</span><p>시나리오 수집기들끼리는 <strong>한 번에 하나씩</strong> TOS에 접근하도록 줄을 세웠습니다. 다만 <strong>운영 추출기는 이 줄에 세우지 않습니다</strong> — 운영 쪽은 1분마다 여러 개가 동시에 도는 설계라, 같은 줄에 세우면 시나리오가 조회하는 동안 <strong>운영이 막히기</strong> 때문입니다. 정확히 피하려던 사고가 그것입니다.</p></div>
 
   <h2>3. 무엇을 모으나</h2>
-  <p>자동으로 도는 것은 <strong>다섯 가지</strong>입니다.</p>
+  <p>요청한 하루 동안 도는 것은 <strong>다섯 가지</strong>입니다. 아래 "TOS를 보나" 열이 중요합니다 — <strong>아니오</strong>인 것은 우리 표만 읽으므로 나중에 얼마든지 따라잡을 수 있고, <strong>예</strong>인 것 중에서도 <em>지금 야적장</em>을 보는 것(컨테이너 크기·야적장 모습)은 <strong>지나가면 되살릴 수 없습니다</strong>. 지난 날짜를 받지 않는 이유가 이것입니다.</p>
   <div class="kc-tablewrap"><table>
     <thead><tr><th>모으는 것</th><th>왜 필요한가</th><th>주기</th><th>TOS를 보나</th></tr></thead>
     <tbody>
-      <tr><td><strong>배 귀속 정보</strong></td><td>컨테이너 이동 기록에는 <strong>어느 배 것인지가 없습니다</strong>. 이걸 따로 모아 붙여 줍니다</td><td>10분</td><td>예</td></tr>
-      <tr><td><strong>야드 크레인 이동</strong></td><td>컨테이너가 야적장 <strong>어느 자리</strong>에 놓이고 빠졌는지 (칸·단까지)</td><td>5분</td><td>예</td></tr>
+      <tr><td><strong>배 귀속 정보</strong></td><td>컨테이너 이동 기록에는 <strong>어느 배 것인지가 없습니다</strong>. 이걸 따로 모아 붙여 줍니다</td><td>10분</td><td><strong>아니오</strong> (2026-08-06~ 우리 표에서 읽음)</td></tr>
+      <tr><td><strong>야드 크레인 이동</strong></td><td>컨테이너가 야적장 <strong>어느 자리</strong>에 놓이고 빠졌는지 (칸·단까지)</td><td>5분</td><td><strong>아니오</strong> (2026-08-06~ 우리 표에서 읽음)</td></tr>
       <tr><td><strong>게이트 통과 시각</strong></td><td>외부 트럭이 <strong>언제 게이트를 지났고 언제 나갔는지</strong> — 야드 기록에 없는 유일한 값</td><td>5분</td><td>예</td></tr>
       <tr><td><strong>배·컨테이너 상세</strong></td><td>배 길이·접안 위치, 컨테이너 크기·무게·냉동 여부·배 안에서의 위치</td><td>15분</td><td>예</td></tr>
       <tr><td><strong>야드 모습 다시 그리기</strong></td><td>모아 둔 이동 기록을 되짚어 <strong>야적장 현재 모습</strong>을 만듦 (아래 5번)</td><td>10분</td><td><strong>아니오</strong></td></tr>
@@ -113,20 +114,19 @@
     </tbody>
   </table></div>
 
-  <h2>8. 멈추고 다시 켤 때 — 순서가 중요합니다</h2>
-  <p>이 기능은 언제든 멈출 수 있습니다. 두 가지 방법이 있습니다.</p>
-  <ul>
-    <li><strong>부드럽게</strong> — 중단 스위치를 끄면 수집기들이 계속 깨어나긴 하지만 <strong>아무 일도 하지 않고 즉시 돌아갑니다</strong>. 한 주기 안에 반영됩니다.</li>
-    <li><strong>확실하게</strong> — 자동 실행 예약 자체를 해제합니다.</li>
-  </ul>
-  <div class="kc-cal danger"><span class="h">⚠ 다시 켤 때 — 켜기 전에 시작 지점을 지정해야 합니다</span><p>오래 멈춰 뒀다가 그냥 켜면, 수집기는 "어디까지 읽었는지" 기억이 없으므로 <strong>지금 시각으로 건너뜁니다</strong>. 그러면 멈춰 있던 기간이 <strong>영구히 빈칸</strong>이 됩니다. 특히 <strong>야드 위치 기록은 우리 쪽에 사본이 없어서</strong>, TOS에서 사라지면 되살릴 방법이 없습니다.</p><p>그래서 <strong>켜기 전에</strong> 각 수집기의 시작 지점을 원하는 과거 시점으로 지정해 둬야 합니다. 그러면 알아서 그 지점부터 따라잡습니다 — 한 번에 몰아치지 않고 정해진 주기로 조금씩 따라오므로 TOS에 부담도 없습니다.</p></div>
+  <h2>8. 멈추고 다시 켤 때</h2>
+  <p>평소에는 <strong>이미 멈춰 있는 것이 정상</strong>입니다. 요청을 기다리는 감시자 하나만 5분마다 깨어나 "요청이 있나" 보고 바로 돌아갑니다(요청이 없으면 <strong>0.02초</strong>, TOS 접촉 0). 나머지는 요청받은 하루에만 켜집니다.</p>
+  <p>급히 전부 멈춰야 하면 <strong>중단 스위치</strong>를 끄면 됩니다 — 감시자가 깨어나도 아무 일도 하지 않습니다.</p>
+  <div class="kc-cal note"><span class="h">"오래 멈춰 두면 빈칸이 된다"는 걱정은 이제 없습니다</span><p>예전 안내는 <strong>켜기 전에 시작 지점을 손으로 지정하라</strong>고 했습니다. 오래 멈춰 있으면 그 기간이 영구히 빈칸이 된다고 봤기 때문인데, <strong>지금은 그렇지 않습니다.</strong></p>
+  <p>야적장 이동 기록과 배 귀속 정보는 <strong>대시보드 쪽이 시나리오와 무관하게 계속 모으고 있고</strong>, 그 표에 <strong>7주치</strong>가 남아 있습니다. 그래서 몇 주를 쉬었더라도 요청 한 번이면 <strong>TOS를 건드리지 않고</strong> 그 사이를 메웁니다 — 요청을 받으면 가장 먼저 하는 일이 바로 그것입니다.</p>
+  <p>다만 <strong>따라잡기가 끝나기 전에 그날이 시작되면</strong> 야적장 출발 모습이 그만큼 부정확합니다. 그런 경우 화면의 그 줄에 <strong>얼마나 뒤처진 채 시작했는지</strong>가 적힙니다. 여유를 두고 <strong>하루 전에</strong> 요청해 두시는 것이 가장 안전합니다.</p></div>
   <div class="kc-cal note"><span class="h">야드 블록 이름표는 켜져 있을 때만</span><p>야드 블록의 <strong>이름표</strong>를 채우는 작업은 TOS를 봐야 해서 중단 스위치 뒤에 있습니다. 이름표가 비어 있으면 야드 초기 상태의 위치가 <strong>이름 없이</strong> 나갑니다. 다시 켠 김에 <strong>한 번 수동으로</strong> 돌려 두는 게 좋습니다(조회 한 번, 1초).</p></div>
 
   <h2>9. 지금 상태</h2>
   <div class="kc-tablewrap"><table>
     <thead><tr><th>조각</th><th>상태</th></tr></thead>
     <tbody>
-      <tr><td>자동 수집 5가지</td><td><strong>✅ 가동 중</strong></td></tr>
+      <tr><td>수집 5가지</td><td><strong>✅ 요청 기반</strong> — 요청받은 하루에만 가동(2026-08-21~)</td></tr>
       <tr><td>배별 작업목록 · 육측 · 장비 투입 · 야드 초기 상태</td><td><strong>✅ 시나리오에 실림</strong></td></tr>
       <tr><td>에뮬레이터 값</td><td><strong>✅ 전부 채워짐</strong> (각 값이 이 기간을 설명하는지, 전체 평균인지, 고정값인지까지 함께 표기)</td></tr>
       <tr><td>게이트 통과·대기·출차 시각</td><td><strong>✅ 됨</strong> — 지난 기간은 수집기가 시간순으로 채우는 중</td></tr>
