@@ -3,15 +3,15 @@
 Unit files are named `tt-*`. Two families live here and they are deliberately kept apart:
 
 - **Critical extraction** (`tt-nightly`, `tt-shift-*`, `tt-qc-moves`, …) — feeds the dashboard.
-- **Scenario subsystem** (`tt-scenario-*`) — simulation input, non-critical. Separate binary,
-  separate `scenario` schema, its own kill switch. A failure here must never disturb the above.
+- **Scenario subsystem** (`tt-scenario-*`) — simulation input, non-critical. **2026-08-21 부터
+  별도 저장소 `~/projects/tt-scengen` 소유**이고, 유닛 파일도 그쪽에 있다. 이 호스트에서 같이
+  돌지만 여기서 빌드·설치하지 않는다.
 
 ## Long-running services
 
 | unit | what |
 |---|---|
 | `tt-api` | read-only axum API over PostgreSQL |
-| `tt-scenario-web` | isolated scenario monitor/download page on its own port (`:8899`) |
 | `tt-ws-bridge` | SSH tunnel for the live position feed |
 
 ## Timers — critical extraction
@@ -50,27 +50,18 @@ soon as a new shift starts.
 
 ## Timers — scenario subsystem
 
-| timer | command | cadence | Oracle |
-|---|---|---|---|
-| `tt-scenario-collect` | `scengen collect` (vessel attribution stream) | 10 min | **no** (local `tos_handover_label` since 2026-08-06) |
-| `tt-scenario-yard` | `scengen yard-moves` (yard-crane moves + decoded slot) | 5 min | **no** (local `rtg_move_log` since 2026-08-06) |
-| `tt-scenario-gate` | `scengen gate` (gate transaction times for the local GI/GO containers) | 5 min | yes (PK IN seek) |
-| `tt-scenario-contspec` | `scengen container-spec` (ISO size for unknown containers) | 5 min | yes (PK IN seek, skips when drained) |
-| `tt-scenario-enrich` | `scengen enrich` (vessel particulars, container details) | 15 min | yes (new voyages only, ~17/day) |
-| `tt-scenario-plan` | `scengen qc-plan` (work-plan archiver from `live_workqueue`) | 5 min | **no** |
-| `tt-scenario-assemble` | `scengen assemble` (queued window builds) | 2 min | **no** |
-| `tt-scenario-plan-backfill` | `scengen plan-backfill` | 10 min | **disabled** (would seek `JOB_QUEUE_SCHEDULE` if enabled) |
-| `tt-scenario-snapshot` | `scengen snapshot` | — | **do not enable** (full aggregate of a hot table) |
+**여기 없다. `~/projects/tt-scengen` 로 옮겼다(2026-08-21).**
 
-`tt-scenario-gate` is the odd one out: its watermark points at **our own** `rtg_move_log`, not at an
-Oracle key, because `CYC_HISTORY` has no time-leading index. It walks the local gate moves forward
-and looks those containers up by number, staying 60 minutes behind live so a truck's exit has been
-written before it asks. Reset its watermark to re-collect a past range.
+시나리오/에뮬레이터 수집기는 별도 저장소가 됐다 — 유닛 파일도 그쪽 `deploy/systemd/` 에 있고,
+`ExecStart` 도 그 저장소의 빌드 산출물을 가리킨다. 여기서 빌드해도 그 바이너리는 만들어지지
+않는다(워크스페이스 멤버에서 빠졌다).
 
-`tt-scenario-snapshot` is retired as a periodic job: it swept a hot 110k-row table six times a day
-to keep a 302-row static block-name map current. Run it **by hand** when new yard blocks appear —
-the admin page shows an "unresolved" count that tells you when. It is an Oracle job, so the kill
-switch has to be on for it to do anything.
+같이 옮겨간 것: `crates/scengen` · `scenario.*` 마이그레이션 18개 · 유닛 21개.
+**남은 것**: `0109_move_log_queue_vessel.sql` — 이름과 달리 운영 표(`qc_move_log`·
+`rtg_move_log`)에 컬럼을 더하는 마이그레이션이라 여기가 주인이다.
+
+⚠ 수집 방식도 함께 바뀌었다: **상시 타이머가 아니라 요청받은 하루만** 돈다(Oracle 부하).
+지금 이 호스트의 시나리오 타이머 10개는 전부 정지·`disabled` 상태다. 자세한 것은 그쪽 CLAUDE.md.
 
 ## Install (as the `tkadmin` user, no sudo)
 
@@ -78,11 +69,11 @@ switch has to be on for it to do anything.
 cd ~/projects/tt-aiops-platform
 
 # build the release binaries the units reference
-cargo build --release -p tt-extractor -p tt-api -p scengen
+cargo build --release -p tt-extractor -p tt-api
 
 # install user units
 mkdir -p ~/.config/systemd/user
-cp deploy/systemd/tt-*.{service,timer} ~/.config/systemd/user/
+cp deploy/systemd/tt-*.{service,timer} ~/.config/systemd/user/   # tt-scenario-* 는 여기 없다
 systemctl --user daemon-reload
 
 # critical extraction
@@ -95,12 +86,7 @@ systemctl --user enable --now tt-nightly.timer tt-shift-t1.timer tt-shift-t2.tim
 systemctl --user enable --now tt-move-log.timer tt-cycle-recon.timer \
                               tt-cycle-pred-shadow.timer tt-learn-cycle-remaining.timer
 
-# scenario subsystem (8 timers — snapshot and plan-backfill stay off, see above)
-systemctl --user enable --now tt-scenario-web.service
-systemctl --user enable --now tt-scenario-collect.timer tt-scenario-yard.timer \
-                              tt-scenario-gate.timer tt-scenario-yard-build.timer \
-                              tt-scenario-enrich.timer tt-scenario-contspec.timer \
-                              tt-scenario-plan.timer tt-scenario-assemble.timer
+# scenario subsystem — ~/projects/tt-scengen 참조. 타이머는 상시로 켜지 않는다(요청 기반).
 
 # keep everything running after logout (REQUIRED — otherwise --user units stop on SSH disconnect)
 loginctl enable-linger tkadmin
@@ -111,26 +97,6 @@ journalctl --user -u tt-shift-t1.service -n 50
 ```
 
 `.env` (loaded via `EnvironmentFile`) must define `DATABASE_URL` and `SKILL_DIR`.
-
-## Stopping the scenario subsystem
-
-Two levers, in order of bluntness:
-
-```bash
-# soft: collectors keep firing but return immediately; survives restarts
-psql "$DATABASE_URL" -c "UPDATE scenario.config SET enabled=false"
-
-# hard: stop the timers entirely
-systemctl --user disable --now 'tt-scenario-*.timer'
-```
-
-The kill switch is read at the top of every collector tick, so it takes effect within one cadence.
-`tt-scenario-yard-build` is deliberately **not** gated by it — replaying already-collected moves
-costs no Oracle and should be allowed to finish even while collection is paused.
-
-Resuming after a long pause: seed `scenario.watermark` to where you want each stream to restart
-**before** turning the kill switch back on. The first tick of a stream with no watermark row jumps
-forward to "now", which turns the gap into permanent data loss.
 
 ## Tuning load
 

@@ -79,11 +79,11 @@
 ```
 cargo build --release -p tt-api        # API 서버 (바이너리 이름은 api)
 cargo build --release -p tt-extractor  # TOS 추출기 (바이너리 이름은 extractor)
-cargo test --workspace                 # 47개, 전부 통과가 기준
+cargo test --workspace                 # 64개, 전부 통과가 기준
 ```
 
-⚠ 패키지 이름과 바이너리 이름이 다르다. `-p tt-scengen`처럼 **없는 패키지를 지정하면
-아무것도 빌드되지 않는데 유닛은 옛 바이너리로 "success"를 반환한다.**
+⚠ 패키지 이름과 바이너리 이름이 다르다(패키지 `tt-api`/바이너리 `api`). `-p api` 처럼
+**없는 패키지를 지정하면 아무것도 빌드되지 않는데 유닛은 옛 바이너리로 "success"를 반환한다.**
 배포 확인은 `target/release/<bin>`의 mtime으로 한다.
 
 프론트: `cd web && npm run build`
@@ -122,10 +122,22 @@ systemctl --user restart tt-api
 여러 에이전트가 같은 워크트리를 쓸 수 있다. **`git commit -- <경로>`로 경로를 지정한다** —
 인덱스가 공유 자원이라 남의 스테이징이 딸려 들어간다(커밋 `acb8677` 실제 사고).
 
-### 시나리오/`crates/scengen`
+### 시나리오/`crates/scengen` — 이 저장소에 없다
 
-**2026-08-12 이관 — 이 에이전트 담당이다**(종전 "다른 에이전트 담당·손대지 않는다"는 폐기).
-작업 워크트리는 `~/projects/tt-scengen`(브랜치 `scengen`), **그 워크트리의 빌드는 배포되지 않는다.**
+**2026-08-21 별도 저장소로 분리했다 → `~/projects/tt-scengen`**(이 에이전트 담당). 워크트리가
+아니라 독립 저장소이고, **거기가 곧 배포 경로다.** 규약은 그쪽 `CLAUDE.md`.
+
+같이 나간 것: `crates/scengen` · `scenario.*` 마이그레이션 18개 · `tt-scenario-*` 유닛 21개.
+**여기 남은 것**: `db/migrations/0109_move_log_queue_vessel.sql` — 이름과 달리 운영 표
+(`qc_move_log`·`rtg_move_log`)에 컬럼을 더하므로 주인이 여기다. 그 컬럼 중 `queuename` 은
+배차·KPI 쪽에서도 쓴다(갑판/선창 명시값이 거기 들어 있다).
+
+분리한 이유는 코드가 아니라 **작업 격리**다 — 워크트리를 공유하면 인덱스·브랜치·`HANDOFF.md`
+가 겹쳐 세션끼리 부딪힌다. 지식센터(`kc/data/scenario-collection.html`)만은 **여기 남는다**
+(운영 API 가 서빙하므로). 수집 로직을 바꾸면 두 저장소를 오가야 하는 유일한 이음매다.
+
+⚠ 시나리오 수집은 이제 **상시가 아니라 요청받은 하루만** 돈다(2026-08-21 사용자 결정·Oracle 부하).
+이 호스트의 `tt-scenario-*` 타이머는 전부 정지·`disabled` 상태가 정상이다.
 
 ---
 
