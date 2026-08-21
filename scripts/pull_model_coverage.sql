@@ -240,7 +240,7 @@ SELECT coalesce(state,'(안 보임)') AS "요청 순간 상태", count(*) FILTER
 \echo '════ ⑫ ★풀 재현율 (mig 0154 · pool_ver 1 · 2026-08-19~) — 트럭이 요청한 순간, 직전 틱(≤150초) 우리 후보 풀에 있었나 ════'
 \echo '    분모 = 풀 기록이 시작된 뒤의 요청(DS/LD 왕복 1건). 이번 사이클(pull 1/2)의 합격 기준 ≥ 95%. 슬롯은 안 바꿨으므로 커버리지(①)와 다르다.'
 CREATE TEMP TABLE pool AS
-SELECT ts, ytno, reason, free_in_s, pos_src FROM stage2_pool_truck_shadow
+SELECT ts, ytno, reason, free_in_s, pos_src, jobtype FROM stage2_pool_truck_shadow
  WHERE ts > now() - interval '7 days' AND pool_ver = (SELECT max(pool_ver) FROM stage2_pool_truck_shadow);  -- 최신 판만
 CREATE INDEX ON pool (ytno, ts); CREATE INDEX ON pool (ts); ANALYZE pool;
 WITH win AS (SELECT min(ts) AS t0, max(ts) AS t1 FROM pool),
@@ -318,11 +318,15 @@ ev2 AS (
                         ORDER BY as_of_ts LIMIT 1) a ON true
    WHERE f.f > win.t0 AND f.f < win.t1 - interval '2 minutes'
 ), ev3 AS (
-  SELECT e.*, p.reason FROM ev2 e
+  -- ⚠창 폭: 매칭 틱이 60초라 150초는 **직전 2~3틱** 을 본다. 90초(직전 1틱)로도 같이 내서 폭이 결과를 만드는지 본다.
+  SELECT e.*, p.reason,
+         (SELECT reason FROM pool WHERE pool.ytno=e.ytno AND pool.ts <= e.ask_ts AND pool.ts > e.ask_ts - interval '90 seconds' ORDER BY pool.ts DESC LIMIT 1) AS reason_90
+    FROM ev2 e
     LEFT JOIN LATERAL (SELECT reason FROM pool WHERE pool.ytno=e.ytno AND pool.ts <= e.ask_ts AND pool.ts > e.ask_ts - interval '150 seconds' ORDER BY pool.ts DESC LIMIT 1) p ON e.ask_ts IS NOT NULL
 )
 SELECT count(*) AS "자유 사건", count(ask_ts) AS "그 뒤 등재됨(=물어봄)",
-       round(100.0*count(reason)/nullif(count(ask_ts),0),1) AS "★풀 재현율 %",
+       round(100.0*count(reason)/nullif(count(ask_ts),0),1) AS "★풀 재현율 %(150초)",
+       round(100.0*count(reason_90)/nullif(count(ask_ts),0),1) AS "재현율 %(90초=직전 1틱)",
        round(100.0*count(*) FILTER (WHERE reason='free_tos')/nullif(count(ask_ts),0),1) AS "free_tos %",
        round(100.0*count(*) FILTER (WHERE reason LIKE 'inflight%')/nullif(count(ask_ts),0),1) AS "inflight %",
        round(100.0*count(*) FILTER (WHERE reason='gps_free')/nullif(count(ask_ts),0),1) AS "gps_free %",
@@ -351,5 +355,14 @@ SELECT CASE WHEN ask_ts - free_ts <= interval '90 seconds' THEN 'a) 자유 뒤 9
        count(*) AS 건, round(100.0*count(*)/sum(count(*)) OVER (),1) AS "%",
        round(percentile_cont(0.5) WITHIN GROUP (ORDER BY EXTRACT(epoch FROM ask_ts-free_ts))::numeric,0) AS "자유→등재 중앙(초)"
   FROM miss GROUP BY 1 ORDER BY 1;
+
+\echo ''
+\echo '════ ⑰ 풀 구성·재현율을 작업유형으로 가른다 (mig 0156) — 이 저장소가 반복해 틀린 축 ════'
+SELECT coalesce(jobtype,'(미상)') AS 작업, count(*) AS 행, round(100.0*count(*)/sum(count(*)) OVER (),1) AS "비중 %",
+       round(avg(free_in_s)) AS "자유까지 평균(초)",
+       round(100.0*count(*) FILTER (WHERE reason='free_tos')/count(*),1) AS "free_tos %",
+       round(100.0*count(*) FILTER (WHERE reason='inflight_anchor')/count(*),1) AS "앵커 %",
+       round(100.0*count(*) FILTER (WHERE reason='inflight_gps')/count(*),1) AS "GPS %"
+  FROM pool GROUP BY 1 ORDER BY 2 DESC;
 
 ROLLBACK;
