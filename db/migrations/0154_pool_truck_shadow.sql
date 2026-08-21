@@ -26,10 +26,5 @@ CREATE TABLE IF NOT EXISTS stage2_pool_truck_shadow (
 );
 CREATE INDEX IF NOT EXISTS stage2_pool_truck_ytno_ts ON stage2_pool_truck_shadow (ytno, ts);
 
-COMMENT ON TABLE stage2_pool_truck_shadow IS
-  'Stage-2 후보 풀에 든 트럭(배정 여부 무관), 매 매칭 틱. 풀 재현율 측정용. 3일 보관. pool_ver=1 (2026-08-19 pull 재정의).';
-COMMENT ON COLUMN stage2_pool_truck_shadow.reason IS
-  'free_tos | gps_free | inflight_anchor | inflight_gps | inflight_held — 왜 풀에 들었나. 재현율은 이 값으로 가른다.';
-COMMENT ON COLUMN stage2_pool_truck_shadow.free_in_s IS '매처가 쓴 자유까지 초(비용 base). 0 = 지금 빔.';
-COMMENT ON COLUMN stage2_pool_truck_shadow.pos_src IS 'gps_live | gps_stale | pos_hist | drop_est — 매처가 쓴 위치의 출처.';
-COMMENT ON COLUMN stage2_pool_truck_shadow.gps_age_s IS '그 틱에서 마지막 GPS 픽스 나이(초). NULL = 픽스 없음.';
+-- ⚠COMMENT 는 이 파일이 아니라 **0156 이 소유한다**(2026-08-21 2차 리뷰). 스키마는 멱등이지만 COMMENT 는 마지막에
+-- 실행된 파일이 이기므로, 여기에도 두면 0154 를 다시 돌릴 때 0156 의 정정(pool_ver 1→5 등)이 되돌아간다.

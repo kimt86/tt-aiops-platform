@@ -161,12 +161,15 @@ const CANDIDATE_STATES = ["idle", "soon_idle", "wait_rtg"] as const;
 // free_in_s는 후보 상태에서 매처가 마지막 틱에 쓴 base 그대로다(백엔드 stage2_pool 발행,
 // ≤60s 지연) — 양하는 그 트립의 무브로그 앵커 우선, 정차면 정차 중앙값, 이동 중이면 학습값,
 // 매처 미발행 구간만 상수표 폴백. 그래서 이 정렬은 매처의 순서와 같은 숫자로 선다.
-const freeInOf = (d: LiveTT): number => (d.dispatch === "idle" ? 0 : d.free_in_s ?? 9e9);
+// 비용 기저(free_in_s)가 있으면 그것이 매처가 쓴 값이다. 없을 때만 GPS 라벨로 떨어진다.
+// ★2026-08-21: 원천 크레인 로그로 '이미 빈 것'이 확인된 트럭은 GPS 라벨이 delivering/staging 이어도 base 0 이다 —
+// 라벨을 먼저 보면 그 트럭이 "곧 자유"로 밀려 카드가 자기 정의("비용 기저 0초")와 어긋난다.
+const freeInOf = (d: LiveTT): number => d.free_in_s ?? (d.dispatch === "idle" ? 0 : 9e9);
 // ⚠ 후보를 두 갈래로만 센다: '지금 유휴' vs '곧 자유'. 곧유휴/RTG대기를 갈라 세우지 않는다 —
 // ADR 0002(유휴 리드타임은 예측하지 않는다, 채택 2026-07-15)로 상태별 개별 예측을 중단했다.
 // 시간-투-프리의 출처는 위 주석(앵커→정차 중앙값→학습값→상수)이 현행이다. 화면이 세 갈래로
 // 나누면 시스템이 실제로 하지 않는 구분을 하는 것처럼 읽힌다. 상태는 행 앞 점(보조 정보)으로만 남긴다.
-const isIdleNow = (d: LiveTT) => d.dispatch === "idle";
+const isIdleNow = (d: LiveTT) => freeInOf(d) <= 0;
 // localized dispatch-state label for tooltips
 function dspTitle(dispatch: string | undefined, lang: Lang): string | undefined {
   if (!dispatch || !DSP_META[dispatch]) return undefined;

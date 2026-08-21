@@ -16,3 +16,9 @@ CREATE INDEX IF NOT EXISTS assigned_tt_hist_ytno_ts ON assigned_tt_hist (ytno, a
 
 COMMENT ON TABLE assigned_tt_hist IS
   'live_assigned_tt(전 작업유형 A/B/Q 배차 트럭) 매 틱 스냅샷 이력. 자유 뒤 처음 실린 틱 = 트럭이 물어본 순간. 3일 보관.';
+
+-- ⚠`jobstatus` 는 임의값일 수 있다: `live_assigned_tt` 는 (ytno, jobstatus) 단위라 한 트럭이 A·Q 두 행을 갖는 경우가
+-- 있는데(관측 395행/357트럭 = 38대) PK 가 (as_of_ts, ytno) 라 `ON CONFLICT DO NOTHING` 이 하나를 버린다. 존재 여부만
+-- 쓰는 현재 측정(자유 뒤 첫 등재)에는 무해하나, **이 컬럼으로 A/Q 를 가르지 말 것**(2026-08-21 2차 리뷰).
+COMMENT ON COLUMN assigned_tt_hist.jobstatus IS
+  '한 트럭이 A·Q 두 행을 가질 때 하나만 남는다(PK 가 ytno 단위) — 존재 여부 전용, A/Q 판별에 쓰지 말 것.';
