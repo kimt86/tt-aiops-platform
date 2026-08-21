@@ -4377,8 +4377,9 @@ const POOL_FREE_HORIZON_S: i64 = 900;
 const POS_MAX_AGE_S: i64 = 3600;
 /// 풀 규칙 판(stage2_pool_truck_shadow.pool_ver). 1 = 첫 배포(2026-08-19 12:57 MYT) · 2 = 픽업 가드 + 앵커 status
 /// 필터 제거(15:09 KST~) · 3 = 리뷰 반영(적하 GPS 우선 복구 · 위치 나이 상한 · asg 창 분리 · tos_sig 실패 시 GPS
-/// 갈래 차단, 2026-08-21). 재현율은 반드시 이 값으로 가른다 — 판이 다르면 모집단이 다르다.
-const POOL_VER: i16 = 3;
+/// 갈래 차단, 2026-08-21 09:01) · 4 = 적하 앵커를 '값'에서만 미루고 '풀 소속'은 유지(같은 날 10:30 — 3판이
+/// 커버리지까지 버려 재현율 98.7→87.7% 회귀). 재현율은 반드시 이 값으로 가른다 — 판이 다르면 모집단이 다르다.
+const POOL_VER: i16 = 4;
 
 /// 트럭 한 대가 **빈 채 대기 중**인가 — TOS 신호 네 개(자유·픽업·배차·배차목록 등재)만 보는 순수 판정.
 ///
@@ -4932,13 +4933,22 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                     // 배차 중 — 예측 자유까지 시간
                     let anchored = inflight.get(id).copied();
                     // ★앵커를 언제 쓰나 — 위 헤드투헤드 실측(4711~ 주석)이 정한 규칙을 그대로 지킨다:
-                    //   "GPS 가 보는 곳은 GPS, 못 보는 곳은 앵커". 적하는 GPS 가 우세(|err| 240s vs 앵커 659s)이므로
-                    //   **GPS 가 신선한 적하 트럭에는 앵커를 쓰지 않는다**. 양하는 앵커가 우세(311s vs 424s)라 앵커 우선.
-                    //   (2026-08-19 1차 배포에서 유형 구분 없이 앵커를 먼저 써 적하 예측이 전부 앵커로 넘어갔던 것을 되돌림.)
+                    //   "GPS 가 보는 곳은 GPS, 못 보는 곳은 앵커". 적하는 **값의 정확도**가 GPS 우세(|err| 240s vs
+                    //   앵커 659s)라 GPS 가 그 트럭을 곧-빔으로 분류하면 GPS 값을 쓴다. 양하는 앵커가 우세(311s vs 424s).
+                    //   ⚠단 **정확도와 커버리지를 섞지 말 것**(2026-08-21 회귀에서 배움): 위 주석이 "GPS 에 없는 것은
+                    //   정확도가 아니라 COVERAGE"라고 적어둔 그대로다. 적하에서 앵커를 통째로 버렸더니 GPS 가
+                    //   `delivering` 으로 보는 트럭(=곧 빌 것을 GPS 가 못 알아본 트럭)이 풀에서 사라져 재현율이
+                    //   98.7%→87.7% 로 떨어졌다. 그러니 적하는 **GPS 분류가 될 때만 GPS 값**을 쓰고, 안 되면 앵커로
+                    //   풀에 남긴다 — 값은 GPS 우선, 소속은 앵커가 보장.
                     let gps_fresh = age.unwrap_or(i64::MAX) <= STALE_AFTER_S;
-                    let anchored = if gps_fresh && jt_tos == Some("LD") { None } else { anchored };
+                    // 적하 + GPS 신선 + GPS 가 곧-빔으로 분류 → 그때만 앵커를 미룬다.
+                    let gps_sees_soon = gps_fresh && dev.is_some_and(|p| {
+                        matches!(classify_tt(p, assigned_pool.get(id), &rtgs, &plc, &cranes, &centroids, now).state,
+                                 "soon_idle" | "wait_rtg" | "idle")
+                    });
+                    let anchored = if gps_sees_soon && jt_tos == Some("LD") { None } else { anchored };
                     let (base, state, reason): (i64, &'static str, &'static str) = match (anchored, dev) {
-                        // 앵커: TOS 권위 · GPS 가 못 보는 트럭도 본다
+                        // 앵커: TOS 권위 · GPS 가 못 보는 트럭도 본다(커버리지)
                         (Some(rem), _) => (rem.clamp(0, 3600), "soon_idle_anchored", "inflight_anchor"),
                         // 앵커 없고 GPS 신선: 상태 학습값 (soon_idle/wait_rtg 만 예측 가능; delivering 은 상수라 H 밖)
                         (None, Some(p)) if gps_fresh => {

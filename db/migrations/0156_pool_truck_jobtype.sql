@@ -15,7 +15,8 @@ COMMENT ON COLUMN stage2_pool_truck_shadow.jobtype IS
 COMMENT ON TABLE stage2_pool_truck_shadow IS
   'Stage-2 후보 풀에 든 트럭(배정 여부 무관), 매 매칭 틱. 풀 재현율 측정용. 3일 보관(db.rs RETENTION 등록).
    pool_ver: 1=첫 배포(2026-08-19 12:57 MYT) · 2=픽업 가드+앵커 status 필터 제거(15:09 KST) ·
-   3=리뷰 반영(적하 GPS 우선 복구·위치 나이 상한 3600s·asg 창 분리·tos_sig 실패 시 GPS 갈래 차단, 08-21).';
+   3=리뷰 반영(적하 GPS 우선 복구·위치 나이 상한 3600s·asg 창 분리·tos_sig 실패 시 GPS 갈래 차단, 08-21 09:01) ·
+   4=적하 앵커를 값에서만 미루고 풀 소속은 유지(08-21 10:30 — 3판이 커버리지까지 버려 재현율 98.7→87.7% 회귀).';
 COMMENT ON COLUMN stage2_pool_truck_shadow.pool_ver IS
   '풀 규칙 판. 집계는 반드시 이 값으로 가른다 — 판이 다르면 모집단이 다르다(livemap.rs POOL_VER).';
 COMMENT ON COLUMN stage2_pool_truck_shadow.pos_src IS
