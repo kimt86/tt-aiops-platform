@@ -6,7 +6,9 @@
 ALTER TABLE stage2_pool_truck_shadow ADD COLUMN IF NOT EXISTS jobtype text;
 
 COMMENT ON COLUMN stage2_pool_truck_shadow.jobtype IS
-  '그 트럭의 직전/진행 중 작업유형(DS/LD). 사유별 분해를 유형으로 가르기 위한 것 — 모르면 NULL(신규 투입 등).';
+  'DS/LD. **갈래별로 출처가 다르다**(pool_ver 6~): free_tos = 방금 끝낸 일(자유 사건) · inflight_* = 지금 하는 일
+   (배차행 > 없으면 픽업 로그) · gps_free = GPS 라벨(DS/LD 만). 모르면 NULL. ⚠pool_ver 5 이하는 적하 운행 중이
+   직전 트립 유형으로 뒤집혀 있다(실측 53.5%) — 그 구간의 유형 분해는 쓰지 말 것.';
 
 -- 0154 문서 정정: 코드와 어긋난 서술을 바로잡는다.
 --   · pool_ver 는 3까지 왔는데 COMMENT 가 1 로 남아 있었다.
@@ -17,7 +19,8 @@ COMMENT ON TABLE stage2_pool_truck_shadow IS
    pool_ver: 1=첫 배포(2026-08-19 12:57 MYT) · 2=픽업 가드+앵커 status 필터 제거(15:09 KST) ·
    3=리뷰 반영(적하 GPS 우선 복구·위치 나이 상한 3600s·asg 창 분리·tos_sig 실패 시 GPS 갈래 차단, 08-21 09:01) ·
    4=적하 앵커를 값에서만 미루고 풀 소속은 유지(08-21 10:30 — 3판이 커버리지까지 버려 재현율 98.7→87.7% 회귀) ·
-   5=위치 상한을 명단 창과 같은 3시간으로(08-21 11:30 — 3600s 는 94.7%로 기준 미달, 놓친 53건 중 44건이 이 상한).';
+   5=위치 상한을 명단 창과 같은 3시간으로(08-21 11:30 — 3600s 는 94.7%로 기준 미달, 놓친 53건 중 44건이 이 상한) ·
+   6=2차 리뷰 반영(유형 출처를 갈래별로 — 적하 운행 중 53.5% 오라벨 정정, 08-21 18:2x).';
 COMMENT ON COLUMN stage2_pool_truck_shadow.pool_ver IS
   '풀 규칙 판. 집계는 반드시 이 값으로 가른다 — 판이 다르면 모집단이 다르다(livemap.rs POOL_VER).';
 COMMENT ON COLUMN stage2_pool_truck_shadow.pos_src IS
