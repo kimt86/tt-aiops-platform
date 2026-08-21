@@ -4829,13 +4829,16 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
             let tos_sig_rows =
                 sqlx::query_as::<_, (String, Option<DateTime<Utc>>, Option<DateTime<Utc>>, Option<String>, Option<String>, Option<DateTime<Utc>>, Option<DateTime<Utc>>)>(
                     "WITH freed AS (
-                       SELECT ytno, max(f) f FROM (
-                         SELECT trk_id ytno, comp_ts f FROM qc_move_log
+                       -- 자유 사건은 그 트럭이 **방금 끝낸 작업의 유형**도 알려준다(적하 자유 = QC 가 배에 실음,
+                       -- 양하 자유 = 야드 인계). free_tos 트럭은 작업목록에서 이미 사라져 배차행 유형이 없으므로
+                       -- 유형은 여기서만 온다(mig 0156 의 jobtype 컬럼).
+                       SELECT DISTINCT ON (ytno) ytno, f, jt FROM (
+                         SELECT trk_id ytno, comp_ts f, 'LD'::text jt FROM qc_move_log
                           WHERE jobtype='LD' AND comp_ts > now()-interval '3 hours' AND trk_id IS NOT NULL
                          UNION ALL
-                         SELECT ytno, comp_ts FROM tos_handover_label
+                         SELECT ytno, comp_ts, 'DS' FROM tos_handover_label
                           WHERE jobtype='DS' AND comp_ts > now()-interval '3 hours' AND ytno IS NOT NULL
-                       ) u GROUP BY 1
+                       ) u ORDER BY ytno, f DESC
                      ), disp AS (
                        SELECT DISTINCT ON (ytno) ytno, yt_dis_ts d, jobtype, coalesce(nullif(to_pos,''), nullif(yt_topos,'')) topos
                          FROM live_workpool WHERE ytno IS NOT NULL AND ytno <> '' AND yt_dis_ts IS NOT NULL
@@ -4861,7 +4864,7 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                      ), ids AS (
                        SELECT ytno FROM freed UNION SELECT ytno FROM disp UNION SELECT ytno FROM asg UNION SELECT ytno FROM picked
                      )
-                     SELECT i.ytno, f.f, d.d, d.jobtype, d.topos, a.asof, pk.p
+                     SELECT i.ytno, f.f, d.d, coalesce(d.jobtype, f.jt), d.topos, a.asof, pk.p
                        FROM ids i LEFT JOIN freed f USING (ytno) LEFT JOIN disp d USING (ytno) LEFT JOIN asg a USING (ytno) LEFT JOIN picked pk USING (ytno)",
                 )
                 .fetch_all(&pool).await;
