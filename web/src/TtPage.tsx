@@ -121,7 +121,7 @@ const kindChip = (jt: string | null) => (jt === "DS" ? "dsc" : jt === "LD" ? "lo
 const kindLabel = (jt: string | null) => (jt === "DS" ? "DSC" : jt === "LD" ? "LOD" : "SHF");
 
 // ───────────────────────── live vehicle pool ─────────────────────────
-type LiveTT = { id: string; cls: string; dispatch?: string; jobtype?: string; topos1?: string; dispatch_reason?: string; swappable?: boolean; dest_remaining_m?: number; nearest_rtg_m?: number; free_in_s?: number; free_in_hi_s?: number };
+type LiveTT = { id: string; cls: string; dispatch?: string; jobtype?: string; topos1?: string; dispatch_reason?: string; swappable?: boolean; dest_remaining_m?: number; nearest_rtg_m?: number; free_in_s?: number; free_in_hi_s?: number; in_pool?: boolean };
 
 // "곧 빔 ~N분 (최대 M분)" — 백엔드 free_in_s. 후보 상태(soon_idle/wait_rtg)에서는 매처가
 // 마지막 틱에 실제로 쓴 비용 기저(base)를 그대로 실어준 값이고(≤60s 지연), 그 외 상태나
@@ -149,22 +149,27 @@ function soonWhy(d: LiveTT, lang: Lang): string {
   return k ? "안벽 핸드오버 · PLC" : "quay handover · PLC";
 }
 
-// ── 후보 차량 = 매처(spawn_stage2_shadow)가 실제로 배차 대상으로 삼는 상태 ──────────────────
-// 매처는 idle(즉시) + soon_idle/wait_rtg(곧 자유)만 후보로 쓰고 delivering/empty_travel/staging은
-// 건너뛴다. (approaching은 분류기가 더는 내지 않는 은퇴 상태 — 2026-08-10 양쪽에서 정리.)
-// 여기에 더해 매처는 GPS가 침묵(120초+)해도 무브로그가 '아직 일하는 중'이라 하는 트럭을 풀에
-// 유지한다 — 그런 트럭은 devices에 없으므로 snap.stage2_held로 따로 받아 아래에서 합산한다.
+// ── 후보 차량 = 매처가 마지막 틱에 실제로 풀에 넣은 트럭 ─────────────────────────────────
+// ★2026-08-19 이후 풀은 GPS 상태 라벨로 정해지지 않는다: 현장이 pull 구조(트럭이 비면 요청)라
+// 매처는 ①원천 크레인 로그로 '이미 빈 트럭'을 전부(라벨이 delivering/staging이어도, GPS가 잠잠해도)
+// ②예측 자유까지 15분 안인 배차 중 트럭을 담는다. 그래서 프론트가 상태로 후보를 재구성하면 틀린다 —
+// 백엔드가 device.in_pool로 소속을 그대로 알려준다(매처 미발행/낡음이면 undefined).
+// GPS 침묵으로 devices에 아예 없는 후보는 종전대로 snap.stage2_held로 따로 받아 합산한다.
+// (옛 상태 목록은 in_pool이 없는 낡은 API를 만났을 때의 폴백으로만 남긴다.)
 const CANDIDATE_STATES = ["idle", "soon_idle", "wait_rtg"] as const;
 // 정렬 기준 = 매처의 간선 비용 기저(base): 지금 자유면 0, 아니면 자유까지 예측 초.
 // free_in_s는 후보 상태에서 매처가 마지막 틱에 쓴 base 그대로다(백엔드 stage2_pool 발행,
 // ≤60s 지연) — 양하는 그 트립의 무브로그 앵커 우선, 정차면 정차 중앙값, 이동 중이면 학습값,
 // 매처 미발행 구간만 상수표 폴백. 그래서 이 정렬은 매처의 순서와 같은 숫자로 선다.
-const freeInOf = (d: LiveTT): number => (d.dispatch === "idle" ? 0 : d.free_in_s ?? 9e9);
+// 비용 기저(free_in_s)가 있으면 그것이 매처가 쓴 값이다. 없을 때만 GPS 라벨로 떨어진다.
+// ★2026-08-21: 원천 크레인 로그로 '이미 빈 것'이 확인된 트럭은 GPS 라벨이 delivering/staging 이어도 base 0 이다 —
+// 라벨을 먼저 보면 그 트럭이 "곧 자유"로 밀려 카드가 자기 정의("비용 기저 0초")와 어긋난다.
+const freeInOf = (d: LiveTT): number => d.free_in_s ?? (d.dispatch === "idle" ? 0 : 9e9);
 // ⚠ 후보를 두 갈래로만 센다: '지금 유휴' vs '곧 자유'. 곧유휴/RTG대기를 갈라 세우지 않는다 —
 // ADR 0002(유휴 리드타임은 예측하지 않는다, 채택 2026-07-15)로 상태별 개별 예측을 중단했다.
 // 시간-투-프리의 출처는 위 주석(앵커→정차 중앙값→학습값→상수)이 현행이다. 화면이 세 갈래로
 // 나누면 시스템이 실제로 하지 않는 구분을 하는 것처럼 읽힌다. 상태는 행 앞 점(보조 정보)으로만 남긴다.
-const isIdleNow = (d: LiveTT) => d.dispatch === "idle";
+const isIdleNow = (d: LiveTT) => freeInOf(d) <= 0;
 // localized dispatch-state label for tooltips
 function dspTitle(dispatch: string | undefined, lang: Lang): string | undefined {
   if (!dispatch || !DSP_META[dispatch]) return undefined;
@@ -200,12 +205,12 @@ function LiveDispatchPool({ lang, snap, err }: { lang: Lang; snap: Snap | null; 
     });
   // 후보 = 보이는 후보 상태 + 침묵 유지. 자유가 빠른 순(= 매처 비용 기저 순)으로 한 줄로 세운다.
   const cands = tts
-    .filter((d) => (CANDIDATE_STATES as readonly string[]).includes(d.dispatch ?? ""))
+    .filter((d) => d.in_pool ?? (CANDIDATE_STATES as readonly string[]).includes(d.dispatch ?? ""))
     .concat(heldRows)
     .sort((a, b) => freeInOf(a) - freeInOf(b) || a.id.localeCompare(b.id));
   const idleN = cands.filter(isIdleNow).length;
   const soonN = cands.length - idleN;  // 곧 자유 = 곧유휴 + RTG대기 + 침묵 유지 (한 갈래로 센다·위 주석 참조)
-  const busyN = tts.length - (cands.length - heldRows.length); // 운반중·배차대기·공차 = 매처가 건너뛰는 차량(보이는 것만)
+  const busyN = tts.length - (cands.length - heldRows.length); // 매처가 이번 틱에 건너뛴 차량(보이는 것만) = 자유까지 15분 넘게 남은 트럭
   const empties = tts.filter((d) => d.dispatch === "empty_travel");
   // swap pool: empty trucks still far enough from their pickup, EXCLUDING yard moves (MI/MO)
   // — only vessel work (DS/LD) is swappable. Distance threshold is operator-adjustable.
@@ -233,7 +238,7 @@ function LiveDispatchPool({ lang, snap, err }: { lang: Lang; snap: Snap | null; 
       <div className="tcard-body">
         {/* 후보 총계를 먼저 크게 — 매처가 이번 틱에 쓸 수 있는 차량 수가 이 카드의 헤드라인이다. */}
         <div className="lvp-stats lvp-stats4">
-          <div className="lvp-stat lvp-stat-hero" title={k ? `매처가 지금 배차 대상으로 삼는 차량 = 지금 유휴 + 곧 자유 (GPS 침묵 유지 ${heldRows.length}대 포함)` : `vehicles the matcher treats as dispatchable = idle now + soon free (incl. ${heldRows.length} GPS-silent held)`}>
+          <div className="lvp-stat lvp-stat-hero" title={k ? `매처가 이번 틱 풀에 넣은 차량 = 이미 빈 트럭(원천 크레인 로그로 확인) + 15분 안에 빌 트럭 (GPS 침묵 ${heldRows.length}대 포함)` : `vehicles in the matcher's pool this tick = confirmed free (crane log) + freeing within 15 min (incl. ${heldRows.length} GPS-silent)`}>
             <div className="lvp-n">{cands.length}</div>
             <div className="lvp-l">{k ? "후보 차량" : "Candidates"}</div>
           </div>
@@ -272,9 +277,11 @@ function LiveDispatchPool({ lang, snap, err }: { lang: Lang; snap: Snap | null; 
                       ? <span className="lvp-freein lvp-now">{k ? "지금" : "now"}</span>
                       : freeInLabel(d, lang) && <span className="lvp-freein" title={k ? "매처가 마지막 틱에 쓴 자유까지 시간(양하는 무브로그 앵커 우선·정차는 정차 중앙값·60초 주기 갱신)" : "time-to-free the matcher used last tick (DS: move-log anchor first; stopped: stationary median; refreshed every 60s)"}>{freeInLabel(d, lang)}</span>}
                     <span className="lvp-why">{hk
-                      ? (hk === "anchored"
-                          ? (k ? "GPS 침묵 · 무브로그 앵커로 유지" : "GPS silent · held by move-log anchor")
-                          : (k ? "GPS 침묵 · 드랍 근접 대기로 유지" : "GPS silent · held waiting at its drop"))
+                      ? (freeInOf(d) <= 0
+                          ? (k ? "GPS 침묵 · 원천 로그로 이미 빈 것 확인" : "GPS silent · confirmed free by crane log")
+                          : hk === "anchored"
+                            ? (k ? "GPS 침묵 · 무브로그 앵커로 유지" : "GPS silent · held by move-log anchor")
+                            : (k ? "GPS 침묵 · 드랍 근접 대기로 유지" : "GPS silent · held waiting at its drop"))
                       : soonWhy(d, lang)}</span>
                   </div>
                 );
