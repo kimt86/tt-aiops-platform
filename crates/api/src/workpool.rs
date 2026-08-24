@@ -1183,7 +1183,7 @@ pub(crate) async fn stage2_work_candidates(
     .fetch_all(&pool_for_lead).await.unwrap_or_default()
     .into_iter().map(|(j, v)| (j, (v as i64).clamp(60, 3600))).collect();
     // ⚠ 아래 live_candidate(집계) 경로는 **상자 단위 경로가 못 덮는 것만** 담는다.
-    // live_workpool 은 배차됨(A)·미배차(Q) 를 모두 상자 단위로 갖고 있어 live_candidate 의
+    // live_workpool 은 배차됨(A·Q+트럭, 2026-08-24부터)·미배차(Q) 를 모두 상자 단위로 갖고 있어 live_candidate 의
     // 상위집합이다. 둘 다 담으면 미배차 상자가 이중 계상된다. 상자 단위가 있으면 그쪽이 우선이고
     // (마감을 상자마다 매길 수 있으므로), 여기서는 상자 단위에 없는 (크레인,배,구역)만 보충한다.
     let boxed_keys: std::collections::HashSet<(String, String, String)> = sqlx::query_as::<_, (String, String, String)>(
@@ -1402,7 +1402,7 @@ pub(crate) async fn stage2_work_candidates(
             dd_lead_s: Some(lead),
             slot_idx: Some(slot_idx as i32),
             move_s: Some(move_s),
-            tos_assigned,   // ⚠ 행마다 정확히 — live_workpool 은 배차됨(A)·미배차(Q) 를 둘 다 담는다
+            tos_assigned,   // ⚠ 행마다 정확히 — live_workpool 은 배차됨(A·Q+트럭)·미배차(Q) 를 둘 다 담는다
             contno: Some(contno),
             contnos,
         });

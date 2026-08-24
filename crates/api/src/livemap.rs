@@ -4392,10 +4392,12 @@ const POS_MAX_AGE_S: i64 = 10800;
 /// 갈래 차단, 2026-08-21 09:01) · 4 = 적하 앵커를 '값'에서만 미루고 '풀 소속'은 유지(같은 날 10:30 — 3판이
 /// 커버리지까지 버려 재현율 98.7→87.7% 회귀) · 5 = 위치 상한을 명단 창과 같은 3시간으로(같은 날 11:30 — 3600s
 /// 는 재현율 94.7%로 기준 미달, 놓친 53건 중 44건이 이 상한이었다) · 6 = 2차 리뷰 반영(유형 출처를 갈래별로,
-/// 적하 운행 중 53.5% 오라벨 정정 — ver4 의 적하 GPS 분기가 이제야 제 모집단에서 열린다).
+/// 적하 운행 중 53.5% 오라벨 정정 — ver4 의 적하 GPS 분기가 이제야 제 모집단에서 열린다) · 7 = 추출기가
+/// Q+트럭(배차됨·픽업 전) 행을 live_workpool 에 착지(2026-08-24) — 풀 코드는 무변경이나 disp(yt_dis_ts)·배차행
+/// 유형 신호가 배차 ≤60초에 도착해 배차된 트럭이 풀에서 더 일찍 빠진다(종전엔 listed_at 가드가 뒤늦게 막던 것).
 /// 재현율은 반드시 이 값으로 가른다 — 판이 다르면 모집단이 다르다.
 /// ⚠`POOL_FREE_HORIZON_S` 를 환경변수로 바꾸면 이 값은 안 바뀐다 — 레버를 쓸 거면 판도 같이 올릴 것.
-const POOL_VER: i16 = 6;
+const POOL_VER: i16 = 7;
 
 /// 트럭 한 대가 **빈 채 대기 중**인가 — TOS 신호 네 개(자유·픽업·배차·배차목록 등재)만 보는 순수 판정.
 ///
@@ -4406,8 +4408,9 @@ const POOL_VER: i16 = 6;
 /// - `picked > free` → 그 뒤 크레인이 상자를 실어줬다 = 싣고 가는 중. **적하 작업은 야드 픽업 직후 작업목록의
 ///   A/Q 에서 사라지므로** 이 가드가 없으면 싣고 가는 트럭이 빈 트럭으로 보인다(2026-08-19 실증).
 /// - `dis > free` → 새 배차가 붙었다.
-/// - `listed_at >= free` → 자유 **이후** 스냅샷에서 전 유형 배차 목록에 있다(`live_workpool` 은 A + (Q ∧ 트럭 없음)
-///   만 담아 Q 로 배차된 트럭이 안 보인다). 자유가 스냅샷보다 새로우면 스냅샷이 낡은 것이라 자유를 믿는다.
+/// - `listed_at >= free` → 자유 **이후** 스냅샷에서 전 유형 배차 목록에 있다. (★2026-08-24부터 `live_workpool`
+///   도 Q+트럭 행을 담아 `dis` 신호가 배차 ≤60초에 온다 — 이 가드는 야드 유형(MI/MO 등, live_workpool 밖) 배차를
+///   여전히 유일하게 막으므로 유지한다.) 자유가 스냅샷보다 새로우면 스냅샷이 낡은 것이라 자유를 믿는다.
 fn is_free_tos(sig: &TosSig) -> bool {
     let Some(f) = sig.free else { return false };
     if sig.picked.is_some_and(|p| p > f) { return false; }
@@ -4842,8 +4845,10 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
             let pool_h_s: i64 = std::env::var("POOL_FREE_HORIZON_S").ok().and_then(|v| v.parse().ok()).unwrap_or(POOL_FREE_HORIZON_S);
             // TOS 쪽 신호: 트럭별 마지막 자유(원천) · 마지막 배차(작업목록 yt_dis_ts) · 그 배차의 작업유형/목적지 ·
             // 전 작업유형 배차 목록(live_assigned_tt·A+Q)에 실린 마지막 스냅샷 시각.
-            // ⚠live_workpool 은 "A + (Q ∧ 트럭 없음)" 만 담는다 — Q(대기) 상태로 배차된 트럭(~80대)이 거기 없어
-            //   첫 배포 틱에서 free_tos 247 중 67대가 실은 배차 중이었다. live_assigned_tt 로 막는다.
+            // ⚠종전 live_workpool 은 "A + (Q ∧ 트럭 없음)" 만 담아 Q 배차 트럭(~80대)이 안 보였고, 첫 배포 틱에서
+            //   free_tos 247 중 67대가 실은 배차 중이었다 — 그래서 live_assigned_tt(listed_at) 가드를 뒀다.
+            //   ★2026-08-24부터 Q+트럭 행도 착지해 disp(yt_dis_ts) 신호가 배차 ≤60초에 온다. listed_at 가드는
+            //   야드 유형(live_workpool 밖) 배차를 여전히 막으므로 존치. 경계 = pool_ver 7.
             let tos_sig_rows =
                 sqlx::query_as::<_, (String, Option<DateTime<Utc>>, Option<DateTime<Utc>>, Option<String>, Option<String>, Option<String>, Option<DateTime<Utc>>, Option<DateTime<Utc>>)>(
                     "WITH freed AS (
@@ -6725,7 +6730,8 @@ mod pool_tests {
 
     #[test]
     fn listed_at_or_after_free_means_working() {
-        // live_workpool 은 A + (Q ∧ 트럭 없음) 만 담아 Q 배차 트럭이 안 보인다 → 이 가드가 그 구멍을 막는다.
+        // 종전 live_workpool 은 Q 배차 트럭이 안 보여 이 가드가 유일한 방벽이었다(★2026-08-24부터 Q+트럭 행도
+        // 착지하지만, 야드 유형은 여전히 live_workpool 밖이라 가드는 유효하다).
         assert!(!is_free_tos(&sig(Some(100), None, None, Some(100))), "자유와 같은 스냅샷이면 이미 실렸다");
         assert!(!is_free_tos(&sig(Some(100), None, None, Some(101))));
         assert!(is_free_tos(&sig(Some(100), None, None, Some(99))), "자유보다 낡은 스냅샷은 판정 근거가 못 된다");

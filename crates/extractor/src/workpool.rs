@@ -7,7 +7,9 @@
 //!   SRC='WP' JOB_ORDER_LIST (A + B + Q, any jobtype) → split in Rust into:
 //!        - live_assigned_tt (any row with a non-empty YTNO — the old SQL_ASSIGNED
 //!                            population: any jobtype, status A/B/Q)
-//!        - live_workpool  (DS/LD + A = dispatched in-flight moves, the QC task cards)
+//!        - live_workpool  (DS/LD, dispatched or not: A rows + Q-with-truck rows land with
+//!                          their YTNO/YT_DIS_DT, Q-without-truck rows with ytno=NULL.
+//!                          ★2026-08-24 전까지는 Q+트럭 행을 버려 배차 탐지가 픽업까지 늦었다)
 //!        - live_candidate (DS/LD + Q + empty YTNO = UNASSIGNED demand, aggregated:
 //!                          discharge by QC, load by source block — dispatch candidate pool)
 //! Kill switch: env WORKPOOL_FETCH=split reverts to the two separate scans.
@@ -464,8 +466,15 @@ async fn src_workpool(pool: &PgPool, rows: &[MoveRow], date: chrono::NaiveDate, 
         let mut active = 0u64;
         for r in rows {
             let is_ds_ld = matches!(r.jobtype.as_deref(), Some("DS") | Some("LD"));
-            match (is_ds_ld, r.jobstatus.as_deref()) {
-                (true, Some("A")) => {
+            // ★2026-08-24: TOS 는 배차를 상자 행에 즉시 찍는다 — 'Q' 인데 트럭이 채워진 행
+            //   (= 배차됐고 픽업 전, 실측 순간 116행)이 그 상태다. 종전에는 이 행이 A 갈래
+            //   (jobstatus='A' 요구)에도 Q 갈래(ytno 빈 것 요구)에도 안 걸려 통째로 버려졌고,
+            //   그래서 tos_assigned 가 픽업 후 'A' 전환까지 거짓이었다(양하 배차 탐지 p50 544초).
+            //   트럭이 있으면 상태와 무관하게 배차행으로 싣는다. jobstatus 는 원문('Q')을
+            //   보존하므로 하류가 A/Q 를 구분할 수 있다.
+            let has_truck = !r.ytno.as_deref().unwrap_or("").is_empty();
+            match (is_ds_ld, r.jobstatus.as_deref(), has_truck) {
+                (true, Some("A"), _) | (true, Some("Q"), true) => {
                     let etw_ts = r.etw_dt.as_deref().and_then(parse_etw);
                     // ACTV_DT/UPD_DT share the ETW timestamp shape (YYYYMMDDHH24MISS[mmm], MYT).
                     let actv_ts = r.actv_dt.as_deref().and_then(parse_etw);
@@ -488,7 +497,7 @@ async fn src_workpool(pool: &PgPool, rows: &[MoveRow], date: chrono::NaiveDate, 
                     active += 1;
                 }
                 // unassigned demand → candidate pool (only truly unassigned: no truck yet)
-                (true, Some("Q")) if r.ytno.as_deref().unwrap_or("").is_empty() => {
+                (true, Some("Q"), false) => {
                     let jt = r.jobtype.clone().unwrap_or_default();
                     let src_block = if jt == "LD" {
                         r.yt_topos.as_deref().map(|t| block_prefix(t).to_string()).filter(|s| !s.is_empty())

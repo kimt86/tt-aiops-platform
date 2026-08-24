@@ -100,7 +100,7 @@
   <div class="kc-tablewrap"><table>
     <thead><tr><th>스트림</th><th>역할 → 타깃</th><th>바운드</th></tr></thead>
     <tbody>
-      <tr><td>workpool</td><td>배차용 작업풀(A=진행중 카드·Q=미배정 수요) → <code>live_workpool</code>·<code>live_candidate</code></td><td>COMPDATE NULL·상태 A/Q·CRE_DT ≥ SYSDATE-2</td></tr>
+      <tr><td>workpool</td><td>배차용 작업풀(진행중 카드 + 배차됨(대기) + 미배정 수요) → <code>live_workpool</code>·<code>live_candidate</code></td><td>COMPDATE NULL·상태 A/Q·CRE_DT ≥ SYSDATE-2</td></tr>
       <tr><td>workqueue</td><td>QC별 작업 큐 계획 → <code>live_workqueue</code></td><td>미완 큐 + 최근 6h 완료</td></tr>
       <tr><td>vessel_schedule</td><td><strong>선박 스케줄 = 데드라인 소스</strong>(ETD·컷오프) → <code>live_vessel_schedule</code></td><td>ESTDEP ∈ [SYSDATE-2, +10]</td></tr>
       <tr><td>assigned_tt</td><td>과제 보유 TT(순수 TOS 가동률) → <code>live_assigned_tt</code></td><td>상태 A/B/Q·YTNO 있음</td></tr>
