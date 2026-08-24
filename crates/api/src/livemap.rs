@@ -4422,7 +4422,8 @@ fn is_free_tos(sig: &TosSig) -> bool {
 /// 트럭 한 대에 대한 TOS 쪽 신호 (후보 풀 판정용).
 struct TosSig {
     free: Option<DateTime<Utc>>,      // 원천 드랍 로그의 마지막 자유(3h 창)
-    dis: Option<DateTime<Utc>>,       // 작업목록(live_workpool)의 마지막 배차 시각 — A 상태 vessel 작업만 보인다
+    dis: Option<DateTime<Utc>>,       // 작업목록(live_workpool)의 마지막 배차 시각 — A + Q+트럭(배차됨·픽업 전,
+                                      //   ★2026-08-24부터) vessel 작업. 야드 유형은 여전히 안 보인다(listed_at 몫)
     jobtype: Option<String>,          // **지금 하는 일**의 유형(배차행 > 픽업 로그) — 운행 중 트럭용
     free_jt: Option<String>,          // **방금 끝낸 일**의 유형(자유 사건) — 빈 트럭용
     topos: Option<String>,            // 그 배차의 목적지 코드

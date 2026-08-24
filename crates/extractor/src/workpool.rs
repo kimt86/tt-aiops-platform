@@ -472,7 +472,8 @@ async fn src_workpool(pool: &PgPool, rows: &[MoveRow], date: chrono::NaiveDate, 
             //   그래서 tos_assigned 가 픽업 후 'A' 전환까지 거짓이었다(양하 배차 탐지 p50 544초).
             //   트럭이 있으면 상태와 무관하게 배차행으로 싣는다. jobstatus 는 원문('Q')을
             //   보존하므로 하류가 A/Q 를 구분할 수 있다.
-            let has_truck = !r.ytno.as_deref().unwrap_or("").is_empty();
+            // trim: live_assigned_tt 경로(위 assigned)와 같은 규칙 — 공백만인 YTNO 를 배차로 오인하지 않는다.
+            let has_truck = !r.ytno.as_deref().map(str::trim).unwrap_or("").is_empty();
             match (is_ds_ld, r.jobstatus.as_deref(), has_truck) {
                 (true, Some("A"), _) | (true, Some("Q"), true) => {
                     let etw_ts = r.etw_dt.as_deref().and_then(parse_etw);

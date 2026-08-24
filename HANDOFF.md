@@ -53,6 +53,16 @@ psql -h 127.0.0.1 -p 5433 -U wp -d wp_tt -c "SELECT jobtype, count(*) FROM live_
 - ≤120초는 예측값 — 안 떨어지면 그 잔여가 (e)의 근거이지 이 세션의 실패가 아님.
 - Q+트럭 행의 트윈·`live_candidate` 상호작용 세부 — 빌드 중 확정.
 
+## 수행 기록 (2026-08-24 빌드 중)
+
+- **IN SCOPE 5 완료**: 3일 프룬 실동작 확인 — `stage2_pool_truck_shadow` min(ts) 08-21 03:49 ·
+  `assigned_tt_hist` 08-21 04:04 = 정확히 3일 경계 부근. RETENTION 정상, 조치 불요.
+- **재측정 분모 규칙**(1차 리뷰 SF3 반영): 경계는 `t1_ts`(배차 시각)로 걸고,
+  `(qc,queuename,tos_ytno,t1_ts)` 단위 `min(ts)` 로 접는다. `ts` 로 거르면 배포 순간
+  미픽업 재고(~116행)가 544초급으로 p50 을 오염시킨다. mig0157 COMMENT 에도 기록.
+- **다음 정리 이월**(리뷰 C6): 착지 진리표가 인라인 match 라 유닛 테스트가 없다 —
+  분류 함수 추출 + 돌연변이 검증은 리팩터링이라 이번 범위 밖.
+
 ## 참고 (전 사이클에서 이어짐)
 
 - `web/public/livemap-roadgraph.geojson`은 매시 크론이 다시 쓴다 — 항상 modified·커밋 경로 지정.

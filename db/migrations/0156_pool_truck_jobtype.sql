@@ -21,8 +21,8 @@ COMMENT ON TABLE stage2_pool_truck_shadow IS
    4=적하 앵커를 값에서만 미루고 풀 소속은 유지(08-21 10:30 — 3판이 커버리지까지 버려 재현율 98.7→87.7% 회귀) ·
    5=위치 상한을 명단 창과 같은 3시간으로(08-21 11:30 — 3600s 는 94.7%로 기준 미달, 놓친 53건 중 44건이 이 상한) ·
    6=2차 리뷰 반영(유형 출처를 갈래별로 — 적하 운행 중 53.5% 오라벨 정정, 08-21 18:2x).';
-COMMENT ON COLUMN stage2_pool_truck_shadow.pool_ver IS
-  '풀 규칙 판. 집계는 반드시 이 값으로 가른다 — 판이 다르면 모집단이 다르다(livemap.rs POOL_VER).';
+-- pool_ver COLUMN COMMENT 의 주인은 mig0157 로 넘어갔다(2026-08-24). 여기 두면 0156 재실행이
+-- 0157 의 ver 7 경계 서술을 되돌린다 — 0154:30 에서 해소한 것과 같은 패턴.
 COMMENT ON COLUMN stage2_pool_truck_shadow.pos_src IS
   'gps_live(≤120s) | gps_stale(장치 목록의 낡은 픽스) | pos_hist(truck_pos_hist 마지막 행·나이 ≤ POS_MAX_AGE_S).';
 COMMENT ON COLUMN stage2_pool_truck_shadow.gps_age_s IS

@@ -5,13 +5,15 @@
 -- this used to be two Oracle round-trips: this scan + a separate SQL_ASSIGNED call):
 --   A (any jobtype)              -> the "assigned" TT roster (any active job)
 --   B, Q (any jobtype)           -> also the "assigned" TT roster when YTNO present
---   A + DS/LD                    -> live_workpool (dispatched in-flight moves, QC task cards)
---   Q + DS/LD + YTNO empty       -> live_candidate (UNASSIGNED candidate demand, no truck yet)
+--   DS/LD + YTNO present (A, or Q pre-pickup) -> live_workpool as DISPATCHED rows
+--   Q + DS/LD + YTNO empty       -> live_candidate + live_workpool (UNASSIGNED demand)
 -- The extractor splits all of this in Rust: rows with a non-empty YTNO -> live_assigned_tt
 -- (any jobtype, status A/B/Q — same population SQL_ASSIGNED used to select); DS/LD rows
--- with status A -> live_workpool; DS/LD rows with status Q and empty YTNO -> live_candidate
--- (aggregated by QC for discharge / by source block for load). CRE_DT within ~2 days
--- bounds the scan and drops stale orphans.
+-- WITH a truck -> live_workpool dispatched rows regardless of status ('Q'+YTNO = dispatched,
+-- pre-pickup — ★2026-08-24 전까지는 이 행을 버려 배차 탐지가 픽업까지 늦었다. jobstatus 는
+-- 원문 보존); DS/LD + Q + empty YTNO -> live_candidate (aggregated by QC for discharge /
+-- by source block for load) + individual live_workpool rows with ytno=NULL. CRE_DT within
+-- ~2 days bounds the scan and drops stale orphans.
 --
 -- NO queue join here: queuenames (e.g. '02D-L') are reused across vessels/voyages over
 -- time, so joining JOB_QUEUE_SCHEDULE on (queuename, vessel) fans out against historic

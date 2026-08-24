@@ -403,6 +403,8 @@ pub(crate) async fn build_workpool(pool: PgPool) -> Result<WorkpoolOut, AppError
         qcs.push(QcOut {
             qc: qc.clone(),
             vessels,
+            // ★2026-08-24부터 Q+트럭(배차됨·픽업 전) 행도 세어 카드가 첫 픽업보다 최대 ~9분 일찍
+            //   "작업 중"이 된다 — 의도한 무해 판정: 배차됨은 그 QC 로 가는 중이므로 진행의 일부다.
             active_moves: moves_out.iter().filter(|m| m.ytno.as_deref().is_some_and(|s| !s.is_empty())).count(),
             remaining,
             queues: queues_out,

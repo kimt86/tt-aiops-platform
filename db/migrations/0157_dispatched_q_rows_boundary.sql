@@ -19,9 +19,13 @@ COMMENT ON COLUMN stage2_pool_truck_shadow.pool_ver IS
 --    탐지 지연·일치율을 경계 너머로 이어 읽으면 두 모집단이 섞인다.
 COMMENT ON TABLE dispatch_compare_shadow IS
   'TOS 배차 vs 우리 선택, T1 시점 재구성 비교(그림자). '
-  '⚠2026-08-24 경계(브랜치 dispatched-q-rows): 이전에는 배차행이 픽업 후(A 전환)에야 들어와 '
-  '탐지가 양하 p50 544초 늦었고, 이후로는 Q+트럭 행이 배차 ≤60초에 들어온다. '
-  'first_seen 기반 지연·시간대 분해를 경계 너머로 잇지 말 것. t1_ver/t1_ts 는 mig0149·0152.';
+  '⚠2026-08-24 경계(브랜치 dispatched-q-rows·새 모집단 첫 착지 04:06:55Z·배포는 extractor 먼저 '
+  '→ api(POOL_VER 7) 04:07:14Z 재시작·ver7 첫 틱 04:08:03Z): 이전에는 배차행이 픽업 후(A 전환) '
+  '에야 들어와 탐지가 양하 p50 544초 늦었고, 이후로는 Q+트럭 행이 배차 ≤60초에 들어온다. '
+  '⚠탐지 지연을 잴 때 분모 규칙 둘: ①경계는 ts(착지)가 아니라 t1_ts(배차 시각)로 걸러라 — '
+  'ts 로 거르면 배포 순간의 미픽업 재고(~116행·배차는 과거)가 544초급 지연으로 p50 을 오염시킨다. '
+  '②(qc,queuename,tos_ytno,t1_ts) 단위 min(ts) 로 접어라 — UPD_DT 갱신 재비교(47%가 2행+, mig0152)가 '
+  '늦은 first_seen 을 섞는다. t1_ver/t1_ts 는 mig0149·0152.';
 
 -- ③ 공정비교 15분 창 — 같은 확장을 받는다(질의가 live_workpool 배차행을 읽음).
 COMMENT ON TABLE fair_compare_shadow IS
