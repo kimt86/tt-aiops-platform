@@ -55,6 +55,14 @@ websocket   ──(SSH 터널 → API 인제스트)▶ 메모리(라이브맵·�
   <li><strong>적하(LD)</strong> — 상자를 실을 <strong>안벽 크레인 번호</strong>. 예: <code>C42</code>. 야드 블록이 아닙니다.</li></ul>
   <p>2026-08-05 하루(양하 11,730 · 적하 9,302)로 재보니 <strong>적하 9,271건(99.7%)이 안벽 크레인 형식</strong>이었고 야드 블록 형식은 한 건도 없었습니다. 적하 상자를 <em>어느 야드 자리에서 집었는지</em>는 이 컬럼으로 알 수 없고, 야드 크레인 작업 기록을 따로 봐야 합니다.</p></div>
 
+  <div class="kc-cal note"><span class="h">이 표는 변경 기록장이다 — 배차·교체도 여기 남는다 (2026-08-24 실측)</span>
+  <p>이 표에는 작업이 <em>끝났을 때</em>만 줄이 생기는 게 아니라, 작업지시가 <strong>바뀔 때마다</strong> 한 줄씩 쌓입니다. 어느 프로그램이 바꿨는지(<code>JOB_HIST_PROGRAM</code>)도 함께 적혀서, 터미널 시스템이 트럭을 배차한 순간(<code>NEW_ITV_DISPATCHING</code>)과 배차를 바꾼 순간을 그대로 읽을 수 있습니다. 최신 줄은 지연 없이(같은 초 안에) 나타납니다.</p>
+  <p>여기서 확인된 현장 규칙 두 가지:</p>
+  <ul>
+  <li><strong>배차는 자주 바뀝니다.</strong> 상자 하나가 완료까지 트럭을 평균 2~2.5대 거칩니다. 바꿀 때 두 트럭이 작업을 맞바꾸는 게 아니라, <strong>한 트럭을 다른 상자로 돌리고 남은 상자는 대기로 되돌립니다</strong>(맞교환은 실측 0건).</li>
+  <li><strong>양하에서 상자와 트럭의 짝은 픽업 전까지 유동적입니다.</strong> 양하는 안벽 크레인이 상자를 실어주므로, 빈 트럭이 크레인에 오기만 하면 어떤 상자든 주면 됩니다. 그래서 양하 교체의 83%가 같은 크레인 줄 안에서 일어나고, 거리를 줄이는 방향도 아닙니다(줄어든 경우 37~48%뿐). 적하는 트럭이 <em>그 상자가 있는 야드 자리</em>까지 가야 해서 짝이 일찍 굳습니다. ⇒ 양하 배차를 셀 때는 "어느 상자를 누가"가 아니라 <strong>"어느 크레인에 트럭 몇 대"</strong>가 실제 단위입니다.</li>
+  </ul></div>
+
   <h3>3.2 <code>MCH_OPERATION</code> — 크레인 작업 기록 (move 단위)</h3>
   <p>QC 생산성(MPH)·QC 유휴·크레인 가동률의 원천. 깊게 보존(≥35일).</p>
   <div class="kc-tablewrap"><table>
@@ -97,10 +105,13 @@ websocket   ──(SSH 터널 → API 인제스트)▶ 메모리(라이브맵·�
     <tbody>
       <tr><td><code>JOB_ODR_JOBSTATUS</code></td><td>A 활성 · Q 대기 · P 계획 · B 차단 · C 완료. 라이브 = A/Q/P/B + COMPDATE IS NULL.</td></tr>
       <tr><td><code>JOB_ODR_YTNO</code></td><td><strong>배정된 TT</strong>. GPS device와 일치.</td></tr>
+      <tr><td><code>YT_DIS_DT</code></td><td>배차 시각(VARCHAR2·14자리). 배차 순간 <code>YTNO</code>와 함께 즉시 채워진다.</td></tr>
       <tr><td><code>JOB_ODR_ETW_DT</code></td><td><strong>ETW = 크레인 준비 시각</strong>. ETW − 현재 = 시급도.</td></tr>
       <tr><td><code>JOB_ODR_ARMGC / CONTNO / YT_TOPOS</code></td><td>야드크레인 / 컨테이너 / <strong>상대편 위치</strong> — 양하는 야드 블록-베이, 적하는 안벽 크레인(3.1 주의 참조).</td></tr>
     </tbody>
   </table></div>
+  <div class="kc-cal warn"><span class="h">⚠ 배차 여부는 상태(JOBSTATUS)가 아니라 트럭 칸(YTNO)으로 읽어라 (2026-08-24 실측)</span>
+  <p>터미널 시스템은 트럭을 붙이는 순간 상태를 바꾸지 않고 <strong>트럭 번호와 배차 시각만 먼저 채웁니다</strong>. 그래서 "Q(대기)인데 트럭이 있는" 줄이 항상 수십~백여 건 있고, 그 줄이 곧 <em>배차됐지만 아직 상자를 싣지 않은</em> 작업입니다. 상태 A는 (양하 기준 95%가) 이미 픽업까지 끝난 뒤에야 옵니다. "A만 배차됨"으로 읽으면 배차 사실을 평균 9분 늦게 알게 됩니다 — 우리 추출기가 실제로 이 함정에 빠져 있었습니다(2026-08-24 고침).</p></div>
   <div class="kc-tablewrap"><table>
     <thead><tr><th>JOB_QUEUE_SCHEDULE 컬럼</th><th>의미</th></tr></thead>
     <tbody>
