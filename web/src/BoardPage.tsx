@@ -216,6 +216,15 @@ export default function BoardPage({ lang }: { lang: Lang }) {
                             {ko ? "재지향" : "REDIRECT"}
                           </span>
                         ) : null}
+                        {r.match_tier === 2 ? (
+                          <span
+                            className="pill good"
+                            style={{ marginLeft: 6 }}
+                            title={ko ? "마감이 아직 안 온 작업 — 남는 트럭에 미리 배정한 추천" : "deadline not yet due — pre-assigned to a spare truck"}
+                          >
+                            {ko ? "미리" : "EARLY"}
+                          </span>
+                        ) : null}
                       </td>
                       <td className="mono">{r.contno ?? "–"}</td>
                       <td>{r.qc ?? "–"}</td>

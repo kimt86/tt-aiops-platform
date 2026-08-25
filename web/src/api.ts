@@ -290,6 +290,8 @@ export interface BoardReco {
   arrival_s: number | null; switched: boolean | null;
   /** 재지향 추천: 이 트럭이 지금 붙들고 있는 작업(qc queuename [contno]) · null = 보통 추천 */
   redirected_from: string | null;
+  /** 발행 계층: 1 = 마감 도래 · 2 = 마감 전 미리 배정 · null = 경계 이전 행 */
+  match_tier: number | null;
 }
 export interface DispatchBoard {
   generated_at: string | null;
