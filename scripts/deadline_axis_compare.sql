@@ -29,6 +29,7 @@ SELECT jobtype AS 작업, count(*) AS 추천,
        round(avg(dd_lead_s)) AS "뺀 준비시간(초)"
   FROM stage2_match_shadow
  WHERE ts > now() - :'win'::interval AND jobtype IN ('DS','LD')
+   AND match_tier IS DISTINCT FROM 2 -- 2계층(미리 배정·mig 0161)은 마감이 먼 예고라 축 비교를 오염시킨다
  GROUP BY 1 ORDER BY 1;
 
 \echo ''
@@ -39,7 +40,8 @@ SELECT jobtype AS 작업, count(*) AS n,
        round(percentile_cont(0.5) WITHIN GROUP (ORDER BY (deadline_slack_s + od_p90_s) - dd_slack_s)) AS "옛 축이 늦은 정도",
        round(100.0*count(*) FILTER (WHERE dd_slack_s < 0)/count(*),1) AS "새 축 기준 이미 늦음 %"
   FROM stage2_match_shadow
- WHERE ts > now() - :'win'::interval AND jobtype IN ('DS','LD') AND dd_slack_s IS NOT NULL
+ WHERE ts > now() - :'win'::interval AND jobtype IN ('DS','LD')
+   AND match_tier IS DISTINCT FROM 2 AND dd_slack_s IS NOT NULL -- 2계층(미리 배정·mig 0161)은 마감이 먼 예고라 축 비교를 오염시킨다
  GROUP BY 1 ORDER BY 1;
 
 \echo ''
@@ -51,6 +53,7 @@ WITH m AS (
          dd_slack_s                  AS new_h
     FROM stage2_match_shadow
    WHERE ts > now() - :'win'::interval AND jobtype IN ('DS','LD')
+   AND match_tier IS DISTINCT FROM 2 -- 2계층(미리 배정·mig 0161)은 마감이 먼 예고라 축 비교를 오염시킨다
      AND queuename IS NOT NULL AND dd_slack_s IS NOT NULL
 ), t AS (
   SELECT m.*, extract(epoch FROM d.comp - m.ts) AS truth_h
@@ -78,6 +81,7 @@ WITH m AS (
          (deadline_slack_s + od_p90_s) - CASE WHEN jobtype='LD' THEN 1448 ELSE 455 END AS placebo_h
     FROM stage2_match_shadow
    WHERE ts > now() - :'win'::interval AND jobtype IN ('DS','LD')
+   AND match_tier IS DISTINCT FROM 2 -- 2계층(미리 배정·mig 0161)은 마감이 먼 예고라 축 비교를 오염시킨다
      AND queuename IS NOT NULL AND dd_slack_s IS NOT NULL
 ), t AS (
   SELECT m.*, extract(epoch FROM d.comp - m.ts) AS truth_h
@@ -99,6 +103,7 @@ WITH m AS (
          deadline_slack_s + od_p90_s AS old_h, dd_slack_s AS new_h
     FROM stage2_match_shadow
    WHERE ts > now() - :'win'::interval AND jobtype IN ('DS','LD')
+   AND match_tier IS DISTINCT FROM 2 -- 2계층(미리 배정·mig 0161)은 마감이 먼 예고라 축 비교를 오염시킨다
      AND queuename IS NOT NULL AND dd_slack_s IS NOT NULL
 ), t AS (
   SELECT m.*, extract(epoch FROM d.comp - m.ts) AS truth_h

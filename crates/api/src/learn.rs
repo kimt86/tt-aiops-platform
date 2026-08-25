@@ -800,7 +800,8 @@ pub async fn extra(State(pool): State<PgPool>) -> Result<Json<ExtraResp>, AppErr
     .await?;
     let (s2_rows, s2_feasible_pct, s2_switched): (i64, Option<f64>, i64) = sqlx::query_as(
         "SELECT count(*), (100.0*avg(feasible::int))::float8, count(*) FILTER (WHERE switched)
-           FROM stage2_match_shadow WHERE ts > now()-interval '24 hours'",
+           FROM stage2_match_shadow WHERE ts > now()-interval '24 hours'
+            AND match_tier IS DISTINCT FROM 2", // 2계층(미리 배정·mig 0161)은 feasible ~100%라 게이지를 부풀린다
     )
     .fetch_one(&pool)
     .await?;

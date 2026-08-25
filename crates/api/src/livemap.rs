@@ -4752,14 +4752,30 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
             let now = Utc::now().timestamp_millis();
             // previous-tick recommendation per vehicle (ytno → work bucket key) for anti-thrash.
             // ts-based (restart-safe), latest per vehicle within PREV_WINDOW_S.
-            let prev: HashMap<String, (String, String, String)> = sqlx::query_as::<_, (String, String, String, String)>(
-                &format!(
-                    "SELECT DISTINCT ON (ytno) ytno, coalesce(qc,''), coalesce(vessel,''), coalesce(queuename,'')
-                       FROM stage2_match_shadow WHERE ts > now() - interval '{PREV_WINDOW_S} seconds' ORDER BY ytno, ts DESC"
-                ),
-            )
-            .fetch_all(&pool).await.unwrap_or_default()
-            .into_iter().map(|(yt, q, v, qn)| (yt, (q, v, qn))).collect();
+            // ★2계층(미리 배정·mig 0161) 행은 **1계층 간선이 보는 prev 에 넣지 않는다** — 예고가
+            //   트럭에 SWITCH/COMMIT 벌점을 얹으면 급한 일이 가까운 트럭을 못 집어 "1계층이 항상
+            //   우선"이 깨진다(1차 리뷰 실측: 섞인 상태에서 1계층 switched 0.05%→4.5%). 경계 이전
+            //   행은 match_tier NULL 이라 포함 — 즉 1계층 prev 는 종전과 입력이 같다(동작 보존).
+            //   2계층 간선은 계층 불문 최신(prev_any)을 봐 예고 자체의 들락날락을 막는다 — 기존
+            //   규칙의 재사용이지 새 상수가 아니다.
+            let (prev, prev_any): (HashMap<String, (String, String, String)>, HashMap<String, (String, String, String)>) = {
+                let rows = sqlx::query_as::<_, (String, String, String, String, Option<i16>)>(
+                    &format!(
+                        "SELECT ytno, coalesce(qc,''), coalesce(vessel,''), coalesce(queuename,''), match_tier
+                           FROM stage2_match_shadow WHERE ts > now() - interval '{PREV_WINDOW_S} seconds'
+                          ORDER BY ytno, ts DESC"
+                    ),
+                )
+                .fetch_all(&pool).await.unwrap_or_default();
+                let mut p1 = HashMap::new();
+                let mut pa = HashMap::new();
+                for (yt, q, v, qn, tier) in rows { // ytno 별 ts 내림차순 — 먼저 본 행이 최신
+                    let key = (q, v, qn);
+                    if tier != Some(2) { p1.entry(yt.clone()).or_insert_with(|| key.clone()); }
+                    pa.entry(yt).or_insert(key);
+                }
+                (p1, pa)
+            };
             // 자기 추천 이력 (mig 0142→0158): 최근 180초 안에 추천한 상자 키. 게이지
             // 전용 — 풀에서 빼지 않는다(2026-08-25 사용자 결정: 로직은 TOS 가 우리 추천을
             // 채택하는지와 무관해야 하므로 DISPATCH_MODE 제거). 재추천 중복 제거는 소비자
@@ -4767,7 +4783,8 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
             let self_recent: std::collections::HashSet<(String, String, String)> =
                 sqlx::query_as::<_, (String, String, String)>(
                     "SELECT DISTINCT vessel, queuename, contno FROM stage2_match_shadow
-                      WHERE ts > now() - interval '180 seconds' AND contno IS NOT NULL",
+                      WHERE ts > now() - interval '180 seconds' AND contno IS NOT NULL
+                        AND match_tier IS DISTINCT FROM 2", // 게이지 정의 보존(mig 0161): 예고 반복을 재추천 압력으로 세지 않는다
                 )
                 .fetch_all(&pool).await.unwrap_or_default()
                 .into_iter().collect();
@@ -5530,7 +5547,8 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                 for (vi, v) in vehicles.iter().enumerate() {
                     let (p50, p90, tier) = cost(v.1, v.2, wlat, wlon, w.jobtype == "LD");
                     let arr = v.3 + p50; // empty travel to the pickup
-                    let prevk = prev.get(&v.0);
+                    // 1계층 간선은 2계층 행을 뺀 prev(종전 입력 그대로), 2계층 간선은 계층 불문(mig 0161).
+                    let prevk = if w_tier == 2 { prev_any.get(&v.0) } else { prev.get(&v.0) };
                     let switched = prevk.map(|pk| pk != &this_key).unwrap_or(false);
                     // committed window: if this truck's PRIOR work is on the verge of dispatch, switching
                     // it away is near-locked (COMMIT_LOCK_S); otherwise the normal switch penalty.
@@ -5727,7 +5745,11 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
             // mig 0121 → 0133 — 구동 풀(설계③)에 든 묶음의 상세. 레거시 풀이 사라져 in_current_pool/
             // rank_current는 NULL(비교 대상 없음).
             {
-                let rank_new: HashMap<usize, i32> = driving.iter().enumerate().map(|(r, &(oi, _, _))| (oi, r as i32)).collect();
+                // 1계층만 순위를 매긴다(mig 0161) — 양층에 걸친 묶음은 driving 에 두 번 나와,
+                // 거르지 않으면 2계층 순위가 1계층 순위를 덮어쓴다(1차 리뷰 지적).
+                let rank_new: HashMap<usize, i32> = driving.iter().enumerate()
+                    .filter(|&(_, t)| t.2 == 1)
+                    .map(|(r, &(oi, _, _))| (oi, r as i32)).collect();
                 for &oi in &pool_new_set {
                     let w = &work[works[oi].0];
                     let dd = w.dispatch_deadline_ts;
@@ -5759,8 +5781,8 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                 //   실패한다. 그런데 DEADMAN 은 stage2_match_shadow 만 보고 이 표는 안 본다
                 //   (crates/api/src/db.rs) — 경보가 안 뜨니 사람이 읽는 건 이 줄뿐이다.
                 //   그래서 **최근 마이그레이션 번호를 여기 같이 적는다**(0104 = 표 신설,
-                //   0150 = workpool_age_s, 0153 = wake_src).
-                tracing::warn!(error = %e, "stage2_solver_shadow insert failed — 마이그레이션 0104/0150/0153 적용 여부 확인");
+                //   0150 = workpool_age_s, 0153 = wake_src, 0161 = t2_*).
+                tracing::warn!(error = %e, "stage2_solver_shadow insert failed — 마이그레이션 0104/0150/0153/0161 적용 여부 확인");
             }
             if tick % 30 == 0 {
                 crate::db::prune(&pool, "stage2_match_shadow", "DELETE FROM stage2_match_shadow WHERE ts < now() - interval '21 days'").await;

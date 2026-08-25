@@ -1442,6 +1442,8 @@ struct S2Match {
     feasible: Option<bool>,
     cost_tier: Option<String>,
     switched: Option<bool>,
+    /// 발행 계층(mig 0161): 1=마감 도래·2=미리 배정·NULL=경계 이전. 목록은 걸러내지 않고 표식만 준다.
+    match_tier: Option<i16>,
 }
 /// "Free truck nearby but the QC is stuck" — the dispatch inefficiency Stage-2 targets: a working QC
 /// idle past threshold with no truck at it (starving_real) WHILE empty+unassigned trucks sit within
@@ -1505,7 +1507,7 @@ pub async fn stage2_shadow(State(pool): State<PgPool>) -> Result<Json<Stage2Shad
     let latest: Vec<S2Match> = match latest_ts {
         Some(ts) => sqlx::query_as(
             "SELECT ytno, qc, vessel, queuename, jobtype, src_block, veh_state, arrival_s,
-                    deadline_slack_s, feasible, cost_tier, switched
+                    deadline_slack_s, feasible, cost_tier, switched, match_tier
                FROM stage2_match_shadow WHERE ts = $1 ORDER BY arrival_s",
         )
         .bind(ts)
@@ -1626,7 +1628,9 @@ pub async fn health_dispatch(State(pool): State<PgPool>) -> Result<Json<HealthDi
     let (last_tick_age_s, ticks_1h, matches_latest): (Option<i64>, i64, i64) = sqlx::query_as(
         "SELECT extract(epoch FROM now() - max(ts))::int8 AS age,
                 count(DISTINCT ts) FILTER (WHERE ts > now() - interval '1 hour') AS ticks_1h,
-                count(*) FILTER (WHERE ts = (SELECT max(ts) FROM stage2_match_shadow)) AS latest
+                -- matches_latest 는 1계층만(mig 0161) — 이 화면의 다른 지표와 같은 모집단으로.
+                count(*) FILTER (WHERE ts = (SELECT max(ts) FROM stage2_match_shadow)
+                                   AND match_tier IS DISTINCT FROM 2) AS latest
            FROM stage2_match_shadow",
     )
     .fetch_one(&pool)
@@ -1673,6 +1677,7 @@ pub async fn health_dispatch(State(pool): State<PgPool>) -> Result<Json<HealthDi
                   count(*)::int8 AS n, min(arrival_s) AS ord
              FROM stage2_match_shadow
             WHERE ts > now() - interval '1 hour' AND arrival_s IS NOT NULL
+              AND match_tier IS DISTINCT FROM 2 -- 옆의 p50/p90 과 같은 모집단(mig 0161)
               AND ts IN (SELECT ts FROM stage2_solver_shadow
                           WHERE ts > now() - interval '1 hour' AND pool_mode = 3)
             GROUP BY 1) z ORDER BY ord",
@@ -1686,6 +1691,7 @@ pub async fn health_dispatch(State(pool): State<PgPool>) -> Result<Json<HealthDi
                 (100.0*count(*) FILTER (WHERE switched)/nullif(count(*),0))::float8 AS thrash_pct,
                 count(*)::int8 AS matches
            FROM stage2_match_shadow WHERE ts > now() - interval '24 hours'
+            AND match_tier IS DISTINCT FROM 2 -- 경계(mig 0161)에서 matches 3배 점프를 막는다
             AND ts IN (SELECT ts FROM stage2_solver_shadow
                         WHERE ts > now() - interval '24 hours' AND pool_mode = 3)
           GROUP BY 1 ORDER BY 1",
@@ -1697,6 +1703,7 @@ pub async fn health_dispatch(State(pool): State<PgPool>) -> Result<Json<HealthDi
     let decisions: Vec<HDecision> = sqlx::query_as(
         "SELECT ts, ytno, qc, queuename, jobtype, arrival_s, deadline_slack_s, feasible, cost_tier, switched
            FROM stage2_match_shadow WHERE ts = (SELECT max(ts) FROM stage2_match_shadow)
+            AND match_tier IS DISTINCT FROM 2 -- '지금 보내라' 결정만(mig 0161)
           ORDER BY arrival_s LIMIT 12",
     )
     .fetch_all(&pool)
@@ -2075,6 +2082,9 @@ const BOX_JOIN_CTE: &str = "WITH r AS (
               (array_agg(dispatch_deadline_ts ORDER BY ts))[1] AS first_deadline
          FROM stage2_match_shadow
         WHERE ts > now() - interval '24 hours' AND contno IS NOT NULL
+          -- 2계층(미리 배정·mig 0161) 제외: first_ts 가 몇 시간 이른 예고로 당겨지면 gap/margin
+          -- 백분위가 통째로 다른 정의가 된다 — 이 헤드라인은 종전 모집단(마감 도래 발행)을 지킨다.
+          AND match_tier IS DISTINCT FROM 2
         GROUP BY contno
      ), j AS (
        SELECT r.contno, r.qc, r.jobtype, r.first_ts, r.first_ytno, r.first_deadline,
@@ -2296,6 +2306,8 @@ pub async fn dispatch_board(State(pool): State<PgPool>) -> Result<Json<DispatchB
            SELECT contno, min(ts) AS first_ts
              FROM stage2_match_shadow
             WHERE ts > now() - interval '24 hours' AND contno IS NOT NULL
+              -- 2계층(미리 배정·mig 0161) 제외 — 박제 쿼리(dispatch_adoption_metric)와 같은 잣대 유지.
+              AND match_tier IS DISTINCT FROM 2
             GROUP BY contno
          ), d AS (
            SELECT r.contno, t.ytno, t.dispatch_ts

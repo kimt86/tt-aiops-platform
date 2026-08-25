@@ -61,6 +61,7 @@ WITH r AS (                                   -- 상자당 첫 추천 (헤드라
     FROM stage2_match_shadow
    WHERE ts BETWEEN now() - interval '8 days' AND now() - interval '1 day'
      AND contno IS NOT NULL AND jobtype IN ('DS','LD')
+     AND match_tier IS DISTINCT FROM 2 -- 2계층(미리 배정·mig 0161)이 first_ts 를 몇 시간 당겨 wait_upper 를 부풀린다
    GROUP BY contno, jobtype
 ), d AS (                                     -- 같은 상자의 TOS 배차 (첫 추천 −90초 이후 가장 이른 것)
   SELECT r.*, t.ytno AS tos_ytno, t.dispatch_ts AS tos_dis_ts, b.dispatch_ts AS tos_before_ts

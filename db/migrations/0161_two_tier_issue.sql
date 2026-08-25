@@ -16,8 +16,10 @@ ALTER TABLE stage2_solver_shadow ADD COLUMN IF NOT EXISTS t2_slots int4;
 ALTER TABLE stage2_solver_shadow ADD COLUMN IF NOT EXISTS t2_assign_n int4;
 COMMENT ON COLUMN stage2_solver_shadow.t2_works IS
   '2계층(마감 미도래 발행 지시)에 배정된 묶음 수. NULL = 경계 이전(mig 0161·2026-08-25). '
-  '⚠경계부터 n_works·optimal_n·greedy_n 은 2계층을 포함한다 — 종전 정의(1계층만)와 비교하려면 '
-  't2_works/t2_assign_n 을 빼고 읽을 것. trucks_held_n 정의(슬롯 못 받은 트럭)는 불변이나 '
+  '⚠경계부터 n_works·pool_new_n·optimal_n·greedy_n 은 2계층을 포함한다. 종전 정의(1계층만)로 '
+  '복원 가능한 것은 n_works/pool_new_n(−t2_works)·optimal_n(−t2_assign_n)뿐이고, greedy_n 의 '
+  '2계층 몫은 따로 기록하지 않아 정확 복원 불가 — 종전 시계열과 비교할 땐 t2_works IS NULL '
+  '구간만 쓰거나 optimal 축으로 볼 것. trucks_held_n 정의(슬롯 못 받은 트럭)는 불변이나 '
   '2계층이 잔여 트럭을 채우므로 값의 대역이 크게 내려간다(종전 상시 188~228).';
 COMMENT ON COLUMN stage2_solver_shadow.t2_slots IS
   '2계층에 배정된 슬롯 수 합(캡). 1계층 합 + 이 값 ≤ truck_n(재지향 제외) — 작업>트럭 금지는 층을 합쳐 성립.';

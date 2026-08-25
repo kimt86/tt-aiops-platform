@@ -45,3 +45,19 @@ LD 65.9%**(08-25 진단) 해소 — 적하 none 의 81%가 "직전 30분 그 큐
 - ⑮ 재현율 야간 포함 재확인(회귀 감시) · 채택률 시계열이 게이트 후 연속적인지.
 - 관찰: 2계층 추천의 "예고 → 실제 그 트럭이 그 일을 받았나"(reco_tier=2 & agree) —
   발행 페이스 vs 크레인 리듬 괴리가 얼마나 메워지는지의 직접 계기.
+
+## 1차 리뷰 반영 (FIX FIRST 3 + SHOULD_FIX 4 + CONSIDER 3 — 전부 수용)
+
+- **(차단1) prev 오염 수정**: 2계층 행이 들락날락 방지(prev)에 섞여 1계층 switched 가
+  0.05%→4.5%로 뛰었다(리뷰 실측·같은 90분 창). 수정 = 1계층 간선은 **2계층 행을 뺀 prev**
+  (경계 이전 NULL 행 포함 → 종전 입력과 동일 = 동작 보존 복원), 2계층 간선은 계층 불문
+  최신(prev_any·예고 자체의 안정성). ⚠**오염 창 = 15:20:02~15:41:32 MYT** —
+  이 창의 1계층 switched 는 오염값이니 시계열 비교에서 제외할 것.
+- **(차단2·3) 게이트 누락 2곳**: 보드 라이브 채택률 분모·VS TOS 상자 비교(BOX_JOIN_CTE)
+  first_* — 1계층만으로 게이트(박제 쿼리와 같은 잣대 복원). truck_match/ytno_match 의
+  EXISTS 는 계층 불문 유지(그 트럭 추천이 서 있었다는 사실 자체는 계층과 무관).
+- 헬스 화면 내부 일관화(히스토그램·트렌드·decisions·matches_latest 게이트) ·
+  stage2_shadow 상세 목록에 match_tier 표식 · 러닝센터 s2_feasible_pct 게이트 ·
+  분석 스크립트 2개(counterfactual_wait·deadline_axis_compare) 계층 필터 ·
+  self_cover_n 정의 보존 · rank_new 1계층만(양층 걸친 묶음의 덮어씀) ·
+  mig0161 COMMENT 정정(greedy_n 정확 복원 불가 명시) · 솔버 실패 힌트에 0161.
