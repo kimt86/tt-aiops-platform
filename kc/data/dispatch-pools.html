@@ -39,7 +39,7 @@
       <tr><td><code>idle</code> 현재 유휴</td><td>공차 + 정지 + <strong>미배정</strong> → 즉시 배차 가능. 배차 풀 1열.</td></tr>
       <tr><td><code>staging</code> 배차·대기</td><td>공차 + 정지 + <strong>배정됨</strong> → 순서 대기(노는 게 아님).</td></tr>
       <tr><td><code>soon_idle</code> 곧 유휴</td><td>적재 + 마지막 핸드오버 진행 중 → 곧 풀림.</td></tr>
-      <tr><td><code>empty_travel</code> 공차 주행</td><td>공차로 픽업 향함. 목적지 멀면(≥150m) 스왑 후보.</td></tr>
+      <tr><td><code>empty_travel</code> 공차 주행</td><td>공차로 픽업 향함. 목적지 멀면(≥500m) 스왑 후보.</td></tr>
       <tr><td><code>delivering</code> 적재 이동</td><td>적재하고 이동 중(아직 도착 전).</td></tr>
       <tr><td><code>wait_rtg</code> 도착·RTG 대기</td><td>블록 도착했으나 RTG 미관여 → 아직 대기.</td></tr>
     </tbody>
@@ -47,7 +47,7 @@
   <div class="kc-cal note"><span class="h">idle → idle/staging 분리 (총 6상태)</span><p>이 문서 초판(2026-06-09)은 5상태였으나, "공차+정지"의 절반이 실은 배정된 차(순서 대기)여서 <strong>배정된 대기 = <code>staging</code></strong>, 진짜 미배정 = <code>idle</code>로 분리해 <strong>6상태</strong>가 됐습니다. 상세 <a href="/kc/dashboard/dispatch.html">TT Dispatch 해설</a>.</p></div>
 
   <h2>Part 2 · 배차 상태 분류 상세</h2>
-  <p>각 TT를 매 스냅샷마다 결정 트리로 분류. <strong>websocket 신호만</strong> 사용. 상수: 유휴속도 <strong>3km/h</strong> · RTG 같은bay <strong>30m</strong> · 스왑 최소거리 <strong>150m</strong>.</p>
+  <p>각 TT를 매 스냅샷마다 결정 트리로 분류. <strong>websocket 신호만</strong> 사용. 상수: 유휴속도 <strong>3km/h</strong> · RTG 같은bay <strong>30m</strong> · 스왑 최소거리 <strong>500m</strong>(초판의 150m에서 상향).</p>
   <pre><code>적재 여부 = container1 이 비었나?
 공차(빈 차)
   ├ 속도 &lt; 3km/h · 미배정 ────────▶ idle          (즉시 배차 가능)
@@ -61,6 +61,7 @@
           ├ RTG GPS ≤ 30m ─────▶ soon_idle     (같은 bay = 핸드오버 중)
           └ RTG 멀음 ──────────▶ wait_rtg      (도착 ≠ 곧유휴)</code></pre>
   <div class="kc-cal warn"><span class="h">양하(DS)가 어려운 이유 — RTG엔 PLC가 없다</span><p>적하는 QC PLC 하중 전이로 핸드오버를 ±1초로 잡습니다. 하지만 양하 블록측 RTG는 PLC가 없어 <strong>RTG GPS와 TT GPS가 같은 bay(≈30m)인지</strong>로 판정. 블록에 <em>도착만</em> 했다고 곧유휴로 보면 오판(<code>wait_rtg</code>).</p></div>
+  <div class="kc-cal note"><span class="h">스왑 후보가 이제 배차 계산에도 들어갑니다 (2026-08-25)</span><p>위 분류는 화면 표시용이고, 배차 계산의 "재지향 가능" 판별은 GPS가 아니라 <strong>TOS 기록</strong>으로 합니다 — 배차는 받았는데 아직 픽업 전인 트럭(그리고 같은 트럭이 지금 하는 일이 따로 없는 것을 확인)을 후보에 넣고, 픽업 지점 500m 안이면 뺍니다. 급한 작업이 이런 트럭을 데려가려면 방향을 트는 비용(3분치)을 얹어 계산하므로, 빈 트럭과 비슷하면 빈 트럭이 이깁니다. 상세는 <a href="/kc/dashboard/board.html">배차 추천 보드 해설</a>.</p></div>
   <h3>블록 위치 학습 (centroid)</h3>
   <p>크레인이 항상 GPS를 쏘지 않으므로 <strong>ARRIVED TT들의 GPS로 블록/베이 위치를 학습</strong>(코드별 이동평균). 공차 TT가 픽업 목적지까지 몇 m 남았는지를 TOS 의존 없이 추정 → 스왑성 판정.</p>
 
