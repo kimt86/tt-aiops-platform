@@ -1061,6 +1061,9 @@ pub fn spawn_dispatch_pred_logger(pool: PgPool) {
                        SELECT contno, min(ts) AS first_ts
                          FROM stage2_match_shadow
                         WHERE ts > now() - interval '24 hours' AND contno IS NOT NULL
+                          -- 2계층(미리 배정·mig 0161)은 분모에서 뺀다: '추천 후 20분 내 채택' 잣대는
+                          -- 마감 도래 추천의 것이고, 몇 시간 이른 예고를 섞으면 채택률이 허구로 무너진다.
+                          AND match_tier IS DISTINCT FROM 2
                         GROUP BY contno
                      ), d AS (
                        SELECT r.contno, t.ytno, t.dispatch_ts
@@ -1486,6 +1489,9 @@ pub async fn stage2_shadow(State(pool): State<PgPool>) -> Result<Json<Stage2Shad
                 count(DISTINCT ytno) AS vehicles,
                 count(DISTINCT (qc, queuename, vessel)) AS works
            FROM stage2_match_shadow m WHERE m.ts > now() - interval '30 minutes'
+            -- 2계층(미리 배정·mig 0161)은 집계에서 뺀다: 마감이 멀어 feasible ~100%·도착 분포가
+            -- 다른 모집단이라 섞으면 종전 지표(30분 요약)의 의미가 바뀐다.
+            AND m.match_tier IS DISTINCT FROM 2
             AND m.ts IN (SELECT ts FROM stage2_solver_shadow
                           WHERE ts > now() - interval '30 minutes' AND pool_mode = 3)",
     )
@@ -1557,7 +1563,10 @@ pub async fn stage2_advisory(State(pool): State<PgPool>) -> Result<Json<Vec<S2Ad
     let rows: Vec<S2Advisory> = sqlx::query_as(
         "SELECT ytno, qc, queuename, contno, ts, jobtype, src_block, dest_lat, dest_lon, src_lat, src_lon, arrival_s, feasible
            FROM stage2_match_shadow
-          WHERE ts = (SELECT max(ts) FROM stage2_match_shadow) AND dest_lat IS NOT NULL",
+          WHERE ts = (SELECT max(ts) FROM stage2_match_shadow) AND dest_lat IS NOT NULL
+            -- 지도 추천선은 '지금 보내라'만 — 2계층(미리 배정·mig 0161)은 다음 일 예고라 선을
+            -- 그리면 화면이 배로 붐비고 뜻도 다르다. 보드가 '미리' 칩으로 따로 보여준다.
+            AND match_tier IS DISTINCT FROM 2",
     )
     .fetch_all(&pool)
     .await?;
@@ -1639,6 +1648,8 @@ pub async fn health_dispatch(State(pool): State<PgPool>) -> Result<Json<HealthDi
                 (percentile_cont(0.5) WITHIN GROUP (ORDER BY arrival_s))::float8,
                 (percentile_cont(0.9) WITHIN GROUP (ORDER BY arrival_s))::float8
            FROM stage2_match_shadow WHERE ts > now() - interval '30 minutes'
+            -- 2계층(미리 배정·mig 0161) 제외 — 요약 지표는 종전 모집단(마감 도래 발행)으로 유지.
+            AND match_tier IS DISTINCT FROM 2
             AND ts IN (SELECT ts FROM stage2_solver_shadow
                         WHERE ts > now() - interval '30 minutes' AND pool_mode = 3)",
     )
