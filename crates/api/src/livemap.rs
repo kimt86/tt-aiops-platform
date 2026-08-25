@@ -5710,9 +5710,44 @@ pub fn spawn_dispatch_compare(lm: Arc<LiveMap>, pool: PgPool) {
                 let cem = ce.iter().map(|(k, c)| (k.clone(), (c.lat, c.lon))).collect();
                 (cr, cem)
             };
+            // ── ② 실제 추천 스트림 — "그 순간 보드에 떠 있던 답"을 채점할 재료 (mig 0159) ──
+            //
+            // 아래 best(최근접 가용 트럭)는 채점용으로 사후에 새로 계산한 **상한 계기**지 우리
+            // 제품이 아니다. 현장 투입 판단에 필요한 건 "운영자가 그 순간 보드를 그대로 따라
+            // 했다면"이라(2026-08-25 사용자 지시), stage2_match_shadow(실제 추천)를 T1 로 되감아
+            // 같은 자로 병기 채점한다. '떠 있던'의 기준은 **보드와 같은 150초** —
+            // web/src/BoardPage.tsx `STALE_S`(그 나이를 넘긴 추천은 화면도 '적용 금지'로 회색
+            // 처리)와 같이 움직여야 한다. 창 15분은 T1 나이(탐지 ≤60초대·재시작 백로그 제외)를
+            // 넉넉히 덮는 값이고, 못 덮는 T1 은 reco_src=NULL(평가 불능)로 정직하게 남긴다 —
+            // '추천이 없었다(none)'와 '안 읽었다(NULL)'를 섞으면 none 비율이 오염된다.
+            const RECO_STANDING_S: i64 = 150;
+            let reco_fetch_at = Utc::now().timestamp_millis();
+            let reco_rows = sqlx::query_as::<_, (DateTime<Utc>, String, Option<String>, Option<String>, Option<String>)>(
+                "SELECT ts, ytno, qc, queuename, contno FROM stage2_match_shadow
+                  WHERE ts > now() - interval '15 minutes'",
+            )
+            .fetch_all(&pool).await.unwrap_or_default();
+            let mut reco_by_cont: HashMap<String, Vec<(i64, DateTime<Utc>, String)>> = HashMap::new();
+            let mut reco_by_queue: HashMap<(String, String), Vec<(i64, DateTime<Utc>, String)>> = HashMap::new();
+            for (rts, ryt, rqc, rqu, rcont) in reco_rows {
+                let ms = rts.timestamp_millis();
+                if let Some(c) = rcont {
+                    reco_by_cont.entry(c).or_default().push((ms, rts, ryt.clone()));
+                }
+                if let (Some(q), Some(u)) = (rqc, rqu) {
+                    reco_by_queue.entry((q, u)).or_default().push((ms, rts, ryt));
+                }
+            }
+            for v in reco_by_cont.values_mut() { v.sort_by_key(|x| x.0); }
+            for v in reco_by_queue.values_mut() { v.sort_by_key(|x| x.0); }
+            // 그 작업에 대해 T1 시점에 유효(150초 이내 최신)했던 추천 하나.
+            let standing = |v: Option<&Vec<(i64, DateTime<Utc>, String)>>, t1: i64| -> Option<(DateTime<Utc>, String)> {
+                v.and_then(|v| v.iter().rev().find(|(ms, _, _)| *ms <= t1 && t1 - *ms <= RECO_STANDING_S * 1000))
+                    .map(|(_, ts, yt)| (*ts, yt.clone()))
+            };
             // EVERY truck TOS has assigned that we haven't compared yet (one row per bay×truck). No
             // time window → covers the whole current backlog, not just the last few minutes.
-            let rows = sqlx::query_as::<_, (String, String, String, String, DateTime<Utc>, DateTime<Utc>, Option<DateTime<Utc>>, Option<String>)>(
+            let rows = sqlx::query_as::<_, (String, String, String, String, DateTime<Utc>, DateTime<Utc>, Option<DateTime<Utc>>, Option<String>, Option<String>)>(
                 // ★T1 = yt_dis_ts (배차 시각 실물·mig 0148). 종전엔 upd_ts 를 T1 로 썼는데 그건 행
                 //   마지막 갱신이라 배차 이후 갱신에 밀린다 — 그만큼 엉뚱한 순간의 트럭 위치로
                 //   비교하게 된다. **키(tos_upd)는 그대로 둔다**: 중복 제거용 토큰으로는 여전히
@@ -5720,7 +5755,7 @@ pub fn spawn_dispatch_compare(lm: Arc<LiveMap>, pool: PgPool) {
                 //   yt_dis_ts 가 비면(있으면 안 되지만) upd_ts 로 떨어져 행을 잃지 않는다.
                 "SELECT DISTINCT ON (w.qc, w.queuename, w.ytno)
                         w.qc, w.queuename, w.jobtype, w.ytno, w.upd_ts,
-                        coalesce(w.yt_dis_ts, w.upd_ts) AS t1, w.yt_dis_ts AS dis_raw, w.yt_topos
+                        coalesce(w.yt_dis_ts, w.upd_ts) AS t1, w.yt_dis_ts AS dis_raw, w.yt_topos, w.contno
                    FROM live_workpool w
                   WHERE w.ytno IS NOT NULL AND w.ytno <> '' AND w.qc IS NOT NULL
                     AND w.jobtype IN ('DS','LD')
@@ -5730,7 +5765,7 @@ pub fn spawn_dispatch_compare(lm: Arc<LiveMap>, pool: PgPool) {
                   ORDER BY w.qc, w.queuename, w.ytno, w.upd_ts DESC",
             )
             .fetch_all(&pool).await.unwrap_or_default();
-            for (qc, queue, jobtype, tos_ytno, tos_upd, tos_dis, dis_raw, yt_topos) in rows {
+            for (qc, queue, jobtype, tos_ytno, tos_upd, tos_dis, dis_raw, yt_topos, w_contno) in rows {
                 // pickup coord: LD = the source block centroid, DS = the QC crane (live or learned)
                 let coord = if jobtype == "LD" {
                     yt_topos.as_deref().and_then(|t| centroids.get(t).or_else(|| centroids.get(block_prefix(t))).copied())
@@ -5779,6 +5814,47 @@ pub fn spawn_dispatch_compare(lm: Arc<LiveMap>, pool: PgPool) {
                     else if agree { "same" }
                     else if tos_arrival.map(|t| our_arrival < t).unwrap_or(false) { "ours_closer" }
                     else { "tos_closer" };
+                // ── ② 실제 추천 채점 (mig 0159) ──
+                // 평가 가능 = 추천 조회 창이 [T1−150초, T1] 을 다 덮을 때만. 아니면 NULL.
+                let reco_evaluable = t1 - RECO_STANDING_S * 1000 >= reco_fetch_at - 15 * 60 * 1000 + 5_000
+                    && t1 <= reco_fetch_at;
+                let (reco_src, reco_pick): (Option<&str>, Option<(DateTime<Utc>, String)>) = if !reco_evaluable {
+                    (None, None)
+                } else {
+                    // 상자 키 우선(적하의 자연 단위), 없으면 (qc,queuename) — 양하는 트럭이
+                    // 대체 가능해 큐 단위가 자연 단위다(2026-08-24 사용자 확인).
+                    let got = w_contno.as_ref().and_then(|c| standing(reco_by_cont.get(c), t1)).map(|p| ("cont", p))
+                        .or_else(|| standing(reco_by_queue.get(&(qc.clone(), queue.clone())), t1).map(|p| ("queue", p)));
+                    match got {
+                        Some((src, p)) => (Some(src), Some(p)),
+                        None => (Some("none"), None), // 그 순간 이 작업에 유효 추천 없음 — 이것도 성적
+                    }
+                };
+                let (reco_ts, reco_ytno) = match &reco_pick {
+                    Some((ts, yt)) => (Some(*ts), Some(yt.clone())),
+                    None => (None, None),
+                };
+                // 추천 트럭 위치: TOS 트럭과 같은 폴백 규칙(T1 스냅샷 → 최신 위치). 상태 불문 —
+                // 아직 일하는 중이면 단순 주행시간이 후하게 나오므로 reco_free 로 층화한다.
+                let (reco_arrival, reco_free): (Option<i64>, Option<bool>) = match &reco_ytno {
+                    Some(ryt) => {
+                        let at = at_t1
+                            .and_then(|tk| tk.iter().find(|(yt, _, _, _)| yt == ryt).map(|(_, la, lo, st)| (*la, *lo, st.clone())))
+                            .or_else(|| latest_pos.get(ryt).map(|(la, lo, st)| (*la, *lo, st.clone())));
+                        match at {
+                            Some((la, lo, st)) => (
+                                Some(cost(la, lo, dlat, dlon, jobtype == "LD")),
+                                Some(matches!(st.as_str(), "idle" | "soon_idle" | "wait_rtg")),
+                            ),
+                            None => (None, None),
+                        }
+                    }
+                    None => (None, None),
+                };
+                let reco_delta: Option<i64> = match (tos_arrival, reco_arrival) {
+                    (Some(t), Some(r)) => Some(t - r), // + = 우리 추천이 더 빠름
+                    _ => None,
+                };
                 // t1_ver: 1 = T1 이 yt_dis_ts(배차 시각 실물) · 0 = upd_ts 로 폴백 ·
                 // NULL = 2026-08-11 경계 이전(mig 0149).
                 // ⚠판별은 **원시 컬럼의 NULL 여부**로 한다. `tos_dis == tos_upd` 로 재면
@@ -5791,12 +5867,16 @@ pub fn spawn_dispatch_compare(lm: Arc<LiveMap>, pool: PgPool) {
                     // 밀 때마다 같은 배차가 새 행으로 들어오는데(실측 47%가 2행 이상), 이 컬럼이
                     // 없으면 사후 중복 제거가 불가능하고 자주 갱신되는 배차가 그만큼 가중된다.
                     "INSERT INTO dispatch_compare_shadow
-                       (qc,queuename,jobtype,tos_ytno,tos_arrival_s,our_ytno,our_arrival_s,agree,reason,delta_s,tos_upd,t1_ver,t1_ts)
-                     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) ON CONFLICT (qc,queuename,tos_ytno,tos_upd) DO NOTHING",
+                       (qc,queuename,jobtype,tos_ytno,tos_arrival_s,our_ytno,our_arrival_s,agree,reason,delta_s,tos_upd,t1_ver,t1_ts,
+                        reco_ytno,reco_ts,reco_src,reco_arrival_s,reco_delta_s,reco_free)
+                     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
+                     ON CONFLICT (qc,queuename,tos_ytno,tos_upd) DO NOTHING",
                 )
                 .bind(&qc).bind(&queue).bind(&jobtype).bind(&tos_ytno).bind(tos_arrival.map(|x| x as i32))
                 .bind(&our_ytno).bind(our_arrival as i32).bind(agree).bind(reason).bind(delta.map(|x| x as i32)).bind(tos_upd)
                 .bind(t1_ver).bind(tos_dis)
+                .bind(&reco_ytno).bind(reco_ts).bind(reco_src).bind(reco_arrival.map(|x| x as i32))
+                .bind(reco_delta.map(|x| x as i32)).bind(reco_free)
                 .execute(&pool).await;
                 // ⚠`let _ =` 로 버리면 마이그레이션 미적용 시 INSERT 가 **전건 조용히 실패**한다.
                 // 같은 사이클의 게이지 커밋이 논증한 바로 그 유형이라 여기도 소리를 내게 한다.

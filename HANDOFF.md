@@ -42,6 +42,10 @@ SELECT source, subject, severity, occurrences FROM ops_alert WHERE last_ts > now
 - **판 경계는 UTC 기록으로**: ver5 08-21 02:25Z~09:08Z · ver6 ~08-24 04:07Z · ver7 04:06:55Z~
   (`f1bfaae` HANDOFF RESULT). **프룬되는 표(`stage2_pool_truck_shadow` 3일)에서 경계 재독 금지.**
 - KC 검증 절(§8)에 "추천 개수는 물동량이 정한다 — 출렁임은 고장이 아니다" 노트 추가.
+- **순간 비교에 '실제 추천 성적' 병기(2026-08-25 사용자 지시·mig0159)** — `dispatch_compare_shadow.reco_*`
+  가 T1 에 보드에 떠 있던 추천(150초=보드 STALE_S)을 같은 자로 채점. `reco_src`(cont/queue/**none**=그 순간
+  추천 없음·NULL=평가불능)로 가른다. **기존 our_ytno 는 우리 추천이 아니라 사후 계산한 최근접 가용(상한 계기)**
+  — 화면 VS TOS 요약은 아직 이걸 읽는다. 첫 표본(10분·n=159): none ~60%·같은트럭 0·reco_free 15%.
 - **DISPATCH_MODE 제거(2026-08-25 사용자 결정·mig0158)** — 로직은 TOS 가 우리 추천을 채택하는지와
   무관하게 관측 상태만의 함수로 돈다. active 모드의 자기 추천 풀 제외 소멸·`self_cover_n` 은 게이지
   존치(재추천 압력)·재추천 중복 제거는 소비자(TOS) 몫. 보드 API `mode` 필드·SHADOW/ACTIVE 칩 제거.
@@ -55,6 +59,8 @@ SELECT source, subject, severity, occurrences FROM ops_alert WHERE last_ts > now
 
 ## 다음 후보 (한 줄 근거)
 
+0. **VS TOS 를 ②(실제 추천 성적) 기준으로 재집계·화면 전환**: reco_* 24h+ 쌓인 뒤 요약·헤드라인을
+   상한 계기에서 제품 성적으로 교체(none 비율=순간 커버리지 헤드라인). 야간 포함 창으로.
 1. **pull 2/2 — 슬롯·배정 순서**: 명분이 바뀌었다. "커버리지 회수"가 아니라 ①`truck_n` 분모의 의미
    (풀 전체 vs 곧 물어볼 트럭) ②희소 슬롯이 마감 아닌 거리로 배정되는 것(격차 5~13%p) ③사용자 설계
    불변식(작업=트럭 수만큼 긴급 순)과 현 코드의 정합 — 을 설계 질문으로 다루는 사이클.

@@ -7,7 +7,7 @@ import { api, DispatchBoard } from "./api";
 import type { Lang } from "./i18n";
 import { mytTime, pct } from "./timefmt";
 
-const STALE_S = 150; // 60초 틱 × 2.5 — 이 나이를 넘긴 추천은 적용하면 안 된다
+const STALE_S = 150; // 60초 틱 × 2.5 — 이 나이를 넘긴 추천은 적용하면 안 된다. ⚠비교기 RECO_STANDING_S(livemap.rs·mig 0159)가 같은 기준으로 '떠 있던 추천'을 채점하므로 바꾸면 같이 바꾼다
 
 /** 마감 카운트다운: 남은 초 → "3:12" / 지났으면 "지연 4:05" */
 function countdown(deadlineIso: string | null, nowMs: number, ko: boolean): { text: string; cls: string } {
