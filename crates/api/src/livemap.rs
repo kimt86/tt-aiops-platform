@@ -4916,8 +4916,7 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
             // Q틱의 7.7%가 실제로는 적재 중·tt_move_log 구간 대조). "같은 트럭의 A행 없음"이 그걸
             // 거르고, 남는 오판은 미러 지연 창(픽업 후 ≤120초) ~1.1% — 아래 픽업 로그 가드가 또 줄인다.
             // (ytno, jobtype, qc, queuename, contno, pickup_topos)
-            let redir: HashMap<String, (String, String, String, Option<String>, Option<String>)> =
-                sqlx::query_as::<_, (String, String, String, String, Option<String>, Option<String>)>(
+            let redir_rows = sqlx::query_as::<_, (String, String, String, String, Option<String>, Option<String>)>(
                     "SELECT DISTINCT ON (w.ytno) w.ytno, w.jobtype, w.qc, w.queuename, w.contno,
                             nullif(w.yt_topos,'')
                        FROM live_workpool w
@@ -4927,8 +4926,17 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                                          WHERE a.jobstatus='A' AND a.ytno = w.ytno)
                       ORDER BY w.ytno, w.yt_dis_ts DESC NULLS LAST",
                 )
-                .fetch_all(&pool).await
-                .inspect_err(|e| tracing::warn!(error = %e, "재지향 후보 질의 실패 — 이번 틱은 재지향 없이 간다 (pool_ver 8)"))
+                .fetch_all(&pool).await;
+            // 실패는 축소로 퇴화(재지향 없이 진행)하지만, warn 로그 한 줄로는 지속 실패를 사후에
+            // 구분할 수 없다(위 tos_sig 경로와 같은 이유) — 갈래가 조용히 죽으면 ⑮ 재현율이
+            // "ver 8"이라는 이름으로 다른 모집단을 재게 되므로 경보를 남긴다(1차 리뷰 SHOULD_FIX 2).
+            if let Err(e) = &redir_rows {
+                tracing::warn!(error = %e, "재지향 후보 질의 실패 — 이번 틱은 재지향 없이 간다 (pool_ver 8)");
+                crate::db::alert(&pool, "stage2_pool", "redir_query", "warn",
+                    "재지향 후보 질의가 실패해 이번 틱은 재지향 갈래 없이 돈다 — 지속되면 pool_ver 8 갈래가 조용히 죽은 것",
+                    Some(&e.to_string())).await;
+            }
+            let redir: HashMap<String, (String, String, String, Option<String>, Option<String>)> = redir_rows
                 .unwrap_or_default()
                 .into_iter().map(|(y, jt, qc, qu, c, tp)| (y, (jt, qc, qu, c, tp))).collect();
             #[allow(clippy::type_complexity)]
