@@ -4766,7 +4766,12 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                           ORDER BY ytno, ts DESC"
                     ),
                 )
-                .fetch_all(&pool).await.unwrap_or_default();
+                .fetch_all(&pool).await
+                // ⚠조용히 삼키면 안 되는 실패(2차 리뷰): match_tier 가 없으면(0161 미적용 복원 등)
+                //   이 질의가 매 틱 실패해 prev 가 영구히 비고 anti-thrash 가 무음으로 죽는다 —
+                //   INSERT 쪽(아래 5630대 주석)과 같은 실패 유형이라 같은 규칙으로 소리를 낸다.
+                .inspect_err(|e| tracing::warn!(error = %e, "prev(들락날락 방지) 질의 실패 — anti-thrash 무효. 마이그레이션 0161 적용 여부 확인"))
+                .unwrap_or_default();
                 let mut p1 = HashMap::new();
                 let mut pa = HashMap::new();
                 for (yt, q, v, qn, tier) in rows { // ytno 별 ts 내림차순 — 먼저 본 행이 최신
@@ -4786,7 +4791,9 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                       WHERE ts > now() - interval '180 seconds' AND contno IS NOT NULL
                         AND match_tier IS DISTINCT FROM 2", // 게이지 정의 보존(mig 0161): 예고 반복을 재추천 압력으로 세지 않는다
                 )
-                .fetch_all(&pool).await.unwrap_or_default()
+                .fetch_all(&pool).await
+                .inspect_err(|e| tracing::warn!(error = %e, "self_recent(자기 추천 게이지) 질의 실패 — 마이그레이션 0161 적용 여부 확인"))
+                .unwrap_or_default()
                 .into_iter().collect();
             // mig 0116 — seconds between REACHING THE PICKUP POINT and the crane handover that our
             // travel model does not count. For DS the pickup point IS the crane, so this is small
@@ -5698,7 +5705,7 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
             }
             if let Some(e) = ins_err {
                 tracing::warn!(error = %e, failed = ins_err_n, of = assign.len(),
-                    "stage2_match_shadow insert failed — anti-thrash(prev)도 함께 죽는다. 0104 마이그레이션 적용 여부 확인");
+                    "stage2_match_shadow insert failed — anti-thrash(prev)도 함께 죽는다. 0104/0161 마이그레이션 적용 여부 확인");
             }
             let gap_pct = if opt_cost > 0 { 100.0 * (greedy_cost - opt_cost) as f64 / opt_cost as f64 } else { 0.0 };
             let solver_ins = sqlx::query(

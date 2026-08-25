@@ -98,6 +98,7 @@ WITH r AS (                                   -- 상자당 첫 추천 (헤드라
       SELECT ts, arrival_s, lead_extra_s FROM stage2_match_shadow m
        WHERE m.contno = c.contno AND m.jobtype = c.jobtype
          AND m.ts >= c.first_ts AND m.ts <= c.tos_dis_ts
+         AND m.match_tier IS DISTINCT FROM 2 -- 헤드라인 r CTE 와 같은 잣대(mig 0161)
        ORDER BY m.ts DESC LIMIT 1) m ON c.tos_dis_ts IS NOT NULL
 )
 SELECT c.*,
