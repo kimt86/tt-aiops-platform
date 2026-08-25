@@ -3998,6 +3998,10 @@ fn clean_driver(s: &str) -> String {
 // anti-thrash: a vehicle keeps its previous-tick work bucket unless another is >= this many
 // arrival-seconds cheaper. Damps reassignment from small OD/GPS noise.
 const SWITCH_PENALTY_S: i64 = 180;
+/// 재지향 벌점(pool_ver 8): 배차됨·픽업 전 공차를 다른(긴급) 작업으로 트는 비용. TOS 배차를
+/// 뒤집는 일이라 빈 트럭과 겨루면 이만큼 불리하게 시작한다 — 확실히 이득일 때만 뽑히게.
+/// 출발값 = SWITCH_PENALTY_S 와 같은 180초(2026-08-25 사이클·적정성은 후속 측정).
+const REDIRECT_PENALTY_S: i64 = 180;
 /// 설계③ 풀 여유 — 마감이 (지금 + 이 값) 안에 든 슬롯을 풀에 담는다. 보드 깔때기의
 /// '마감 도래' 계수도 이 값을 써야 화면과 매처가 같은 숫자를 본다.
 pub(crate) const POOL_MARGIN_S: i64 = 300;
@@ -4395,9 +4399,11 @@ const POS_MAX_AGE_S: i64 = 10800;
 /// 적하 운행 중 53.5% 오라벨 정정 — ver4 의 적하 GPS 분기가 이제야 제 모집단에서 열린다) · 7 = 추출기가
 /// Q+트럭(배차됨·픽업 전) 행을 live_workpool 에 착지(2026-08-24) — 풀 코드는 무변경이나 disp(yt_dis_ts)·배차행
 /// 유형 신호가 배차 ≤60초에 도착해 배차된 트럭이 풀에서 더 일찍 빠진다(종전엔 listed_at 가드가 뒤늦게 막던 것).
-/// 재현율은 반드시 이 값으로 가른다 — 판이 다르면 모집단이 다르다.
+/// 재현율은 반드시 이 값으로 가른다 — 판이 다르면 모집단이 다르다. · 8 = 재지향 가능 공차 갈래 추가
+/// (2026-08-25 사용자 결정): 배차됨·픽업 전 빈 트럭(reason=redirectable)이 풀에 들어와 긴급 작업이
+/// 전환 벌점(REDIRECT_PENALTY_S)을 물고 집을 수 있다. truck_n(슬롯 수)에는 세지 않아 발행량 불변.
 /// ⚠`POOL_FREE_HORIZON_S` 를 환경변수로 바꾸면 이 값은 안 바뀐다 — 레버를 쓸 거면 판도 같이 올릴 것.
-const POOL_VER: i16 = 7;
+const POOL_VER: i16 = 8;
 
 /// 트럭 한 대가 **빈 채 대기 중**인가 — TOS 신호 네 개(자유·픽업·배차·배차목록 등재)만 보는 순수 판정.
 ///
@@ -4904,8 +4910,29 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
             }
             let tos_sig: HashMap<String, TosSig> = tos_sig_rows.unwrap_or_default()
                 .into_iter().map(|(y, f, d, jt, fjt, tp, asof, pk)| (y, TosSig { free: f, dis: d, jobtype: jt, free_jt: fjt, topos: tp, listed_at: asof, picked: pk })).collect();
+            // ── 재지향 가능 공차 후보 (pool_ver 8 · 2026-08-25 사용자 결정) ────────────────────
+            // 배차받았지만 픽업 전인 트럭 = live_workpool 의 Q+트럭 행(정본). ⚠Q행만으로는 안 된다:
+            // TOS 는 트럭이 싣고 달리는 중에도 **다음 작업을 미리 Q 로 선배정**한다(이 사이클 실측:
+            // Q틱의 7.7%가 실제로는 적재 중·tt_move_log 구간 대조). "같은 트럭의 A행 없음"이 그걸
+            // 거르고, 남는 오판은 미러 지연 창(픽업 후 ≤120초) ~1.1% — 아래 픽업 로그 가드가 또 줄인다.
+            // (ytno, jobtype, qc, queuename, contno, pickup_topos)
+            let redir: HashMap<String, (String, String, String, Option<String>, Option<String>)> =
+                sqlx::query_as::<_, (String, String, String, String, Option<String>, Option<String>)>(
+                    "SELECT DISTINCT ON (w.ytno) w.ytno, w.jobtype, w.qc, w.queuename, w.contno,
+                            nullif(w.yt_topos,'')
+                       FROM live_workpool w
+                      WHERE w.jobstatus='Q' AND w.ytno IS NOT NULL AND w.ytno <> ''
+                        AND w.jobtype IN ('DS','LD') AND w.qc IS NOT NULL
+                        AND NOT EXISTS (SELECT 1 FROM live_workpool a
+                                         WHERE a.jobstatus='A' AND a.ytno = w.ytno)
+                      ORDER BY w.ytno, w.yt_dis_ts DESC NULLS LAST",
+                )
+                .fetch_all(&pool).await
+                .inspect_err(|e| tracing::warn!(error = %e, "재지향 후보 질의 실패 — 이번 틱은 재지향 없이 간다 (pool_ver 8)"))
+                .unwrap_or_default()
+                .into_iter().map(|(y, jt, qc, qu, c, tp)| (y, (jt, qc, qu, c, tp))).collect();
             #[allow(clippy::type_complexity)]
-            let vehicles_built: (Vec<(String, f64, f64, i64, &'static str)>, Vec<HeldCandidateOut>, Vec<PoolRow>, Vec<(String, i64, &'static str, &'static str, Option<String>)>) = {
+            let vehicles_built: (Vec<(String, f64, f64, i64, &'static str)>, Vec<HeldCandidateOut>, Vec<PoolRow>, Vec<(String, i64, &'static str, &'static str, Option<String>)>, HashMap<String, String>) = {
                 let map = lm.devices.read().await;
                 let plc = lm.plc.read().await;
                 let centroids = lm.centroids.read().await;
@@ -4927,6 +4954,8 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                 let mut held: Vec<HeldCandidateOut> = Vec::new();
                 let mut rows: Vec<PoolRow> = Vec::new();
                 let mut n_ds_anchor: usize = 0;
+                // 재지향 트럭 → 지금 붙들고 있는 작업 라벨(qc queuename [contno]) — 추천행 표식용
+                let mut redir_from: HashMap<String, String> = HashMap::new();
                 // 위치를 장치 목록에서 못 찾은 후보(침묵 >600s) — 뒤에서 truck_pos_hist 로 한 번에 채운다
                 let mut need_pos: Vec<(String, i64, &'static str, &'static str, Option<String>)> = Vec::new(); // (ytno, base, state, reason, jobtype)
 
@@ -4952,6 +4981,49 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                             None => need_pos.push((id.clone(), 0, "free_tos", "free_tos", free_jt.map(str::to_string))),
                         }
                         continue;
+                    }
+                    // ── 재지향 가능 공차 (pool_ver 8) — 배차됨·픽업 전이면 "빈 채 목적지로 가는 중"이다.
+                    // TOS 자신도 이 구간에서만 스왑한다(한 방향 재지향). 소속은 TOS 정본(redir 질의),
+                    // 값(위치)은 GPS — 소속/정확도 분리 규율 그대로.
+                    if let Some((r_jt, r_qc, r_queue, r_cont, r_topos)) = redir.get(id) {
+                        // 픽업 로그 가드: 마지막 픽업 > 마지막 자유 = 싣고 있다(선배정 Q) → 재지향 아님
+                        let loaded = match (sig.picked, sig.free) {
+                            (Some(p), Some(f)) => p > f,
+                            (Some(_), None) => true,
+                            _ => false,
+                        };
+                        if !loaded {
+                            // 픽업 지점 근접 제외 — 표시용 스왑 임계(SWAP_MIN_M)와 **같은 값**을 쓴다
+                            // (화면이 "스왑 부적합"이라 부르는 트럭을 행렬이 집으면 안 된다). 신선 GPS
+                            // 가 있을 때만 잰다 — 낡은 위치로는 근접을 단정할 수 없다.
+                            let dest = if r_jt.as_str() == "LD" {
+                                r_topos.as_deref().and_then(|t| {
+                                    centroids.get(t).or_else(|| centroids.get(block_prefix(t))).map(|c| (c.lat, c.lon))
+                                })
+                            } else {
+                                cranes.get(r_qc.as_str()).copied().or_else(|| centroids.get(r_qc.as_str()).map(|c| (c.lat, c.lon)))
+                            };
+                            let near_pickup = dev
+                                .filter(|p| (now - p.last_seen_ms) / 1000 <= STALE_AFTER_S)
+                                .zip(dest)
+                                .is_some_and(|(p, d)| dist_m((p.lat, p.lon), d) < SWAP_MIN_M);
+                            if !near_pickup {
+                                let from = match r_cont {
+                                    Some(c) => format!("{r_qc} {r_queue} {c}"),
+                                    None => format!("{r_qc} {r_queue}"),
+                                };
+                                redir_from.insert(id.clone(), from);
+                                match dev {
+                                    Some(p) => {
+                                        let src = if age.unwrap_or(i64::MAX) <= STALE_AFTER_S { "gps_live" } else { "gps_stale" };
+                                        v.push((id.clone(), p.lat, p.lon, 0, "redirectable"));
+                                        rows.push(PoolRow { ytno: id.clone(), reason: "redirectable", free_in_s: 0, pos_src: src, gps_age_s: age, jobtype: Some(r_jt.clone()) });
+                                    }
+                                    None => need_pos.push((id.clone(), 0, "redirectable", "redirectable", Some(r_jt.clone()))),
+                                }
+                                continue;
+                            }
+                        }
                     }
                     // 배차 중 — 예측 자유까지 시간
                     let anchored = inflight.get(id).copied();
@@ -5057,16 +5129,17 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                     let n_free = rows.iter().filter(|r| r.reason == "free_tos").count();
                     let n_inf = rows.iter().filter(|r| r.reason.starts_with("inflight")).count();
                     let n_gps = rows.iter().filter(|r| r.reason == "gps_free").count();
-                    tracing::info!(total = v.len(), free_tos = n_free, inflight = n_inf, gps_free = n_gps, ds_anchor = n_ds_anchor, horizon_s = pool_h_s, "후보 풀 (pull 재정의)");
+                    let n_red = rows.iter().filter(|r| r.reason == "redirectable").count();
+                    tracing::info!(total = v.len(), free_tos = n_free, inflight = n_inf, gps_free = n_gps, redirectable = n_red, ds_anchor = n_ds_anchor, horizon_s = pool_h_s, "후보 풀 (pull 재정의)");
                 }
-                (v, held, rows, need_pos)
+                (v, held, rows, need_pos, redir_from)
             };
             // ── 3) 장치 목록에 없는 후보의 위치: truck_pos_hist 마지막 행 ──────────────────────
             // ★락을 놓은 뒤에 질의한다(2026-08-19 리뷰). 위 블록이 끝나며 devices/plc/centroids/assigned_pool
             //   읽기 가드가 전부 풀린다 — 종전에는 이 질의의 await 를 가드가 넘어가, 매 분 웹소켓 인제스트
             //   (plc/centroids write)가 질의 시간만큼 멈췄다(이 파일 3455행 "no two locks held" 규약).
-            let (vehicles, held_out, pool_rows) = {
-                let (mut v, mut held, mut rows, need_pos) = vehicles_built;
+            let (vehicles, held_out, pool_rows, redir_from) = {
+                let (mut v, mut held, mut rows, need_pos, redir_from) = vehicles_built;
                 if !need_pos.is_empty() {
                     let ids: Vec<String> = need_pos.iter().map(|x| x.0.clone()).collect();
                     // ⚠`DISTINCT ON (ytno) … ORDER BY ytno, ts DESC` 는 PK(ytno,ts)를 역방향으로 못 타 2일치를
@@ -5104,7 +5177,7 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                             "후보 트럭인데 쓸 위치가 없어 뺐다 (위치 없음 / 나이 상한 초과)");
                     }
                 }
-                (v, held, rows)
+                (v, held, rows, redir_from)
             };
             // ★낡은 위치 계기 (2026-08-21 2차 리뷰) — 재현율은 위치 오차를 못 본다. GPS 피드가 죽으면 장치 목록이
             //   10분 뒤 비고 전 후보가 `pos_hist` 로 넘어가, 상한(3h)까지 **얼어붙은 좌표로 추천이 계속 나간다**
@@ -5323,7 +5396,10 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                     if slots > 0 { due.push((oi, slots, base)); }
                 }
                 due.sort_by_key(|&(_, _, d)| d); // 마감이 이른 순
-                let truck_n = vehicles.len() as i64;
+                // 재지향 트럭은 Stage-1 슬롯 수에 세지 않는다(pool_ver 8) — 후보를 넓힌 것이지
+                // 발행량(마감 도래 슬롯)을 바꾼 것이 아니다. 풀 크기는 발행을 직접 밀어올린다
+                // (전례: 풀 63→253 때 틱당 발행 +55%).
+                let truck_n = vehicles.iter().filter(|t| t.4 != "redirectable").count() as i64;
                 let mut acc = 0i64;
                 let mut kept_new: Vec<(usize, i64)> = Vec::new();
                 for &(oi, slots, _) in &due {
@@ -5421,7 +5497,10 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                         0
                     };
                     if arr < 1800 {
-                        let eff = arr + switch_pen; // PURE efficiency (+ anti-thrash); urgency is Stage-1
+                        // 재지향 트럭(pool_ver 8)은 TOS 배차를 트는 비용을 문다 — 빈 트럭과 비슷하면
+                        // 빈 트럭이 이기고, 뽑히는 건 확실히 이득일 때뿐. 자기 현재 작업은 tos_assigned
+                        // 라 행렬에 없으므로 이 트럭의 모든 간선이 곧 재지향이다.
+                        let eff = if v.4 == "redirectable" { arr + REDIRECT_PENALTY_S } else { arr + switch_pen };
                         edges.push((vi, wpos, eff)); // prune the far tail (never in the optimum)
                     }
                     row.push((arr, v.3 + p90, tier, switched));
@@ -5442,7 +5521,9 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                 let deadline = deadlines[wpos];
                 let mut cand: Vec<(usize, i64)> = (0..vehicles.len())
                     .filter(|vi| !used.contains(vi))
-                    .map(|vi| { let (arr, _p90, _t, sw) = matrix[wpos][vi]; (vi, arr + if sw { SWITCH_PENALTY_S } else { 0 }) })
+                    .map(|vi| { let (arr, _p90, _t, sw) = matrix[wpos][vi];
+                        let pen = if vehicles[vi].4 == "redirectable" { REDIRECT_PENALTY_S } else if sw { SWITCH_PENALTY_S } else { 0 };
+                        (vi, arr + pen) })
                     .collect();
                 cand.sort_by_key(|c| c.1);
                 let mut taken = 0i64;
@@ -5507,8 +5588,8 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                 // 컬럼(dep_slack_s / dep_tier)으로만 추가한다.
                 let ins = sqlx::query(
                     "INSERT INTO stage2_match_shadow
-                       (ts,tick,ytno,qc,vessel,queuename,jobtype,src_block,veh_state,arrival_s,od_p90_s,deadline_slack_s,feasible,cost_tier,switched,dest_lat,dest_lon,src_lat,src_lon,dep_slack_s,dep_tier,lead_extra_s,crane_slack_s,feasible_crane,dispatch_deadline_ts,dd_slack_s,dd_lead_s,deadline_ver,contno)
-                     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,2,$28) ON CONFLICT (ts,ytno) DO NOTHING",
+                       (ts,tick,ytno,qc,vessel,queuename,jobtype,src_block,veh_state,arrival_s,od_p90_s,deadline_slack_s,feasible,cost_tier,switched,dest_lat,dest_lon,src_lat,src_lon,dep_slack_s,dep_tier,lead_extra_s,crane_slack_s,feasible_crane,dispatch_deadline_ts,dd_slack_s,dd_lead_s,deadline_ver,contno,redirected_from)
+                     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,2,$28,$29) ON CONFLICT (ts,ytno) DO NOTHING",
                 )
                 .bind(ts).bind(tick as i64).bind(&v.0).bind(&w.qc).bind(&w.vessel).bind(&w.queuename)
                 .bind(&w.jobtype).bind(&w.src_block).bind(v.4)
@@ -5526,6 +5607,7 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                 }))
                 .bind(w.dd_lead_s.map(|v| v as i32))
                 .bind(w.contno.clone()) // mig 0142 — 상자 단위 집행·자기 추천 이력의 키
+                .bind(redir_from.get(&v.0)) // mig 0160 — 재지향 추천 표식(지금 붙든 작업 라벨)
                 .execute(&pool).await;
                 if let Err(e) = ins {
                     ins_err_n += 1;

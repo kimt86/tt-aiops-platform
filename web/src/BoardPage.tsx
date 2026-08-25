@@ -209,7 +209,14 @@ export default function BoardPage({ lang }: { lang: Lang }) {
                   return (
                     <tr key={r.ytno}>
                       <td>{i + 1}</td>
-                      <td className="board-tt">{r.ytno}</td>
+                      <td className="board-tt">
+                        {r.ytno}
+                        {r.redirected_from ? (
+                          <span className="pill warn" style={{ marginLeft: 6 }} title={`${ko ? "지금 작업" : "current job"}: ${r.redirected_from}`}>
+                            {ko ? "재지향" : "REDIRECT"}
+                          </span>
+                        ) : null}
+                      </td>
                       <td className="mono">{r.contno ?? "–"}</td>
                       <td>{r.qc ?? "–"}</td>
                       <td className="mono">{r.queuename ?? "–"}</td>

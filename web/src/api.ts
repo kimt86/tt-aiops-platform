@@ -288,6 +288,8 @@ export interface BoardReco {
   queuename: string | null; jobtype: string | null; src_block: string | null;
   dispatch_deadline_ts: string | null; dd_slack_s: number | null;
   arrival_s: number | null; switched: boolean | null;
+  /** 재지향 추천: 이 트럭이 지금 붙들고 있는 작업(qc queuename [contno]) · null = 보통 추천 */
+  redirected_from: string | null;
 }
 export interface DispatchBoard {
   generated_at: string | null;

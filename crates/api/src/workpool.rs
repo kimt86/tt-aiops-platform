@@ -2172,6 +2172,9 @@ struct BoardReco {
     dd_slack_s: Option<i32>,
     arrival_s: Option<i32>,
     switched: Option<bool>,
+    /// 재지향 추천(mig 0160·pool_ver 8): 이 트럭이 지금 붙들고 있는 작업(qc queuename [contno]).
+    /// NULL = 보통 추천(빈/곧 빌 트럭).
+    redirected_from: Option<String>,
 }
 #[derive(Serialize, sqlx::FromRow)]
 struct BoardPoolStat {
@@ -2229,7 +2232,7 @@ pub async fn dispatch_board(State(pool): State<PgPool>) -> Result<Json<DispatchB
     let recos: Vec<BoardReco> = match generated_at {
         Some(ts) => sqlx::query_as(
             "SELECT ytno, contno, qc, vessel, queuename, jobtype, src_block,
-                    dispatch_deadline_ts, dd_slack_s, arrival_s, switched
+                    dispatch_deadline_ts, dd_slack_s, arrival_s, switched, redirected_from
                FROM stage2_match_shadow WHERE ts = $1
               ORDER BY dd_slack_s ASC NULLS LAST LIMIT 40",
         )
