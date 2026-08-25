@@ -2209,7 +2209,6 @@ struct AdoptionPt {
 }
 #[derive(Serialize)]
 pub struct DispatchBoardOut {
-    mode: String,
     generated_at: Option<DateTime<Utc>>,
     age_s: Option<i64>,
     recos: Vec<BoardReco>,
@@ -2311,7 +2310,6 @@ pub async fn dispatch_board(State(pool): State<PgPool>) -> Result<Json<DispatchB
     .await
     .unwrap_or_default();
     Ok(Json(DispatchBoardOut {
-        mode: std::env::var("DISPATCH_MODE").unwrap_or_else(|_| "shadow".into()),
         generated_at,
         age_s,
         recos,

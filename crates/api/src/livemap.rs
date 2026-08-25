@@ -4441,11 +4441,6 @@ struct PoolRow {
     jobtype: Option<String>, // 직전/진행 중 작업유형 (mig 0156) — DS/LD 로 사유를 가르기 위한 것
 }
 
-/// 배차 모드 (mig 0142). `DISPATCH_MODE=active` 일 때만 자기 추천 이력이 풀에서 작업을
-/// 제외한다(추천→TOS 추출 반영 사이의 재추천 방지). 기본 shadow = 계상만(게이지).
-/// 실배차 전환의 **운영 상태**이지 실험 레버가 아니다 — 값은 유닛 파일에 있다.
-static DISPATCH_ACTIVE: AtomicBool = AtomicBool::new(false);
-
 /// 작업목록(Oracle 미러)이 이보다 오래되면 매칭을 돌리지 않는다.
 ///
 /// 정상 대역은 **12~62초 톱니**다(`tt-workpool` 타이머가 매분 :55 에 1회 — 2026-08-11 실측
@@ -4503,8 +4498,7 @@ const WAKE_POLL_MS: u64 = 2_000;
 /// 먼저 터져 틱의 42%가 폴백이 됐고(시간당 58 → 82.5틱), 그 폴백이 만든 낡은 판단이
 /// 0.2~58초 뒤 신선한 판단을 **안티스래시로 밀어냈다** — `prev` 창(150초)이 직전 틱을
 /// 기준점으로 삼고, 그걸 뒤집으려면 `SWITCH_PENALTY_S`(180초), 마감 임박이면
-/// `COMMIT_LOCK_S`(1200초)를 물어야 하기 때문이다. `DISPATCH_MODE=active` 에서는 더 직접적이다:
-/// 폴백 틱이 집은 상자가 자기 추천 커버(180초)에 걸려 신선 틱의 후보풀에서 빠진다.
+/// `COMMIT_LOCK_S`(1200초)를 물어야 하기 때문이다.
 /// ⇒ **낡은 목록이 신선한 목록을 선점한다.**
 ///
 /// 150초의 근거는 아래 두 경계다(테스트 `폴백_대기는_관측된_착지_간격보다_뒤에_있다` 가 고정):
@@ -4642,10 +4636,6 @@ async fn wait_for_workpool_landing(
 
 pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
     tokio::spawn(async move {
-        DISPATCH_ACTIVE.store(
-            std::env::var("DISPATCH_MODE").unwrap_or_default() == "active",
-            Ordering::Relaxed,
-        );
         let mut tick = 0u64;
         // 추천 생산 0(트럭·작업은 있는데) 연속 틱 수 — 3틱이면 경보 (mig 0142)
         let mut zero_streak: u32 = 0;
@@ -4739,9 +4729,10 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
             )
             .fetch_all(&pool).await.unwrap_or_default()
             .into_iter().map(|(yt, q, v, qn)| (yt, (q, v, qn))).collect();
-            // 자기 추천 이력 (mig 0142): 최근 180초 안에 추천한 상자 키. TTL 180초는
-            // 추천→TOS 추출 반영 지연(~1-2분)을 덮는 값 — active 모드에서 이 집합에 든
-            // 작업은 풀에서 제외되고, TTL이 지나도록 실배차 확인이 안 오면 다시 들어온다.
+            // 자기 추천 이력 (mig 0142→0158): 최근 180초 안에 추천한 상자 키. 게이지
+            // 전용 — 풀에서 빼지 않는다(2026-08-25 사용자 결정: 로직은 TOS 가 우리 추천을
+            // 채택하는지와 무관해야 하므로 DISPATCH_MODE 제거). 재추천 중복 제거는 소비자
+            // (TOS) 쪽 상태의 몫이고, 우리 쪽 반영은 TOS 배차 기록(tos_assigned)이 한다.
             let self_recent: std::collections::HashSet<(String, String, String)> =
                 sqlx::query_as::<_, (String, String, String)>(
                     "SELECT DISTINCT vessel, queuename, contno FROM stage2_match_shadow
@@ -5306,19 +5297,18 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                     //   **바꾸는 게 아니라 둘이 공존하는 것**이 맞다(2026-08-11 재검토):
                     //   - `tos_assigned` 는 그때도 참이다 — TOS 가 배차했다면 출처가 우리 추천이든
                     //     아니든 **그 상자에는 이미 트럭이 가 있다.** 또 보내면 낭비다.
-                    //   - 진짜 구멍은 그 사이의 지연이었다: 우리가 추천하고 TOS 반영까지 1~2분,
-                    //     그동안 tos_assigned 가 아직 거짓이라 같은 상자를 다시 추천한다.
-                    //     그 구멍은 아래 자기 추천 커버(mig 0142·TTL 180초)가 메운다.
-                    //   ⇒ 즉 이 줄은 그대로 두고, active 전환 시 필요한 것은 아래 한 줄뿐이다.
-                    //     라이브 확인(2026-08-11): self_cover_n 28~44 가 직전 틱 추천 33~46 을
-                    //     따라붙고 추천행 contno 채움률 100% — 키가 맞아 배선이 살아 있다.
+                    //   - 추천→TOS 기록 반영 사이(배차 인식 ≤60초 + 틱 ~60초)에는 같은
+                    //     상자가 추천에 다시 나올 수 있다. 그 중복 제거는 **소비자(TOS) 쪽
+                    //     상태**의 몫이다(2026-08-25 사용자 결정: 우리 로직은 TOS 가 우리
+                    //     추천을 실제로 배차하는지와 무관하게 관측된 상태만의 함수로 돈다 —
+                    //     DISPATCH_MODE 와 active 모드의 자기 추천 풀 제외를 함께 삭제, mig 0158).
                     if w.tos_assigned { continue }
-                    // 자기 추천 이력 (mig 0142): shadow = 계상만(self_cover_n 게이지 — 직전 틱
-                    // 추천 수와 비슷해야 배선이 산 것, 0이면 키 불일치 버그). active = 제외.
+                    // 자기 추천 이력 (mig 0142→0158): self_cover_n 게이지 전용. 직전 틱 추천
+                    // 수와 비슷해야 배선이 산 것(0이면 키 불일치 버그)이고, 값 자체가 "TOS 기록
+                    // 반영 전에 같은 상자를 다시 답한 횟수" = 재추천 압력의 실측이다.
                     if let Some(c) = w.contno.as_ref() {
                         if self_recent.contains(&(w.vessel.clone(), w.queuename.clone(), c.clone())) {
                             self_cover_n += 1;
-                            if DISPATCH_ACTIVE.load(Ordering::Relaxed) { continue }
                         }
                     }
                     let Some(dd) = w.dispatch_deadline_ts else { continue };

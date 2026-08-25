@@ -290,7 +290,6 @@ export interface BoardReco {
   arrival_s: number | null; switched: boolean | null;
 }
 export interface DispatchBoard {
-  mode: string;
   generated_at: string | null;
   age_s: number | null;
   recos: BoardReco[];

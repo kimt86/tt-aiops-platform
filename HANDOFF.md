@@ -42,6 +42,9 @@ SELECT source, subject, severity, occurrences FROM ops_alert WHERE last_ts > now
 - **판 경계는 UTC 기록으로**: ver5 08-21 02:25Z~09:08Z · ver6 ~08-24 04:07Z · ver7 04:06:55Z~
   (`f1bfaae` HANDOFF RESULT). **프룬되는 표(`stage2_pool_truck_shadow` 3일)에서 경계 재독 금지.**
 - KC 검증 절(§8)에 "추천 개수는 물동량이 정한다 — 출렁임은 고장이 아니다" 노트 추가.
+- **DISPATCH_MODE 제거(2026-08-25 사용자 결정·mig0158)** — 로직은 TOS 가 우리 추천을 채택하는지와
+  무관하게 관측 상태만의 함수로 돈다. active 모드의 자기 추천 풀 제외 소멸·`self_cover_n` 은 게이지
+  존치(재추천 압력)·재추천 중복 제거는 소비자(TOS) 몫. 보드 API `mode` 필드·SHADOW/ACTIVE 칩 제거.
 
 ## 일부러 안 한 것
 
@@ -73,6 +76,5 @@ SELECT source, subject, severity, occurrences FROM ops_alert WHERE last_ts > now
 
 ## 사용자가 답해야 하는 것
 
-- **`DISPATCH_MODE=active` 시점** — 코드 작업 없음·병목은 TOS 협의(변화 없음).
 - **(e) 확장 시점** — churn 관측·요청 순간 정답지가 필요해질 때(B안 검증 또는 TOS 협의 자료).
 - **야간 재현율을 따로 잴 것인가** — 주간 96.4%로 충분하다고 볼지, 다음 측정을 야간 포함으로 할지.

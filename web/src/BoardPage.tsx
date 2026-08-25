@@ -137,7 +137,6 @@ export default function BoardPage({ lang }: { lang: Lang }) {
   const ageS = d?.age_s != null ? d.age_s + Math.round((nowMs - fetchedAt) / 1000) : null;
   const stale = err || ageS == null || ageS > STALE_S;
 
-  const shadow = (d?.mode ?? "shadow") !== "active";
   const ad = d?.adoption ?? null;
 
   return (
@@ -146,8 +145,8 @@ export default function BoardPage({ lang }: { lang: Lang }) {
         <div className="cyc-title">
           <h2>
             {ko ? "배차 추천 보드" : "Dispatch Board"}
-            <span className={`pill ${shadow ? "warn" : "good"}`} style={{ marginLeft: 10 }}>
-              {shadow ? "SHADOW" : "ACTIVE"}
+            <span className="pill warn" style={{ marginLeft: 10 }}>
+              {ko ? "추천 전용" : "ADVISORY"}
             </span>
             <span className={`pill ${stale ? "bad" : "good"}`} style={{ marginLeft: 6 }}>
               {stale
