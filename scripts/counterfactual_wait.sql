@@ -57,7 +57,10 @@ WITH r AS (                                   -- 상자당 첫 추천 (헤드라
          (array_agg(arrival_s   ORDER BY ts))[1]           AS first_arrival_s,
          (array_agg(od_p90_s    ORDER BY ts))[1]           AS first_arrival_p90_s,
          (array_agg(lead_extra_s ORDER BY ts))[1]          AS first_extra_s,
-         (array_agg(qc          ORDER BY ts))[1]           AS first_qc
+         (array_agg(qc          ORDER BY ts))[1]           AS first_qc,
+         (array_agg(dispatch_deadline_ts ORDER BY ts))[1]  AS first_dd_ts,   -- ⑧ 귀속용
+         (array_agg(deadline_ver ORDER BY ts))[1]          AS first_dd_ver,
+         (array_agg(dd_lead_s    ORDER BY ts))[1]          AS first_dd_lead_s
     FROM stage2_match_shadow
    WHERE ts BETWEEN now() - interval '8 days' AND now() - interval '1 day'
      AND contno IS NOT NULL AND jobtype IN ('DS','LD')
@@ -235,5 +238,31 @@ SELECT jobtype AS 작업, count(*) AS n,
   round((percentile_cont(0.50) WITHIN GROUP (ORDER BY EXTRACT(epoch FROM comp_ts-arr_at))/60)::numeric,1) AS "중앙(분)",
   round((percentile_cont(0.90) WITHIN GROUP (ORDER BY EXTRACT(epoch FROM comp_ts-arr_at))/60)::numeric,1) AS "p90(분)"
  FROM j GROUP BY 1 ORDER BY 1;
+
+\echo ''
+\echo '════ ⑧ 귀속 — 이른 것이 「마감 산식」인가 「후보풀 진입」인가 (분모=⓪★ · 분) ════'
+\echo '   마감 오차 = 크레인 실제 처리 − (우리 마감 + 우리 준비시간). 0 부근이면 마감 산식 자체는 맞는 것이다.'
+\echo '   풀 선행   = 우리 마감 − 첫 추천. 양수면 「마감이 오기도 전에」 이미 풀에 들어와 추천되고 있다는 뜻.'
+SELECT jobtype AS 작업, count(first_dd_ts) AS "마감 있는 상자",
+       min(first_dd_ver)::text || '~' || max(first_dd_ver)::text AS "마감 판(ver)",
+       round((percentile_cont(0.5) WITHIN GROUP (ORDER BY EXTRACT(epoch FROM comp_ts - (first_dd_ts + make_interval(secs => first_arrival_s + first_extra_s))))/60)::numeric,1) AS "마감 오차 중앙",
+       round((percentile_cont(0.9) WITHIN GROUP (ORDER BY EXTRACT(epoch FROM comp_ts - (first_dd_ts + make_interval(secs => first_arrival_s + first_extra_s))))/60)::numeric,1) AS "마감 오차 p90",
+       round((percentile_cont(0.5) WITHIN GROUP (ORDER BY EXTRACT(epoch FROM first_dd_ts - first_ts))/60)::numeric,1) AS "풀 선행 중앙",
+       round((percentile_cont(0.9) WITHIN GROUP (ORDER BY EXTRACT(epoch FROM first_dd_ts - first_ts))/60)::numeric,1) AS "풀 선행 p90",
+       round(100.0*count(*) FILTER (WHERE first_dd_ts > first_ts)/nullif(count(first_dd_ts),0),1) AS "마감 도래 전에 추천된 %"
+  FROM cf WHERE comp_ts IS NOT NULL GROUP BY 1 ORDER BY 1;
+
+\echo ''
+\echo '════ ⑨ 이른 원인 분해 — 「필요시각을 이르게 봤나」인가 「빼는 준비시간이 큰가」인가 (분모=⓪★ · 분) ════'
+\echo '   mig0120: 마감 = (우리가 본 필요시각) − dd_lead_s(실제로 뺀 준비시간). 둘을 갈라서 본다.'
+\echo '   필요시각 오차 = 크레인 실제 처리 − (마감 + dd_lead_s). 양수 = 필요시각을 그만큼 이르게 봤다.'
+\echo '   준비시간 차   = dd_lead_s − (arrival_s + lead_extra_s). 양수 = 우리 자신의 준비시간 추정보다 더 크게 뺐다.'
+SELECT jobtype AS 작업, count(first_dd_lead_s) AS 상자,
+       round((percentile_cont(0.5) WITHIN GROUP (ORDER BY EXTRACT(epoch FROM comp_ts - (first_dd_ts + make_interval(secs => first_dd_lead_s))))/60)::numeric,1) AS "필요시각 오차 중앙",
+       round((percentile_cont(0.9) WITHIN GROUP (ORDER BY EXTRACT(epoch FROM comp_ts - (first_dd_ts + make_interval(secs => first_dd_lead_s))))/60)::numeric,1) AS "필요시각 오차 p90",
+       round((percentile_cont(0.5) WITHIN GROUP (ORDER BY first_dd_lead_s - (first_arrival_s + first_extra_s))/60)::numeric,1) AS "준비시간 차 중앙",
+       round((percentile_cont(0.5) WITHIN GROUP (ORDER BY first_dd_lead_s)/60)::numeric,1) AS "뺀 준비시간 중앙",
+       round((percentile_cont(0.5) WITHIN GROUP (ORDER BY first_arrival_s + first_extra_s)/60)::numeric,1) AS "우리 준비시간 추정 중앙"
+  FROM cf WHERE comp_ts IS NOT NULL GROUP BY 1 ORDER BY 1;
 
 ROLLBACK;
