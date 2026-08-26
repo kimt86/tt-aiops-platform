@@ -310,7 +310,11 @@ SELECT jobtype AS 작업,
        round(100.0*count(*)/sum(count(*)) OVER (PARTITION BY jobtype),1) AS "몫 %",
        round((percentile_cont(0.5) WITHIN GROUP (ORDER BY EXTRACT(epoch FROM comp_ts - (first_dd_ts + make_interval(secs => first_dd_lead_s))))/60)::numeric,1) AS "필요시각 오차 중앙",
        round((percentile_cont(0.5) WITHIN GROUP (ORDER BY wait_upper_s)/60)::numeric,1) AS "대기 상한 중앙",
-       round((percentile_cont(0.5) WITHIN GROUP (ORDER BY wait_lower_s)/60)::numeric,1) AS "대기 하한 중앙"
+       round((percentile_cont(0.5) WITHIN GROUP (ORDER BY wait_lower_s)/60)::numeric,1) AS "대기 하한 중앙",
+       -- ★붕괴 지문: 페이스가 1초 바닥이면 필요시각이 「지금」 부근이어야 한다. 아니면 갈래 ①(페이스가 빠름)이다.
+       round((percentile_cont(0.5) WITHIN GROUP (ORDER BY EXTRACT(epoch FROM (first_dd_ts + make_interval(secs => first_dd_lead_s)) - first_ts))/60)::numeric,1) AS "필요시각−첫추천 중앙",
+       round(100.0*count(*) FILTER (WHERE first_dd_ts + make_interval(secs => first_dd_lead_s) - first_ts <= interval '2 minutes')
+             / nullif(count(first_dd_ts),0),1) AS "붕괴 지문 %(필요시각≤2분)"
   FROM cf WHERE comp_ts IS NOT NULL GROUP BY 1,2 ORDER BY 1,2;
 
 ROLLBACK;

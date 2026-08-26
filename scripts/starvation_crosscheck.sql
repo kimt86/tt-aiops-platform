@@ -43,7 +43,10 @@ WITH s AS (
          coalesce(starving_real,false) AND coalesce(near_idle_tt,-1) = 0 AS gen_def,
          coalesce(near_idle_tt, 0)                             AS near_n,
          lag(coalesce(genuine,false))  OVER w AS pg, lag(ts) OVER w AS pts,
-         lead(coalesce(genuine,false)) OVER w AS ng, lead(ts) OVER w AS nts
+         lead(coalesce(genuine,false)) OVER w AS ng, lead(ts) OVER w AS nts,
+         -- ③ 민감도도 genuine 과 같은 2틱 지속을 걸어야 한다 (한쪽만 1틱이면 수준을 비교할 수 없다)
+         lag(coalesce(starving_real,false) AND coalesce(near_idle_tt,0) > 0)  OVER w AS pk,
+         lead(coalesce(starving_real,false) AND coalesce(near_idle_tt,0) > 0) OVER w AS nk
     FROM qc_wait_qc_sample
    WHERE ts BETWEEN now() - interval '9 days' AND now()
    WINDOW w AS (PARTITION BY qc ORDER BY ts)
@@ -52,7 +55,8 @@ SELECT qc, ts, sr, gen, gen_raw, gen_def,
        gen AND ( (pg AND ts - pts <= interval '90 seconds')
               OR (ng AND nts - ts <= interval '90 seconds') ) AS gen2,
        -- ⑤ 민감도용: genuine 이 정의상 제외하는 갈래 = 「멈췄는데 옆에 빈 트럭이 있었다」
-       sr AND near_n > 0 AS stuck_with_truck
+       sr AND near_n > 0 AND ( (pk AND ts - pts <= interval '90 seconds')
+                            OR (nk AND nts - ts <= interval '90 seconds') ) AS stuck_with_truck
   FROM s;
 CREATE INDEX ON g (qc, ts);
 ANALYZE g;
@@ -187,7 +191,7 @@ SELECT jobtype AS 작업,
 \echo '════ ③ 민감도 — genuine 이 「정의상 제외하는」 갈래로도 재본다 ════'
 \echo '   genuine 은 「옆에 빈 트럭이 없었다」를 요구한다. 그런데 우리가 늦어서 생길 굶김은 「빈 트럭은 있는데 안 보냈다」 모양이라'
 \echo '   그 갈래에 구조적으로 눈이 먼다. 제외 갈래(멈췄는데 옆에 빈 트럭 있음)로도 겹침을 재서 갈래를 가르는지 본다.'
-\echo '   두 갈래가 비슷하면 그건 배경 소음이고, genuine 을 쓴 선택이 옳다.'
+\echo '   두 갈래가 비슷하면 그건 배경 소음이고, genuine 을 쓴 선택이 옳다. 필터는 genuine 과 같은 2틱 지속으로 맞췄다.'
 SELECT f.jobtype AS 작업,
        CASE WHEN f.wait_upper_s < 0 THEN '우리가 늦음' ELSE '우리가 이름(대기)' END AS 갈래,
        count(*) AS 상자,
