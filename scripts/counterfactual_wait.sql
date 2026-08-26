@@ -60,7 +60,8 @@ WITH r AS (                                   -- 상자당 첫 추천 (헤드라
          (array_agg(qc          ORDER BY ts))[1]           AS first_qc,
          (array_agg(dispatch_deadline_ts ORDER BY ts))[1]  AS first_dd_ts,   -- ⑧ 귀속용
          (array_agg(deadline_ver ORDER BY ts))[1]          AS first_dd_ver,
-         (array_agg(dd_lead_s    ORDER BY ts))[1]          AS first_dd_lead_s
+         (array_agg(dd_lead_s    ORDER BY ts))[1]          AS first_dd_lead_s,
+         (array_agg(dep_tier     ORDER BY ts))[1]          AS first_dep_tier
     FROM stage2_match_shadow
    WHERE ts BETWEEN now() - interval '8 days' AND now() - interval '1 day'
      AND contno IS NOT NULL AND jobtype IN ('DS','LD')
@@ -109,7 +110,8 @@ SELECT c.*,
        -- 우리 도착 추정과 대기 (초)
        c.first_ts + make_interval(secs => c.first_arrival_s + c.first_extra_s)               AS ready_ts,
        EXTRACT(epoch FROM c.comp_ts - (c.first_ts + make_interval(secs => c.first_arrival_s + c.first_extra_s)))::int      AS wait_upper_s,
-       GREATEST(0, EXTRACT(epoch FROM c.prev_comp_ts - (c.first_ts + make_interval(secs => c.first_arrival_s + c.first_extra_s))))::int AS wait_lower_s,
+       CASE WHEN c.prev_comp_ts IS NULL THEN NULL   -- ⚠GREATEST(0,NULL)=0 이라 그냥 두면 '모름'이 0 으로 섞인다
+            ELSE GREATEST(0, EXTRACT(epoch FROM c.prev_comp_ts - (c.first_ts + make_interval(secs => c.first_arrival_s + c.first_extra_s))))::int END AS wait_lower_s,
        EXTRACT(epoch FROM c.comp_ts - (c.first_ts + make_interval(secs => c.first_arrival_p90_s + c.first_extra_s)))::int  AS wait_upper_p90arr_s,
        EXTRACT(epoch FROM c.comp_ts - (l.last_ts + make_interval(secs => l.last_arrival_s + l.last_extra_s)))::int         AS wait_upper_last_s,
        -- 같은 상자의 TOS 와 우리 (준비시간 모델 무관)
@@ -131,6 +133,13 @@ SELECT qc, tos_ytno, t1_ts, tos_arrival_s
 CREATE INDEX ON cmp (tos_ytno, t1_ts);
 ANALYZE cmp;
 
+-- ③-b 용 표식: 위약 짝이 붙는 상자. 짝이 39~46% 에만 붙으므로 그 부분집합이 대표성이 있는지 봐야 한다.
+ALTER TABLE cf ADD COLUMN paired boolean NOT NULL DEFAULT false;
+UPDATE cf f SET paired = true
+ WHERE f.comp_ts IS NOT NULL AND EXISTS (
+   SELECT 1 FROM cmp x WHERE x.tos_ytno = f.tos_ytno AND x.qc = f.machno
+    AND x.t1_ts BETWEEN f.tos_dis_ts - interval '5 seconds' AND f.tos_dis_ts + interval '5 seconds');
+
 -- ─────────────────────────────────────────────────────────────────────────────────────────
 \echo ''
 \echo '════ ⓪ 분모 — 우리가 처음 추천한 (상자,작업유형) 이 어디까지 살아남았나 ════'
@@ -145,6 +154,19 @@ SELECT jobtype AS 작업,
   FROM cf GROUP BY 1 ORDER BY 1;
 
 \echo ''
+\echo '════ ⓪-b 판(ver) 구성 — 창 안에 어떤 판이 섞였나. 섞였으면 절대 한 표로 읽지 말 것 ════'
+\echo '   2계층(mig0161·match_tier) 과 재지향(mig0160·표식 redirected_from). pool_ver 자체는 이 표에 없다.'
+SELECT count(*) AS "창 안 추천 행",
+       count(*) FILTER (WHERE match_tier IS NULL) AS "match_tier NULL(2계층 도입 이전)",
+       count(*) FILTER (WHERE match_tier = 1)     AS "1계층",
+       count(*) FILTER (WHERE match_tier = 2)     AS "2계층(게이트로 제외됨)",
+       count(*) FILTER (WHERE redirected_from IS NOT NULL) AS "재지향 표식 행",
+       min(ts)::timestamp(0) AS 시작, max(ts)::timestamp(0) AS 끝
+  FROM stage2_match_shadow
+ WHERE ts BETWEEN now() - interval '8 days' AND now() - interval '1 day'
+   AND contno IS NOT NULL AND jobtype IN ('DS','LD');
+
+\echo ''
 \echo '════ ① 헤드라인 — 우리 추천대로 보냈다면 트럭은 크레인 앞에서 얼마나 기다렸나 (분모=⓪★ · 분) ════'
 \echo '   상한 = 크레인 실제 처리 − 우리 도착 · 하한 = 직전 무브 끝 − 우리 도착 (0 미만은 0) · 음수 상한 = 트럭이 늦음'
 SELECT jobtype AS 작업, count(*) AS 상자,
@@ -153,7 +175,7 @@ SELECT jobtype AS 작업, count(*) AS 상자,
        round((percentile_cont(0.5) WITHIN GROUP (ORDER BY wait_lower_s)/60)::numeric,1) AS "대기 하한 중앙",
        round((percentile_cont(0.9) WITHIN GROUP (ORDER BY wait_lower_s)/60)::numeric,1) AS "하한 p90",
        round(100.0*count(*) FILTER (WHERE wait_upper_s < 0)/count(*),1)                  AS "늦음 %(상한<0)",
-       round(100.0*count(*) FILTER (WHERE wait_lower_s >= 600)/count(*),1)               AS "확실히 10분+ 대기 %",
+       round(100.0*count(*) FILTER (WHERE wait_lower_s >= 600)/nullif(count(wait_lower_s),0),1) AS "확실히 10분+ 대기 %(분모=하한 있는 건)",
        round(100.0*count(*) FILTER (WHERE wait_upper_s >= 600)/count(*),1)               AS "최대 10분+ 대기 %",
        round((percentile_cont(0.5) WITHIN GROUP (ORDER BY wait_upper_s - CASE WHEN jobtype='DS' THEN :hs_ds ELSE :hs_ld END)/60)::numeric,1) AS "상한 중앙(동작 제외)"
   FROM cf WHERE comp_ts IS NOT NULL GROUP BY 1 ORDER BY 1;
@@ -189,6 +211,15 @@ SELECT jobtype AS 작업, count(*) AS "짝 붙은 상자",
   FROM p GROUP BY 1 ORDER BY 1;
 
 \echo ''
+\echo '════ ③-b 위약 부분집합이 대표성이 있나 — 짝 붙은 것과 안 붙은 것의 헤드라인이 같아야 한다 ════'
+SELECT jobtype AS 작업,
+       CASE WHEN paired THEN '위약 짝 있음' ELSE '위약 짝 없음' END AS 갈래,
+       count(*) AS 상자,
+       round((percentile_cont(0.5) WITHIN GROUP (ORDER BY wait_upper_s)/60)::numeric,1) AS "대기 상한 중앙",
+       round((percentile_cont(0.5) WITHIN GROUP (ORDER BY wait_lower_s)/60)::numeric,1) AS "대기 하한 중앙"
+  FROM cf WHERE comp_ts IS NOT NULL GROUP BY 1,2 ORDER BY 1,2;
+
+\echo ''
 \echo '════ ④ 층화 — 크레인이 이 상자 직전에 5분 넘게 놀았나 (굶김) · 굶긴 층에서는 상한을 믿지 말고 하한을 볼 것 ════'
 SELECT jobtype AS 작업,
        CASE WHEN crane_gap_s > 300 THEN '굶김(간격>5분)' ELSE '연속 작업' END AS 층,
@@ -210,7 +241,7 @@ SELECT f.jobtype AS 작업, count(*) AS 상자,
 
 \echo ''
 \echo '════ ⑥ 민감도 — 첫 추천 대신 TOS 배차 직전 마지막 추천 · arrival p90 (분모=⓪★ · 분) ════'
-SELECT jobtype AS 작업, count(*) AS 상자,
+SELECT jobtype AS 작업, count(*) AS "상자(⓪★)", count(last_ts) AS "마지막 추천 있는 상자",
        round((percentile_cont(0.5) WITHIN GROUP (ORDER BY wait_upper_s)/60)::numeric,1)         AS "상한 중앙(첫 추천·p50)",
        round((percentile_cont(0.5) WITHIN GROUP (ORDER BY wait_upper_p90arr_s)/60)::numeric,1)  AS "상한 중앙(첫 추천·arrival p90)",
        round((percentile_cont(0.5) WITHIN GROUP (ORDER BY wait_upper_last_s)/60)::numeric,1)    AS "상한 중앙(마지막 추천)",
@@ -242,7 +273,9 @@ SELECT jobtype AS 작업, count(*) AS n,
 \echo ''
 \echo '════ ⑧ 귀속 — 이른 것이 「마감 산식」인가 「후보풀 진입」인가 (분모=⓪★ · 분) ════'
 \echo '   마감 오차 = 크레인 실제 처리 − (우리 마감 + 우리 준비시간). 0 부근이면 마감 산식 자체는 맞는 것이다.'
-\echo '   풀 선행   = 우리 마감 − 첫 추천. 양수면 「마감이 오기도 전에」 이미 풀에 들어와 추천되고 있다는 뜻.'
+\echo '   풀 선행   = 우리 마감 − 첫 추천. ⚠이 값은 풀 게이트 상수에 막혀 있다 — livemap.rs:4007 POOL_MARGIN_S=300초라'
+\echo '             정의상 5분을 넘을 수 없다(설정을 되읽는 값). 「일찍 들이는가」의 판별에 쓰지 말고, 「풀이 기여할 수'
+\echo '             있는 최대치가 5분」이라는 상한으로만 읽을 것.'
 SELECT jobtype AS 작업, count(first_dd_ts) AS "마감 있는 상자",
        min(first_dd_ver)::text || '~' || max(first_dd_ver)::text AS "마감 판(ver)",
        round((percentile_cont(0.5) WITHIN GROUP (ORDER BY EXTRACT(epoch FROM comp_ts - (first_dd_ts + make_interval(secs => first_arrival_s + first_extra_s))))/60)::numeric,1) AS "마감 오차 중앙",
@@ -264,5 +297,20 @@ SELECT jobtype AS 작업, count(first_dd_lead_s) AS 상자,
        round((percentile_cont(0.5) WITHIN GROUP (ORDER BY first_dd_lead_s)/60)::numeric,1) AS "뺀 준비시간 중앙",
        round((percentile_cont(0.5) WITHIN GROUP (ORDER BY first_arrival_s + first_extra_s)/60)::numeric,1) AS "우리 준비시간 추정 중앙"
   FROM cf WHERE comp_ts IS NOT NULL GROUP BY 1 ORDER BY 1;
+
+\echo ''
+\echo '════ ⑩ 필요시각이 앞서는 몫을 「배 상태」로 가른다 (mig0104 dep_tier: 0=늦음 1=빠듯 2=여유/미상) ════'
+\echo '   workpool.rs:1393 — 무브당 배정 시간 = (출항 목표 − 지금) ÷ 남은 무브 수, 바닥이 1초.'
+\echo '   출항 목표가 이미 지난 배에서는 이 값이 1초로 붕괴해 마감이 사실상 「전부 지금」이 된다. 처방이 다른 갈래다.'
+\echo '   ⚠dep_tier 는 (베이 완료기한−지금)−처리시간 기준이라 페이스 붕괴 조건과 같지 않다 — 근사 판별자로만 읽을 것.'
+SELECT jobtype AS 작업,
+       CASE first_dep_tier WHEN 0 THEN '0 늦음' WHEN 1 THEN '1 빠듯' WHEN 2 THEN '2 여유/미상'
+            ELSE '기록 없음' END AS "배 상태(첫 추천 시점)",
+       count(*) AS 상자,
+       round(100.0*count(*)/sum(count(*)) OVER (PARTITION BY jobtype),1) AS "몫 %",
+       round((percentile_cont(0.5) WITHIN GROUP (ORDER BY EXTRACT(epoch FROM comp_ts - (first_dd_ts + make_interval(secs => first_dd_lead_s))))/60)::numeric,1) AS "필요시각 오차 중앙",
+       round((percentile_cont(0.5) WITHIN GROUP (ORDER BY wait_upper_s)/60)::numeric,1) AS "대기 상한 중앙",
+       round((percentile_cont(0.5) WITHIN GROUP (ORDER BY wait_lower_s)/60)::numeric,1) AS "대기 하한 중앙"
+  FROM cf WHERE comp_ts IS NOT NULL GROUP BY 1,2 ORDER BY 1,2;
 
 ROLLBACK;
