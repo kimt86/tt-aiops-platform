@@ -9,6 +9,7 @@ Wants=network-online.target
 # 초과 시 커널이 서버가 아니라 이 유닛만 죽인다.
 MemoryMax=256M
 MemorySwapMax=0
+# 2026-09-30 중계 서버 변경 100.124.171.118 → 100.109.43.18(wppwas1).
 # Tailscale SSH auth (no key/password) to the azure box, which CAN reach the WSL GPS ws.
 # BatchMode=yes so it fails fast instead of ever hanging on a prompt; ExitOnForwardFailure
 # so a port clash exits (and Restart= retries) rather than running half-up.
@@ -19,7 +20,7 @@ ExecStart=/usr/bin/ssh -N \
   -o ServerAliveInterval=20 \
   -o ServerAliveCountMax=3 \
   -L 127.0.0.1:9986:172.21.30.72:9986 \
-  aiadmin@100.124.171.118
+  aiadmin@100.109.43.18
 Restart=always
 RestartSec=5
 
