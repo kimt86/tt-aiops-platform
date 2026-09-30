@@ -36,7 +36,7 @@
     <li><strong>발화 시각 분산</strong> — 주기 작업들의 시작 초를 서로 다르게 고정(:05/:15/:25/:30/:35/:45/:50/:55)해 같은 순간에 겹치지 않게 했습니다(아래 §5 시각표).</li>
     <li><strong>타임아웃</strong> — 쿼리당 45~90초 강제 종료. 폭주 쿼리가 세션을 오래 붙들 수 없습니다.</li>
     <li><strong>행 수 캡</strong> — 스트림 쿼리는 <code>FETCH FIRST N ROWS ONLY</code>(3,000~20,000)로 상한을 박아, 예외 상황에도 반환량이 폭주하지 않습니다.</li>
-    <li><strong>병렬 억제</strong> — 집계 쿼리에 <code>/*+ NO_PARALLEL */</code> 힌트. Oracle 병렬 슬레이브를 쓰지 않습니다.</li>
+    <li><strong>병렬 없음</strong> — DB가 '수동 병렬' 모드이고 우리가 읽는 표 7개는 모두 병렬 설정이 1이라, 우리 조회는 여러 일꾼으로 나뉘어 돌지 않습니다(2026-09-30 확인). 예전에 붙이던 병렬 금지 힌트는 조회 도구 교체로 힌트를 쓸 수 없게 돼 뺐습니다.</li>
     <li><strong>킬스위치</strong> — 스트림별 systemd 타이머 정지 또는 환경변수 한 줄로 개별·전체 즉시 중단(§8).</li>
     <li><strong>변경 통제</strong> — 쿼리·주기를 바꾸면 이 문서를 같이 갱신하고(맨 아래 규칙), TOS팀 공유 프로세스를 거칩니다(§9 제안).</li>
   </ul>
@@ -98,7 +98,7 @@
 
   <h4>① qc-moves — 안벽 크레인(QC) 작업 이벤트</h4>
   <p class="kc-meta-line"><code>MCH_OPERATION</code> → 우리 <code>qc_move_log</code> · 60초 · 회당 ~41행 · PK 시크</p>
-  <pre><code>SELECT /*+ INDEX(MCH_OPERATION MCH_PK_OPERATION) */
+  <pre><code>SELECT
        MCH_OPER_MACHNO AS machno, SUBSTR(MCH_OPER_CONTNO,1,11) AS contno,
        MCH_OPER_SEQNO AS seqno, MCH_OPER_JOBTYPE AS jobtype, TRK_ID AS trk_id,
        ST_DT AS st_dt, MCH_OPER_COMPDATE||MCH_OPER_COMPTIME AS comp_dt,
@@ -111,12 +111,12 @@
    AND LENGTH(MCH_OPER_COMPTIME) &gt;= 6
  ORDER BY MCH_OPER_SEQNO
  FETCH FIRST 5000 ROWS ONLY</code></pre>
-  <p><strong>부하 근거</strong>: <code>MCH_OPER_SEQNO</code>가 PK 선두 컬럼이라 <code>&gt;=워터마크</code>는 <strong>인덱스 시크</strong>로 새 꼬리만 읽습니다(실측: 시크 ~0.8초 vs 풀스캔이면 ~45초 — 그래서 힌트로 시크를 고정). REGEXP는 그 작은 꼬리에만 적용되는 후처리 필터입니다.</p>
+  <p><strong>부하 근거</strong>: <code>MCH_OPER_SEQNO</code>가 PK 선두 컬럼이라 <code>&gt;=워터마크</code>는 <strong>인덱스 시크</strong>로 새 꼬리만 읽습니다(실측: 시크 ~0.8초 vs 풀스캔이면 ~45초). 예전엔 힌트로 이 길을 고정했지만, 2026-09-30 힌트 없이 운영 DB에 돌려 보니 Oracle이 스스로 같은 길을 골랐습니다(최근 2분 30ms · 최근 6시간 0.3초). REGEXP는 그 작은 꼬리에만 적용되는 후처리 필터입니다.</p>
   <p><strong>용도</strong>: <code>qc_move_log</code>는 안벽 크레인이 "언제 어느 상자를 다뤘나"의 사본 원장입니다. 배차 계산의 <strong>작업 도달 정답지</strong>(완료시각 comp_ts), 크레인별 처리 속도 학습, 배차 마감 역산, 로컬 KPI 계산의 공통 앵커로 쓰입니다.</p>
 
   <h4>② rtg-moves — 야드 크레인(RTG/ES) 작업 이벤트</h4>
   <p class="kc-meta-line"><code>MCH_OPERATION</code> → 우리 <code>rtg_move_log</code> · 60초 · 회당 ~74행 · PK 시크</p>
-  <pre><code>SELECT /*+ INDEX(MCH_OPERATION MCH_PK_OPERATION) */
+  <pre><code>SELECT
        MCH_OPER_MACHNO AS machno, SUBSTR(MCH_OPER_CONTNO,1,11) AS contno,
        MCH_OPER_SEQNO AS seqno, MCH_OPER_JOBTYPE AS jobtype, TRK_ID AS trk_id,
        ST_DT AS st_dt, MCH_OPER_COMPDATE||MCH_OPER_COMPTIME AS comp_dt,
@@ -244,7 +244,7 @@ SELECT 'WP' AS src,
 
   <h4>⑧ voyage_plan — 항차별 계획 물량</h4>
   <p class="kc-meta-line"><code>VSS_STATISTICS</code> → 우리 <code>raw_voyage_plan</code> · 15분 · 회당 ~43행 · 120행 캡</p>
-  <pre><code>SELECT /*+ NO_PARALLEL */
+  <pre><code>SELECT
        VSS_STT_VESSEL AS vessel, VSS_STT_VOYAGE AS voyage,
        MAX(TO_NUMBER(VSS_STT_VAN DEFAULT NULL ON CONVERSION ERROR)) AS planned_moves
   FROM TOSADM.VSS_STATISTICS
@@ -275,7 +275,7 @@ SELECT 'WP' AS src,
          STDDEV(cycle_sec) AS std_cyc, MEDIAN(cycle_sec) AS med_cyc, ...
     FROM cycles GROUP BY JOB_HIST_JOBTYPE
 )
-SELECT /*+ NO_PARALLEL */ ... FROM stats s
+SELECT ... FROM stats s
  ORDER BY s.jobs DESC FETCH FIRST 15 ROWS ONLY</code></pre>
   <p><strong>부하 근거</strong>: 활성 경로에서 <strong>유일하게 남은 Oracle 지표 재스캔</strong>입니다. 어제 하루 파티션만(날짜 리터럴 등호 조건), 야간 01:30 단독, 하루 1회 8.3초. 나머지 지표 15종은 전부 로컬 사본에서 계산하도록 전환을 마쳤습니다.</p>
   <p><strong>용도</strong>: <code>raw_k_cycle</code>은 작업 1건의 취급 구간(첫 이벤트~마지막 이벤트) 분포 — 내부 분석용 참고 통계입니다(화면 표시 지표는 로컬 계산본을 씁니다).</p>
@@ -351,7 +351,7 @@ SELECT ... FROM TOSADM.ETV_BAPLIE_CONT
   <ul>
     <li>①②(PK 시크)·③⑥(시간 인덱스 시크)·⑩⑪(PK IN 시크): <strong>직전 1~2분의 뜨거운 블록만</strong> 반복해서 읽습니다 — 버퍼 캐시에 있는 페이지들이라 물리 I/O 기여가 작습니다.</li>
     <li>④⑤⑦⑧⑨: 시간창(1일~10일)으로 잘린 범위 조회·집계. 무제한 풀스캔은 활성 경로에 <strong>없습니다</strong>.</li>
-    <li>Oracle 힌트는 시크 고정(<code>INDEX</code>)과 병렬 금지(<code>NO_PARALLEL</code>)뿐 — 실행계획을 공격적으로 바꾸는 힌트를 쓰지 않습니다.</li>
+    <li>Oracle 힌트는 쓰지 않습니다(2026-09-30부터 조회 도구가 거부). 예전 힌트 두 종류(색인 고정·병렬 금지)는 없어도 실행 방식이 같다는 것을 운영 DB에서 확인하고 뺐습니다.</li>
   </ul>
 
   <h3>7-5. 동시성·잠금·쓰기</h3>

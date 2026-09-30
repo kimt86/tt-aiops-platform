@@ -34,7 +34,7 @@ stats AS (
     FROM cycles
    GROUP BY JOB_HIST_JOBTYPE
 )
-SELECT /*+ NO_PARALLEL */
+SELECT
        s.JOB_HIST_JOBTYPE                    AS jobtype,
        s.jobs,
        ROUND(s.avg_cyc, 1)                   AS avg_sec,

@@ -26,7 +26,7 @@ seq AS (
 capped AS (
   SELECT TRK_ID, jt, gap_sec FROM seq WHERE gap_sec BETWEEN 120 AND 1200
 )
-SELECT /*+ NO_PARALLEL */
+SELECT
        COUNT(DISTINCT TRK_ID)                                          AS trucks,
        COUNT(*)                                                        AS samples,
        ROUND(AVG(gap_sec), 1)                                          AS avg_sec,

@@ -172,7 +172,7 @@ websocket   ──(SSH 터널 → API 인제스트)▶ 메모리(라이브맵·�
   <div class="kc-tablewrap"><table>
     <thead><tr><th>함정</th><th>대응</th></tr></thead>
     <tbody>
-      <tr><td>SQL 주석의 아포스트로피</td><td><code>--</code> 주석에 <code>'</code>가 있으면 toolbox/Oracle HTTP 400. 곱슬따옴표도 금지.</td></tr>
+      <tr><td>조회 도구가 거부하는 글자</td><td>2026-09-30 교체된 조회 도구는 SQL 어디에든 <code>--</code>·<code>/*</code>가 있거나(문자열 안이어도) <code>UPDATE</code> 같은 쓰기 단어가 있으면 거부합니다. 주석은 스크립트가 지워서 보내지만, <strong>힌트(<code>/*+ ... */</code>)는 쓸 수 없습니다.</strong> 곱슬따옴표도 금지.</td></tr>
       <tr><td>시간대 MYT vs KST</td><td><code>terminal_now()</code> 필수.</td></tr>
       <tr><td>K_RTG_Q 라벨 오해</td><td>"QC 대기" 아님 — 야드 핸드오버 대기(ARMGC=RTG/ES). + YT_DIS_DT 의미 재검토(위).</td></tr>
       <tr><td>RTG PLC 없음</td><td>양하 블록측은 GPS·근접도로 추정.</td></tr>

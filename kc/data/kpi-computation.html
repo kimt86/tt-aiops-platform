@@ -39,7 +39,7 @@
   <div class="kc-cal warn"><span class="h">K_QC_NOMOVE ≠ K_RTG_Q · YT_DIS_DT 주의</span><p><strong>K_QC_NOMOVE</strong>(표시) = "QC가 트럭을 기다림"(안벽 크레인 유휴 갭). <strong>K_RTG_Q</strong>(숨김) = "TT가 야드에서 핸드오버를 기다림"(ARMGC=RTG). 또한 <code>YT_DIS_DT</code>는 <strong>DISpatch(배차 시각)</strong>이지 하차가 아니어서, K_RTG_Q(ACTV_DT − YT_DIS_DT)는 대기가 아니라 <strong>배차→야드활성 전 구간</strong>을 재 <strong>과대 가능</strong>(그래서 숨김). 컬럼 상세 → <a href="/kc/data/tos-db-reference.html">TOS DB 레퍼런스</a>.</p></div>
 
   <h2>KPI별 추출·가공·적재 (4단계)</h2>
-  <p>각 KPI는 <strong>① 소스 · ② 가공+왜 · ③ 적재 · ④ 롤업</strong>으로 나뉩니다. 공통 규약: 일 단위 SQL은 <code>{{DAY_STR}}</code>(YYYYMMDD)을 인덱스-세이프 리터럴로 주입. DAY 경로는 <code>{{TIME_PREDICATE}}</code>를 빈 문자열로(검증본과 바이트 동일), SHIFT 경로는 교대 창을 끼움. <code>/*+ NO_PARALLEL */</code> + <code>FETCH FIRST</code>로 부하 억제. 모든 <code>raw_*</code> upsert는 <code>ON CONFLICT (PK) DO UPDATE</code>(멱등).</p>
+  <p>각 KPI는 <strong>① 소스 · ② 가공+왜 · ③ 적재 · ④ 롤업</strong>으로 나뉩니다. 공통 규약: 일 단위 SQL은 <code>{{DAY_STR}}</code>(YYYYMMDD)을 인덱스-세이프 리터럴로 주입. DAY 경로는 <code>{{TIME_PREDICATE}}</code>를 빈 문자열로(검증본과 바이트 동일), SHIFT 경로는 교대 창을 끼움. <code>FETCH FIRST</code>로 부하 억제(병렬 금지 힌트는 2026-09-30 조회 도구 교체로 뺐음 — DB가 수동 병렬 모드라 영향 없음). 모든 <code>raw_*</code> upsert는 <code>ON CONFLICT (PK) DO UPDATE</code>(멱등).</p>
 
   <h3>K_EMPTY · K_EMPTY_R — 공차거리 / 공차비율</h3>
   <p>같은 로컬 SQL(<code>sql/local/l_empty.sql</code>)로 같은 <code>raw_k_empty</code> 행에서 나옵니다(분자만 다름). 소스는 우리 로컬 사본 <code>tos_handover_label</code>: <code>trv_rng</code>(적재m)·<code>un_trv_rng</code>(공차m) — TOS 원장에서 <strong>완료된 운반(DS·LD)의 최종 기록</strong>을 60초마다 받아둔 것. 완료 작업 1건=1행이라 접기 없이 (jobtype×shift)로 집계.</p>

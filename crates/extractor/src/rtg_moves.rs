@@ -92,13 +92,17 @@ pub async fn tick_rtg_moves(pool: &PgPool, target: &str) -> Result<()> {
             .unwrap_or_else(|_| wm.clone());
 
         // Watermark on MCH_OPER_SEQNO (global-monotonic "YYYYMMDDHHMMSS" = completion order, and the
-        // LEADING column of PK MCH_PK_OPERATION). `SEQNO >= wm` SEEKS via the PK (INDEX hint pins it) and
+        // LEADING column of PK MCH_PK_OPERATION). `SEQNO >= wm` SEEKS via the PK and
         // reads only the new tail — NO re-scan of today's rows — so poll cost is independent of frequency
         // (verified: seek ~0.8s vs a full scan ~45s). `>=` (not `>`) re-reads the watermark second so the
         // non-unique SEQNO can't skip same-second rows; ON CONFLICT dedups the tiny overlap. REGEXP/LENGTH
         // are post-filters on the small tail. Yard cranes only (RTG/ES); excludes QC and trucks.
+        // No optimizer hint (removed 2026-09-30): toolbox 1.x rejects any `/*`, hints included. Measured
+        // on prod without the old `INDEX(MCH_OPERATION MCH_PK_OPERATION)` hint the plan is unchanged —
+        // PK RANGE SCAN + WINDOW NOSORT STOPKEY for a 2-min window (22ms; the QC twin also held it over a 6-h
+        // window). If a stats refresh ever flips it, the poll slows and the rtg_move_log DEADMAN fires.
         let sql = format!(
-            "SELECT /*+ INDEX(MCH_OPERATION MCH_PK_OPERATION) */
+            "SELECT
                     MCH_OPER_MACHNO AS machno, SUBSTR(MCH_OPER_CONTNO,1,11) AS contno,
                     MCH_OPER_SEQNO AS seqno, MCH_OPER_JOBTYPE AS jobtype, TRK_ID AS trk_id,
                     ST_DT AS st_dt, MCH_OPER_COMPDATE||MCH_OPER_COMPTIME AS comp_dt,

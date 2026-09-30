@@ -49,7 +49,7 @@ DATABASE_URL=postgresql://wp:wp@127.0.0.1:5433/wp_tt ./db/apply.sh
 
 # 2. extract real data (read-only against prod Oracle)
 export DATABASE_URL=postgresql://wp:wp@127.0.0.1:5433/wp_tt
-export SKILL_DIR=/home/aiadmin/.codex/skills/yard-db-ops
+# Oracle 조회 스크립트는 저장소 안 tools/oracle-toolbox/ 를 자동으로 쓴다(SKILL_DIR 로 덮어쓰기 가능)
 cargo run -p tt-extractor -- run --kpi all --date 2026-06-04 --target oracle-prod
 # optional history for trends/baseline:
 cargo run -p tt-extractor -- backfill --from 2026-05-01 --to 2026-06-04

@@ -17,7 +17,7 @@ WITH q AS (
      AND YT_DIS_DT IS NOT NULL
      AND JOB_HIST_ACTV_DT IS NOT NULL
 )
-SELECT /*+ NO_PARALLEL */
+SELECT
        JOB_HIST_DATE                                                AS work_date,
        JOB_HIST_JOBTYPE                                             AS jobtype,
        COUNT(*)                                                     AS events_nn,

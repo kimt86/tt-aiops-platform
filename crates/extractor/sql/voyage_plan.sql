@@ -2,7 +2,7 @@
 -- panel progress bar. VSS_STT_MOVES is NULL for in-progress voyages, so VAN (planned
 -- containers) is the available planned denominator. Latest VAN per voyage over the
 -- recent window. Small table (~41K rows) -> TRIVIAL. Read-only.
-SELECT /*+ NO_PARALLEL */
+SELECT
        VSS_STT_VESSEL AS vessel,
        VSS_STT_VOYAGE AS voyage,
        MAX(TO_NUMBER(VSS_STT_VAN DEFAULT NULL ON CONVERSION ERROR)) AS planned_moves

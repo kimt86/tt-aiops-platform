@@ -34,7 +34,7 @@
   <div class="kc-tablewrap"><table>
     <thead><tr><th>원칙</th><th>구현</th></tr></thead>
     <tbody>
-      <tr><td><strong>단일 게이트</strong></td><td><code>runner.rs</code>의 <code>Toolbox</code>만 Oracle에 닿음 — <code>remote-toolbox-sql</code> 스킬 스크립트를 통해. 다른 어떤 모듈도 직접 Oracle 접근 안 함.</td></tr>
+      <tr><td><strong>단일 게이트</strong></td><td><code>runner.rs</code>의 <code>Toolbox</code>만 Oracle에 닿음 — 저장소 안의 <code>tools/oracle-toolbox</code> 스크립트가 중계 서버의 조회 도구로 SQL을 보냄(2026-09-30까지는 다른 사람 계정의 스크립트를 빌려 썼음). 다른 어떤 모듈도 직접 Oracle 접근 안 함.</td></tr>
       <tr><td><strong>직렬화</strong></td><td>프로세스 전역 <code>static ORACLE_LOCK: Mutex</code> — <code>run_sql</code>이 먼저 락을 잡아 <strong>두 쿼리가 동시에 Oracle에 못 감</strong>.</td></tr>
       <tr><td><strong>읽기전용</strong></td><td>스킬이 SELECT만 허용(읽기전용 툴박스). 손상 불가.</td></tr>
       <tr><td><strong>인덱스 안전</strong></td><td>모든 술어가 인덱스 타는 형태(날짜 등가/범위·PK seek). <code>params.rs</code>가 문자열 리터럴로만 렌더(바인드·Oracle 날짜연산 없음).</td></tr>

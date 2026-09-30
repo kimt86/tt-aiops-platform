@@ -21,7 +21,7 @@ gs AS (
   SELECT qc, jt, CASE WHEN hh BETWEEN '06' AND '17' THEN 'D' ELSE 'N' END AS shift, gap
   FROM g WHERE gap BETWEEN 1 AND 300
 )
-SELECT /*+ NO_PARALLEL */
+SELECT
   qc,
   jt AS jobtype,
   CASE WHEN GROUPING(shift) = 1 THEN 'ALL' ELSE shift END AS shift,

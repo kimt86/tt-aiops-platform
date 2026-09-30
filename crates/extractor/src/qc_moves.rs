@@ -89,7 +89,7 @@ pub async fn tick_qc_moves(pool: &PgPool, target: &str) -> Result<()> {
             .unwrap_or_else(|_| wm.clone());
 
         // Watermark on MCH_OPER_SEQNO (global-monotonic "YYYYMMDDHHMMSS" = completion order, and the
-        // LEADING column of PK MCH_PK_OPERATION). `SEQNO >= wm` SEEKS via the PK (INDEX hint pins it) and
+        // LEADING column of PK MCH_PK_OPERATION). `SEQNO >= wm` SEEKS via the PK and
         // reads only the new tail — NO re-scan of today's rows — so poll cost is independent of frequency
         // (verified: seek ~0.8s vs a full scan ~45s). `>=` (not `>`) re-reads the watermark second so the
         // non-unique SEQNO can't skip same-second rows; ON CONFLICT dedups the tiny overlap. The machno/LENGTH
@@ -98,8 +98,12 @@ pub async fn tick_qc_moves(pool: &PgPool, target: &str) -> Result<()> {
         // 한다(2026-08-11). '^(C|M|Z)' 하드코딩이 CR4(모든 이름: C·CR·DC·M·Z)를 놓쳐 HLLO 항차가
         // 통째로 안 보였다. 마스터에 QC 가 새로 등록되면 여기는 자동으로 따라간다 — KPI 쪽 정규식이
         // 뒤처지면 nightly crane_guard 가 경보한다.
+        // No optimizer hint (removed 2026-09-30): toolbox 1.x rejects any `/*`, hints included. Measured
+        // on prod without the old `INDEX(MCH_OPERATION MCH_PK_OPERATION)` hint the plan is unchanged —
+        // PK RANGE SCAN + WINDOW NOSORT STOPKEY for a 2-min window (≈30ms) and a 6-h window (291ms, capped
+        // by FETCH FIRST). If a stats refresh ever flips it, the poll slows and the qc_move_log DEADMAN fires.
         let sql = format!(
-            "SELECT /*+ INDEX(MCH_OPERATION MCH_PK_OPERATION) */
+            "SELECT
                     MCH_OPER_MACHNO AS machno, SUBSTR(MCH_OPER_CONTNO,1,11) AS contno,
                     MCH_OPER_SEQNO AS seqno, MCH_OPER_JOBTYPE AS jobtype, TRK_ID AS trk_id,
                     ST_DT AS st_dt, MCH_OPER_COMPDATE||MCH_OPER_COMPTIME AS comp_dt,

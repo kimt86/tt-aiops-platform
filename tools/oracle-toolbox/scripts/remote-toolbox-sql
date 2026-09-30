@@ -1,0 +1,157 @@
+#!/usr/bin/env python3
+"""TOS Oracle 조회 — 중계 서버의 mcp-toolbox 에 SQL 을 보내고 `{"result": ...}` 봉투로 출력한다.
+
+추출기(crates/extractor/src/runner.rs)가 모든 Oracle 조회에 이 스크립트 하나를 쓴다.
+2026-09-30 까지는 다른 사람 계정(aiadmin)의 Codex 스킬 파일을 빌려 썼다 — 그 파일이
+옮겨지거나 중계 서버가 바뀌면 우리 수집이 통째로 멈추므로 우리 저장소로 가져왔다.
+
+경로: 이 서버 --ssh--> 중계 서버 --curl--> toolbox --> Oracle
+출력: 항상 옛 toolbox(0.21) 모양 `{"result":"<JSON 배열 문자열>"}` (0행이면 "null").
+      해석은 crates/core/src/parse.rs 가 한다 — 프로토콜이 바뀌어도 거기는 모른다.
+
+두 프로토콜 (TT_TOOLBOX_PROTO):
+  mcp — toolbox 1.x. `/api` 가 기본으로 꺼져 있어(410 Gone) `/mcp` JSON-RPC tools/call 로
+        부른다. 응답은 행마다 text 항목 하나, 0행이면 빈 목록, 오류는 HTTP 200 + isError.
+  api — toolbox 0.x 의 `/api/tool/<name>/invoke`. 응답이 이미 옛 모양이라 그대로 출력.
+
+⚠ toolbox 1.x 설정은 SQL 어디에든 `--`·`/*` 가 있으면(문자열 안이어도) 거부한다. 일반 주석은
+  여기서 지워 보낸다(의미 불변). **힌트 `/*+ ... */` 는 지우지 않는다** — 크레인 무브 폴링의
+  INDEX 힌트가 빠지면 MCH_OPERATION 전체 탐색이 될 수 있다(2026-07-15 부하 사고). 막히면
+  조용히 느려지는 대신 오류로 드러나게 둔다.
+
+사용: remote-toolbox-sql oracle-prod --file q.sql [--timeout 90]
+      remote-toolbox-sql oracle-prod -c "select 1 as one from dual"
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shlex
+import subprocess
+import sys
+from pathlib import Path
+
+DEFAULT_HOST = "aiadmin@100.109.43.18"  # 2026-09-30 중계 서버 교체(옛 100.124.171.118)
+DEFAULT_URL = "http://100.109.43.18:35000"  # 1.x 는 127.0.0.1 이 아니라 이 주소에만 뜬다(--allowed-hosts)
+DEFAULT_PROTO = "mcp"
+
+TOOLS = {
+    "oracle-prod": "oracle-prod-execute-sql",
+    "oracle-uat": "oracle-uat-execute-sql",
+}
+
+
+def strip_comments(sql: str) -> str:
+    """`--` 줄 주석과 `/* */` 블록 주석을 지운다. 문자열·따옴표 식별자 안은 건드리지 않고,
+    힌트 `/*+ ... */` 는 남긴다."""
+    out: list[str] = []
+    i, n = 0, len(sql)
+    while i < n:
+        c = sql[i]
+        if c in ("'", '"'):
+            j = i + 1
+            while j < n:
+                if sql[j] == c:
+                    if j + 1 < n and sql[j + 1] == c:  # '' 이스케이프
+                        j += 2
+                        continue
+                    break
+                j += 1
+            out.append(sql[i : j + 1])
+            i = j + 1
+        elif sql.startswith("--", i):
+            j = sql.find("\n", i)
+            i = n if j < 0 else j  # 줄바꿈은 남긴다
+        elif sql.startswith("/*", i) and not sql.startswith("/*+", i):
+            j = sql.find("*/", i + 2)
+            i = n if j < 0 else j + 2
+            out.append(" ")
+        else:
+            out.append(c)
+            i += 1
+    return "".join(out)
+
+
+def to_envelope_from_mcp(raw: str) -> tuple[str | None, str | None]:
+    """MCP 응답 → (옛 봉투, 오류 문구)."""
+    try:
+        msg = json.loads(raw)
+    except json.JSONDecodeError:
+        return None, f"toolbox 응답이 JSON 이 아님: {raw[:300]}"
+    if "error" in msg:
+        return None, f"JSON-RPC error: {json.dumps(msg['error'], ensure_ascii=False)[:500]}"
+    res = msg.get("result") or {}
+    content = res.get("content") or []
+    if res.get("isError"):
+        return None, "; ".join(c.get("text", "") for c in content)[:1000]
+    rows = [json.loads(c["text"]) for c in content if c.get("type") == "text"]
+    return json.dumps({"result": json.dumps(rows) if rows else "null"}), None
+
+
+def main() -> int:
+    p = argparse.ArgumentParser(description="Run SQL on TOS Oracle through the relay-host mcp-toolbox.")
+    p.add_argument("tool", choices=sorted(set(TOOLS) | set(TOOLS.values())))
+    src = p.add_mutually_exclusive_group(required=True)
+    src.add_argument("--sql", "-c")
+    src.add_argument("--file", "-f", type=Path)
+    p.add_argument("--timeout", type=int, default=60, help="toolbox 요청 최대 시간(초)")
+    p.add_argument("--connect-timeout", type=int, default=5, help="ssh 접속 시간 제한(초)")
+    p.add_argument("--show-target", action="store_true", help="보낼 곳만 출력하고 끝낸다")
+    args = p.parse_args()
+
+    host = os.environ.get("TT_TOOLBOX_HOST", DEFAULT_HOST)
+    url = os.environ.get("TT_TOOLBOX_URL", DEFAULT_URL).rstrip("/")
+    proto = os.environ.get("TT_TOOLBOX_PROTO", DEFAULT_PROTO)
+    tool = TOOLS.get(args.tool, args.tool)
+    if args.show_target:
+        print(f"host={host}\nurl={url}\nproto={proto}\ntool={tool}")
+        return 0
+    if args.timeout <= 0 or args.connect_timeout <= 0:
+        print("error: timeouts must be positive", file=sys.stderr)
+        return 2
+    if proto not in ("mcp", "api"):
+        print(f"error: TT_TOOLBOX_PROTO must be mcp or api, got {proto!r}", file=sys.stderr)
+        return 2
+
+    sql = args.sql if args.sql is not None else args.file.read_text()
+    if proto == "mcp":
+        sql = strip_comments(sql)
+    # Oracle 은 문장 끝 세미콜론을 받지 않는다(ORA-00933). 하나만 떼어 준다.
+    s = sql.rstrip()
+    if s.endswith(";"):
+        sql = s[:-1]
+
+    if proto == "mcp":
+        endpoint = f"{url}/mcp"
+        body = {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": {"name": tool, "arguments": {"sql": sql}}}
+        accept = "-H 'accept: application/json, text/event-stream' "
+    else:
+        endpoint = f"{url}/api/tool/{tool}/invoke"
+        body = {"sql": sql}
+        accept = ""
+    remote = (
+        f"curl -sS --fail --max-time {args.timeout} "
+        f"-H 'content-type: application/json' {accept}-X POST {shlex.quote(endpoint)} --data-binary @-"
+    )
+    # BatchMode: 비밀번호 프롬프트에 매달리지 않고 바로 실패한다(추출기는 무인 실행).
+    cmd = ["ssh", "-o", "BatchMode=yes", "-o", f"ConnectTimeout={args.connect_timeout}", host, remote]
+    proc = subprocess.run(cmd, input=json.dumps(body), text=True, capture_output=True)
+    sys.stderr.write(proc.stderr)
+    if proc.returncode != 0:
+        return proc.returncode
+    if proto == "api":
+        sys.stdout.write(proc.stdout)
+        return 0
+    env, err = to_envelope_from_mcp(proc.stdout)
+    if err is not None:
+        print(f"toolbox error: {err}", file=sys.stderr)
+        return 1
+    sys.stdout.write(env)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

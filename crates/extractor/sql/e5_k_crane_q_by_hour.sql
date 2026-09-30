@@ -20,7 +20,7 @@ valid AS (
     FROM q
    WHERE crane_q_sec BETWEEN 0 AND 1800
 )
-SELECT /*+ NO_PARALLEL */
+SELECT
        hour,
        COUNT(*)                                                 AS events,
        ROUND(AVG(crane_q_sec), 1)                              AS avg_sec,

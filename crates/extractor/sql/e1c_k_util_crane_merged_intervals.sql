@@ -33,7 +33,7 @@ merged AS (
     FROM grouped
    GROUP BY machno, grp_id
 )
-SELECT /*+ NO_PARALLEL */
+SELECT
        machno,
        CASE
          WHEN REGEXP_LIKE(machno, '^(C|CR|DC|M|Z)[0-9]+$') THEN 'QC'

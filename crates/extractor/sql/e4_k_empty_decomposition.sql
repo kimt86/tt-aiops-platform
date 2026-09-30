@@ -22,7 +22,7 @@ WITH jobs AS (
    GROUP BY JOB_HIST_DATE, JOB_HIST_JOBTYPE,
             JOB_HIST_CONTNO, JOB_HIST_POINT, JOB_HIST_SEQNO
 )
-SELECT /*+ NO_PARALLEL */
+SELECT
        JOB_HIST_JOBTYPE                                                       AS jobtype,
        shift,
        COUNT(*)                                                               AS jobs,

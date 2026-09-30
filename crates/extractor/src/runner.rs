@@ -16,11 +16,23 @@ pub struct Toolbox {
 }
 
 impl Toolbox {
-    /// `target` is e.g. "oracle-prod" / "oracle-uat". SKILL_DIR comes from env.
+    /// `target` is e.g. "oracle-prod" / "oracle-uat".
+    ///
+    /// The script lives in THIS repo (`tools/oracle-toolbox/scripts/remote-toolbox-sql`), found
+    /// relative to the binary (`<repo>/target/release/extractor`). Until 2026-09-30 the default was
+    /// another person's Codex skill file (`/home/aiadmin/.codex/skills/yard-db-ops`) — every Oracle
+    /// poll depended on a file we did not own, pointed at a relay host that was being retired.
+    /// `SKILL_DIR` still overrides (any dir holding `scripts/remote-toolbox-sql`).
     pub fn from_env(target: &str) -> Result<Self> {
-        let skill_dir = std::env::var("SKILL_DIR")
-            .unwrap_or_else(|_| "/home/aiadmin/.codex/skills/yard-db-ops".to_string());
-        let skill_dir = PathBuf::from(skill_dir);
+        let skill_dir = match std::env::var("SKILL_DIR") {
+            Ok(d) => PathBuf::from(d),
+            Err(_) => std::env::current_exe()
+                .context("locating extractor binary")?
+                .ancestors()
+                .nth(3) // extractor -> release -> target -> <repo>
+                .context("extractor binary is not under <repo>/target/<profile>/")?
+                .join("tools/oracle-toolbox"),
+        };
         let script = skill_dir.join("scripts/remote-toolbox-sql");
         if !script.exists() {
             bail!("remote-toolbox-sql not found at {}", script.display());

@@ -2,7 +2,7 @@
 -- moves_per_active_hour = COUNT(*) / COUNT(DISTINCT hour-of-day), LD/DS only, QC only.
 -- Only change: MCH_OPER_COMPDATE = '{{DAY_STR}}' (index-safe). Load: LOW.
 
-SELECT /*+ NO_PARALLEL */
+SELECT
        MCH_OPER_VESSEL                                              AS vessel,
        MCH_OPER_VOYAGE                                              AS voyage,
        MCH_OPER_MACHNO                                              AS qc_machno,

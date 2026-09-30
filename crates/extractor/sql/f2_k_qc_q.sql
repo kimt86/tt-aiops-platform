@@ -45,7 +45,7 @@ gaps AS (
          LEAD(qn) OVER (PARTITION BY qc, vessel, voyage ORDER BY gs) AS nxt_qn
     FROM merged
 )
-SELECT /*+ NO_PARALLEL */
+SELECT
        qc,
        COUNT(*)                                                          AS idle_periods,
        SUM(CASE WHEN idle_sec BETWEEN 0   AND 60   THEN 1 END)           AS quick_under_1m,
