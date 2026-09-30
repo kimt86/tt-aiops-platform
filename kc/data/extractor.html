@@ -41,7 +41,7 @@
       <tr><td><strong>캡</strong></td><td>모든 쿼리에 <code>FETCH FIRST n ROWS ONLY</code>. 90초 타임아웃. SQL은 argv 아닌 <strong>임시 파일</strong>로 전달(셸 이스케이프 손상 방지).</td></tr>
     </tbody>
   </table></div>
-  <div class="kc-cal warn"><span class="h">⚠ 알려진 함정</span><p>① 툴박스는 SQL에 <strong>단독 <code>&gt;</code></strong>가 있으면 HTTP 400(부등호는 <code>&gt;=</code>/<code>BETWEEN</code> 사용). ② <code>ORACLE_LOCK</code>은 <strong>프로세스 내</strong>만 직렬화 — qc/rtg/handover는 <strong>독립 서비스</strong>라 매분 겹칠 수 있음(정상 seek 속도라 무해하나, 회귀 시 배가). ③ 딕셔너리(<code>all_ind_columns</code> 등)로 인덱스 먼저 확인 후 본 테이블 조회.</p></div>
+  <div class="kc-cal warn"><span class="h">⚠ 알려진 함정</span><p>① 조회 도구(2026-09-30부터 새 버전)는 SQL에 <code>--</code>·<code>/*</code>(문자열 안·힌트 포함)나 <code>UPDATE</code> 같은 쓰기 단어가 있으면 거부합니다. 주석은 스크립트가 지워 보내지만 <strong>힌트는 쓸 수 없습니다</strong>. (옛 버전의 '단독 <code>&gt;</code> 거부'는 더 이상 없습니다.) ② <code>ORACLE_LOCK</code>은 <strong>프로세스 내</strong>만 직렬화 — qc/rtg/handover는 <strong>독립 서비스</strong>라 매분 겹칠 수 있음(정상 seek 속도라 무해하나, 회귀 시 배가). ③ 딕셔너리(<code>all_ind_columns</code> 등)로 인덱스 먼저 확인 후 본 테이블 조회.</p></div>
 
   <h2>3. 서브커맨드 (CLI)</h2>
   <p><code>extractor &lt;subcommand&gt; [--flags]</code>. 두 종류 — KPI 배치(run·tick·backfill·transform)와 라이브 스트림(나머지):</p>
@@ -105,7 +105,7 @@
       <tr><td>vessel_schedule</td><td><strong>선박 스케줄 = 데드라인 소스</strong>(ETD·컷오프) → <code>live_vessel_schedule</code></td><td>ESTDEP ∈ [SYSDATE-2, +10]</td></tr>
       <tr><td>assigned_tt</td><td>과제 보유 TT(순수 TOS 가동률) → <code>live_assigned_tt</code></td><td>상태 A/B/Q·YTNO 있음</td></tr>
       <tr><td>voyage_plan</td><td>계획 항차 크기(VAN·진행바 분모) → <code>raw_voyage_plan</code></td><td>최근 3일 MAX(VAN)</td></tr>
-      <tr><td>ETW</td><td>컨테이너별 ETW 강화·<strong>Oracle 아님</strong>(Azure 게이트웨이 curl) → <code>tos_etw_cntr</code></td><td>항차별 스냅샷 통째 저장·게이트웨이가 준 유효기간(30분) 안에는 재요청 안 함</td></tr>
+      <tr><td>ETW</td><td>컨테이너별 ETW 강화·<strong>Oracle 아님</strong>(Azure 게이트웨이 curl) → <code>tos_etw_cntr</code></td><td>항차별 스냅샷 통째 저장·게이트웨이가 준 유효기간(30분) 안에는 재요청 안 함. 게이트웨이가 모르는 항차(404)는 정상으로 봄. <strong>받으려던 항차를 하나도 못 받으면 '실패'로 기록</strong>(2026-09-30부터 — 그전엔 전부 실패해도 '성공'으로 찍혀 이틀 넘게 아무도 몰랐음). 일부만 실패하면 성공으로 두고 로그에 개수를 남김</td></tr>
     </tbody>
   </table></div>
   <p><strong>순수 Postgres 변환</strong>(Oracle 무접촉): <code>baseline</code>(kpi_daily→kpi_baseline·Welch), <code>shift</code>(시프트 SQL 렌더→<code>kpi_shift</code>/<code>kpi_shift_history</code>+vessel 패널·<code>rollup_today_from_shifts</code>로 추가 스캔 0).</p>

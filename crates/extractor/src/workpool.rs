@@ -308,6 +308,10 @@ async fn src_etw(pool: &PgPool, date: chrono::NaiveDate) -> Result<()> {
         let mut tx = pool.begin().await?;
         let mut n = 0u64;
         let (mut fetched_ct, mut skipped_ct) = (0u32, 0u32);
+        // not_found = the gateway answered 404 (voyage it doesn't know — normal, see above).
+        // failed = anything else that got us no snapshot: unreachable, timeout, 5xx, bad JSON.
+        let (mut not_found_ct, mut failed_ct) = (0u32, 0u32);
+        let mut first_err: Option<String> = None;
         for (vessel, voyage) in &voyages {
             let unexpired = valid_until
                 .get(&(vessel.clone(), voyage.clone()))
@@ -318,14 +322,36 @@ async fn src_etw(pool: &PgPool, date: chrono::NaiveDate) -> Result<()> {
             }
             let voye = voyage.replace('/', "%2F");
             let url = format!("{base}/v1/voyages/{vessel}/{voye}/snapshot");
+            // No `-f`: we need the HTTP status to tell a 404 (normal) from a dead gateway.
             let out = tokio::process::Command::new("curl")
-                .args(["-fsS", "-m", "8", &url]).output().await;
-            let body = match out {
-                Ok(o) if o.status.success() => o.stdout,
-                _ => { tracing::warn!(%vessel, %voyage, "etw snapshot fetch failed"); continue; }
+                .args(["-sS", "-m", "8", "-w", "\n%{http_code}", &url]).output().await;
+            let fetch = match &out {
+                Ok(o) => classify_etw_fetch(o.status.success(), &o.stdout),
+                Err(e) => EtwFetch::Failed(format!("spawn curl: {e}")),
+            };
+            let body = match fetch {
+                EtwFetch::Ok(b) => b,
+                EtwFetch::NotFound => { not_found_ct += 1; continue; }
+                EtwFetch::Failed(why) => {
+                    let why = match &out {
+                        Ok(o) if !o.stderr.is_empty() => format!("{why}: {}", String::from_utf8_lossy(&o.stderr).trim()),
+                        _ => why,
+                    };
+                    tracing::warn!(%vessel, %voyage, %why, "etw snapshot fetch failed");
+                    failed_ct += 1;
+                    first_err.get_or_insert(format!("{vessel}/{voyage}: {why}"));
+                    continue;
+                }
+            };
+            let snap: serde_json::Value = match serde_json::from_slice(body) {
+                Ok(v) => v,
+                Err(e) => {
+                    failed_ct += 1;
+                    first_err.get_or_insert(format!("{vessel}/{voyage}: snapshot is not JSON: {e}"));
+                    continue;
+                }
             };
             fetched_ct += 1;
-            let snap: serde_json::Value = match serde_json::from_slice(&body) { Ok(v) => v, Err(_) => continue };
             let fetched = parse_ts(snap.get("fetched_at_utc").and_then(|v| v.as_str()));
             let expires = parse_ts(snap.get("expires_at_utc").and_then(|v| v.as_str()));
             for c in snap.get("cntr_list").and_then(|v| v.as_array()).into_iter().flatten() {
@@ -351,10 +377,55 @@ async fn src_etw(pool: &PgPool, date: chrono::NaiveDate) -> Result<()> {
         // drop ETW for voyages no longer refreshed (left the pool >2h ago)
         sqlx::query("DELETE FROM tos_etw_cntr WHERE updated_at < now() - interval '2 hours'")
             .execute(&mut *tx).await?;
+        // Commit even when every fetch failed: the 2-hour sweep above must still run, or a dead
+        // gateway would leave the last snapshot on screen forever as if it were current.
         tx.commit().await?;
-        tracing::info!(fetched = fetched_ct, skipped = skipped_ct, upserts = n, "etw refresh");
+        tracing::info!(fetched = fetched_ct, skipped = skipped_ct, not_found = not_found_ct,
+                       failed = failed_ct, upserts = n, "etw refresh");
+        // Until 2026-09-30 every failure was `continue`d past and the step still logged OK — the
+        // gateway moved hosts, every fetch was refused for 2+ days, and data_freshness(ETW) said OK
+        // with tos_etw_cntr at 0 rows. Now: zero snapshots out of a non-zero number of real
+        // failures is a FAILED run. A partial failure stays OK (logged above) — one flaky voyage
+        // should not mark the whole source down. Only this step fails; the workpool tick goes on.
+        etw_outcome(fetched_ct, failed_ct, first_err.as_deref())?;
         Ok(n)
     }).await.map(|_| ())
+}
+
+/// One snapshot fetch, from curl's exit status and stdout (`-w "\n%{http_code}"` appends the code).
+#[derive(Debug, PartialEq)]
+enum EtwFetch<'a> {
+    Ok(&'a [u8]),
+    /// 404 — the gateway doesn't know this voyage. Normal; retried next tick.
+    NotFound,
+    Failed(String),
+}
+
+fn classify_etw_fetch(exit_ok: bool, stdout: &[u8]) -> EtwFetch<'_> {
+    if !exit_ok {
+        // curl itself failed: couldn't connect, timeout, … (http_code is 000 then).
+        return EtwFetch::Failed("gateway unreachable".into());
+    }
+    let (body, code) = match stdout.iter().rposition(|&b| b == b'\n') {
+        Some(i) => (&stdout[..i], String::from_utf8_lossy(&stdout[i + 1..]).trim().to_string()),
+        None => (&stdout[..0], String::from_utf8_lossy(stdout).trim().to_string()),
+    };
+    match code.as_str() {
+        "200" => EtwFetch::Ok(body),
+        "404" => EtwFetch::NotFound,
+        c => EtwFetch::Failed(format!("HTTP {c}")),
+    }
+}
+
+/// Whole-step verdict: FAILED only when there were real failures and not one snapshot landed.
+fn etw_outcome(fetched: u32, failed: u32, first_err: Option<&str>) -> Result<()> {
+    if failed > 0 && fetched == 0 {
+        anyhow::bail!(
+            "ETW gateway: all {failed} snapshot fetches failed, none succeeded (first: {})",
+            first_err.unwrap_or("?")
+        );
+    }
+    Ok(())
 }
 
 async fn src_workqueue(pool: &PgPool, rows: &[QueueRow], date: chrono::NaiveDate, as_of: DateTime<Utc>) -> Result<()> {
@@ -575,6 +646,25 @@ async fn src_workpool(pool: &PgPool, rows: &[MoveRow], date: chrono::NaiveDate, 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn etw_fetch_classification() {
+        assert_eq!(classify_etw_fetch(true, b"{\"a\":1}\n200"), EtwFetch::Ok(b"{\"a\":1}"));
+        assert_eq!(classify_etw_fetch(true, b"not found\n404"), EtwFetch::NotFound);
+        assert_eq!(classify_etw_fetch(true, b"oops\n502"), EtwFetch::Failed("HTTP 502".into()));
+        // curl could not connect (the 2026-09-28~30 case: tunnel up, gateway gone)
+        assert_eq!(classify_etw_fetch(false, b"\n000"), EtwFetch::Failed("gateway unreachable".into()));
+        // a body containing newlines keeps everything before the LAST newline
+        assert_eq!(classify_etw_fetch(true, b"{\n\"a\":1\n}\n200"), EtwFetch::Ok(b"{\n\"a\":1\n}"));
+    }
+
+    #[test]
+    fn etw_outcome_fails_only_when_nothing_landed() {
+        assert!(etw_outcome(0, 12, Some("x")).is_err()); // every fetch failed → FAILED
+        assert!(etw_outcome(3, 2, Some("x")).is_ok()); // partial → still OK (logged)
+        assert!(etw_outcome(0, 0, None).is_ok()); // all skipped (unexpired) or all 404 → OK
+        assert!(etw_outcome(5, 0, None).is_ok());
+    }
 
     #[test]
     fn parses_etw_14_and_17() {
