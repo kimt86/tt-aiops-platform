@@ -92,7 +92,7 @@ enum Command {
         #[arg(long, default_value = "oracle-prod")]
         target: String,
     },
-    /// Yard-crane (RTG/ES) move stream from MCH_OPERATION → rtg_move_log (full work mix,
+    /// Yard-machine (RTG/ES/RS) move stream from MCH_OPERATION → rtg_move_log (full work mix,
     /// not just DS). Incremental via etl_watermark. Run ~every 60s.
     RtgMoves {
         #[arg(long, default_value = "oracle-prod")]

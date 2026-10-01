@@ -1,4 +1,4 @@
-//! Yard-crane (RTG/ES) move stream from MCH_OPERATION → rtg_move_log. The dashboard's KPI
+//! Yard-machine (RTG/ES/RS) move stream from MCH_OPERATION → rtg_move_log. The dashboard's KPI
 //! extractor filters MCH_OPERATION to QC (^C), so the RTG side was never landed — yet RTG moves
 //! ARE logged in detail (ST_DT start + COMPDATE||COMPTIME complete) for the full work mix
 //! (DS/LD/RH/AH/GI/GO/MI/MO). DS handovers are only ~20% of an RTG's moves; the rest (reshuffles,
@@ -96,7 +96,13 @@ pub async fn tick_rtg_moves(pool: &PgPool, target: &str) -> Result<()> {
         // reads only the new tail — NO re-scan of today's rows — so poll cost is independent of frequency
         // (verified: seek ~0.8s vs a full scan ~45s). `>=` (not `>`) re-reads the watermark second so the
         // non-unique SEQNO can't skip same-second rows; ON CONFLICT dedups the tiny overlap. REGEXP/LENGTH
-        // are post-filters on the small tail. Yard cranes only (RTG/ES); excludes QC and trucks.
+        // are post-filters on the small tail. Yard machines only (RTG/ES/RS); excludes QC and trucks.
+        // RS = reach stacker, added 2026-10-01. It had been filtered out since this stream began,
+        // so the scenario's yard side silently lacked it: on MYT 2026-08-18 TOS had 816 RS moves
+        // (1.8% of yard-machine moves; MO 355 · MI 253 · RH 74 · DS 45 · AH 41 · GO 31 · LD 15)
+        // while RTG/ES matched this table exactly. ~2/3 of RS moves carry only NO1 (block) with
+        // NO2..4 null — areas without a stack grid — so they land here with pos2..4 NULL.
+        // Readers that mean "RTG only" must keep filtering machno themselves (l_util_crane_day does).
         // No optimizer hint (removed 2026-09-30): toolbox 1.x rejects any `/*`, hints included. Measured
         // on prod without the old `INDEX(MCH_OPERATION MCH_PK_OPERATION)` hint the plan is unchanged —
         // PK RANGE SCAN + WINDOW NOSORT STOPKEY for a 2-min window (22ms; the QC twin also held it over a 6-h
@@ -113,7 +119,7 @@ pub async fn tick_rtg_moves(pool: &PgPool, target: &str) -> Result<()> {
                FROM TOSADM.MCH_OPERATION
               WHERE MCH_OPER_SEQNO >= '{seek_from}'
                 AND MCH_OPER_SEQNO <= '{until}'
-                AND REGEXP_LIKE(MCH_OPER_MACHNO, '^(RTG|ES)')
+                AND REGEXP_LIKE(MCH_OPER_MACHNO, '^(RTG|ES|RS)')
                 AND LENGTH(MCH_OPER_COMPTIME) >= 6
               ORDER BY MCH_OPER_SEQNO
               FETCH FIRST {FETCH_CAP} ROWS ONLY"
