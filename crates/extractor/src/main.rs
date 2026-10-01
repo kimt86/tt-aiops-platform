@@ -86,6 +86,12 @@ enum Command {
         #[arg(long, default_value = "oracle-prod")]
         target: String,
     },
+    /// TOS 배차 가능 트럭 목록(getMoverList) 복원: 한 문장 스냅샷 + 변경 기록 재생 →
+    /// tos_avail_interval / tos_avail_check (mig 0162). Run ~every 60s.
+    TosAvail {
+        #[arg(long, default_value = "oracle-prod")]
+        target: String,
+    },
     /// Yard-crane (RTG/ES) move stream from MCH_OPERATION → rtg_move_log (full work mix,
     /// not just DS). Incremental via etl_watermark. Run ~every 60s.
     RtgMoves {
@@ -218,6 +224,10 @@ async fn main() -> Result<()> {
         Command::Handover { target } => {
             let pool = db::pool().await?;
             tt_extractor::handover::tick_handover(&pool, &target).await?;
+        }
+        Command::TosAvail { target } => {
+            let pool = db::pool().await?;
+            tt_extractor::tos_avail::tick_tos_avail(&pool, &target).await?;
         }
         Command::RtgMoves { target } => {
             let pool = db::pool().await?;

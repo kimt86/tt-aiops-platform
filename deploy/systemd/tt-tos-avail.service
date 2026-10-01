@@ -1,0 +1,18 @@
+[Unit]
+Description=tt-aiops-platform TOS dispatchable-truck list (getMoverList) replay -> tos_avail_interval
+After=network-online.target
+# 실패하면 ops_alert 에 남긴다 — oneshot 이라 재시도가 없어 조용히 결손된다.
+# 한두 틱 실패는 다음 틱이 이어서 재생한다(앵커가 15분 안이면). 그보다 길면 공백(gap)으로 새로 시작.
+OnFailure=tt-unit-failed@%n.service
+
+[Service]
+# 폭발 반경 제한(2026-07-28 OOM 장애 재발방지). 한 틱 응답 ~0.5MB·재생 상태 수천 행.
+MemoryMax=2G
+MemorySwapMax=0
+Type=oneshot
+# 조회가 멈추면(ssh·중계 서버 hang) 유닛이 끝나지 않아 타이머가 틱을 건너뛰고 실패 경보도 안 뜬다 — 시간을 넘기면
+# 실패로 끊어 OnFailure 가 울리게 한다. 실측 소요 p50 1.4초·p99 4.6초, 조회 자체 제한 90초.
+TimeoutStartSec=180
+EnvironmentFile=%h/projects/tt-aiops-platform/.env
+ExecStart=%h/projects/tt-aiops-platform/target/release/extractor tos-avail --target oracle-prod
+Nice=15

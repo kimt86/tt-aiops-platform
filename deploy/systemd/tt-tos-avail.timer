@@ -1,0 +1,11 @@
+[Unit]
+Description=TOS dispatchable-truck list replay every 60s (snapshot + JOB_ORDER_HISTORY/logon changes, mig 0162)
+
+[Timer]
+OnBootSec=2min
+# :05 qc · :25 rtg · :45 handover · :55 workpool 과 겹치지 않는 자리.
+OnCalendar=*-*-* *:*:40
+AccuracySec=1s
+
+[Install]
+WantedBy=timers.target

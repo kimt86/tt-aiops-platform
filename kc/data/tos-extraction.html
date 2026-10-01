@@ -12,10 +12,10 @@
 <main class="kc-article" data-page="data/tos-extraction">
   <h1>TOS 데이터 추출 전수 — 무엇을·어떻게·얼마의 부하로</h1>
   <p class="kc-lede">우리 시스템(TT AIOps 플랫폼)이 <strong>TOS Oracle DB</strong>에서 가져오는 <strong>모든 것</strong>을 한 곳에 정리한 문서입니다. ① 어느 테이블의 어느 컬럼을 어떤 조건·주기로 가져오는지(<strong>SQL 원문 포함</strong>), ② 그 데이터가 우리 쪽 어느 테이블에 채워져 무슨 목적으로 쓰이는지, ③ 이 동작이 TOS DB에 주는 <strong>모든 종류의 부하 산정</strong>. 내부 파악용이면서, <strong>TOS팀에 공유해 승인을 받기 위한</strong> 문서입니다.</p>
-  <div class="kc-meta"><span class="kc-badge kind">아키텍처 · 카탈로그 · 부하 감사</span><span class="kc-badge living">단일 출처 · 리빙 · 실측 2026-08-10</span></div>
+  <div class="kc-meta"><span class="kc-badge kind">아키텍처 · 카탈로그 · 부하 감사</span><span class="kc-badge living">단일 출처 · 리빙 · 실측 2026-08-10 · ⑬ 2026-10-01</span></div>
 
   <h2>0. 핵심 요약 (TOS팀께 — 한 문단으로)</h2>
-  <div class="kc-cal tip"><span class="h">Bottom line</span><p>우리 접근은 <strong>전부 읽기 전용 SELECT</strong>입니다 — INSERT/UPDATE/DELETE/DDL/PL·SQL/잠금이 <strong>0건</strong>입니다. 총량은 <strong>하루 약 7,500회(시간당 약 313회, 평균 11.5초당 1건)</strong>의 짧은 단문 조회이고, 동시 세션은 발화 시각을 초 단위로 분산해 <strong>통상 1개, 순간 최대 2~3개</strong>입니다. 모든 조회는 인덱스 시크 또는 시간창으로 범위를 좁힌 조회이며(활성 경로에 무제한 풀스캔 없음), 가장 무거운 단일 쿼리는 <strong>야간 01:30에 하루 1번 도는 8.3초짜리</strong>입니다. 반환 데이터는 하루 약 340만 행·전송량 약 0.8GB(평균 <strong>약 0.08 Mbps</strong>) 수준입니다. 어떤 스트림이든 <strong>1분 안에 개별·전체 중단</strong>할 수 있는 킬스위치가 있습니다.</p></div>
+  <div class="kc-cal tip"><span class="h">Bottom line</span><p>우리 접근은 <strong>전부 읽기 전용 SELECT</strong>입니다 — INSERT/UPDATE/DELETE/DDL/PL·SQL/잠금이 <strong>0건</strong>입니다. 총량은 <strong>하루 약 8,950회(시간당 약 373회, 평균 9.7초당 1건)</strong>의 짧은 단문 조회이고, 동시 세션은 발화 시각을 초 단위로 분산해 <strong>통상 1개, 순간 최대 2~3개</strong>입니다. 조회는 인덱스 시크 또는 시간창으로 범위를 좁힌 조회이며, 예외는 ⑬이 매분 작은 표 두 개(장비 마스터 약 1천 행, 장비정지 약 9만 3천 행)를 통째로 한 번 읽는 것 하나입니다(합쳐 한 번에 약 2천 블록, §7-4). 가장 무거운 단일 쿼리는 <strong>야간 01:30에 하루 1번 도는 8.3초짜리</strong>입니다. 반환 데이터는 하루 약 675만 행·전송량 약 1.4GB(평균 <strong>약 0.13 Mbps</strong>) 수준이고, 그 절반이 ⑬입니다. 어떤 스트림이든 <strong>1분 안에 개별·전체 중단</strong>할 수 있는 킬스위치가 있습니다.</p></div>
 
   <h2>1. 왜 이렇게 접근하나 — 사본(mirror) 구조</h2>
   <div class="kc-flow">
@@ -33,15 +33,15 @@
   <ul>
     <li><strong>단일 통로</strong> — 모든 Oracle 접근은 전용 읽기 계정으로 SQL 게이트웨이(<code>remote-toolbox-sql</code>) 한 경로만 지나갑니다. 애플리케이션이 DB에 직접 붙지 않습니다.</li>
     <li><strong>직렬화</strong> — 프로세스 내 잠금 + 파일 잠금(flock)으로 같은 계열 쿼리는 항상 한 번에 하나씩만 나갑니다.</li>
-    <li><strong>발화 시각 분산</strong> — 주기 작업들의 시작 초를 서로 다르게 고정(:05/:15/:25/:30/:35/:45/:50/:55)해 같은 순간에 겹치지 않게 했습니다(아래 §5 시각표).</li>
+    <li><strong>발화 시각 분산</strong> — 주기 작업들의 시작 초를 서로 다르게 고정(:05/:15/:25/:30/:35/:40/:45/:50/:55)해 같은 순간에 겹치지 않게 했습니다(아래 §5 시각표).</li>
     <li><strong>타임아웃</strong> — 쿼리당 45~90초 강제 종료. 폭주 쿼리가 세션을 오래 붙들 수 없습니다.</li>
-    <li><strong>행 수 캡</strong> — 스트림 쿼리는 <code>FETCH FIRST N ROWS ONLY</code>(3,000~20,000)로 상한을 박아, 예외 상황에도 반환량이 폭주하지 않습니다.</li>
-    <li><strong>병렬 없음</strong> — DB가 '수동 병렬' 모드이고 우리가 읽는 표 7개는 모두 병렬 설정이 1이라, 우리 조회는 여러 일꾼으로 나뉘어 돌지 않습니다(2026-09-30 확인). 예전에 붙이던 병렬 금지 힌트는 조회 도구 교체로 힌트를 쓸 수 없게 돼 뺐습니다.</li>
+    <li><strong>행 수 캡</strong> — 스트림 쿼리는 <code>FETCH FIRST N ROWS ONLY</code>(3,000~20,000)로 상한을 박아, 예외 상황에도 반환량이 폭주하지 않습니다. 예외는 ⑬ — 중간을 잘라 받으면 재생이 틀어지므로 캡 대신 <strong>읽는 구간을 최대 약 17분으로 묶어</strong>(그보다 오래 끊기면 재생하지 않고 새로 시작) 반환량을 제한합니다. 평소 한 번 약 2,300행, 하루 중 가장 붐빈 구간 기준 최악 약 9,500행입니다(실측 — 1분 단위 변경 기록의 17분 최대 합 7,970행 + 스냅샷 약 1,500행).</li>
+    <li><strong>병렬 없음</strong> — DB가 '수동 병렬' 모드이고 우리가 읽는 표는 모두 병렬 설정이 1이라(⑬이 새로 읽는 <code>MCH_EQ_WORKSTOP</code>·<code>MCH_WORKTIME</code>·<code>CDY_MACHINE_JOBSTOP</code> 포함), 우리 조회는 여러 일꾼으로 나뉘어 돌지 않습니다(2026-09-30 확인). 예전에 붙이던 병렬 금지 힌트는 조회 도구 교체로 힌트를 쓸 수 없게 돼 뺐습니다.</li>
     <li><strong>킬스위치</strong> — 스트림별 systemd 타이머 정지 또는 환경변수 한 줄로 개별·전체 즉시 중단(§8).</li>
     <li><strong>변경 통제</strong> — 쿼리·주기를 바꾸면 이 문서를 같이 갱신하고(맨 아래 규칙), TOS팀 공유 프로세스를 거칩니다(§9 제안).</li>
   </ul>
 
-  <h2>3. 한눈 요약 — 활성 추출점 12개 (실측 2026-08-10, 24시간)</h2>
+  <h2>3. 한눈 요약 — 활성 추출점 13개 (실측 2026-08-10, 24시간 · ⑬은 2026-09-30 추가)</h2>
   <div class="kc-tablewrap"><table>
     <thead><tr><th>#</th><th>추출점</th><th>원천 테이블</th><th>주기</th><th>왕복/일</th><th>행/회</th><th>회당 소요*</th><th>접근 방식</th></tr></thead>
     <tbody>
@@ -56,11 +56,12 @@
       <tr><td>⑨</td><td>k_cycle</td><td><code>JOB_ORDER_HISTORY</code></td><td>하루 1회 01:30</td><td>1</td><td>10</td><td>8.3s</td><td>하루창 집계(야간)</td></tr>
       <tr><td>⑩</td><td>cont_spec</td><td><code>CYY_CONTAINER</code></td><td>5분</td><td>~284</td><td>~36</td><td>~1.9s</td><td>PK IN-list 시크</td></tr>
       <tr><td>⑪</td><td>gate</td><td><code>CYC_HISTORY</code></td><td>5분</td><td>288</td><td>~15</td><td>~1.9s</td><td>PK IN-list 시크</td></tr>
+      <tr><td>⑬</td><td>tos-avail</td><td><code>CDY_MACHINE</code>·<code>JOB_ORDER_LIST</code>·<code>MCH_EQ_WORKSTOP</code>·<code>MCH_WORKTIME</code>·<code>JOB_ORDER_HISTORY</code></td><td>60초</td><td>1,440</td><td>~2,300</td><td>~1.5s</td><td>한 문장 스냅샷 + 변경 기록 레인지(소형 표 2개 통째 읽기 포함)</td></tr>
       <tr><td>⑫</td><td>enrich</td><td><code>CDV_VESSEL</code>·<code>VSB_VOYAGE</code>·<code>ETV_BAPLIE_CONT</code>·<code>ETV_MOVINS_STOWAGE</code></td><td>신규 항차당 1회</td><td>~51</td><td>446~7,934</td><td>2~4s</td><td>항차 인덱스+캡(1회성)</td></tr>
     </tbody>
   </table></div>
   <p><em>* "회당 소요"는 우리 쪽에서 잰 <strong>벽시계 전체</strong>(게이트웨이 스크립트 기동 + SSH 왕복 + Oracle 처리 + 전송)입니다. 이 중 회당 약 1~2초는 우리 쪽 경유 고정비로 실측되어(같은 쿼리의 <code>COUNT(*)</code>만 2.01초 vs 전체 SELECT 2.61초), <strong>Oracle이 실제 일하는 시간은 통상 회당 1초 미만</strong>입니다. §7에서 상세 산정.</em></p>
-  <p>합계: <strong>약 7,510왕복/일 ≈ 313회/시간 ≈ 평균 11.5초당 1건</strong>. ①~⑨는 배차·대시보드 추출기, ⑩~⑫는 시뮬레이션(시나리오) 수집기입니다.</p>
+  <p>합계: <strong>약 8,950왕복/일 ≈ 373회/시간 ≈ 평균 9.7초당 1건</strong>(⑬ 추가 전 7,510왕복/일 ≈ 313회/시간). ①~⑨·⑬은 배차·대시보드 추출기, ⑩~⑫는 시뮬레이션(시나리오) 수집기입니다.</p>
 
   <h2>4. TOS가 아닌 데이터 (오해 방지 — Oracle 부하 아님)</h2>
   <div class="kc-tablewrap"><table>
@@ -84,6 +85,7 @@
       <tr><td>:25</td><td>② rtg-moves</td><td>매분</td></tr>
       <tr><td>:30</td><td>⑪ gate</td><td>5분</td></tr>
       <tr><td>:35</td><td>⑤ vessel-schedule</td><td>5분</td></tr>
+      <tr><td>:40</td><td>⑬ tos-avail</td><td>매분</td></tr>
       <tr><td>:45</td><td>③ handover</td><td>매분</td></tr>
       <tr><td>:50</td><td>⑩ cont_spec</td><td>5분</td></tr>
       <tr><td>:55</td><td>④ pool_tick</td><td>매분</td></tr>
@@ -153,6 +155,25 @@
   <p><strong>용도</strong>: <code>tos_handover_label</code>은 "이 작업이 언제 끝났고 트럭이 언제 자유로워졌나"의 <strong>권위 라벨</strong>입니다(GPS는 정지 시 침묵해 33%를 놓치므로 TOS 값이 정답지). 트럭 사이클 이력(<code>tt_move_log</code>) 조립, 적재/공차 주행거리(공차율 지표 재료), 예측 모델 채점, 시나리오 작업이력의 원천입니다.</p>
 
   <h3>그룹 B — 라이브 스냅샷 (지금 상태를 통째로)</h3>
+
+  <h4>⑬ tos-avail — TOS가 "지금 배차할 수 있다"고 보는 트럭 목록 (2026-09-30 추가 · 10-01 개정)</h4>
+  <p class="kc-meta-line"><code>CDY_MACHINE</code>·<code>JOB_ORDER_LIST</code>·<code>MCH_EQ_WORKSTOP</code>·<code>CDY_MACHINE_JOBSTOP</code>·<code>MCH_WORKTIME</code>·<code>JOB_ORDER_HISTORY</code> → 우리 <code>tos_avail_interval</code>·<code>tos_avail_check</code> · 60초 · 회당 평균 ~2,300행(최악 ~9,500행) · 한 문장</p>
+  <p><strong>무엇을 알고 싶은가</strong>: TOS는 "지금 일을 줄 수 있는 트럭" 목록을 뽑아 거기서 트럭을 골라 배차합니다. 목록에 드는 조건은 셋입니다 — ① 기사가 로그인해 있고 ② 트럭에 붙은 작업이 하나도 없고(상자를 싣고 가는 중이거나 다음 일이 미리 붙어 있어도 '작업 있음') ③ 장비 정지가 걸려 있지 않을 것. 이 조건은 TOS가 실제로 돌리는 조회문을 운영 DB의 실행 기록에서 찾아 그대로 옮긴 것입니다(TOS는 이 조회를 초당 약 12번 돌립니다).</p>
+  <p><strong>왜 1분마다 찍으면 안 되나</strong>: 트럭은 비자마자 곧 일이 붙어서 이 목록에 몇 초만 머뭅니다. 1분마다 목록을 찍으면 대부분을 못 봅니다(실측: 60초 간격이면 목록의 22%만 맞음, 4초 간격이어도 93%).</p>
+  <p><strong>그래서 이렇게 한다</strong>: 1분에 한 번, <strong>한 문장</strong>으로 "지금 이 순간의 상태"(트럭 로그인 여부·바쁜 작업지시·장비 정지)와 "지난 조회 뒤로 바뀐 기록"(작업지시 추가·수정·삭제 기록과 그 기록이 저장된 <strong>처리 묶음 번호</strong>, 로그인·로그아웃 시각)을 같이 받습니다. 지난 순간의 상태에서 출발해 바뀐 기록을 <strong>처리 묶음 순서대로, 한 묶음씩</strong> 다시 적용하면 그 1분 동안 목록에 누가 언제 들어오고 나갔는지가 나옵니다. 끝에서는 이번에 받은 실제 상태와 맞춰 보고, 다른 게 있으면 바로잡으면서 그 차이를 정확도 기록(<code>tos_avail_check</code>)으로 남깁니다.</p>
+  <p><strong>왜 "처리 묶음" 단위인가</strong>: TOS가 두 트럭의 일을 맞바꿀 때(스왑)는 "떼기 → 붙이기"를 한 번에 처리하는데, 기록에는 몇십 ms 간격으로 두 줄이 남습니다. 두 줄 사이에 트럭이 "빈 것"처럼 보이지만 그 순간은 남에게 보인 적이 없습니다. 반대로 "작업 끝 → 새 배차"는 서로 다른 처리입니다. 운영 DB는 기록마다 어느 처리 묶음(커밋)에서 저장됐는지 번호를 남기므로(<code>ORA_ROWSCN</code> — 두 표 모두 행 단위 기록이 켜져 있음), 한 묶음을 한 걸음으로 적용하면 둘이 저절로 갈립니다. 실측(2026-10-01, 15분): 스왑 묶음 181개 중 163개가 한 묶음 안에서 컨테이너 둘 이상을 바꿨고, "작업 끝 → 새 배차" 191쌍은 1초 미만 2쌍까지 포함해 전부 다른 묶음이었습니다. (처음에는 "1초보다 짧은 머묾은 지운다"는 시간 기준을 썼으나, 진짜 짧은 배차까지 지워서 이 방식으로 바꿨습니다.)</p>
+  <pre><code>한 문장 = 다섯 조각을 UNION ALL (같은 순간 기준)
+  T  지금 시각 (SYSTIMESTAMP)
+  M  트럭 마스터(약 1천 행 전체): 로그인 여부·풀·마지막 로그인 시각, 그리고 모든 트럭의 최근 1시간 마지막 로그아웃 시각
+     (지금 로그인 중이어도 받는다 — 두 조회 사이에 로그아웃했다 다시 들어오는 일이 로그아웃의 약 23%)
+  B  바쁜 작업지시: 트럭이 붙어 있고 상태가 A·B·F·R·X·Q 또는 빈 값 (색인 범위 조회)
+  W  장비 정지로 막힌 트럭 (열린 정지를 찾으려 장비정지 표 약 9만 3천 행을 통째로 한 번 훑는다)
+  H  변경 기록 + 처리 묶음 번호: JOB_ORDER_HISTORY 의 DATE||TIME &gt;= '{지난 조회 − 120초}' (색인 범위 조회)
+     — 이미 반영한 묶음은 번호로 걸러 두 번 적용하지 않는다</code></pre>
+  <p><strong>부하 근거</strong>: 운영 DB 실행 기록으로 잰 값은 한 번에 Oracle 읽기 약 5,400~5,700블록·약 110ms입니다(2026-09-30~10-01). 비교하면 TOS는 같은 목록을 뽑는 데 한 번에 약 500~1,160블록을 쓰고 이를 초당 약 12번 돌리므로, 우리 몫은 TOS가 같은 목적에 쓰는 양의 약 0.7~1.6%입니다. 이 중 약 1,800블록이 장비정지 표를 통째로 읽는 몫입니다 — TOS 방식(트럭마다 따로 찾기)으로 쓰면 이것만 8천~1만 4천 블록이라 한 번 훑는 쪽을 골랐고, 두 방식의 결과가 모든 장비에서 같음을 확인했습니다. <strong>활성 경로의 유일한 통째 읽기</strong>입니다(§7-4). 반환은 평소 한 번 약 2,300행(행당 약 180바이트), 가장 붐빈 17분 구간 기준 최악 약 9,500행입니다(하루 1분 단위 실측 최대 17분 합 7,970행 + 스냅샷 약 1,500행). 왕복은 하루 1,440회 늘었습니다.</p>
+  <p><strong>정확도</strong> (2초 간격으로 실제 목록을 직접 떠서 맞춰 본 결과): 지금 방식(처리 묶음 단위, 로그인·로그아웃은 지난번에 본 값과 달라진 것만)으로 2026-10-01 08:55~09:15 MYT 20분, 실제 목록 591번과 대조했습니다. 실제 목록에 있던 (트럭, 순간) 770쌍 중 <strong>99.4%</strong>를 맞게 올렸고, 우리가 올린 790쌍 중 <strong>96.8%</strong>가 맞았습니다. 틀린 30쌍 중 21쌍은 그 트럭의 상태가 바뀐 순간 앞뒤 1초 안이었습니다. 1~2초만 머문 짧은 등재가 진짜인지도 봤습니다 — 그 짧은 구간 안에 떨어진 실측 182번 중 169번(93%), 1초 미만 구간은 19번 중 19번 그 트럭이 실제로 목록에 있었습니다. 바로 앞 30분 대조(그 사이 고친 것 하나 반영 전)에서는 재현 99.2%·정밀 87.5%였고, 틀린 것의 대부분이 트럭 한 대(장비 정지·로그아웃 처리 중인 트럭)였습니다. 남은 오류 유형: ① 로그아웃 처리 중 TOS가 작업을 떼어낸 순간을 "풀림"으로 보는 것(두 번의 대조에서 2건, 실제 목록엔 28번 중 1번만 있었음 — 이 등재는 가짜일 가능성이 큼, 가설) ② 장비 정지가 걸린 순간(1건) ③ 로그인이 기록 시각보다 몇 초 먼저 보인 것(1건). 참고로 첫 방식(묶음 단위 이전)의 2026-09-30 대조는 97.3%·96.1%였고, 로그인·로그아웃을 빼고 복원하면 정밀도가 67%로 떨어졌습니다. 운영 중에는 <code>tos_avail_check</code>가 매분 <strong>조회 순간 한 점</strong>에서 재생 결과와 실제 목록을 맞춰 봅니다 — 두 조회 사이에 생겼다 사라진 오류는 이 점검에 잡히지 않으므로, 위 2초 대조를 가끔 다시 해야 합니다.</p>
+  <p><strong>한계</strong>: 목록은 <strong>지나고 나서</strong> 정확합니다. 1분마다 받으므로 "지금 이 순간"은 최대 약 1분 전 모습까지만 압니다. 기록 시각은 TOS가 그 변경을 처리한 순간이고 묶음이 저장(커밋)된 순간은 그보다 늦을 수 있어, 한 묶음의 마지막 기록 시각을 "보이게 된 때"로 씁니다(실제보다 이를 수 있음 — 한 묶음 안 시각 폭은 90%가 3.9초 이내). 로그인·로그아웃은 트럭별 마지막 한 번씩만 보여, 1분 안에 두 번 넘게 들락거리면 앞의 것은 놓칩니다. 지난번에 본 값과 달라진 것만 새 로그인·로그아웃으로 씁니다 — 로그인 시각이 찍힌 뒤 늦게 보이는 경우가 있고, 반대로 감독자가 끊은 로그아웃은 로그아웃 기록에 안 남는 경우가 있어(2026-10-01 실측 각 1~3건) 시간으로 고르면 둘 중 하나를 틀립니다. 장비 정지가 걸리거나 로그아웃할 때 TOS가 트럭의 작업을 떼어내는 순간은 "트럭이 풀린 것"처럼 보여 다음 조회까지 잘못 올릴 수 있습니다(2초 간격 대조에서 확인된 오류의 대부분 — 아래 정확도). 장비 정지는 조회 순간에만 반영됩니다. 수집이 15분 넘게 끊기면 그 사이는 복원하지 않고 다시 시작한 순간부터 새로 셉니다(끊긴 구간은 '공백'으로 표시 — 공백과 "목록이 비었다"는 다른 뜻입니다).</p>
+  <p><strong>용도·주의</strong>: "트럭이 빈 순간, TOS가 고른 일과 우리 추천을 비교"하는 새 합격 기준의 재료입니다. 트럭별로 목록에 들어온 시각·나간 시각·풀어준 TOS 프로그램·나갈 때 붙은 작업과 그 작업을 붙인 TOS 프로그램이 남습니다. 시각 t에 목록에 있던 트럭 = <code>SELECT ytno FROM tos_avail_interval WHERE span @&gt; t</code> — 단 t가 마지막 수집 시각(<code>tos_avail_anchor.as_of_ts</code>) 이전일 때만 뜻이 있습니다. <strong>목록에 있다고 배차 후보인 것은 아닙니다</strong> — 풀이 없거나 선박 작업과 무관한 풀의 트럭도 몇 시간씩 목록에 있으니, 선박 배차 비교에는 풀로 걸러 쓰세요.</p>
 
   <h4>④ pool_tick — 작업 풀 + QC 작업큐 (한 왕복으로 병합)</h4>
   <p class="kc-meta-line"><code>JOB_QUEUE_SCHEDULE</code> + <code>JOB_ORDER_LIST</code> → 우리 <code>live_workqueue</code>·<code>live_workpool</code>·<code>live_candidate</code>·<code>live_assigned_tt</code> · 60초 · 회당 ~1,980행 · 시간창 스냅샷</p>
@@ -323,14 +344,15 @@ SELECT ... FROM TOSADM.ETV_BAPLIE_CONT
 
   <h3>7-1. 실행 횟수 (세션·SQL 수)</h3>
   <ul>
-    <li><strong>왕복 약 7,510회/일 = 313회/시간 = 초당 0.087건.</strong> 전부 단문 SELECT 1건씩(트랜잭션 유지 없음).</li>
-    <li>내역: 매분 4회(①②③④) + 2분 1회(⑥) + 5분 3회(⑤⑩⑪) + 15분 1회(⑧) + 1시간 1회(⑦) + 하루 1회(⑨) + 신규 항차당 3회(⑫).</li>
+    <li><strong>왕복 약 8,950회/일 = 373회/시간 = 초당 0.104건</strong>(⑬ 추가 전 7,510회/일). 전부 단문 SELECT 1건씩(트랜잭션 유지 없음).</li>
+    <li>내역: 매분 5회(①②③④⑬) + 2분 1회(⑥) + 5분 3회(⑤⑩⑪) + 15분 1회(⑧) + 1시간 1회(⑦) + 하루 1회(⑨) + 신규 항차당 3회(⑫).</li>
   </ul>
 
   <h3>7-2. DB 점유 시간</h3>
   <ul>
     <li><strong>상한(우리 벽시계 전체 합)</strong>: 하루 약 4.9시간. 단, 이것은 게이트웨이 스크립트 기동 + SSH 왕복 + 전송을 <strong>전부 포함한</strong> 우리 쪽 측정값입니다.</li>
     <li><strong>Oracle 실제 처리 추정</strong>: 회당 고정비 ~2초가 우리 쪽 경유 비용임이 실측으로 분리됩니다(같은 스냅샷 쿼리의 <code>COUNT(*)</code>만 2.01초 vs 전체 SELECT 2.61초 = 페이로드 0.6초 / 이동 스트림 시크는 ~0.8초 실측). 이를 적용하면 <strong>Oracle이 실제 일하는 시간은 하루 합계 약 40~80분 수준(평균 세션 점유율 3~6%)으로 추정</strong>됩니다. 산정 방식이 추정임을 명시하며, 정확한 값은 TOS팀 AWR로 교차 확인을 요청드립니다(§9).</li>
+    <li>⑬: 운영 DB 실행 기록 기준 한 번에 약 110ms·약 5,400~5,700블록(2026-09-30~10-01 실측) — 하루 합계 약 2.6분.</li>
     <li>단일 쿼리 최대: ⑨ 야간 8.3초(하루 1회), ⑦ 화해 5.8초(시간당 1회), ⑫ 적하목록 수 초(항차당 1회). 그 외 전부 ~2초 안팎.</li>
   </ul>
 
@@ -338,19 +360,21 @@ SELECT ... FROM TOSADM.ETV_BAPLIE_CONT
   <div class="kc-tablewrap"><table>
     <thead><tr><th>구분</th><th>행/일(실측)</th><th>비고</th></tr></thead>
     <tbody>
-      <tr><td>④ pool_tick 스냅샷</td><td>~2,850,000</td><td>전체의 85% — 같은 ~2,000행을 매분 다시 읽는 구조(스냅샷 방식의 비용). 시크 전환은 병합 키 부재로 위험해 채택하지 않음(검토 이력 있음)</td></tr>
+      <tr><td>④ pool_tick 스냅샷</td><td>~2,850,000</td><td>전체의 42%(⑬ 추가 전 85%) — 같은 ~2,000행을 매분 다시 읽는 구조(스냅샷 방식의 비용). 시크 전환은 병합 키 부재로 위험해 채택하지 않음(검토 이력 있음)</td></tr>
       <tr><td>①②③ 증분 스트림</td><td>~197,000</td><td>새로 생긴 이벤트만</td></tr>
       <tr><td>⑥⑦ 적부계획</td><td>~228,000</td><td>델타 ~59k + 시간당 화해 ~169k</td></tr>
       <tr><td>⑤⑧⑨ 일정·지표</td><td>~72,000</td><td>—</td></tr>
       <tr><td>⑩⑪⑫ 시나리오</td><td>~45,000</td><td>—</td></tr>
-      <tr><td><strong>합계</strong></td><td><strong>~3,390,000행/일</strong></td><td>행당 ~250바이트(JSON) 기준 <strong>약 0.8GB/일 ≈ 35MB/시간 ≈ 평균 0.08Mbps</strong></td></tr>
+      <tr><td>⑬ tos-avail</td><td>~3,360,000</td><td>전체의 50% — 매분 스냅샷 약 1,500행(트럭 마스터 전체 + 바쁜 작업지시) + 변경 기록 약 3분치. 실측 한 번 평균 2,333행·행당 약 180바이트</td></tr>
+      <tr><td><strong>합계</strong></td><td><strong>~6,750,000행/일</strong></td><td>⑬ 이전 몫은 행당 ~250바이트 기준 0.8GB, ⑬ 약 0.6GB — <strong>약 1.4GB/일 ≈ 59MB/시간 ≈ 평균 0.13Mbps</strong></td></tr>
     </tbody>
   </table></div>
 
   <h3>7-4. 액세스 패턴 (버퍼·I/O 관점)</h3>
   <ul>
     <li>①②(PK 시크)·③⑥(시간 인덱스 시크)·⑩⑪(PK IN 시크): <strong>직전 1~2분의 뜨거운 블록만</strong> 반복해서 읽습니다 — 버퍼 캐시에 있는 페이지들이라 물리 I/O 기여가 작습니다.</li>
-    <li>④⑤⑦⑧⑨: 시간창(1일~10일)으로 잘린 범위 조회·집계. 무제한 풀스캔은 활성 경로에 <strong>없습니다</strong>.</li>
+    <li>④⑤⑦⑧⑨: 시간창(1일~10일)으로 잘린 범위 조회·집계.</li>
+    <li>⑬: 바쁜 작업지시·변경 기록은 색인 범위 조회, 로그아웃 시각은 색인만 훑기. <strong>활성 경로의 유일한 통째 읽기가 여기 있습니다</strong> — 장비 마스터(약 1천 행)와 장비정지 표(약 9만 3천 행, 매분 약 1,800블록). 장비정지를 TOS와 같은 방식(트럭마다 찾기)으로 쓰면 오히려 8천~1만 4천 블록이라 한 번 읽는 쪽을 골랐습니다(실행계획 2026-10-01 확인).</li>
     <li>Oracle 힌트는 쓰지 않습니다(2026-09-30부터 조회 도구가 거부). 예전 힌트 두 종류(색인 고정·병렬 금지)는 없어도 실행 방식이 같다는 것을 운영 DB에서 확인하고 뺐습니다.</li>
   </ul>
 
@@ -372,8 +396,11 @@ SELECT ... FROM TOSADM.ETV_BAPLIE_CONT
     <thead><tr><th>Oracle 테이블</th><th>왕복/일</th><th>접근</th><th>추출점</th></tr></thead>
     <tbody>
       <tr><td><code>MCH_OPERATION</code></td><td>2,880</td><td>PK 시크(새 꼬리만)</td><td>①②</td></tr>
-      <tr><td><code>JOB_ORDER_HISTORY</code></td><td>1,441</td><td>시간 인덱스 시크 + 야간 하루창 1회</td><td>③⑨</td></tr>
+      <tr><td><code>JOB_ORDER_HISTORY</code></td><td>2,881</td><td>시간 인덱스 시크 + 야간 하루창 1회</td><td>③⑨⑬</td></tr>
       <tr><td><code>JOB_ORDER_LIST</code>·<code>JOB_QUEUE_SCHEDULE</code></td><td>1,440(한 왕복에 동승)</td><td>시간창 스냅샷</td><td>④</td></tr>
+      <tr><td><code>JOB_ORDER_LIST</code>(바쁜 작업지시)</td><td>1,440</td><td>상태 색인 범위 조회</td><td>⑬</td></tr>
+      <tr><td><code>CDY_MACHINE</code>·<code>MCH_EQ_WORKSTOP</code>·<code>CDY_MACHINE_JOBSTOP</code></td><td>1,440(한 왕복에 동승)</td><td>소형 표 통째 읽기(약 1천 행·약 9만 3천 행) + PK 조회</td><td>⑬</td></tr>
+      <tr><td><code>MCH_WORKTIME</code></td><td>1,440</td><td>로그아웃 시각 색인만 훑기(최근 1시간)</td><td>⑬</td></tr>
       <tr><td><code>VSP_SHIP</code></td><td>744</td><td>UPD_DT 시크 + 시간당 항차 IN</td><td>⑥⑦</td></tr>
       <tr><td><code>VSB_VOYAGE</code></td><td>288 + α</td><td>날짜창 조회(소형)</td><td>⑤⑫</td></tr>
       <tr><td><code>VSS_STATISTICS</code></td><td>96</td><td>3일창 집계·120행 캡</td><td>⑧</td></tr>
@@ -397,7 +424,7 @@ SELECT ... FROM TOSADM.ETV_BAPLIE_CONT
 
   <h2>9. TOS팀께 확인·요청 드리는 사항</h2>
   <ol>
-    <li><strong>현행 승인</strong>: 위 12개 추출점·주기·쿼리(§6)에 대한 승인을 요청드립니다. 전부 읽기 전용이며 총량은 §0 요약과 같습니다.</li>
+    <li><strong>현행 승인</strong>: 위 13개 추출점·주기·쿼리(§6)에 대한 승인을 요청드립니다(⑬은 2026-09-30 추가). 전부 읽기 전용이며 총량은 §0 요약과 같습니다.</li>
     <li><strong>계정</strong>: 현재 사용 중인 읽기 전용 계정의 유지(권한 축소 방향 환영 — SELECT 외 권한은 필요 없습니다).</li>
     <li><strong>교차 검증</strong>: 우리 측정은 전부 우리 쪽에서 잰 값입니다(Oracle에 측정 부하 추가하지 않음). 필요하시면 해당 계정 기준 AWR/ASH로 실제 DB 시간을 교차 확인해 주시면 이 문서에 반영하겠습니다.</li>
     <li><strong>변경 절차 제안</strong>: 쿼리 추가·주기 단축 등 부하가 <em>늘어나는</em> 변경은 사전 공유 후 진행하고, 부하가 줄어드는 변경은 사후 통지로 갈음하는 절차를 제안드립니다.</li>

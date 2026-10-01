@@ -12,6 +12,7 @@ pub mod rtg_moves;
 pub mod runner;
 pub mod shift;
 pub mod stowplan;
+pub mod tos_avail;
 pub mod transform;
 pub mod vessel;
 pub mod weather;
