@@ -14,7 +14,7 @@
   <p class="kc-lede">시나리오 수집기가 만들어 내보내는 <strong>파일 두 개가 어떻게 생겼고 무엇을 담고 있는지</strong>를 필드 단위로 정리합니다. 모든 수치는 현재 코드로 <strong>MYT 2026-08-18 하루</strong>를 직접 조립해서 잰 값입니다.</p>
   <div class="kc-meta"><span class="kc-badge kind">레퍼런스 · 출력 형식</span><span class="kc-badge living">실측 2026-10-01</span></div>
 
-  <div class="kc-cal tip"><span class="h">Bottom line</span><p>결과물은 <strong>시나리오</strong>(그날 실제로 일어난 일)와 <strong>에뮬레이터</strong>(장비가 얼마나 빨리 움직이는지) 두 JSON 입니다. 시나리오는 <strong>6개 섹션</strong>(<code>meta</code> · <code>vessels</code> · <code>cranes</code> · <code>landside</code> · <code>equipment</code> · <code>yard_t0</code>)으로 되어 있고, 하루치가 약 <strong>30MB</strong>입니다. 파일을 쓰기 전에 <strong><code>meta.summary</code> 부터 읽으세요</strong> — 재료가 덜 모인 기간도 파일은 정상적으로 나오기 때문에, 그 파일이 믿을 만한지는 여기 적힌 채움 비율로만 알 수 있습니다. 가장 큰 구멍은 <strong>적하 컨테이너의 적부 명세(무게·목적항·선내 위치)가 5.6%만 채워진다</strong>는 점입니다.</p></div>
+  <div class="kc-cal tip"><span class="h">Bottom line</span><p>결과물은 <strong>시나리오</strong>(그날 실제로 일어난 일)와 <strong>에뮬레이터</strong>(장비가 얼마나 빨리 움직이는지) 두 JSON 입니다. 시나리오는 <strong>6개 섹션</strong>(<code>meta</code> · <code>vessels</code> · <code>cranes</code> · <code>landside</code> · <code>equipment</code> · <code>yard_t0</code>)으로 되어 있고, 하루치가 약 <strong>30MB</strong>입니다. 파일을 쓰기 전에 <strong><code>meta.summary</code> 부터 읽으세요</strong> — 재료가 덜 모인 기간도 파일은 정상적으로 나오기 때문에, 그 파일이 믿을 만한지는 여기 적힌 채움 비율로만 알 수 있습니다. 가장 큰 구멍은 <strong>적하 컨테이너의 적부 명세(무게·목적항·선내 위치)가 5.6%만 채워진다</strong>는 점과, <strong>리치스태커(RS) 무브가 야드 쪽에서 통째로 빠진다</strong>는 점(하루 ~816건, 7절)입니다.</p></div>
 
   <p>수집 방식(무엇을 언제 모으나, 요청하는 법)은 <a href="/kc/data/scenario-collection.html">시나리오 수집</a>을 보세요. 이 문서는 <strong>나온 파일의 모양</strong>만 다룹니다. 소비자(시뮬레이터) 쪽 규격은 <code>kimt86/con-term-sim</code> 저장소의 <code>docs/real-data/scenario-format.md</code>(v3)와 <code>emulator-format.md</code>이고, 우리 출력과의 관계는 <a href="#v3">10절</a>에 있습니다.</p>
 
@@ -187,12 +187,13 @@
     <thead><tr><th>키</th><th>한 항목</th><th>8/18</th></tr></thead>
     <tbody>
       <tr><td><code>qc[]</code></td><td>QC 한 대가 한 배에서 일한 구간: <code>crane</code> · <code>vessel_id</code> · <code>voyage</code> · <code>start_ts</code> · <code>end_ts</code> · <code>moves</code> · <code>ds</code> · <code>ld</code></td><td>89</td></tr>
-      <tr><td><code>rtg[]</code></td><td>야드 장비(RTG·ES) 한 대가 한 블록에서 일한 구간: <code>machine</code> · <code>block</code> · <code>block_id</code> · <code>start_ts</code> · <code>end_ts</code> · <code>moves</code> · <code>by_code</code>(작업 코드별 건수, 예: <code>{"DS":27,"RH":1}</code>)</td><td>3,917</td></tr>
+      <tr><td><code>rtg[]</code></td><td>야드 장비(RTG·ES — <strong>RS 없음</strong>, 아래) 한 대가 한 블록에서 일한 구간: <code>machine</code> · <code>block</code> · <code>block_id</code> · <code>start_ts</code> · <code>end_ts</code> · <code>moves</code> · <code>by_code</code>(작업 코드별 건수, 예: <code>{"DS":27,"RH":1}</code>)</td><td>3,917</td></tr>
       <tr><td><code>yard_moves_by_code</code></td><td>창 안 야드 장비 무브 전체를 작업 코드별로 센 것</td><td>AH 7,563 · DS 11,502 · GC 14 · GI 4,222 · GO 4,835 · LC 2 · LD 8,094 · MI 1,559 · MO 1,467 · RH 5,453</td></tr>
       <tr><td><code>yard_internal_moves[]</code></td><td>야드 안 이적 한 건: 집기(MO)와 놓기(MI)를 짝지은 것. <code>container_id</code> · <code>from_ts</code>/<code>to_ts</code> · <code>from_machine</code>/<code>to_machine</code> · <code>from_slot</code>/<code>to_slot</code>. 창 끝에 걸려 짝이 없으면 한쪽이 null</td><td>1,467(짝 맞음 1,287)</td></tr>
       <tr><td><code>tt_fleet</code></td><td>터미널 트럭(TT) 30분 버킷별 가동 대수: <code>bucket_minutes</code> · <code>trucks_total</code> · <code>peak_trucks</code> · <code>buckets[]{ts, trucks, cycles}</code></td><td>전체 463대 · 최대 423대 · 버킷 48개</td></tr>
     </tbody>
   </table></div>
+  <div class="kc-cal danger"><span class="h">리치스태커(RS)가 통째로 빠져 있습니다 (2026-10-01 확인)</span><p>야드 장비 무브는 운영 추출기가 <code>rtg_move_log</code> 에 넣을 때 장비 번호가 <code>RTG</code>·<code>ES</code> 로 시작하는 것만 남기고(<code>REGEXP_LIKE(MCH_OPER_MACHNO, '^(RTG|ES)')</code>), 시나리오의 야드 이동 기록도 그 표를 읽습니다. TOS 에는 <strong>RS20–RS25 의 무브가 하루 816건</strong>(MYT 8/18 · 야드 장비 무브의 1.8%) 있습니다 — MO 355 · MI 253 · RH 74 · DS 45 · AH 41 · GO 31 · LD 15 · LC 2. 그래서 <code>equipment.rtg[]</code>·<code>yard_moves_by_code</code>·<code>yard_internal_moves</code>·<code>landside</code>·<code>yard_t0</code>·에뮬레이터 <code>yc_service</code> 모두에서 RS 몫이 없습니다. 해측 무브 중 야드 칸이 비는 건(양하 46 · 적하 13)이 RS 가 처리한 양하 45 · 적하 15 와 거의 같아, 그 빈칸도 대부분 이 때문으로 보입니다. 같은 날 RTG(40,435)·ES(4,275)는 TOS 와 우리 표가 일치합니다.</p></div>
   <p>작업 코드가 <strong>무엇을 뜻하는지는 파일에서 단정하지 않습니다</strong>. 이 문서에서 쓰는 읽기(DS 양하·LD 적하·GI 반입·GO 반출·RH/AH 재조작·MO/MI 이적 집기/놓기)는 앞의 여섯 개는 코드 주석과 수집 로직 근거가 있지만, <code>GC</code>·<code>LC</code> 는 드물고 뜻이 확인되지 않았습니다.</p>
 
   <h2>8. <code>yard_t0</code> — 시작 시점 야드</h2>
@@ -234,6 +235,8 @@
     <thead><tr><th>무엇</th><th>상태</th></tr></thead>
     <tbody>
       <tr><td><strong>적하 적부 명세</strong></td><td>무게·양하항·선내 위치·높이·계열이 적하에서 5.6%. 명세 도착 시점 문제(4.2절)</td></tr>
+      <tr><td><strong>리치스태커(RS) 무브</strong></td><td>야드 쪽 전 섹션에서 빠짐(하루 ~816건, 7절). 원인은 운영 추출기의 장비 필터 — <strong>고칠 후보</strong></td></tr>
+      <tr><td><strong>야드 작업시간의 장비 유형 구분</strong></td><td><code>yc_service</code> 는 작업 코드별로만 나뉘고 장비 유형(RTG·ES·RS)을 섞습니다. 소비자 규격(R4)은 유형별 분리를, 못 하면 <code>_provenance</code> 에 "유형 미분리" 표기를 요청하는데 둘 다 안 합니다 — <strong>고칠 후보</strong></td></tr>
       <tr><td><strong>적하의 <code>height</code>·<code>family</code></strong></td><td>적하 상자는 <code>iso</code> 가 100% 있는데도 <code>height</code>·<code>family</code> 는 명세가 있을 때만(5.6%) 나옵니다. 게이트 무브는 같은 <code>iso</code> 에서 풀어 주므로 두 섹션이 다르게 동작합니다 — <strong>고칠 후보</strong></td></tr>
       <tr><td><code>beam_m</code></td><td>저장된 항차 521건 전부 null. TOS 원천이 비어 있는지 우리가 못 읽는지는 확인하지 않았습니다</td></tr>
       <tr><td>에뮬레이터 <code>_provenance.note</code></td><td>"<code>containers[].service_s</code> 는 관측 COMP−ST 원값" 이라고 적혀 있지만, <strong>2026-08-10 부터 <code>service_s</code> 는 추정값</strong>입니다(4.2절). 문구가 코드를 못 따라온 것 — <strong>고칠 후보</strong></td></tr>
