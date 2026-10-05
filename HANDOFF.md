@@ -7,6 +7,23 @@
 
 ---
 
+## 진행 상황 — BUILD (2026-10-06, worktree `../tt-aiops-platform-job-dispatch` · 브랜치 `job-driven-dispatch`)
+
+- **코드·마이그레이션·테스트 완료, 배포는 승인 대기.** 운영 API 재시작(브랜치 빌드)은 권한에서 막혔다.
+  - `db/migrations/0163_job_driven_dispatch.sql` 은 **운영 DB 에 이미 적용**(멱등 2회 확인). 덧붙이는 것뿐이라
+    지금 도는 옛 API(08-25 빌드)와 함께 써도 안전하다. 단 신뢰도 표는 새 API 가 15분마다 갱신하므로 지금은 적용 시각 값으로 멈춰 있다.
+  - 테스트: `cargo test --workspace` **120개 전부 통과**(종전 104 + 신규 16). 돌연변이 7종 전부 검출.
+  - 배포 순서(승인 후): 브랜치를 main 에 합치고 `cargo build --release -p tt-api`(main) → `systemctl --user restart tt-api`
+    → 1시간 이상 뒤 `psql -v from="'<재시작 시각>'" -f scripts/job_driven_check.sql` 로 DONE 숫자를 낸다.
+- **⚠사고(복구됨)**: 컴파일 확인 때 브랜치 빌드를 `CARGO_TARGET_DIR=<main>/target` 으로 돌려 **운영 경로의 바이너리를
+  덮어썼다**(재시작 전이라 운영 영향 없음). 두 worktree 가 같은 산출물 이름을 써 cargo 가 main 빌드를 "최신"으로 착각했다 —
+  main 소스 mtime 을 갱신해 재컴파일, 원래 크기(12,424,448)로 복구 확인. **worktree 빌드는 자기 target 으로만.**
+- **마감 조사 완료**: `docs/cycles/2026-10-06-deadline-quality.md` · `scripts/deadline_quality.sql`.
+  크레인 사이 순서 정확도 현행 51~55%(우연 50%) vs 크레인 예측 마감 54~62% · 늦음 5% 에서 대기는 둘 다 중앙 17~34분.
+- KC: `kc/dispatch/stage2-design.html`(개편 안내·승인 대기 표시) · `kc/dispatch/dispatch-deadline.html`(조사 결과).
+- 사용자가 아직 안 정한 값: **계획 하나의 값어치 300초**(함께 풀기에서 급한 작업이 계획을 위해 감수하는 추가 주행의 한도)·
+  **스왑은 같은 작업유형끼리만**(보수적으로 정함).
+
 ## 배경 — 이번 사이클에 확정된 사실·결정 (2026-10-01~06, 사용자)
 
 - **TOS 배차 = 작업이 트럭을 고른다.** 작업은 plan seq 순으로 고르고, 매칭은 **N×M 전수 비교로 전체 공차거리 최소** 조합을 고른다.
