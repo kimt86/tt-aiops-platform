@@ -116,7 +116,11 @@ ALTER TABLE stage2_solver_shadow ADD COLUMN IF NOT EXISTS n_soon_drop int4;
 COMMENT ON COLUMN stage2_solver_shadow.t1_unreach_n IS
   '급한 작업 슬롯 중 갈 수 있는(1,800초 안) 지금 빈 트럭이 아예 없던 수 — 순서 위반이 아니라 도달 불가(mig 0163·리뷰 반영).';
 COMMENT ON COLUMN stage2_solver_shadow.n_soon_drop IS
-  '곧 빌 트럭 중 내릴 자리(적하=크레인·양하=블록)를 알아 그 자리에서 계획 비용을 센 수. 나머지는 지금 자리로 대신(mig 0163·2026-10-06 사용자 결정).';
+  '자격 있는 곧 빌 트럭(n_soon_ok 와 같은 모집단) 중 내릴 자리(적하=크레인·양하=블록)를 알아 그 자리에서 계획 비용을 센 수. '
+  '나머지는 지금 자리로 대신(mig 0163·2026-10-06 사용자 결정).';
+COMMENT ON COLUMN stage2_match_shadow.arrival_s IS
+  '트럭이 비기까지 예측 + 픽업 지점까지 빈 차 주행 p50(초). ⚠mig 0163(match_ver=1)부터 곧 빌 트럭의 2계층 행은 주행을 '
+  '**내릴 자리**(적하=크레인·양하=블록)에서 잰다 — src_lat/src_lon 은 여전히 지금 위치라, 두 좌표로 다시 계산하면 이 값과 어긋난다.';
 COMMENT ON COLUMN stage2_solver_shadow.match_ver IS
   '매칭 규칙 판(stage2_match_shadow.match_ver 와 같은 값). NULL = mig 0163 경계 이전.';
 COMMENT ON COLUMN stage2_solver_shadow.n_free IS '지금 빈 트럭 수(1계층 후보 = 1계층 슬롯 상한). mig 0163.';

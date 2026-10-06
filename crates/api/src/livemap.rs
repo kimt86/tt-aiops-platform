@@ -4591,6 +4591,11 @@ pub fn spawn_selfcal_refresh(lm: Arc<LiveMap>, pool: PgPool) {
             // 얼어 자격이 옛 판정에 묶이므로(learn_dispatch_lead 동결 전례) 실패를 남긴다. 실측 2.4초.
             if let Err(e) = sqlx::query("REFRESH MATERIALIZED VIEW CONCURRENTLY learn_soon_free_reliability").execute(&pool).await {
                 tracing::warn!(error = %e, "learn_soon_free_reliability 갱신 실패 — 2계층 곧 빌 트럭 자격이 옛 표에 묶인다 (mig 0163)");
+                // 2시간 넘게 못 갱신하면 매처가 곧 빌 트럭을 통째로 안 쓴다(계획이 지금 빈 트럭만으로 조용히 퇴화) —
+                // 그래서 소리를 낸다(2차 리뷰 SHOULD_FIX 2). alert 는 upsert 라 15분마다 반복돼도 넘치지 않는다.
+                crate::db::alert(&pool, "stage2_pool", "reliability_refresh", "warn",
+                    "곧 빌 트럭 신뢰도 표 갱신 실패 — 2시간 지속되면 계획에서 곧 빌 트럭이 빠진다",
+                    Some(&e.to_string())).await;
             }
             // 정차 앵커: jobtype → (median, p90) seconds-to-free from the GPS-stationary moment.
             if let Ok(rows) = sqlx::query_as::<_, (String, i32, i32)>(
@@ -5600,7 +5605,15 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                 }
             };
             // candidate work + pickup coord — 스왑 마감 보호도 이 목록의 크레인 시각을 쓰므로 스왑보다 먼저 읽는다.
-            let Ok((_, work)) = crate::workpool::stage2_work_candidates(pool.clone()).await else { continue };
+            let work = match crate::workpool::stage2_work_candidates(pool.clone()).await {
+                Ok((_, w)) => w,
+                Err(_) => {
+                    // 이 틱은 매칭도 스왑도 없다 — 종전엔 조용히 넘어갔다(2차 리뷰 CONSIDER 6).
+                    // (AppError 는 내용을 밖으로 안 내므로 원인은 같은 함수의 다른 로그/DB 로그로 본다.)
+                    tracing::warn!("작업목록(stage2_work_candidates) 조회 실패 — 이번 틱 매칭·스왑을 건너뛴다");
+                    continue;
+                }
+            };
             // ── 스왑 단계 (mig 0163·2026-10-06 사용자 확정) ─────────────────────────────────────────
             // 이미 배차되고 픽업 전인 짝들끼리만 행선지를 맞바꾼다 — 새 작업·새 빈 트럭은 끼지 않는다(TOS 도
             // 기 패칭 결과 안에서만 스왑). 억제: 이득 ≥ SWAP_MIN_GAIN_S · 둘 다 목적지 500m 밖(후보 수집에서
@@ -6035,8 +6048,9 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                 let adj1 = bucket_adjacency(n_v, caps1.len(), &edges1);
                 caps1.iter().zip(&adj1).filter(|(_, a)| a.is_empty()).map(|(&c, _)| c.max(0)).sum()
             };
+            // 자격 있는 곧 빌 트럭(n_soon_ok 와 같은 모집단) 중 내릴 자리를 아는 수 — 둘을 나란히 읽게(2차 리뷰).
             let n_soon_drop: i32 = vehicles.iter().zip(&veh_info)
-                .filter(|(v, i)| !i.0 && drop_pos.contains_key(&v.0)).count() as i32;
+                .filter(|(v, i)| !i.0 && i.1.is_some() && drop_pos.contains_key(&v.0)).count() as i32;
             let sink: Vec<(i64, i64)> = (0..driving.len())
                 .map(|wp| if tier_w[wp] == 1 { (cover1[wp], T1_COVER_BONUS) } else { (caps[wp], PLAN_VALUE_S) })
                 .collect();
