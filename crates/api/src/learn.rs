@@ -806,7 +806,8 @@ pub async fn extra(State(pool): State<PgPool>) -> Result<Json<ExtraResp>, AppErr
     .fetch_one(&pool)
     .await?;
     let s2_gap_pct: Option<f64> = sqlx::query_scalar(
-        "SELECT avg(gap_pct)::float8 FROM stage2_solver_shadow WHERE ts > now()-interval '24 hours'",
+        "SELECT avg(gap_pct)::float8 FROM stage2_solver_shadow WHERE ts > now()-interval '24 hours'
+            AND match_ver IS NOT DISTINCT FROM (SELECT match_ver FROM stage2_solver_shadow ORDER BY ts DESC LIMIT 1)", // 판(mig 0163) 섞임 방지
     )
     .fetch_one(&pool)
     .await?;

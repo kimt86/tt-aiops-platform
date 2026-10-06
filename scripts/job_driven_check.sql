@@ -15,7 +15,7 @@ SET LOCAL statement_timeout = '120s';
 SELECT count(*) AS "1계층 행", count(*) FILTER (WHERE veh_state NOT IN ('free_tos','free_gps')) AS "일하는 트럭 배정"
   FROM stage2_match_shadow WHERE ts >= :from::timestamptz AND match_ver = 1 AND match_tier = 1;
 
-\echo '② 내보내는 짝 중 마감이 안 온 작업 — 분모: 같은 1계층 행. 마감 > 기록 시각 + 300초(풀 여유)면 위반. 0이어야 한다.'
+\echo '② 내보내는 짝 중 마감이 안 온 작업 — 분모: 같은 1계층 행. ⚠구조상 0(1계층은 마감 ≤ 틱+300초로만 뽑힌다) — 배선 확인용이지 반증 수단이 아니다.'
 SELECT count(*) FILTER (WHERE dispatch_deadline_ts > ts + interval '300 seconds') AS "마감 안 온 작업을 내보냄"
   FROM stage2_match_shadow WHERE ts >= :from::timestamptz AND match_ver = 1 AND match_tier = 1;
 
@@ -23,9 +23,11 @@ SELECT count(*) FILTER (WHERE dispatch_deadline_ts > ts + interval '300 seconds'
 SELECT count(*) FILTER (WHERE redirected_from IS NOT NULL OR veh_state = 'redirectable') AS "재지향"
   FROM stage2_match_shadow WHERE ts >= :from::timestamptz AND match_ver = 1;
 
-\echo '④ 마감 순서 위반·덮개 감소 — 분모: match_ver=1 의 매칭 틱. 둘 다 0이어야 한다.'
-SELECT count(*) AS "틱", sum(t1_skip_n) AS "순서 위반 합",
+\echo '④ 덮개 감소·순서 위반 — 분모: match_ver=1 의 매칭 틱. ★덮개 감소 틱이 진짜 계기(0이어야 한다).'
+\echo '   순서 위반은 우선 덮개를 자기 자신과 대조하므로 구조상 0 — 배선 확인용. 도달 불가 슬롯은 위반이 아니라 따로 센다.'
+SELECT count(*) AS "틱", sum(t1_skip_n) AS "순서 위반 합(구조상 0)",
        count(*) FILTER (WHERE t1_cov <> t1_cov_alone) AS "함께 풀어 덮개가 줄어든 틱",
+       sum(t1_unreach_n) AS "갈 트럭 없던 급한 슬롯", round(avg(n_soon_drop), 1) AS "내릴 자리 아는 곧빌/틱",
        sum(t1_cov_alone) AS "1계층 덮개 합", sum(n_free) AS "지금 빈 트럭 합"
   FROM stage2_solver_shadow WHERE ts >= :from::timestamptz AND match_ver = 1;
 

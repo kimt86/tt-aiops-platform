@@ -1532,7 +1532,9 @@ pub async fn stage2_shadow(State(pool): State<PgPool>) -> Result<Json<Stage2Shad
                 (100.0*sum(greedy_cost_s - optimal_cost_s)/nullif(sum(greedy_cost_s),0))::float8 AS savings_pct,
                 sum(greedy_miss)::bigint AS greedy_miss,
                 sum(optimal_miss)::bigint AS optimal_miss
-           FROM stage2_solver_shadow WHERE ts > now() - interval '30 minutes' AND pool_mode = 3",
+           FROM stage2_solver_shadow WHERE ts > now() - interval '30 minutes' AND pool_mode = 3
+            AND match_ver IS NOT DISTINCT FROM (SELECT match_ver FROM stage2_solver_shadow ORDER BY ts DESC LIMIT 1)",
+            // ↑ 매칭 규칙 판(mig 0163)이 바뀌면 기준선(greedy) 정의도 바뀐다 — 창 안에서 최신 판만 본다.
     )
     .fetch_one(&pool)
     .await?;
@@ -1662,7 +1664,8 @@ pub async fn health_dispatch(State(pool): State<PgPool>) -> Result<Json<HealthDi
 
     let savings_pct: Option<f64> = sqlx::query_scalar(
         "SELECT (100.0*sum(greedy_cost_s - optimal_cost_s)/nullif(sum(greedy_cost_s),0))::float8
-           FROM stage2_solver_shadow WHERE ts > now() - interval '30 minutes' AND pool_mode = 3",
+           FROM stage2_solver_shadow WHERE ts > now() - interval '30 minutes' AND pool_mode = 3
+            AND match_ver IS NOT DISTINCT FROM (SELECT match_ver FROM stage2_solver_shadow ORDER BY ts DESC LIMIT 1)", // 판(mig 0163) 섞임 방지
     )
     .fetch_one(&pool)
     .await

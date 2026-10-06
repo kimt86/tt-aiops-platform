@@ -4333,6 +4333,33 @@ fn soon_free_quantile(fracs: &[f32; 9], p: f32) -> Option<i64> {
     SOON_FREE_POINTS.iter().zip(fracs.iter()).find(|(_, &f)| f >= p).map(|(&s, _)| s)
 }
 
+/// 간선 자격 (mig 0163) — 1계층(내보내는 짝)은 지금 빈 트럭만. TOS 는 일하는 트럭에 예약을 안 받는다.
+/// 2계층(계획)은 지금 빈 트럭, 또는 곧 빌 트럭 중 자격 시각 q80 이 그 묶음 첫 미도래 슬롯의 배차 마감 안인 것.
+fn edge_eligible(tier: u8, free: bool, q80: Option<i64>, first_ms: Option<i64>, now_ms: i64) -> bool {
+    if tier == 1 {
+        return free;
+    }
+    free || matches!((q80, first_ms), (Some(q), Some(f)) if now_ms + q * 1000 <= f)
+}
+
+/// 스왑 동결 (mig 0163) — 마지막 스왑 추천이 마지막 자유보다 뒤면 그 배차 동안은 다시 스왑하지 않는다.
+/// 자유 기록이 없으면(3시간 창 밖) 스왑 이력이 있는 한 동결.
+fn swap_is_frozen(last_swap: Option<DateTime<Utc>>, last_free: Option<DateTime<Utc>>) -> bool {
+    last_swap.is_some_and(|s| last_free.is_none_or(|f| s > f))
+}
+
+/// 스왑 후보의 거리 조건 — 목적지(픽업 지점)에서 SWAP_MIN_M 이상 떨어져 있어야 한다.
+fn swap_far_enough(dist_m: f64) -> bool {
+    dist_m >= SWAP_MIN_M
+}
+
+/// 스왑 마감 보호 (2026-10-06 사용자 결정): 새 트럭의 도착이 그 작업의 필요 시각보다 뒤이고
+/// **원래 트럭보다도 뒤**면 이 스왑이 그 작업을 늦게 만든 것이다 → 하지 않는다.
+/// (원래부터 늦던 작업이 더 늦어지지 않는 스왑은 막지 않는다.)
+fn swap_makes_late(new_arr_ms: i64, old_arr_ms: i64, need_ms: i64) -> bool {
+    new_arr_ms > need_ms && new_arr_ms > old_arr_ms
+}
+
 /// 스왑 고르기 (mig 0163): 이미 배차되고 픽업 전인 트럭들끼리 행선지를 맞바꾸는 쌍.
 /// `own[i]` = 트럭 i 가 자기 작업까지 빈 차 주행(초), `cross(i, j)` = 트럭 i 가 트럭 j 의 작업까지(같은
 /// 작업유형일 때만 Some). 이득 = own[i]+own[j] − cross(i,j) − cross(j,i) ≥ `min_gain` 인 쌍을 이득 큰
@@ -5230,7 +5257,7 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
             .ok()
             .map(|rows| rows.into_iter().collect());
             #[allow(clippy::type_complexity)]
-            let vehicles_built: (Vec<(String, f64, f64, i64, &'static str)>, Vec<HeldCandidateOut>, Vec<PoolRow>, Vec<(String, i64, &'static str, &'static str, Option<String>)>, Vec<SwapCand>) = {
+            let vehicles_built: (Vec<(String, f64, f64, i64, &'static str)>, Vec<HeldCandidateOut>, Vec<PoolRow>, Vec<(String, i64, &'static str, &'static str, Option<String>)>, Vec<SwapCand>, HashMap<String, (f64, f64)>) = {
                 let map = lm.devices.read().await;
                 let plc = lm.plc.read().await;
                 let centroids = lm.centroids.read().await;
@@ -5254,6 +5281,9 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                 let mut n_ds_anchor: usize = 0;
                 // 스왑 후보(mig 0163) — 배차됨·픽업 전·신선 GPS·목적지 500m 밖·미동결
                 let mut swap_cands: Vec<SwapCand> = Vec::new();
+                // 곧 빌 트럭이 **짐을 내릴 자리**(2026-10-06 사용자 결정·리뷰 SHOULD_FIX 2) — 계획 비용은 트럭이 지금
+                // 있는 자리가 아니라 비는 자리에서 센다(적하 = 안벽 크레인, 양하 = 야드 블록). 모르면 지금 자리로 대신한다.
+                let mut drop_pos: HashMap<String, (f64, f64)> = HashMap::new();
                 // 위치를 장치 목록에서 못 찾은 후보(침묵 >600s) — 뒤에서 truck_pos_hist 로 한 번에 채운다
                 let mut need_pos: Vec<(String, i64, &'static str, &'static str, Option<String>)> = Vec::new(); // (ytno, base, state, reason, jobtype)
 
@@ -5302,12 +5332,10 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                                 cranes.get(r_qc.as_str()).copied().or_else(|| centroids.get(r_qc.as_str()).map(|c| (c.lat, c.lon)))
                             };
                             let fresh = dev.filter(|p| (now - p.last_seen_ms) / 1000 <= STALE_AFTER_S);
-                            let frozen = swap_frozen.as_ref().map_or(true, |fz| {
-                                fz.get(id).is_some_and(|&last| sig.free.is_none_or(|f| last > f))
-                            });
+                            let frozen = swap_frozen.as_ref().map_or(true, |fz| swap_is_frozen(fz.get(id).copied(), sig.free));
                             if let (Some(p), Some(d), false) = (fresh, dest, frozen) {
                                 let dist = dist_m((p.lat, p.lon), d);
-                                if dist >= SWAP_MIN_M {
+                                if swap_far_enough(dist) {
                                     swap_cands.push(SwapCand {
                                         ytno: id.clone(), jobtype: r_jt.clone(), qc: r_qc.clone(), queuename: r_queue.clone(),
                                         contno: r_cont.clone(), lat: p.lat, lon: p.lon, dlat: d.0, dlon: d.1, dist_m: dist,
@@ -5387,6 +5415,24 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                     };
                     if base > pool_h_s { continue; } // 명백히 작업 중 — 이번 틱 풀 밖
                     if reason == "inflight_anchor" && jt_tos == Some("DS") { n_ds_anchor += 1; }
+                    // 내릴 자리: 단말의 목적지 > 래치된 목적지 > TOS 배차행 목적지(옛 held 가지와 같은 순서).
+                    // 유형과 짝이 맞을 때만(적하 = 크레인 코드 · 양하 = 블록) — 선배정 Q 의 다음 작업 목적지가
+                    // 섞여 들어오는 것을 막는다.
+                    {
+                        let code = dev.and_then(|p| p.topos1.as_deref().filter(|s| !s.is_empty()).or(p.latched_topos.as_deref()))
+                            .or(sig.topos.as_deref());
+                        let at = code.and_then(|code| {
+                            let is_cr = is_crane_code(code);
+                            let side_ok = match jt_tos { Some("LD") => is_cr, Some("DS") => !is_cr, _ => false };
+                            if !side_ok { return None; }
+                            if is_cr {
+                                cranes.get(code).copied().or_else(|| centroids.get(code).map(|c| (c.lat, c.lon)))
+                            } else {
+                                centroids.get(code).or_else(|| centroids.get(block_prefix(code))).map(|c| (c.lat, c.lon))
+                            }
+                        });
+                        if let Some(d) = at { drop_pos.insert(id.clone(), d); }
+                    }
                     match dev {
                         Some(p) => {
                             let src = if age.unwrap_or(i64::MAX) <= STALE_AFTER_S { "gps_live" } else { "gps_stale" };
@@ -5423,14 +5469,14 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                     let n_gps = rows.iter().filter(|r| r.reason == "gps_free").count();
                     tracing::info!(total = v.len(), free_tos = n_free, inflight = n_inf, gps_free = n_gps, swap_cands = swap_cands.len(), ds_anchor = n_ds_anchor, horizon_s = pool_h_s, "후보 풀 (pool_ver 9)");
                 }
-                (v, held, rows, need_pos, swap_cands)
+                (v, held, rows, need_pos, swap_cands, drop_pos)
             };
             // ── 3) 장치 목록에 없는 후보의 위치: truck_pos_hist 마지막 행 ──────────────────────
             // ★락을 놓은 뒤에 질의한다(2026-08-19 리뷰). 위 블록이 끝나며 devices/plc/centroids/assigned_pool
             //   읽기 가드가 전부 풀린다 — 종전에는 이 질의의 await 를 가드가 넘어가, 매 분 웹소켓 인제스트
             //   (plc/centroids write)가 질의 시간만큼 멈췄다(이 파일 3455행 "no two locks held" 규약).
-            let (vehicles, held_out, pool_rows, swap_cands) = {
-                let (mut v, mut held, mut rows, need_pos, swap_cands) = vehicles_built;
+            let (vehicles, held_out, pool_rows, swap_cands, drop_pos) = {
+                let (mut v, mut held, mut rows, need_pos, swap_cands, drop_pos) = vehicles_built;
                 if !need_pos.is_empty() {
                     let ids: Vec<String> = need_pos.iter().map(|x| x.0.clone()).collect();
                     // ⚠`DISTINCT ON (ytno) … ORDER BY ytno, ts DESC` 는 PK(ytno,ts)를 역방향으로 못 타 2일치를
@@ -5468,7 +5514,7 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                             "후보 트럭인데 쓸 위치가 없어 뺐다 (위치 없음 / 나이 상한 초과)");
                     }
                 }
-                (v, held, rows, swap_cands)
+                (v, held, rows, swap_cands, drop_pos)
             };
             // ★낡은 위치 계기 (2026-08-21 2차 리뷰) — 재현율은 위치 오차를 못 본다. GPS 피드가 죽으면 장치 목록이
             //   10분 뒤 비고 전 후보가 `pos_hist` 로 넘어가, 상한(3h)까지 **얼어붙은 좌표로 추천이 계속 나간다**
@@ -5553,22 +5599,37 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                     }
                 }
             };
+            // candidate work + pickup coord — 스왑 마감 보호도 이 목록의 크레인 시각을 쓰므로 스왑보다 먼저 읽는다.
+            let Ok((_, work)) = crate::workpool::stage2_work_candidates(pool.clone()).await else { continue };
             // ── 스왑 단계 (mig 0163·2026-10-06 사용자 확정) ─────────────────────────────────────────
             // 이미 배차되고 픽업 전인 짝들끼리만 행선지를 맞바꾼다 — 새 작업·새 빈 트럭은 끼지 않는다(TOS 도
             // 기 패칭 결과 안에서만 스왑). 억제: 이득 ≥ SWAP_MIN_GAIN_S · 둘 다 목적지 500m 밖(후보 수집에서
             // 걸렀다) · 한 트럭은 자유 사이 1회(동결, 후보 수집에서 걸렀다) · 같은 작업유형끼리만.
             // 작업이 트럭을 고르는 구조라 순서는 이미 정해졌고, 여기서는 빈 차 주행만 본다(긴급도 항 없음).
-            // 후보 풀·작업 유무와 무관하게 돈다 — 그래서 아래 `continue` 들보다 앞에 둔다.
+            // 후보 풀 유무와 무관하게 돈다 — 그래서 아래 `continue` 들보다 앞에 둔다.
+            // ★마감 보호(2026-10-06 사용자 결정): 바꾼 트럭이 그 작업의 크레인 필요 시각보다 늦게 닿고, 원래 트럭보다도
+            //   늦으면 그 방향은 없다(쌍 전체가 무산). 도착 = 지금 + p90 주행 + 픽업 뒤 인계까지(lead_extra) — 매처의
+            //   실행가능 판정과 같은 식. 필요 시각을 모르는 작업(목록에 없음)은 판정 불능이라 스왑하지 않는다.
             let swap_cand_n = swap_cands.len() as i32;
             let mut swap_n: i32 = 0;
             let mut swap_gain_total: i64 = 0;
             if swap_cands.len() >= 2 {
-                let own: Vec<i64> = swap_cands.iter()
-                    .map(|c| cost(c.lat, c.lon, c.dlat, c.dlon, c.jobtype == "LD").0).collect();
+                let need_by_cont: HashMap<&str, i64> = work.iter()
+                    .filter_map(|w| w.work_eta_ts.map(|e| (w, e.timestamp_millis())))
+                    .flat_map(|(w, e)| w.contnos.iter().map(move |c| (c.as_str(), e)))
+                    .collect();
+                let now_ms = Utc::now().timestamp_millis();
+                let arr_ms = |p90: i64, jt: &str| now_ms + (p90 + lead_extra.get(jt).copied().unwrap_or(0)) * 1000;
+                let own_pp: Vec<(i64, i64)> = swap_cands.iter()
+                    .map(|c| { let (p50, p90, _) = cost(c.lat, c.lon, c.dlat, c.dlon, c.jobtype == "LD"); (p50, p90) }).collect();
+                let own: Vec<i64> = own_pp.iter().map(|x| x.0).collect();
                 let cross = |i: usize, j: usize| -> Option<i64> {
                     let (a, b) = (&swap_cands[i], &swap_cands[j]);
                     if a.jobtype != b.jobtype { return None; }
-                    Some(cost(a.lat, a.lon, b.dlat, b.dlon, a.jobtype == "LD").0)
+                    let need = b.contno.as_deref().and_then(|c| need_by_cont.get(c).copied())?;
+                    let (p50, p90, _) = cost(a.lat, a.lon, b.dlat, b.dlon, a.jobtype == "LD");
+                    if swap_makes_late(arr_ms(p90, &b.jobtype), arr_ms(own_pp[j].1, &b.jobtype), need) { return None; }
+                    Some(p50)
                 };
                 let picks = pick_swaps(&own, cross, SWAP_MIN_GAIN_S);
                 let sts = Utc::now();
@@ -5592,9 +5653,13 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                         Err(e) => { if sw_err.is_none() { sw_err = Some(e.to_string()); } }
                     }
                 }
-                // ⚠조용히 삼키면 동결이 안 걸린다(다음 틱이 같은 스왑을 또 낸다) — 소리를 낸다.
+                // ⚠조용히 삼키면 동결이 안 걸린다(다음 틱이 같은 스왑을 또 낸다) — 경보를 낸다(리뷰 SHOULD_FIX 5).
+                //   스왑 0건은 정상값이라 DEADMAN 으로는 못 잡는다. 실배차 연결 때는 기록이 전송보다 먼저여야 한다.
                 if let Some(e) = sw_err {
                     tracing::warn!(error = %e, "stage2_swap_shadow 기록 실패 — 동결이 안 걸려 같은 스왑이 반복될 수 있다. 마이그레이션 0163 확인");
+                    crate::db::alert(&pool, "stage2_swap", "insert_failed", "warn",
+                        "스왑 추천 기록이 실패했다 — 동결이 안 걸려 같은 스왑이 반복될 수 있다",
+                        Some(&e)).await;
                 }
             }
             if tick % 30 == 20 {
@@ -5603,8 +5668,6 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
             if vehicles.is_empty() {
                 continue;
             }
-            // candidate work + pickup coord
-            let Ok((_, work)) = crate::workpool::stage2_work_candidates(pool.clone()).await else { continue };
             let (cranes_now, centroids_now): (HashMap<String, (f64, f64)>, HashMap<String, (f64, f64)>) = {
                 let map = lm.devices.read().await;
                 let cr = map.iter()
@@ -5695,7 +5758,8 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
             let reliability: HashMap<(String, String, i32), [f32; 9]> =
                 sqlx::query_as::<_, (String, String, i32, f32, f32, f32, f32, f32, f32, f32, f32, f32)>(
                     "SELECT reason, jobtype, pred_b, f60, f120, f180, f300, f450, f600, f900, f1200, f1800
-                       FROM learn_soon_free_reliability WHERE n >= $1",
+                       FROM learn_soon_free_reliability WHERE n >= $1
+                        AND built_at > now() - interval '2 hours'", // 갱신이 멈추면 곧 빌 트럭을 안 쓴다(리뷰 CONSIDER)
                 )
                 .bind(SOON_FREE_MIN_N)
                 .fetch_all(&pool).await
@@ -5881,7 +5945,9 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                 // 2계층 곧 빌 트럭 자격의 기준 = 이 묶음의 첫 미도래 슬롯 배차 마감(mig 0163)
                 let first_ms = if w_tier == 2 { fut_first_ms.get(&oi).copied() } else { None };
                 for (vi, v) in vehicles.iter().enumerate() {
-                    let (p50, p90, tier) = cost(v.1, v.2, wlat, wlon, w.jobtype == "LD");
+                    // 곧 빌 트럭은 내릴 자리에서 센다(지금 빈 트럭은 지금 자리) — 2026-10-06 사용자 결정.
+                    let (sx, sy) = if veh_info[vi].0 { (v.1, v.2) } else { drop_pos.get(&v.0).copied().unwrap_or((v.1, v.2)) };
+                    let (p50, p90, tier) = cost(sx, sy, wlat, wlon, w.jobtype == "LD");
                     let arr = v.3 + p50; // empty travel to the pickup
                     // 1계층 간선은 2계층 행을 뺀 prev(종전 입력 그대로), 2계층 간선은 계층 불문(mig 0161).
                     let prevk = if w_tier == 2 { prev_any.get(&v.0) } else { prev.get(&v.0) };
@@ -5900,12 +5966,7 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                     // 간선 비용 = 빈 차 주행(p50) + 들락날락 벌점. 곧 빌 트럭의 '비기까지 시간'은 비용에 안 넣는다:
                     //   계획은 마감에 내보내므로 그 전에만 비면 기다림이 없다(자격이 그걸 보장한다).
                     let (free, q80, _) = &veh_info[vi];
-                    let eligible = if w_tier == 1 {
-                        *free
-                    } else {
-                        *free || matches!((q80, first_ms), (Some(q), Some(f)) if now + q * 1000 <= f)
-                    };
-                    if eligible && p50 < 1800 {
+                    if edge_eligible(w_tier, *free, *q80, first_ms, now) && p50 < 1800 {
                         edges.push((vi, wpos, p50 + switch_pen)); // prune the far tail (never in the optimum)
                     }
                     row.push((arr, v.3 + p90, tier, switched));
@@ -5930,8 +5991,11 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                 }
                 let deadline = deadlines[wpos];
                 // 최적 매칭과 같은 허용 간선만(mig 0163 — 1계층은 지금 빈 트럭, 2계층은 자격 있는 트럭).
+                // 계획(2계층)은 최적 매칭처럼 주행 < PLAN_VALUE_S 일 때만 선다 — 같은 규칙이어야 절감률이
+                // '덜 배정해서' 생긴 차이를 '더 아꼈다'로 읽지 않는다(리뷰 SHOULD_FIX 1).
                 let mut cand: Vec<(usize, i64)> = edges_by_w[wpos].iter()
                     .filter(|(vi, _)| !used.contains(vi))
+                    .filter(|&&(_, c)| tier_w[wpos] == 1 || c < PLAN_VALUE_S)
                     .copied()
                     .collect();
                 cand.sort_by_key(|c| c.1);
@@ -5966,6 +6030,13 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
             let cover1 = priority_cover(n_v, &caps1, &edges1);
             let t1_cov_alone: i64 = cover1.iter().sum();
             let t1_skip_n = priority_skips(n_v, &caps1, &cover1, &edges1);
+            // 갈 수 있는 트럭이 아예 없던 급한 작업 슬롯 — 순서 위반이 아니라 도달 불가(DONE 의 '따로 센다').
+            let t1_unreach_n: i64 = {
+                let adj1 = bucket_adjacency(n_v, caps1.len(), &edges1);
+                caps1.iter().zip(&adj1).filter(|(_, a)| a.is_empty()).map(|(&c, _)| c.max(0)).sum()
+            };
+            let n_soon_drop: i32 = vehicles.iter().zip(&veh_info)
+                .filter(|(v, i)| !i.0 && drop_pos.contains_key(&v.0)).count() as i32;
             let sink: Vec<(i64, i64)> = (0..driving.len())
                 .map(|wp| if tier_w[wp] == 1 { (cover1[wp], T1_COVER_BONUS) } else { (caps[wp], PLAN_VALUE_S) })
                 .collect();
@@ -6070,9 +6141,10 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
             let gap_pct = if opt_cost > 0 { 100.0 * (greedy_cost - opt_cost) as f64 / opt_cost as f64 } else { 0.0 };
             let solver_ins = sqlx::query(
                 "INSERT INTO stage2_solver_shadow (ts,tick,n_trucks,n_works,greedy_n,greedy_cost_s,optimal_n,optimal_cost_s,gap_pct,greedy_miss,optimal_miss,dep_tier_on,dep_tier0_n,dep_urgent_slots,dep_null_n,dep_demoted_n,ab_block,ab_warmup,works_raw,need_horizon_on,works_no_eta,works_no_coord,pool_new_n,pool_overlap_n,trucks_held_n,pool_overdue_n,pool_mode,due_buckets_n,self_cover_n,workpool_age_s,wake_src,t2_works,t2_slots,t2_assign_n,
-                     match_ver,n_free,n_soon_ok,t1_cov_alone,t1_cov,t1_skip_n,seq_t1_cost_s,seq_t2_cost_s,seq_t2_n,joint_t1_cost_s,joint_t2_cost_s,joint_t2_n,swap_cand_n,swap_n,swap_gain_s)
+                     match_ver,n_free,n_soon_ok,t1_cov_alone,t1_cov,t1_skip_n,seq_t1_cost_s,seq_t2_cost_s,seq_t2_n,joint_t1_cost_s,joint_t2_cost_s,joint_t2_n,swap_cand_n,swap_n,swap_gain_s,
+                     t1_unreach_n,n_soon_drop)
                  VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,
-                         $35,$36,$37,$38,$39,$40,$41,$42,$43,$44,$45,$46,$47,$48,$49) ON CONFLICT (ts) DO NOTHING",
+                         $35,$36,$37,$38,$39,$40,$41,$42,$43,$44,$45,$46,$47,$48,$49,$50,$51) ON CONFLICT (ts) DO NOTHING",
             )
             .bind(ts).bind(tick as i64).bind(vehicles.len() as i32).bind(driving.len() as i32)
             .bind(greedy_n).bind(greedy_cost).bind(assign.len() as i32).bind(opt_cost).bind(gap_pct as f32)
@@ -6104,6 +6176,7 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
             .bind(seq_t1_cost).bind(seq_t2_cost).bind(seq_t2_n)
             .bind(joint_t1_cost).bind(joint_t2_cost).bind(t2_assign_n)
             .bind(swap_cand_n).bind(swap_n).bind(swap_gain_total)
+            .bind(t1_unreach_n as i32).bind(n_soon_drop)
             .execute(&pool).await;
             // 생산 0 경보 (mig 0142): 트럭도 작업도 있는데 추천이 3틱 연속 0이면 매칭이 죽은
             // 것이다. 총정지는 stage2_match_shadow DEADMAN(30분)이 백스톱으로 잡지만, 이건
@@ -7413,6 +7486,7 @@ mod pool_tests {
 #[cfg(test)]
 mod job_driven_tests {
     use super::*;
+    use chrono::TimeZone;
 
     // ── 층별 트럭 상한 ─────────────────────────────────────────────────────────────────────
 
@@ -7584,6 +7658,50 @@ mod job_driven_tests {
         let p = pick_swaps(&own, cross, SWAP_MIN_GAIN_S);
         assert_eq!(p.len(), 1);
         assert_eq!((p[0].0, p[0].1), (0, 1));
+    }
+
+    // ── 리뷰 반영: 핵심 불변식 (2026-10-06) ─────────────────────────────────────────────────
+
+    #[test]
+    fn 급한_작업에는_지금_빈_트럭만_간선을_얻는다() {
+        let now = 1_000_000i64;
+        // 곧 빌 트럭은 자격 시각이 아무리 빨라도(0초) 1계층 간선이 없다.
+        assert!(!edge_eligible(1, false, Some(0), Some(now + 10_000_000), now));
+        assert!(edge_eligible(1, true, Some(0), None, now));
+    }
+
+    #[test]
+    fn 계획에는_자격_시각이_마감_안인_곧_빌_트럭만_들어간다() {
+        let now = 1_000_000i64;
+        let first = now + 600_000; // 10분 뒤 배차 마감
+        assert!(edge_eligible(2, false, Some(600), Some(first), now), "정확히 마감에 비면 자격");
+        assert!(!edge_eligible(2, false, Some(601), Some(first), now), "마감 뒤에 비면 자격 없음");
+        assert!(!edge_eligible(2, false, None, Some(first), now), "표에 없는 갈래는 자격 없음");
+        assert!(edge_eligible(2, true, None, None, now), "지금 빈 트럭은 계획에도 들어간다");
+    }
+
+    #[test]
+    fn 스왑은_자유_사이에_한_번만() {
+        let t = |s: i64| Utc.timestamp_opt(1_780_000_000 + s, 0).unwrap();
+        assert!(!swap_is_frozen(None, Some(t(0))), "스왑 이력 없음");
+        assert!(swap_is_frozen(Some(t(10)), Some(t(0))), "자유 뒤에 스왑했으면 동결");
+        assert!(!swap_is_frozen(Some(t(0)), Some(t(10))), "그 뒤 다시 비었으면 풀림");
+        assert!(swap_is_frozen(Some(t(0)), None), "자유 기록이 없으면 동결(닫는 쪽)");
+    }
+
+    #[test]
+    fn 목적지_500m_안의_트럭은_스왑하지_않는다() {
+        assert!(!swap_far_enough(SWAP_MIN_M - 1.0));
+        assert!(swap_far_enough(SWAP_MIN_M));
+    }
+
+    #[test]
+    fn 스왑이_작업을_늦게_만들면_하지_않는다() {
+        let need = 1_000_000i64;
+        assert!(swap_makes_late(need + 1, need - 50, need), "제때 오던 작업이 늦어진다");
+        assert!(!swap_makes_late(need - 1, need + 500, need), "늦던 작업이 제때가 된다");
+        assert!(!swap_makes_late(need + 100, need + 200, need), "원래도 늦었고 덜 늦어진다");
+        assert!(swap_makes_late(need + 300, need + 200, need), "원래도 늦었는데 더 늦어진다");
     }
 
     #[test]

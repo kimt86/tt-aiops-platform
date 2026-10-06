@@ -74,7 +74,8 @@ COMMENT ON TABLE stage2_swap_shadow IS
   '스왑 추천(mig 0163): 이미 배차되고 픽업 전인 두 트럭의 행선지를 맞바꾸는 추천. 새 작업·새 빈 트럭은 '
   '끼지 않는다(사용자 확인 — TOS 도 기 패칭 결과 안에서만 스왑). 억제 3조건: 이득 ≥ 180초 · 둘 다 '
   '목적지 500m 밖 · 한 트럭은 자유 사이(한 번의 배차) 동안 1회만(그 뒤 이 표에 있으면 동결). 같은 '
-  '작업유형끼리만. 그림자라 TOS 가 적용하지 않으므로 같은 짝이 남아도 다시 추천하지 않는다(동결).';
+  '작업유형끼리만. 그림자라 TOS 가 적용하지 않으므로 같은 짝이 남아도 다시 추천하지 않는다(동결). '
+  '마감 보호(2026-10-06 사용자 결정): 바꾼 트럭이 그 작업의 크레인 필요 시각보다 늦고 원래 트럭보다도 늦게 닿으면 하지 않는다.';
 
 -- ── 판별자 ─────────────────────────────────────────────────────────────────────────────────
 ALTER TABLE stage2_match_shadow ADD COLUMN IF NOT EXISTS match_ver int2;
@@ -110,6 +111,12 @@ ALTER TABLE stage2_solver_shadow ADD COLUMN IF NOT EXISTS joint_t2_n int4;
 ALTER TABLE stage2_solver_shadow ADD COLUMN IF NOT EXISTS swap_cand_n int4;
 ALTER TABLE stage2_solver_shadow ADD COLUMN IF NOT EXISTS swap_n int4;
 ALTER TABLE stage2_solver_shadow ADD COLUMN IF NOT EXISTS swap_gain_s int8;
+ALTER TABLE stage2_solver_shadow ADD COLUMN IF NOT EXISTS t1_unreach_n int4;
+ALTER TABLE stage2_solver_shadow ADD COLUMN IF NOT EXISTS n_soon_drop int4;
+COMMENT ON COLUMN stage2_solver_shadow.t1_unreach_n IS
+  '급한 작업 슬롯 중 갈 수 있는(1,800초 안) 지금 빈 트럭이 아예 없던 수 — 순서 위반이 아니라 도달 불가(mig 0163·리뷰 반영).';
+COMMENT ON COLUMN stage2_solver_shadow.n_soon_drop IS
+  '곧 빌 트럭 중 내릴 자리(적하=크레인·양하=블록)를 알아 그 자리에서 계획 비용을 센 수. 나머지는 지금 자리로 대신(mig 0163·2026-10-06 사용자 결정).';
 COMMENT ON COLUMN stage2_solver_shadow.match_ver IS
   '매칭 규칙 판(stage2_match_shadow.match_ver 와 같은 값). NULL = mig 0163 경계 이전.';
 COMMENT ON COLUMN stage2_solver_shadow.n_free IS '지금 빈 트럭 수(1계층 후보 = 1계층 슬롯 상한). mig 0163.';
