@@ -5770,7 +5770,10 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
             // 비는 비율이 4~8%였다(2026-10-01 실측). 표가 비거나 갈래 표본이 모자라면 자격 없음(모르면 안 쓴다).
             let reliability: HashMap<(String, String, i32), [f32; 9]> =
                 sqlx::query_as::<_, (String, String, i32, f32, f32, f32, f32, f32, f32, f32, f32, f32)>(
-                    "SELECT reason, jobtype, pred_b, f60, f120, f180, f300, f450, f600, f900, f1200, f1800
+                    // ⚠비율 컬럼은 real/bigint 나눗셈이라 실제 타입이 float8 이다 — f32 로 받으려면 여기서 float4 로 캐스트한다
+                    //   (안 하면 디코딩이 매 틱 실패해 곧 빌 트럭이 계획에서 통째로 빠진다 — 10-06 첫 배포에서 실제로 그랬다).
+                    "SELECT reason, jobtype, pred_b, f60::float4, f120::float4, f180::float4, f300::float4, f450::float4,
+                            f600::float4, f900::float4, f1200::float4, f1800::float4
                        FROM learn_soon_free_reliability WHERE n >= $1
                         AND built_at > now() - interval '2 hours'", // 갱신이 멈추면 곧 빌 트럭을 안 쓴다(리뷰 CONSIDER)
                 )
