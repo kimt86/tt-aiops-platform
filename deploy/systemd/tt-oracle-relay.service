@@ -1,0 +1,31 @@
+[Unit]
+Description=tt-aiops-platform shared SSH connection to the Oracle relay host (ControlMaster for remote-toolbox-sql)
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+# 2026-10-08. 1분 추출 유닛 5개가 Oracle 조회마다 중계 서버에 새로 SSH 접속했다(접속 한 번 0.66초).
+# 여기서 연결 하나를 열어 두고 remote-toolbox-sql 이 그 소켓으로 세션만 연다(0.16초).
+# 이 유닛이 죽어 있어도 수집은 멈추지 않는다 — 소켓이 없으면 스크립트의 ssh 가 직접 접속한다.
+# 소켓 이름(%%C = 사용자·호스트·포트 해시)은 스크립트의 CONTROL_NAME 과 같아야 한다.
+MemoryMax=256M
+MemorySwapMax=0
+# 지난번 비정상 종료가 남긴 소켓 파일이 있으면 -M 이 "already exists, disabling multiplexing"
+# 으로 주인 노릇을 포기한 채 연결만 붙들고 있게 된다 — 시작 전에 지운다.
+ExecStartPre=-/bin/sh -c 'rm -f "$XDG_RUNTIME_DIR"/tt-oracle-relay-*'
+# ServerAlive 5초×3: 끊긴 줄 모르고 붙들고 있는 시간을 15초로 묶는다(그 사이 들어온 조회는 실패 →
+# 다음 분에 재시도). ControlPersist=no: 이 프로세스가 곧 연결이다(포그라운드, Restart 가 살린다).
+ExecStart=/usr/bin/ssh -N -M \
+  -o BatchMode=yes \
+  -o StrictHostKeyChecking=accept-new \
+  -o ConnectTimeout=5 \
+  -o ServerAliveInterval=5 \
+  -o ServerAliveCountMax=3 \
+  -o ControlPersist=no \
+  -o ControlPath=%t/tt-oracle-relay-%%C \
+  aiadmin@100.109.43.18
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

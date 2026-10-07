@@ -13,6 +13,7 @@ Unit files are named `tt-*`. Two families live here and they are deliberately ke
 |---|---|
 | `tt-api` | read-only axum API over PostgreSQL |
 | `tt-ws-bridge` | SSH tunnel for the live position feed |
+| `tt-oracle-relay` | shared SSH connection (ControlMaster) to the Oracle relay — `remote-toolbox-sql` opens sessions on it instead of a new login per query (0.66→0.16 s). If it is down the script connects directly; nothing stops. |
 
 ## Timers — critical extraction
 

@@ -130,7 +130,7 @@
       <tr><td>tt-cycle-recon</td><td><code>psql populate_tt_cycle_recon.sql</code></td><td>10분</td><td>— (psql)</td></tr>
     </tbody>
   </table></div>
-  <div class="kc-cal note"><span class="h">추출기 유닛이 아닌 것</span><p><code>tt-ws-bridge</code>(GPS 웹소켓 SSH 터널)·<code>tt-scenario-*</code>(별 바이너리 <code>scengen</code>·격리된 시나리오 서브시스템)는 추출기가 아닙니다. <code>tt-move-log</code>·<code>tt-cycle-recon</code>은 추출기 바이너리가 아니라 <strong>psql</strong>로 Postgres 조인만(Oracle 무접촉).</p></div>
+  <div class="kc-cal note"><span class="h">추출기 유닛이 아닌 것</span><p><code>tt-ws-bridge</code>(GPS 웹소켓 SSH 터널)·<code>tt-oracle-relay</code>(중계 서버로 가는 SSH 연결 하나를 늘 열어 두는 유닛 — 추출기가 조회할 때마다 새로 접속하던 0.66초를 0.16초로 줄인다. 2026-10-08부터. 이 유닛이 멈춰 있어도 추출기는 예전처럼 직접 접속하므로 수집은 멈추지 않는다)·<code>tt-scenario-*</code>(별 바이너리 <code>scengen</code>·격리된 시나리오 서브시스템)는 추출기가 아닙니다. <code>tt-move-log</code>·<code>tt-cycle-recon</code>은 추출기 바이너리가 아니라 <strong>psql</strong>로 Postgres 조인만(Oracle 무접촉).</p></div>
 
   <h2>8. 데이터 흐름 &amp; 소비자</h2>
   <p>어느 Postgres 테이블이 어느 API 기능을 먹이는가(<code>crates/api/src</code> 실측):</p>

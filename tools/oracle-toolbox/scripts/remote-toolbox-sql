@@ -19,6 +19,13 @@
   INDEX 힌트가 빠지면 MCH_OPERATION 전체 탐색이 될 수 있다(2026-07-15 부하 사고). 막히면
   조용히 느려지는 대신 오류로 드러나게 둔다.
 
+SSH 연결 재사용 (2026-10-08): 접속 한 번(Tailscale SSH 인증)이 0.66초인데 1분 추출 유닛 5개가
+  매 조회마다 새로 접속하고 있었다. 상시 유닛 `tt-oracle-relay` 가 연결 하나를 열어 두고(ssh -M),
+  여기서는 그 소켓으로 세션만 연다(0.16초). 소켓이 없거나 죽었으면 ssh 가 알아서 예전처럼 직접
+  접속한다 — 공용 연결이 수집의 단일 장애점이 되지 않는다. 소켓 이름의 %C 는 (사용자·호스트·포트)
+  해시라 TT_TOOLBOX_HOST 를 바꾸면 다른 소켓을 찾다 직접 접속으로 넘어간다(엉뚱한 서버로 가지 않음).
+  끄기: TT_TOOLBOX_CONTROL_PATH=none.
+
 사용: remote-toolbox-sql oracle-prod --file q.sql [--timeout 90]
       remote-toolbox-sql oracle-prod -c "select 1 as one from dual"
 """
@@ -36,6 +43,8 @@ from pathlib import Path
 DEFAULT_HOST = "aiadmin@100.109.43.18"  # 2026-09-30 중계 서버 교체(옛 100.124.171.118)
 DEFAULT_URL = "http://100.109.43.18:35000"  # 1.x 는 127.0.0.1 이 아니라 이 주소에만 뜬다(--allowed-hosts)
 DEFAULT_PROTO = "mcp"
+# tt-oracle-relay.service 의 ControlPath 와 같아야 한다(%t = XDG_RUNTIME_DIR).
+CONTROL_NAME = "tt-oracle-relay-%C"
 
 TOOLS = {
     "oracle-prod": "oracle-prod-execute-sql",
@@ -137,7 +146,14 @@ def main() -> int:
         f"-H 'content-type: application/json' {accept}-X POST {shlex.quote(endpoint)} --data-binary @-"
     )
     # BatchMode: 비밀번호 프롬프트에 매달리지 않고 바로 실패한다(추출기는 무인 실행).
-    cmd = ["ssh", "-o", "BatchMode=yes", "-o", f"ConnectTimeout={args.connect_timeout}", host, remote]
+    control = os.environ.get("TT_TOOLBOX_CONTROL_PATH")
+    if not control:
+        rt = os.environ.get("XDG_RUNTIME_DIR")
+        control = f"{rt}/{CONTROL_NAME}" if rt else "none"
+    # ControlMaster=no: 소켓을 쓰기만 하고 스스로 주인이 되지 않는다(주인은 상시 유닛 몫 —
+    # oneshot 유닛이 주인이 되면 유닛이 끝날 때 같이 죽는다).
+    cmd = ["ssh", "-o", "BatchMode=yes", "-o", f"ConnectTimeout={args.connect_timeout}",
+           "-o", "ControlMaster=no", "-o", f"ControlPath={control}", host, remote]
     proc = subprocess.run(cmd, input=json.dumps(body), text=True, capture_output=True)
     sys.stderr.write(proc.stderr)
     if proc.returncode != 0:
