@@ -79,7 +79,7 @@
 ```
 cargo build --release -p tt-api        # API 서버 (바이너리 이름은 api)
 cargo build --release -p tt-extractor  # TOS 추출기 (바이너리 이름은 extractor)
-cargo test --workspace                 # 64개, 전부 통과가 기준
+cargo test --workspace                 # 127개(2026-10-08 실측), 전부 통과가 기준
 ```
 
 ⚠ 패키지 이름과 바이너리 이름이 다르다(패키지 `tt-api`/바이너리 `api`). `-p api` 처럼

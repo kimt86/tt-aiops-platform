@@ -10,6 +10,9 @@ OnFailure=tt-unit-failed@%n.service
 MemoryMax=2G
 MemorySwapMax=0
 Type=oneshot
+# 멈춘 실행이 끝나지 않으면 타이머가 다음 회차를 건너뛰고 실패 경보도 안 뜬다 — 넘기면 실패로 끊어 OnFailure 가
+# 울리게 한다(2026-10-08·tt-tos-avail 선례). 실측 소요 p99 0.5·max 1.1초.
+TimeoutStartSec=180
 EnvironmentFile=%h/projects/tt-aiops-platform/.env
 ExecStart=%h/projects/tt-aiops-platform/target/release/extractor tick --shift --tier t1 --target oracle-prod
 Nice=15
