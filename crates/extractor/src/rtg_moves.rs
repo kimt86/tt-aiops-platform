@@ -52,6 +52,12 @@ struct MoveRow {
     pos2: Option<String>,
     pos3: Option<String>,
     pos4: Option<String>,
+    // ISO 6346 size-type ("22G1", "45R1", "L5G1"), from the row we already fetch (mig 0165). The
+    // scenario generator needs every moved box's size; without this it kept its own dictionary that
+    // could only be filled while the box sat in the yard (CYY_CONTAINER is present-tense). VARCHAR2(4)
+    // on the Oracle side. Measured MYT 2026-10-07: populated on 23,129/23,129 QC and 52,275/52,276
+    // yard-machine moves.
+    iso: Option<String>,
 }
 
 /// One incremental poll: upsert yard-crane moves completed since the watermark, advance it.
@@ -115,7 +121,8 @@ pub async fn tick_rtg_moves(pool: &PgPool, target: &str) -> Result<()> {
                     MCH_OPER_STATUS AS status, MCH_OPER_QUEUENAME AS queuename,
                     MCH_OPER_VESSEL AS vessel, MCH_OPER_VOYAGE AS voyage,
                     CRNT_PSN_IDX_NO1 AS pos1, CRNT_PSN_IDX_NO2 AS pos2,
-                    CRNT_PSN_IDX_NO3 AS pos3, CRNT_PSN_IDX_NO4 AS pos4
+                    CRNT_PSN_IDX_NO3 AS pos3, CRNT_PSN_IDX_NO4 AS pos4,
+                    MCH_OPER_ISO AS iso
                FROM TOSADM.MCH_OPERATION
               WHERE MCH_OPER_SEQNO >= '{seek_from}'
                 AND MCH_OPER_SEQNO <= '{until}'
@@ -143,8 +150,8 @@ pub async fn tick_rtg_moves(pool: &PgPool, target: &str) -> Result<()> {
             let res = sqlx::query(
                 "INSERT INTO rtg_move_log
                    (machno, contno, seqno, jobtype, trk_id, st_ts, comp_ts, dur_s, business_date, status,
-                    queuename, vessel, voyage, pos1, pos2, pos3, pos4)
-                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
+                    queuename, vessel, voyage, pos1, pos2, pos3, pos4, iso)
+                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
                  ON CONFLICT (machno, contno, seqno) DO NOTHING",
             )
             .bind(machno.trim())
@@ -166,6 +173,7 @@ pub async fn tick_rtg_moves(pool: &PgPool, target: &str) -> Result<()> {
             .bind(r.pos2.as_deref().map(str::trim).filter(|s| !s.is_empty()))
             .bind(r.pos3.as_deref().map(str::trim).filter(|s| !s.is_empty()))
             .bind(r.pos4.as_deref().map(str::trim).filter(|s| !s.is_empty()))
+            .bind(r.iso.as_deref().map(str::trim).filter(|s| !s.is_empty()))
             .execute(&mut *tx)
             .await
             .context("insert rtg_move_log")?;

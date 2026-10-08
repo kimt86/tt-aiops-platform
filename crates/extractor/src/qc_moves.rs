@@ -49,6 +49,12 @@ struct MoveRow {
     queuename: Option<String>, // MCH_OPER_QUEUENAME: "18H-L" = 40ft bay 18 / Hold / Load
     vessel: Option<String>,
     voyage: Option<String>,
+    // ISO 6346 size-type ("22G1", "45R1", "L5G1"), from the row we already fetch (mig 0165). The
+    // scenario generator needs every moved box's size; without this it kept its own dictionary that
+    // could only be filled while the box sat in the yard (CYY_CONTAINER is present-tense). VARCHAR2(4)
+    // on the Oracle side. Measured MYT 2026-10-07: populated on 23,129/23,129 QC and 52,275/52,276
+    // yard-machine moves.
+    iso: Option<String>,
 }
 
 /// One incremental poll: upsert quay-crane moves completed since the watermark, advance it.
@@ -108,7 +114,8 @@ pub async fn tick_qc_moves(pool: &PgPool, target: &str) -> Result<()> {
                     MCH_OPER_SEQNO AS seqno, MCH_OPER_JOBTYPE AS jobtype, TRK_ID AS trk_id,
                     ST_DT AS st_dt, MCH_OPER_COMPDATE||MCH_OPER_COMPTIME AS comp_dt,
                     MCH_OPER_STATUS AS status, MCH_OPER_QUEUENAME AS queuename,
-                    MCH_OPER_VESSEL AS vessel, MCH_OPER_VOYAGE AS voyage
+                    MCH_OPER_VESSEL AS vessel, MCH_OPER_VOYAGE AS voyage,
+                    MCH_OPER_ISO AS iso
                FROM TOSADM.MCH_OPERATION
               WHERE MCH_OPER_SEQNO >= '{seek_from}'
                 AND MCH_OPER_SEQNO <= '{until}'
@@ -142,8 +149,8 @@ pub async fn tick_qc_moves(pool: &PgPool, target: &str) -> Result<()> {
             let res = sqlx::query(
                 "INSERT INTO qc_move_log
                    (machno, contno, seqno, jobtype, trk_id, dispatch_ts, comp_ts, business_date, status,
-                    queuename, vessel, voyage)
-                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+                    queuename, vessel, voyage, iso)
+                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
                  ON CONFLICT (machno, contno, seqno) DO NOTHING",
             )
             .bind(machno.trim())
@@ -161,6 +168,7 @@ pub async fn tick_qc_moves(pool: &PgPool, target: &str) -> Result<()> {
             .bind(r.queuename.as_deref().map(str::trim).filter(|s| !s.is_empty()))
             .bind(r.vessel.as_deref().map(str::trim).filter(|s| !s.is_empty()))
             .bind(r.voyage.as_deref().map(str::trim).filter(|s| !s.is_empty()))
+            .bind(r.iso.as_deref().map(str::trim).filter(|s| !s.is_empty()))
             .execute(&mut *tx)
             .await
             .context("insert qc_move_log")?;
