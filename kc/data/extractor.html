@@ -69,7 +69,7 @@
     <thead><tr><th>스트림</th><th>소스 → 타깃</th><th>워터마크 seek</th><th>다운스트림</th></tr></thead>
     <tbody>
       <tr><td><strong>qc-moves</strong></td><td>MCH_OPERATION[C/M/Z] → <code>qc_move_log</code></td><td><strong>SEQNO PK-seek</strong>(SEQNO=완료 순서·PK 선두)</td><td>DS 픽업·LD 드롭 핸드오버 진실</td></tr>
-      <tr><td><strong>rtg-moves</strong></td><td>MCH_OPERATION[RTG/ES] → <code>rtg_move_log</code></td><td>SEQNO PK-seek(동일)</td><td>RTG 전 작업믹스 = 대기예측 피처</td></tr>
+      <tr><td><strong>rtg-moves</strong></td><td>MCH_OPERATION[RTG/ES/RS] → <code>rtg_move_log</code> (RS 리치스태커는 2026-10-01 부터 · <a href="/kc/data/scenario-output.html">시나리오 출력 형식</a> 7절)</td><td>SEQNO PK-seek(동일)</td><td>RTG 전 작업믹스 = 대기예측 피처</td></tr>
       <tr><td><strong>handover</strong></td><td>JOB_ORDER_HISTORY[C] → <code>tos_handover_label</code></td><td><strong>concat FBI seek</strong>(<code>DATE‖TIME</code> 함수기반인덱스)</td><td>soon-idle 정답 + <code>tt_move_log</code> 앵커</td></tr>
     </tbody>
   </table></div>
