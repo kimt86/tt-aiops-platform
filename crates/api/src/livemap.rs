@@ -4940,12 +4940,26 @@ fn edge_allowed_by_hold(truck_hold: Option<&str>, w_contno: Option<&str>, box_he
 /// 1초 오차를 넘게 둔다 — 짝을 보낸 뒤에 찍힌 목록이라는 것이 확실할 때만 푼다.
 const HOLD_RELEASE_MARGIN_MS: i64 = 2_000;
 
-/// 고정 해제 — 짝을 보낸 시각보다 **뒤에 찍힌** 작업목록이 들어왔으면 그 목록이 TOS 의 반영(또는 미반영)을
-/// 이미 보여 주므로 고정을 푼다. 목록 시각을 모르면(빈 표·조회 실패) 아무것도 풀지 않는다.
-fn release_held(held: &mut HashMap<String, (String, i64)>, list_as_of_ms: Option<i64>) {
-    if let Some(a) = list_as_of_ms {
-        held.retain(|_, (_, sent_ms)| *sent_ms + HOLD_RELEASE_MARGIN_MS >= a);
-    }
+/// 고정의 최대 수명(ms) — 작업목록 주기(60초)의 3배. 목록이 오래 안 오거나(낡은 목록으로 틱을 건너뜀) 목록 시각을
+/// 모를 때도 고정이 무한히 남아 그 상자를 다른 트럭에서 막지 않게 한다(2차 리뷰 지적).
+const HOLD_MAX_MS: i64 = 180_000;
+
+/// 고정 해제 — ①짝을 보낸 시각보다 **뒤에 찍힌** 작업목록이 들어왔으면 그 목록이 TOS 의 반영(또는 미반영)을
+/// 이미 보여 주므로 푼다(목록 시각을 모르면 이 규칙으로는 안 푼다). ②보낸 지 `HOLD_MAX_MS` 가 지나면 무조건 푼다.
+fn release_held(held: &mut HashMap<String, (String, i64)>, list_as_of_ms: Option<i64>, now_ms: i64) {
+    held.retain(|_, (_, sent_ms)| {
+        let listed_after = list_as_of_ms.is_some_and(|a| *sent_ms + HOLD_RELEASE_MARGIN_MS < a);
+        let expired = now_ms - *sent_ms > HOLD_MAX_MS;
+        !listed_after && !expired
+    });
+}
+
+/// 고정은 그 트럭이 **이번 틱에도 '지금 빈 트럭'**일 때만 묶는다(2차 리뷰 지적). 아니면 TOS 신호(새 배차·픽업·배차 목록)가
+/// 그 트럭의 상태를 이미 보여 준 것이다 — 그때도 고정을 남기면 트럭은 어차피 1계층 간선을 못 받는데 **그 상자만 다른
+/// 트럭에서 막힌다**(TOS 가 그 트럭을 다른 데 보냈으면 그 상자는 비어 있다). 우리 짝이 반영됐으면 그 상자는 TOS 배차분이라
+/// 후보에서 따로 빠진다.
+fn keep_holds_of_free(held: &mut HashMap<String, (String, i64)>, free_now: &HashSet<&str>) {
+    held.retain(|yt, _| free_now.contains(yt.as_str()));
 }
 
 /// 작업목록이 새로 착지할 때까지 기다린다. 반환 = `(깨어난 이유, 마지막 신선도 조회 결과)`.
@@ -5103,11 +5117,10 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                 stale_streak = 0;
             }
             if hold_sent {
-                release_held(&mut held, list_as_of_ms);
+                release_held(&mut held, list_as_of_ms, Utc::now().timestamp_millis());
             } else {
                 held.clear();
             }
-            let held_boxes: HashSet<String> = held.values().map(|(c, _)| c.clone()).collect();
             let now = Utc::now().timestamp_millis();
             // previous-tick recommendation per vehicle (ytno → work bucket key) for anti-thrash.
             // ts-based (restart-safe), latest per vehicle within PREV_WINDOW_S.
@@ -5911,6 +5924,12 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                 (false, q, jt)
             }).collect();
             let n_free = veh_info.iter().filter(|x| x.0).count() as i64;
+            {
+                let free_now: HashSet<&str> = vehicles.iter().zip(&veh_info)
+                    .filter(|(_, i)| i.0).map(|(v, _)| v.0.as_str()).collect();
+                keep_holds_of_free(&mut held, &free_now);
+            }
+            let held_boxes: HashSet<String> = held.values().map(|(c, _)| c.clone()).collect();
             let n_soon_ok = veh_info.iter().filter(|x| !x.0 && x.1.is_some()).count() as i64;
             let mut self_cover_n: i32 = 0; // 자기 추천 이력 적중 수 (mig 0142)
             // 2계층 묶음의 첫 미도래 슬롯 마감(ms) — 곧 빌 트럭 자격 판정용 (mig 0163)
@@ -7329,8 +7348,8 @@ mod workpool_freshness_tests {
 
 #[cfg(test)]
 mod wake_on_landing_tests {
-    use super::{advance_free_seen, combine_wake, edge_allowed_by_hold, free_advanced, release_held, should_wake, WakeSrc, WakeStep,
-                HOLD_RELEASE_MARGIN_MS, PREV_WINDOW_S, WAKE_MAX_WAIT_MS, WORKPOOL_MAX_AGE_S};
+    use super::{advance_free_seen, combine_wake, edge_allowed_by_hold, free_advanced, keep_holds_of_free, release_held, should_wake,
+                WakeSrc, WakeStep, HOLD_MAX_MS, HOLD_RELEASE_MARGIN_MS, PREV_WINDOW_S, WAKE_MAX_WAIT_MS, WORKPOOL_MAX_AGE_S};
     use std::collections::HashMap;
     use chrono::{DateTime, TimeZone, Utc};
     use std::time::Duration;
@@ -7519,14 +7538,38 @@ mod wake_on_landing_tests {
     fn 보낸_뒤에_찍힌_목록이_와야_고정을_푼다() {
         let mut h: HashMap<String, (String, i64)> = HashMap::new();
         h.insert("TT1".into(), ("C1".into(), 100_000));
-        release_held(&mut h, None);
+        let now = 110_000;
+        release_held(&mut h, None, now);
         assert_eq!(h.len(), 1, "목록 시각을 모르면 유지");
-        release_held(&mut h, Some(100_000 + HOLD_RELEASE_MARGIN_MS));
+        release_held(&mut h, Some(100_000 + HOLD_RELEASE_MARGIN_MS), now);
         assert_eq!(h.len(), 1, "여유 안쪽(보낸 시각과 거의 같은 목록)이면 유지");
-        release_held(&mut h, Some(90_000));
+        release_held(&mut h, Some(90_000), now);
         assert_eq!(h.len(), 1, "보내기 전에 찍힌 목록이면 유지");
-        release_held(&mut h, Some(100_000 + HOLD_RELEASE_MARGIN_MS + 1));
+        release_held(&mut h, Some(100_000 + HOLD_RELEASE_MARGIN_MS + 1), now);
         assert!(h.is_empty(), "보낸 뒤에 찍힌 목록이면 푼다");
+    }
+
+    /// 목록이 안 와도(시각 모름·낡은 목록) 고정은 최대 수명에서 풀린다 — 그 상자를 무한히 막지 않는다.
+    #[test]
+    fn 고정은_최대_수명에서_풀린다() {
+        let mut h: HashMap<String, (String, i64)> = HashMap::new();
+        h.insert("TT1".into(), ("C1".into(), 100_000));
+        release_held(&mut h, None, 100_000 + HOLD_MAX_MS);
+        assert_eq!(h.len(), 1, "딱 최대 수명이면 유지");
+        release_held(&mut h, None, 100_000 + HOLD_MAX_MS + 1);
+        assert!(h.is_empty(), "넘으면 푼다");
+    }
+
+    /// 이번 틱에 '지금 빈 트럭'이 아닌 트럭의 고정은 푼다 — TOS 가 그 트럭을 이미 다른 데 보냈으면 상자가 막히면 안 된다.
+    #[test]
+    fn 지금_빈_트럭이_아니면_고정을_푼다() {
+        let mut h: HashMap<String, (String, i64)> = HashMap::new();
+        h.insert("TT1".into(), ("C1".into(), 100_000));
+        h.insert("TT2".into(), ("C2".into(), 100_000));
+        let free_now: std::collections::HashSet<&str> = ["TT1"].into_iter().collect();
+        keep_holds_of_free(&mut h, &free_now);
+        assert!(h.contains_key("TT1"));
+        assert!(!h.contains_key("TT2"), "빈 트럭이 아니면 그 상자(C2)는 다른 트럭이 받을 수 있어야 한다");
     }
 
     /// mig 0164: 자유 사건 원천이 **새 행을 착지시켰을 때만** 참이다. 뒤바꿈(직전↔이번)은 거짓이 된다.
