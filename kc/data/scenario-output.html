@@ -216,20 +216,24 @@
   "hatch_s":    { "ds": 428, "ld": 496 },
   "bay_change_s": 151,
   "drive_speed_ms": 6.33,
-  "yc_service": { "ds": [14,57,147], "ld": [10,79,170], "gi": [22,80,172],
-                  "go": [11,122,217], "rh": [9,63,144], "ah": [7,58,135] },
+  "yc_service": {
+    "rtg": { "ds": [16,62,145], "ld": [15,96,177], "gi": [27,85,172],
+             "go": [15,132,222], "rh": [9,63,144], "ah": [7,58,135] },
+    "es":  { "ds": [8,28,283],  "ld": [7,18,50],   "gi": [10,40,153],
+             "go": [7,33,121],  "rh": null,        "ah": null } },
   "_provenance": { … } }</code></pre>
   <div class="kc-tablewrap"><table>
     <thead><tr><th>키</th><th>뜻(초, 속도는 m/s)</th><th>어떻게 구하나</th><th>8/18 범위(<code>scope</code>)</th></tr></thead>
     <tbody>
       <tr><td><code>qc_move_s.ds</code> · <code>.ld</code></td><td>QC 컨테이너 한 개 양하·적하 주기</td><td>한 크레인의 연속 완료 간격을 [1, 300]초로 자르고, 크레인별 중앙값(간격 30개 이상)을 평균. 자격 크레인이 3대 미만이면 학습 테이블 스냅샷, 그것도 없으면 상수(90/110)</td><td><code>window</code>(양하 53대 · 적하 48대)</td></tr>
-      <tr><td><code>yc_service.&lt;코드&gt;</code></td><td>야드 장비 작업 시간 <strong>[p10, p50, p90]</strong>, 코드는 ds·ld·gi·go·rh·ah</td><td>이 창의 야드 크레인(RTG·ES — 유형 미분리, RS 제외) 무브 처리 시간을 [5, 600]초로 잘라 백분위</td><td><code>window</code>(표본 38,757)</td></tr>
+      <tr><td><code>yc_service.&lt;장비유형&gt;.&lt;코드&gt;</code></td><td>야드 장비 작업 시간 <strong>[p10, p50, p90]</strong>. 장비 유형은 <code>rtg</code> · <code>es</code> · <code>reach_stacker</code>(창에 그 장비 무브가 있을 때만), 코드는 ds·ld·gi·go·rh·ah 여섯 개 모두</td><td>이 창의 야드 장비 무브 처리 시간을 [5, 600]초로 잘라 <strong>장비 유형·코드별</strong> 백분위. 표본 30건 미만이면 <code>null</code>(건수는 <code>samples</code> 에 남음)</td><td><code>window</code>(RTG 35,303 · ES 3,454)</td></tr>
       <tr><td><code>bay_change_s</code></td><td>QC 가 다른 베이로 옮기는 시간</td><td>베이 사이 간격 분포에서 <strong>가장 빽빽한 절반</strong>의 평균을 구하고 컨테이너 한 주기를 뺍니다(중앙값은 트럭 대기가 섞여 부풀기 때문). 전환 1,000건이 안 되면 창 끝에서 3·7·10·14일로 <strong>뒤로 넓혀</strong> 잽니다</td><td><code>widened look-back</code>(7일 · 1,815건 · 252−101=151)</td></tr>
       <tr><td><code>hatch_s.ds</code> · <code>.ld</code></td><td>해치커버 작업(베이당 1회)</td><td>연구 기록의 측정값(무브 로그로는 분리 불가)</td><td><code>constant</code></td></tr>
       <tr><td><code>drive_speed_ms</code></td><td>트럭 순수 주행 속도(정지 제외)</td><td>GPS 주행 구간 분리 측정(22.8 km/h)</td><td><code>constant</code></td></tr>
     </tbody>
   </table></div>
-  <p><code>_provenance</code> 에서 특히 볼 곳: <code>qc_move_s.scope</code>(양하·적하 <strong>따로</strong> — 한쪽만 대체값일 수 있음), <code>bay_change_s.measured_window</code>(넓혔다면 실제로 잰 기간, 요청 창은 항상 그 안), <code>yc_service.samples</code>(코드별 표본 수).</p>
+  <p><code>_provenance</code> 에서 특히 볼 곳: <code>qc_move_s.scope</code>(양하·적하 <strong>따로</strong> — 한쪽만 대체값일 수 있음), <code>bay_change_s.measured_window</code>(넓혔다면 실제로 잰 기간, 요청 창은 항상 그 안), <code>yc_service.samples</code>(유형·코드별 표본 수 — <code>null</code> 인 칸이 왜 비었는지), <code>yc_service.machine_types</code>(각 유형 키가 무슨 장비인지, 모르는 것은 모른다고).</p>
+  <div class="kc-cal note"><span class="h">왜 장비 유형별로 나누나 (2026-10-08 부터)</span><p>예전 파일은 RTG 와 ES 를 한 분포로 섞었습니다. 둘은 담당 블록이 하나도 겹치지 않고 속도가 배수로 다릅니다 — MYT 8/18 중앙값 양하 RTG 62초 · ES 28초, 적하 96초 · 18초, 반출 132초 · 33초. 섞은 값을 쓰면 ES 블록은 전부 느리게, RTG 블록은 전부 빠르게 재생됩니다. 키는 장비 번호 앞글자로 나누며, <strong>ES 가 정확히 어떤 장비인지는 아직 확인되지 않아</strong> 계열명 대신 <code>es</code> 로 둡니다. 리치스태커는 하루 무브가 적어 하루 창에서는 대부분 코드가 <code>null</code> 입니다(MYT 10/5: AH 만 30건). ⚠ 시뮬레이터의 현재 로더는 평면 형식만 받아서 <strong>이 형식은 업로드가 거부됩니다</strong> — 소비자 규격(<code>emulator-format.md</code>)이 요청한 목표 형식이고, 로더는 그쪽에서 맞출 일입니다.</p></div>
 
   <h2>10. 알려진 한계와 어긋남</h2>
   <div class="kc-tablewrap"><table>
@@ -237,7 +241,7 @@
     <tbody>
       <tr><td><strong>적하 적부 명세</strong></td><td>무게·양하항·선내 위치·높이·계열이 적하에서 5.6%. 명세 도착 시점 문제(4.2절)</td></tr>
       <tr><td><strong>리치스태커(RS) 무브</strong></td><td>2026-10-01 이전 창에는 없음(하루 ~816건, 7절). 그날 고쳤고 소급하지 않았습니다. 격자 없는 구역의 RS 무브는 칸 정보가 없습니다</td></tr>
-      <tr><td><strong>야드 작업시간의 장비 유형 구분</strong></td><td><code>yc_service</code> 는 작업 코드별로만 나뉘고 RTG·ES 를 섞으며 RS 는 넣지 않습니다. 소비자 규격(R4)은 유형별 분리를 요청합니다. 2026-10-01 부터 <code>_provenance.yc_service.machine_types</code> 에 "유형 미분리 · RS 제외"를 적습니다. 유형별 분리는 <strong>고칠 후보</strong></td></tr>
+      <tr><td><strong>야드 작업시간의 장비 유형 구분</strong></td><td>2026-10-08 부터 유형별로 나눕니다(9절). 그 전 형식은 RTG·ES 를 섞은 평면 6코드였습니다. 리치스태커는 하루 창에서 대부분 표본 부족으로 <code>null</code>. ES 의 장비 계열은 미확인</td></tr>
       <tr><td><strong>적하의 <code>height</code>·<code>family</code></strong></td><td>적하 상자는 <code>iso</code> 가 100% 있는데도 <code>height</code>·<code>family</code> 는 명세가 있을 때만(5.6%) 나옵니다. 게이트 무브는 같은 <code>iso</code> 에서 풀어 주므로 두 섹션이 다르게 동작합니다 — <strong>고칠 후보</strong></td></tr>
       <tr><td><code>beam_m</code></td><td>저장된 항차 521건 전부 null. TOS 원천이 비어 있는지 우리가 못 읽는지는 확인하지 않았습니다</td></tr>
       <tr><td>에뮬레이터 <code>_provenance.note</code></td><td>"<code>containers[].service_s</code> 는 관측 COMP−ST 원값" 이라고 적혀 있지만, <strong>2026-08-10 부터 <code>service_s</code> 는 추정값</strong>입니다(4.2절). 문구가 코드를 못 따라온 것 — <strong>고칠 후보</strong></td></tr>
