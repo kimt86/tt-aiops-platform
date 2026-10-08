@@ -15,7 +15,7 @@
   <div class="kc-meta"><span class="kc-badge kind">아키텍처 · 카탈로그 · 부하 감사</span><span class="kc-badge living">단일 출처 · 리빙 · 실측 2026-08-10 · ⑬ 2026-10-01</span></div>
 
   <h2>0. 핵심 요약 (TOS팀께 — 한 문단으로)</h2>
-  <div class="kc-cal tip"><span class="h">Bottom line</span><p>우리 접근은 <strong>전부 읽기 전용 SELECT</strong>입니다 — INSERT/UPDATE/DELETE/DDL/PL·SQL/잠금이 <strong>0건</strong>입니다. 총량은 <strong>하루 약 8,950회(시간당 약 373회, 평균 9.7초당 1건)</strong>의 짧은 단문 조회이고, 동시 세션은 발화 시각을 초 단위로 분산해 <strong>통상 1개, 순간 최대 2~3개</strong>입니다. 조회는 인덱스 시크 또는 시간창으로 범위를 좁힌 조회이며, 예외는 ⑬이 매분 작은 표 두 개(장비 마스터 약 1천 행, 장비정지 약 9만 3천 행)를 통째로 한 번 읽는 것 하나입니다(합쳐 한 번에 약 2천 블록, §7-4). 가장 무거운 단일 쿼리는 <strong>야간 01:30에 하루 1번 도는 8.3초짜리</strong>입니다. 반환 데이터는 하루 약 675만 행·전송량 약 1.4GB(평균 <strong>약 0.13 Mbps</strong>) 수준이고, 그 절반이 ⑬입니다. 어떤 스트림이든 <strong>1분 안에 개별·전체 중단</strong>할 수 있는 킬스위치가 있습니다.</p></div>
+  <div class="kc-cal tip"><span class="h">Bottom line</span><p>우리 접근은 <strong>전부 읽기 전용 SELECT</strong>입니다 — INSERT/UPDATE/DELETE/DDL/PL·SQL/잠금이 <strong>0건</strong>입니다. 총량은 <strong>하루 약 17,590회(시간당 약 733회, 평균 4.9초당 1건)</strong>의 짧은 단문 조회이고(2026-10-08 ①·③ 주기를 60초→15초로 줄여 하루 8,640회 늘었습니다 — 아래 표), 동시 세션은 발화 시각을 초 단위로 분산해 <strong>통상 1개, 순간 최대 2~3개</strong>입니다. 조회는 인덱스 시크 또는 시간창으로 범위를 좁힌 조회이며, 예외는 ⑬이 매분 작은 표 두 개(장비 마스터 약 1천 행, 장비정지 약 9만 3천 행)를 통째로 한 번 읽는 것 하나입니다(합쳐 한 번에 약 2천 블록, §7-4). 가장 무거운 단일 쿼리는 <strong>야간 01:30에 하루 1번 도는 8.3초짜리</strong>입니다. 반환 데이터는 하루 약 675만 행·전송량 약 1.4GB(평균 <strong>약 0.13 Mbps</strong>) 수준이고, 그 절반이 ⑬입니다. 어떤 스트림이든 <strong>1분 안에 개별·전체 중단</strong>할 수 있는 킬스위치가 있습니다.</p></div>
 
   <h2>1. 왜 이렇게 접근하나 — 사본(mirror) 구조</h2>
   <div class="kc-flow">
@@ -45,9 +45,9 @@
   <div class="kc-tablewrap"><table>
     <thead><tr><th>#</th><th>추출점</th><th>원천 테이블</th><th>주기</th><th>왕복/일</th><th>행/회</th><th>회당 소요*</th><th>접근 방식</th></tr></thead>
     <tbody>
-      <tr><td>①</td><td>qc-moves</td><td><code>MCH_OPERATION</code></td><td>60초</td><td>1,440</td><td>~41</td><td>2.0s</td><td>PK 시크(증분)</td></tr>
+      <tr><td>①</td><td>qc-moves</td><td><code>MCH_OPERATION</code></td><td><strong>15초</strong>(10-08~)</td><td>5,760</td><td>~41</td><td>2.0s</td><td>PK 시크(증분)</td></tr>
       <tr><td>②</td><td>rtg-moves</td><td><code>MCH_OPERATION</code></td><td>60초</td><td>1,440</td><td>~74</td><td>2.1s</td><td>PK 시크(증분)</td></tr>
-      <tr><td>③</td><td>handover</td><td><code>JOB_ORDER_HISTORY</code></td><td>60초</td><td>1,440</td><td>~22</td><td>1.9s</td><td>인덱스 레인지(증분)</td></tr>
+      <tr><td>③</td><td>handover</td><td><code>JOB_ORDER_HISTORY</code></td><td><strong>15초</strong>(10-08~)</td><td>5,760</td><td>~22</td><td>1.9s</td><td>인덱스 레인지(증분)</td></tr>
       <tr><td>④</td><td>pool_tick</td><td><code>JOB_QUEUE_SCHEDULE</code>+<code>JOB_ORDER_LIST</code></td><td>60초</td><td>1,440</td><td>~1,980</td><td>3.7s</td><td>시간창 스냅샷(1왕복 병합)</td></tr>
       <tr><td>⑤</td><td>vessel-schedule</td><td><code>VSB_VOYAGE</code></td><td>5분</td><td>288</td><td>~236</td><td>2.3s</td><td>소형 마스터 조회</td></tr>
       <tr><td>⑥</td><td>stowplan(델타)</td><td><code>VSP_SHIP</code></td><td>2분</td><td>720</td><td>~83</td><td>2.0s</td><td>UPD_DT 인덱스 시크(증분)</td></tr>
@@ -99,7 +99,8 @@
   <p>세 스트림 모두 <strong>워터마크(마지막으로 읽은 지점) 이후의 새 행만</strong> 읽습니다. 폴링을 자주 해도 읽는 양은 "그 사이 새로 생긴 행"뿐이라 <strong>주기와 무관하게 비용이 일정</strong>합니다.</p>
 
   <h4>① qc-moves — 안벽 크레인(QC) 작업 이벤트</h4>
-  <p class="kc-meta-line"><code>MCH_OPERATION</code> → 우리 <code>qc_move_log</code> · 60초 · 회당 ~41행 · PK 시크</p>
+  <p class="kc-meta-line"><code>MCH_OPERATION</code> → 우리 <code>qc_move_log</code> · 15초(2026-10-08~, 그전 60초) · 회당 ~41행(60초 때 실측) · PK 시크</p>
+  <p>왜 15초인가: 이 스트림이 "트럭이 상자를 내려 빈 순간"(적하)의 원천입니다. 1분마다 읽으면 빈 트럭을 아는 데 평균 약 30초가 그냥 기다리는 시간이었습니다. 조회 한 번은 인덱스로 바로 찾아가는 가벼운 질의라 횟수만 4배가 됩니다.</p>
   <pre><code>SELECT
        MCH_OPER_MACHNO AS machno, SUBSTR(MCH_OPER_CONTNO,1,11) AS contno,
        MCH_OPER_SEQNO AS seqno, MCH_OPER_JOBTYPE AS jobtype, TRK_ID AS trk_id,
@@ -137,7 +138,8 @@
   <p><strong>용도</strong>: <code>rtg_move_log</code>는 야드 크레인의 전 작업(양적하 외 재배치·게이트·보관 포함) 사본입니다. 트럭이 야드에서 언제 풀려나는지, RTG가 얼마나 밀려 있는지(대기 예측 피처), 야드 배치 재구성(시뮬레이션의 야드 상태) 재료입니다. 위치 컬럼(pos1~4)을 함께 받아 시나리오 수집기가 <strong>Oracle을 따로 조회할 필요를 없앴습니다</strong>(2026-08-06 로컬화).</p>
 
   <h4>③ handover — 작업 완료(핸드오버) 권위 라벨</h4>
-  <p class="kc-meta-line"><code>JOB_ORDER_HISTORY</code>(완료분만) → 우리 <code>tos_handover_label</code> · 60초 · 회당 ~22행 · 인덱스 레인지</p>
+  <p class="kc-meta-line"><code>JOB_ORDER_HISTORY</code>(완료분만) → 우리 <code>tos_handover_label</code> · 15초(2026-10-08~, 그전 60초) · 회당 ~22행(60초 때 실측) · 인덱스 레인지</p>
+  <p>왜 15초인가: 양하에서 "트럭이 야드에 상자를 넘겨 빈 순간"의 원천입니다(①과 같은 이유).</p>
   <pre><code>SELECT JOB_HIST_YTNO AS ytno, JOB_HIST_ARMGC AS armgc, JOB_HIST_JOBTYPE AS jobtype,
        JOB_HIST_CONTNO AS contno, JOB_HIST_POINT AS point, JOB_HIST_SEQNO AS seqno,
        JOB_HIST_DATE||JOB_HIST_TIME AS evt, JOB_HIST_ACTV_DT AS actv_dt,

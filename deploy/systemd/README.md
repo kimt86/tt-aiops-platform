@@ -24,9 +24,9 @@ Conservative, load-conscious cadence against the live Oracle:
 | `tt-nightly` | `extractor run --kpi all` (yesterday, authoritative) | 01:30 daily | k_cycle only (rest local since 2026-08-06) |
 | `tt-shift-t1` | `extractor tick --shift --tier t1` (MPH/QC-wait/util + vessels, **LIVE tab**) | 3 min | **no** (local since 2026-08-06) |
 | `tt-shift-t2` | `extractor tick --shift --tier t2` (voyage_plan + cumulative KPIs, **LIVE tab**) | 15 min | voyage_plan only |
-| `tt-qc-moves` | `extractor qc-moves` (quay-crane move stream) | 60 s | yes (PK seek) |
+| `tt-qc-moves` | `extractor qc-moves` (quay-crane move stream — LD free events) | **15 s** (2026-10-08) | yes (PK seek) |
 | `tt-rtg-moves` | `extractor rtg-moves` (yard-crane move stream) | 60 s | yes (PK seek) |
-| `tt-handover` | `extractor handover` | 60 s | yes (index seek) |
+| `tt-handover` | `extractor handover` (DS free events) | **15 s** (2026-10-08) | yes (index seek) |
 | `tt-workpool` | `extractor workpool` (merged 1-pull since 2026-08-10) | 60 s | yes |
 | `tt-vessel-schedule` | `extractor vessel-schedule` | 5 min | yes |
 | `tt-stowplan` | `extractor stowplan` (UPD_DT delta) | 2 min | yes |
@@ -103,8 +103,8 @@ journalctl --user -u tt-shift-t1.service -n 50
 
 - Widen intervals (`OnUnitActiveSec`, or the `OnCalendar` step for the second-staggered units)
   to reduce Oracle hits; `daemon-reload` after editing. Firing seconds are deliberately spread
-  (:05 qc / :15 stowplan / :25 rtg / :30 gate / :35 vessel / :45 handover / :50 contspec /
-  :55 workpool) — keep a new timer off those slots.
+  (:05/20/35/50 qc + handover (15 s, together on purpose — one matcher wake) / :15 stowplan / :25 rtg /
+  :35 vessel / :40 tos-avail / :55 workpool) — keep a new timer off those slots.
 - The scenario collectors serialize their Oracle access with `flock(1)` among themselves. The
   critical extractors are deliberately **outside** that lock — several fire every 60 s and must not
   queue behind a scenario query.
