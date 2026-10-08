@@ -4768,7 +4768,11 @@ const SQL_WORKPOOL_FRESHNESS: &str = "
     SELECT (SELECT EXTRACT(epoch FROM now() - last_success_at)::int8
               FROM data_freshness WHERE kpi_key = 'WORKPOOL'),
            (SELECT EXTRACT(epoch FROM now() - max(as_of_ts))::int8 FROM live_workpool),
-           (SELECT last_success_at FROM data_freshness WHERE kpi_key = 'WORKPOOL')";
+           (SELECT last_success_at FROM data_freshness WHERE kpi_key = 'WORKPOOL'),
+           (SELECT max(captured_at) FROM qc_move_log
+             WHERE jobtype = 'LD' AND comp_ts > now() - interval '30 minutes'),
+           (SELECT max(captured_at) FROM tos_handover_label
+             WHERE jobtype = 'DS' AND comp_ts > now() - interval '30 minutes')";
 
 /// 착지를 기다리며 신선도를 다시 보는 간격.
 ///
@@ -4826,6 +4830,11 @@ enum WakeSrc {
     Landing,
     /// 최대 대기를 채웠다. 목록은 직전 틱과 같다.
     Fallback,
+    /// 새 자유 사건(트럭이 상자를 내려 빈 순간)이 착지했다 — 목록은 직전 틱과 같다 (mig 0164·2026-10-08).
+    /// 작업목록 착지(1분)만 기다리면 빈 트럭을 알고도 매칭이 적하 평균 53초·양하 13초를 더 놀았다
+    /// (`scripts/free_to_reco_latency.sql` ②). 연계 후에는 우리가 늦게 아는 시간이 곧 트럭이 노는 시간이다
+    /// — TOS 는 우리가 안 보낸 빈 트럭을 그냥 둔다.
+    Free,
 }
 
 impl WakeSrc {
@@ -4834,6 +4843,7 @@ impl WakeSrc {
             Self::Startup => "startup",
             Self::Landing => "landing",
             Self::Fallback => "fallback",
+            Self::Free => "free",
         }
     }
 }
@@ -4878,6 +4888,26 @@ fn should_wake(
     }
 }
 
+/// 자유 사건 원천 하나가 새 행을 착지시켰나. 원천마다 따로 본다 — 적하(`qc_move_log`)와 양하
+/// (`tos_handover_label`)는 다른 유닛이 동시에 쓸 수 있고, `captured_at` 은 트랜잭션 **시작** 시각이라
+/// 둘을 한 최대값으로 합치면 늦게 커밋된 쪽이 먼저 커밋된 쪽보다 작아 묻힌다. 한 원천은 한 유닛이
+/// 직렬로 쓰므로 원천 안에서는 단조 증가한다.
+///
+/// 기준선이 없으면(`seen` None) 깨우지 않는다 — 호출부가 기준선만 잡는다.
+fn free_advanced(seen: Option<DateTime<Utc>>, landed: Option<DateTime<Utc>>) -> bool {
+    matches!((seen, landed), (Some(s), Some(l)) if l > s)
+}
+
+/// 작업목록 판정(`should_wake`)과 자유 착지를 합친다. 우선순위: 작업목록 착지·기동 > 자유 착지 > 하트비트.
+/// 작업목록이 왔으면 그 이유로 적는다(`workpool_age_s` 게이지의 정상 대역이 그 모집단 기준이다).
+fn combine_wake(wp: WakeStep, free_new: bool) -> WakeStep {
+    match wp {
+        WakeStep::Wake(WakeSrc::Startup | WakeSrc::Landing) => wp,
+        _ if free_new => WakeStep::Wake(WakeSrc::Free),
+        _ => wp,
+    }
+}
+
 /// 작업목록이 새로 착지할 때까지 기다린다. 반환 = `(깨어난 이유, 마지막 신선도 조회 결과)`.
 ///
 /// 마지막 조회 결과를 그대로 돌려주므로 **틱당 추가 질의는 없다** — 게이트와 게이지가 이 값을
@@ -4891,29 +4921,50 @@ fn should_wake(
 ///   깨어나 폴링 간격마다 도는 루프가 된다.
 /// - **못 봤으면**(조회 실패 등) 그대로 둔다. 다음 성공 조회가 그 착지를 정상적으로 잡는다.
 ///   이 비대칭은 의도된 것이다.
+///
+/// ★2026-10-08 (mig 0164): 자유 사건 착지에도 깨어난다(`free_seen`·원천별). 자유 기준선도 같은 규칙으로
+/// 전진한다 — 본 값은 깨어난 이유와 무관하게 전진, 못 본 값은 그대로. 기준선이 없던 원천은 처음 본 값을
+/// 기준선으로만 삼고 깨우지 않는다. `wake_on_free=false`(환경변수 `MATCH_WAKE_ON_FREE=0`)면 종전과 같다.
 async fn wait_for_workpool_landing(
     pool: &PgPool,
     seen: &mut Option<DateTime<Utc>>,
+    free_seen: &mut [Option<DateTime<Utc>>; 2],
+    wake_on_free: bool,
 ) -> (WakeSrc, Result<(Option<i64>, Option<i64>), String>) {
+    type Row = (Option<i64>, Option<i64>, Option<DateTime<Utc>>, Option<DateTime<Utc>>, Option<DateTime<Utc>>);
     let start = Instant::now();
     loop {
-        let row = sqlx::query_as::<_, (Option<i64>, Option<i64>, Option<DateTime<Utc>>)>(
-            SQL_WORKPOOL_FRESHNESS,
-        )
-        .fetch_one(pool)
-        .await
-        .map_err(|e| e.to_string());
-        let landed = row.as_ref().ok().and_then(|&(_, _, at)| at);
-        let gate_input = row.map(|(age, table_age, _)| (age, table_age));
+        let row = sqlx::query_as::<_, Row>(SQL_WORKPOOL_FRESHNESS)
+            .fetch_one(pool)
+            .await
+            .map_err(|e| e.to_string());
+        let landed = row.as_ref().ok().and_then(|&(_, _, at, _, _)| at);
+        // [적하 자유(qc_move_log LD), 양하 자유(tos_handover_label DS)]
+        let free_landed: [Option<DateTime<Utc>>; 2] =
+            row.as_ref().ok().map_or([None, None], |&(_, _, _, ld, ds)| [ld, ds]);
+        let gate_input = row.map(|(age, table_age, _, _, _)| (age, table_age));
+        let free_new = wake_on_free
+            && free_seen.iter().zip(free_landed.iter()).any(|(s, l)| free_advanced(*s, *l));
 
-        match should_wake(*seen, landed, start.elapsed()) {
+        match combine_wake(should_wake(*seen, landed, start.elapsed()), free_new) {
             WakeStep::Wake(src) => {
                 if landed.is_some() {
                     *seen = landed;
                 }
+                for (s, l) in free_seen.iter_mut().zip(free_landed) {
+                    if l.is_some() {
+                        *s = l;
+                    }
+                }
                 return (src, gate_input);
             }
             WakeStep::KeepWaiting => {
+                // 기준선이 없던 원천은 처음 본 값을 기준선으로 삼는다(깨우지 않는다).
+                for (s, l) in free_seen.iter_mut().zip(free_landed) {
+                    if s.is_none() && l.is_some() {
+                        *s = l;
+                    }
+                }
                 tokio::time::sleep(Duration::from_millis(WAKE_POLL_MS)).await;
             }
         }
@@ -4923,7 +4974,7 @@ async fn wait_for_workpool_landing(
 pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
     tokio::spawn(async move {
         let mut tick = 0u64;
-        // 추천 생산 0(트럭·작업은 있는데) 연속 틱 수 — 3틱이면 경보 (mig 0142)
+        // 추천 생산 0(트럭·작업은 있는데) 연속 틱 수 (mig 0142) — 경보 판정은 아래 zero_since(경과 시간)
         let mut zero_streak: u32 = 0;
         // 작업목록이 낡아 건너뛴 연속 틱 수 (경보·로그를 한 줄로 접기 위한 것)
         let mut stale_streak: u32 = 0;
@@ -4931,6 +4982,13 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
         let mut prev_tier: HashMap<(String, String, String), u8> = HashMap::new();
         // 직전 틱이 쓴 작업목록의 착지 시각. 이 값이 앞으로 가는 것이 곧 "새 목록이 왔다"다.
         let mut seen_landing: Option<DateTime<Utc>> = None;
+        // 직전 틱까지 본 자유 사건 착지 시각 [적하, 양하] (mig 0164). 킬스위치 MATCH_WAKE_ON_FREE=0.
+        let mut seen_free: [Option<DateTime<Utc>>; 2] = [None, None];
+        let wake_on_free = std::env::var("MATCH_WAKE_ON_FREE").map_or(true, |v| v != "0");
+        // 추천 생산 0 이 시작된 시각 — 경보는 틱 수가 아니라 **경과 시간**(3분)으로 판정한다(mig 0164:
+        // 자유 착지로 틱이 분당 ~5회가 되면 "3틱"은 36초라 일시적 공백에도 울린다).
+        let mut zero_since: Option<Instant> = None;
+        let mut zero_alerted = false;
         loop {
             // ── 깨어나기: 고정 초가 아니라 **작업목록 착지**를 기다린다 (2026-08-12, C안) ──
             //
@@ -4942,7 +5000,7 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
             //
             // 고정 초를 어디로 옮겨도 자유주행을 따라갈 수 없으므로 **상수를 없앤다**.
             // 이제 tt-workpool.timer 의 초와 짝을 맞출 필요도 없다.
-            let (wake_src, freshness) = wait_for_workpool_landing(&pool, &mut seen_landing).await;
+            let (wake_src, freshness) = wait_for_workpool_landing(&pool, &mut seen_landing, &mut seen_free, wake_on_free).await;
             tick += 1;
             if !lm.connected.load(Ordering::Relaxed) {
                 continue;
@@ -6195,18 +6253,24 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
             .bind(swap_cand_n).bind(swap_n).bind(swap_gain_total)
             .bind(t1_unreach_n as i32).bind(n_soon_drop)
             .execute(&pool).await;
-            // 생산 0 경보 (mig 0142): 트럭도 작업도 있는데 추천이 3틱 연속 0이면 매칭이 죽은
+            // 생산 0 경보 (mig 0142): 트럭도 작업도 있는데 추천이 계속 0이면 매칭이 죽은
             // 것이다. 총정지는 stage2_match_shadow DEADMAN(30분)이 백스톱으로 잡지만, 이건
             // "틱은 도는데 비어 있다"를 3분 안에 잡는 빠른 경보다. 조용한 시간대(작업 0)에는
             // 조건이 성립하지 않아 오경보가 없다.
+            // ★mig 0164: 종전 "3틱 연속"은 틱이 분당 1회일 때의 3분이었다. 자유 착지로 틱이 잦아져
+            //   **3틱 이상 + 3분 이상**을 함께 요구한다(한 번만 울린다 — zero_streak 이 처음 넘는 순간).
             if !vehicles.is_empty() && !driving.is_empty() && assign.is_empty() {
                 zero_streak += 1;
-                if zero_streak == 3 {
+                let since = *zero_since.get_or_insert_with(Instant::now);
+                if zero_streak >= 3 && since.elapsed() >= Duration::from_secs(180) && !zero_alerted {
+                    zero_alerted = true;
                     crate::db::alert(&pool, "stage2_reco", "zero_production", "crit",
-                        "트럭·작업이 있는데 추천 생산이 3틱 연속 0 — 매칭이 죽었다", None).await;
+                        "트럭·작업이 있는데 추천 생산이 3분 넘게 0 — 매칭이 죽었다", None).await;
                 }
             } else {
                 zero_streak = 0;
+                zero_since = None;
+                zero_alerted = false;
             }
             // mig 0121 → 0133 — 구동 풀(설계③)에 든 묶음의 상세. 레거시 풀이 사라져 in_current_pool/
             // rank_current는 NULL(비교 대상 없음).
@@ -7186,7 +7250,7 @@ mod workpool_freshness_tests {
 
 #[cfg(test)]
 mod wake_on_landing_tests {
-    use super::{should_wake, WakeSrc, WakeStep, PREV_WINDOW_S, WAKE_MAX_WAIT_MS, WORKPOOL_MAX_AGE_S};
+    use super::{combine_wake, free_advanced, should_wake, WakeSrc, WakeStep, PREV_WINDOW_S, WAKE_MAX_WAIT_MS, WORKPOOL_MAX_AGE_S};
     use chrono::{DateTime, TimeZone, Utc};
     use std::time::Duration;
 
@@ -7338,6 +7402,32 @@ mod wake_on_landing_tests {
         assert_eq!(WakeSrc::Startup.as_str(), "startup");
         assert_eq!(WakeSrc::Landing.as_str(), "landing");
         assert_eq!(WakeSrc::Fallback.as_str(), "fallback");
+        assert_eq!(WakeSrc::Free.as_str(), "free");
+    }
+
+    /// mig 0164: 자유 사건 원천이 **새 행을 착지시켰을 때만** 참이다. 뒤바꿈(직전↔이번)은 거짓이 된다.
+    #[test]
+    fn 자유_착지는_전진할_때만_참이다() {
+        assert!(free_advanced(Some(시각(10)), Some(시각(11))));
+        assert!(!free_advanced(Some(시각(11)), Some(시각(10))), "인자를 뒤바꾸면 깨우지 않는다");
+        assert!(!free_advanced(Some(시각(10)), Some(시각(10))));
+        assert!(!free_advanced(None, Some(시각(10))), "기준선이 없으면 기준선만 잡는다");
+        assert!(!free_advanced(Some(시각(10)), None), "조회 실패는 깨우지 않는다");
+    }
+
+    /// 작업목록 착지·기동이 자유보다 앞선다(`workpool_age_s` 정상 대역이 landing 모집단 기준이라 이유를
+    /// 덮어쓰면 안 된다). 자유는 대기 중이거나 하트비트가 찼을 때 이유가 된다.
+    #[test]
+    fn 자유_착지는_목록_착지보다_뒤_하트비트보다_앞이다() {
+        let 착지 = WakeStep::Wake(WakeSrc::Landing);
+        let 기동 = WakeStep::Wake(WakeSrc::Startup);
+        let 폴백 = WakeStep::Wake(WakeSrc::Fallback);
+        assert_eq!(combine_wake(착지, true), 착지);
+        assert_eq!(combine_wake(기동, true), 기동);
+        assert_eq!(combine_wake(WakeStep::KeepWaiting, true), WakeStep::Wake(WakeSrc::Free));
+        assert_eq!(combine_wake(폴백, true), WakeStep::Wake(WakeSrc::Free));
+        assert_eq!(combine_wake(WakeStep::KeepWaiting, false), WakeStep::KeepWaiting);
+        assert_eq!(combine_wake(폴백, false), 폴백);
     }
 }
 

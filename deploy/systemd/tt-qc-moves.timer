@@ -1,9 +1,12 @@
 [Unit]
-Description=wp-tt quay-crane move stream every 1min (incremental MCH_OPERATION C/M/Z; SEQNO PK-seek watermark)
+Description=wp-tt quay-crane move stream every 15s (incremental MCH_OPERATION C/M/Z; SEQNO PK-seek watermark)
 
 [Timer]
 OnBootSec=90s
-OnCalendar=*-*-* *:*:05
+# 2026-10-08: 60→15초. 이 스트림이 '트럭이 빈 순간'(적하 = QC 내림 / 양하 = 야드 인계)의 원천이고, 매칭이
+# 그 착지에 깨어난다(mig 0164). 1분 주기에선 빈 트럭을 아는 데 평균 ~32초가 폴링 대기였다. 사용자 승인
+# (Oracle 왕복 +180/h 씩). qc-moves 와 handover 를 같은 초(:05/20/35/50)에 둔다 — 매칭 깨움이 한 번으로 모인다.
+OnCalendar=*-*-* *:*:05/15
 AccuracySec=1s
 
 [Install]
