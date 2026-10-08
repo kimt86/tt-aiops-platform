@@ -49,6 +49,21 @@
 - 기준 넘으면 **이 세션에서 운영 반영 OK**.
 - C 정리 묶음 **포함**.
 
+## C-3 점검 결과 — "수집 OK ≠ 데이터 들어옴" (10-08·보고만·고치지 않음)
+
+데이터 쪽: 7일 etl_run_log 에서 'OK 인데 0행' 연속 최장 = ETW 28분(만료 게이트 설계상 정상). 다른 원천은 긴 공백 없음.
+⚠ 무브 3종(QC_MOVE·RTG_MOVE·HANDOVER_LABEL)은 rows_written 이 **읽은 행 수**라 이 검사로는 원리상 0이 안 나온다.
+코드 쪽(31개 기록 지점 전수):
+- **(a) 통째 삼킴 1건 — `K_UTIL_SHIFT`** `crates/extractor/src/shift.rs:367` `.unwrap_or((None, 0))` — 로컬 질의가 실패하면
+  K_UTIL=NULL 을 kpi_shift 에 덮어쓰고 OK. 로그·DEADMAN 없음(직접 확인함).
+- **ETW** 남은 구멍 2: 모든 항차가 404 면 OK·0행(`workpool.rs:334` NotFound 는 실패로 안 셈) · 200 인데 `cntr_list` 없으면 OK·0행(`:357`).
+- **WEATHER·WEATHER_1MIN**: 시각 형식이 바뀌면 행마다 조용히 continue → OK·0행(`weather.rs:46/48·103/104`). 로그·DEADMAN 없음.
+- 무브 3종: 형식 안 맞는 행 조용히 건너뜀 + rows_written=읽은 수(`qc_moves.rs:128-133·193` 등). DEADMAN 30분이 일부 백스톱.
+- 미확인(추정): 툴박스 MCP 응답이 isError 없이 내용이 비면 스크립트가 "0행"으로 바꾼다(`remote-toolbox-sql` to_envelope_from_mcp) —
+  오류가 그 모양으로 오는지는 확인 안 함.
+- 나머지(KPI 야간 10종·작업목록·적부계획·tos-avail·항차계획 등)는 실패가 Err 로 전파됨(d).
+- DEADMAN(`crates/api/src/db.rs:42`)이 보는 표: qc/rtg_move_log·tos_handover_label·live_workqueue·live_stow_plan 뿐 — tos_etw_cntr·weather_*·kpi_shift·live_workpool 은 밖.
+
 ## UNKNOWNS
 
 - 35초를 잰 원 질의가 노트에 없다 → 찾거나 새로 만들어 같은 숫자 재현부터.
