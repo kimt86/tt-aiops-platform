@@ -86,7 +86,7 @@ def load(path):
 
 
 def run(rows, W, rng=None):
-    """반환 = (n, 실제 합 m, 최적 합 m, 위약(무작위) 합 m, 평균 대기 s)."""
+    """반환 = (n, 실제 합 m, 최적 합 m, 무작위 짝 합 m(점검용 — 위약이 아니다), 평균 대기 s)."""
     buckets = {}
     for r in rows:
         k = r["f"] if W == 0 else r["f"] // W
@@ -98,6 +98,10 @@ def run(rows, W, rng=None):
         n += m
         a = sum(hav(r["a"], r["b"]) for r in rs)
         act += a
+        if W > 0:
+            # 혼자인 칸의 트럭도 칸 끝까지 기다린다(2026-10-08 리뷰 지적 — 종전엔 빠져 6초 기준 대기가 ~1초 낮았다).
+            end = (k + 1) * W
+            wait += sum(end - r["f"] for r in rs)
         if W == 0 or m == 1:
             opt += a
             plc += a
@@ -108,15 +112,13 @@ def run(rows, W, rng=None):
             perm = list(range(m))
             (rng or random).shuffle(perm)
             plc += sum(cost[i][perm[i]] for i in range(m))
-            end = (k + 1) * W
-            wait += sum(end - r["f"] for r in rs)
     return n, act, opt, plc, wait / max(n, 1)
 
 
 def report(rows, title):
     print(f"\n== {title} — 쌍 {len(rows):,}개 (분모: 자유→다음 픽업 30분 안·좌표 있는 쌍)")
     print(f"{'W(초)':>6} {'트럭/칸':>7} {'실제 km':>9} {'최적 km':>9} {'아낀 %':>7} {'트럭당 아낀 m':>12} "
-          f"{'≈초':>6} {'트럭당 대기 s':>12} {'위약(무작위) km':>14} {'6초 대비 아낀 s':>14} {'추가 대기 s':>10} {'순 s':>7}")
+          f"{'≈초':>6} {'트럭당 대기 s':>12} {'점검:무작위 짝 km':>14} {'6초 대비 아낀 s':>14} {'추가 대기 s':>10} {'순 s':>7}")
     rng = random.Random(7)
     base = None  # W=6 = TOS 배차 주기(~5.5초) 근사 — 같은 잣대(직선·같은 풀이)로 비교하기 위한 기준
     for W in (0, 6, 60, 180, 300):

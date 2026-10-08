@@ -100,7 +100,7 @@
 
   <h4>① qc-moves — 안벽 크레인(QC) 작업 이벤트</h4>
   <p class="kc-meta-line"><code>MCH_OPERATION</code> → 우리 <code>qc_move_log</code> · 15초(2026-10-08~, 그전 60초) · 회당 ~41행(60초 때 실측) · PK 시크</p>
-  <p>왜 15초인가: 이 스트림이 "트럭이 상자를 내려 빈 순간"(적하)의 원천입니다. 1분마다 읽으면 빈 트럭을 아는 데 평균 약 30초가 그냥 기다리는 시간이었습니다. 조회 한 번은 인덱스로 바로 찾아가는 가벼운 질의라 횟수만 4배가 됩니다.</p>
+  <p>왜 15초인가: 이 스트림이 "트럭이 상자를 내려 빈 순간"(적하)의 원천입니다. 1분마다 읽으면 빈 트럭을 아는 데 평균 약 30초가 그냥 기다리는 시간이었습니다. 조회 한 번은 인덱스로 바로 찾아가는 가벼운 질의입니다. 횟수는 4배가 되고, 읽어 오는 행 수는 혹시 늦게 보이는 행을 놓치지 않으려고 직전 2분을 겹쳐 다시 읽기 때문에 약 3배가 됩니다.</p>
   <pre><code>SELECT
        MCH_OPER_MACHNO AS machno, SUBSTR(MCH_OPER_CONTNO,1,11) AS contno,
        MCH_OPER_SEQNO AS seqno, MCH_OPER_JOBTYPE AS jobtype, TRK_ID AS trk_id,

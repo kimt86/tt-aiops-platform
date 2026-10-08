@@ -4777,8 +4777,9 @@ const SQL_WORKPOOL_FRESHNESS: &str = "
 /// 착지를 기다리며 신선도를 다시 보는 간격.
 ///
 /// 실측 비용: 이 질의는 `data_freshness` PK 인덱스 히트라 **0.109ms · buffers 3**(2026-08-12
-/// EXPLAIN ANALYZE). 2초 간격이면 시간당 1,800회 ≈ DB 시간 0.2초 — 로컬 Postgres 기준으로도
-/// 무시할 수준이다. **Oracle 에는 닿지 않는다**(이 크레이트에는 Oracle 접근 수단이 없다).
+/// EXPLAIN ANALYZE). mig 0164 로 자유 원천 2개(comp_ts 인덱스 범위)를 더해 **0.40ms · buffers 36**
+/// (2026-10-08 리뷰 실측). 2초 간격이면 시간당 1,800회 ≈ DB 시간 0.7초 — 무시할 수준이다.
+/// **Oracle 에는 닿지 않는다**(이 크레이트에는 Oracle 접근 수단이 없다).
 const WAKE_POLL_MS: u64 = 2_000;
 
 /// 새 목록이 안 와도 이만큼 지나면 깨어난다(폴백 = 하트비트).
@@ -4908,6 +4909,45 @@ fn combine_wake(wp: WakeStep, free_new: bool) -> WakeStep {
     }
 }
 
+/// 자유 기준선 전진 규칙(mig 0164) — 대기 루프의 매 폴에서 부른다.
+/// - **깨어났으면** 본 값으로 전진한다(깨어난 이유 불문 — 안 그러면 같은 착지로 다시 깬다).
+/// - **안 깨어났으면** 기준선이 없던 원천만 처음 본 값으로 채운다(그 값으로는 깨우지 않는다).
+/// - **못 본 값(None)은 무엇도 지우지 않는다** — 30분 동안 행이 없는 원천(적하가 멈춘 시간대 등)이
+///   기준선을 잃으면 다음 첫 자유가 기준선만 잡고 깨우지 못한다.
+fn advance_free_seen(seen: &mut [Option<DateTime<Utc>>; 2], landed: [Option<DateTime<Utc>>; 2], woke: bool) {
+    for (s, l) in seen.iter_mut().zip(landed) {
+        if l.is_some() && (woke || s.is_none()) {
+            *s = l;
+        }
+    }
+}
+
+/// 내보낸 짝 고정 (2026-10-08 사용자 결정·리뷰 지적) — 자유 착지로 매칭이 분당 ~5회 돌지만 "TOS 가 이미
+/// 배차했다"는 정보는 작업목록(1분)으로만 온다. 연계 후엔 우리가 t 에 보낸 트럭이 t+15·30·45초 틱에 아직
+/// 빈 트럭으로 보이고 그 상자도 미배차로 보여, 더 나은 짝이 보이면 **다른 지시**가 나간다.
+/// 그래서 보낸 짝(트럭 → 상자)은 **그 뒤에 찍힌 작업목록**이 들어올 때까지 고정한다:
+/// 그 트럭은 그 상자 간선만, 그 상자는 그 트럭 간선만 갖는다.
+///
+/// 반환 = 이 간선을 허용하나. `truck_hold` = 이 트럭이 고정된 상자, `box_held` = 이 상자가 (다른 트럭에) 고정됐나.
+fn edge_allowed_by_hold(truck_hold: Option<&str>, w_contno: Option<&str>, box_held: bool) -> bool {
+    match truck_hold {
+        Some(c) => w_contno == Some(c),
+        None => !box_held,
+    }
+}
+
+/// 고정 해제의 여유(ms). 작업목록 시각(`live_workpool.as_of_ts`)은 초 단위로 반올림해 읽으므로(`::int8`)
+/// 1초 오차를 넘게 둔다 — 짝을 보낸 뒤에 찍힌 목록이라는 것이 확실할 때만 푼다.
+const HOLD_RELEASE_MARGIN_MS: i64 = 2_000;
+
+/// 고정 해제 — 짝을 보낸 시각보다 **뒤에 찍힌** 작업목록이 들어왔으면 그 목록이 TOS 의 반영(또는 미반영)을
+/// 이미 보여 주므로 고정을 푼다. 목록 시각을 모르면(빈 표·조회 실패) 아무것도 풀지 않는다.
+fn release_held(held: &mut HashMap<String, (String, i64)>, list_as_of_ms: Option<i64>) {
+    if let Some(a) = list_as_of_ms {
+        held.retain(|_, (_, sent_ms)| *sent_ms + HOLD_RELEASE_MARGIN_MS >= a);
+    }
+}
+
 /// 작업목록이 새로 착지할 때까지 기다린다. 반환 = `(깨어난 이유, 마지막 신선도 조회 결과)`.
 ///
 /// 마지막 조회 결과를 그대로 돌려주므로 **틱당 추가 질의는 없다** — 게이트와 게이지가 이 값을
@@ -4951,20 +4991,12 @@ async fn wait_for_workpool_landing(
                 if landed.is_some() {
                     *seen = landed;
                 }
-                for (s, l) in free_seen.iter_mut().zip(free_landed) {
-                    if l.is_some() {
-                        *s = l;
-                    }
-                }
+                advance_free_seen(free_seen, free_landed, true);
                 return (src, gate_input);
             }
             WakeStep::KeepWaiting => {
                 // 기준선이 없던 원천은 처음 본 값을 기준선으로 삼는다(깨우지 않는다).
-                for (s, l) in free_seen.iter_mut().zip(free_landed) {
-                    if s.is_none() && l.is_some() {
-                        *s = l;
-                    }
-                }
+                advance_free_seen(free_seen, free_landed, false);
                 tokio::time::sleep(Duration::from_millis(WAKE_POLL_MS)).await;
             }
         }
@@ -4989,6 +5021,10 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
         // 자유 착지로 틱이 분당 ~5회가 되면 "3틱"은 36초라 일시적 공백에도 울린다).
         let mut zero_since: Option<Instant> = None;
         let mut zero_alerted = false;
+        // 내보낸 짝 고정(트럭 → (상자, 보낸 시각 ms)) — 위 `edge_allowed_by_hold`. 킬스위치 MATCH_HOLD_SENT=0.
+        // 메모리 상태라 재시작하면 비지만, 재시작 직후 틱은 새 작업목록으로 돈다.
+        let mut held: HashMap<String, (String, i64)> = HashMap::new();
+        let hold_sent = std::env::var("MATCH_HOLD_SENT").map_or(true, |v| v != "0");
         loop {
             // ── 깨어나기: 고정 초가 아니라 **작업목록 착지**를 기다린다 (2026-08-12, C안) ──
             //
@@ -5035,13 +5071,17 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
             //   "매칭이 실제로 쓴 목록의 나이"만 담는다(그게 재고 싶은 값이다).
             let workpool_age_s: Option<i32> =
                 freshness.as_ref().ok().and_then(|(age, _)| *age).map(|a| a as i32);
+            // 이 틱이 쓰는 작업목록이 Oracle 에서 찍힌 시각(= now − 표 나이). 내보낸 짝 고정을 풀 때 쓴다.
+            let list_as_of_ms: Option<i64> = freshness.as_ref().ok().and_then(|(_, t)| *t)
+                .map(|t| Utc::now().timestamp_millis() - t * 1000);
             let stale_why = workpool_stale_reason(freshness);
             if let Some(why) = stale_why {
                 stale_streak += 1;
                 // 첫 틱과 이후 10틱마다만 남긴다 — 장애가 길어져도 로그가 한 줄씩만 는다.
-                // ⚠ 여기서 10틱은 **10분이 아니다**: 추출이 죽으면 이 구간의 틱은 전부
-                //   하트비트(150초)라 10틱 ≈ **25분**이다. 최초 탐지는 첫 틱이라 영향 없고,
-                //   늘어나는 것은 후속 반복 로그와 ops_alert.last_ts 갱신 간격뿐이다.
+                // ⚠ 여기서 10틱은 **10분이 아니다**: 작업목록 추출만 죽고 자유 원천이 살아 있으면
+                //   자유 착지 틱(mig 0164·15초 주기)이라 10틱 ≈ **2~3분**, 둘 다 죽으면 하트비트(150초)라
+                //   ≈ **25분**이다. 최초 탐지는 첫 틱이라 영향 없고, 달라지는 것은 후속 반복 로그와
+                //   ops_alert.last_ts 갱신 간격뿐이다.
                 if stale_streak == 1 || stale_streak % 10 == 0 {
                     tracing::warn!(streak = stale_streak, why = %why, "작업목록이 낡아 매칭을 건너뛴다");
                     crate::db::alert(
@@ -5062,6 +5102,12 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                 tracing::info!(skipped = stale_streak, "작업목록 신선도 회복 — 매칭 재개");
                 stale_streak = 0;
             }
+            if hold_sent {
+                release_held(&mut held, list_as_of_ms);
+            } else {
+                held.clear();
+            }
+            let held_boxes: HashSet<String> = held.values().map(|(c, _)| c.clone()).collect();
             let now = Utc::now().timestamp_millis();
             // previous-tick recommendation per vehicle (ytno → work bucket key) for anti-thrash.
             // ts-based (restart-safe), latest per vehicle within PREV_WINDOW_S.
@@ -5737,6 +5783,10 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                 crate::db::prune(&pool, "stage2_swap_shadow", "DELETE FROM stage2_swap_shadow WHERE ts < now() - interval '21 days'").await;
             }
             if vehicles.is_empty() {
+                // 트럭이 없으면 '생산 0' 조건이 아니다 — 경보 상태를 끊어 다음 무리가 새로 3분을 센다(리뷰 지적).
+                zero_streak = 0;
+                zero_since = None;
+                zero_alerted = false;
                 continue;
             }
             let (cranes_now, centroids_now): (HashMap<String, (f64, f64)>, HashMap<String, (f64, f64)>) = {
@@ -5769,6 +5819,9 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                     "Stage-2 후보에서 제외된 작업");
             }
             if works.is_empty() {
+                zero_streak = 0;
+                zero_since = None;
+                zero_alerted = false;
                 continue;
             }
             // 버킷 여유 = (이 베이의 완료기한 − now) − 이 베이의 처리시간
@@ -6040,7 +6093,13 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                     // 간선 비용 = 빈 차 주행(p50) + 들락날락 벌점. 곧 빌 트럭의 '비기까지 시간'은 비용에 안 넣는다:
                     //   계획은 마감에 내보내므로 그 전에만 비면 기다림이 없다(자격이 그걸 보장한다).
                     let (free, q80, _) = &veh_info[vi];
-                    if edge_eligible(w_tier, *free, *q80, first_ms, now) && p50 < 1800 {
+                    // 내보낸 짝 고정: 고정된 트럭은 자기 상자만, 고정된 상자는 자기 트럭만.
+                    let hold_ok = edge_allowed_by_hold(
+                        held.get(&v.0).map(|(c, _)| c.as_str()),
+                        w.contno.as_deref(),
+                        w.contno.as_ref().is_some_and(|c| held_boxes.contains(c)),
+                    );
+                    if hold_ok && edge_eligible(w_tier, *free, *q80, first_ms, now) && p50 < 1800 {
                         edges.push((vi, wpos, p50 + switch_pen)); // prune the far tail (never in the optimum)
                     }
                     row.push((arr, v.3 + p90, tier, switched));
@@ -6213,6 +6272,23 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                 tracing::warn!(error = %e, failed = ins_err_n, of = assign.len(),
                     "stage2_match_shadow insert failed — anti-thrash(prev)도 함께 죽는다. 0104/0161/0163 마이그레이션 적용 여부 확인");
             }
+            // 내보낸 짝(1계층)을 고정 목록에 올린다. 이미 고정된 트럭은 **처음 보낸 시각**을 유지한다 —
+            // TOS 가 받은 것은 첫 지시이고, 같은 짝을 다시 내는 것은 새 지시가 아니다.
+            if hold_sent {
+                let sent_ms = ts.timestamp_millis();
+                let before = held.len();
+                for &(vi, wpos) in &assign {
+                    if tier_w[wpos] != 1 { continue; }
+                    let (wi, _, _, _) = works[driving[wpos].0];
+                    if let Some(c) = work[wi].contno.clone() {
+                        held.entry(vehicles[vi].0.clone()).or_insert((c, sent_ms));
+                    }
+                }
+                if tick % 10 == 0 {
+                    tracing::info!(held = held.len(), new = held.len() - before, ?wake_src,
+                        "내보낸 짝 고정 — 그 뒤에 찍힌 작업목록이 올 때까지");
+                }
+            }
             let gap_pct = if opt_cost > 0 { 100.0 * (greedy_cost - opt_cost) as f64 / opt_cost as f64 } else { 0.0 };
             let solver_ins = sqlx::query(
                 "INSERT INTO stage2_solver_shadow (ts,tick,n_trucks,n_works,greedy_n,greedy_cost_s,optimal_n,optimal_cost_s,gap_pct,greedy_miss,optimal_miss,dep_tier_on,dep_tier0_n,dep_urgent_slots,dep_null_n,dep_demoted_n,ab_block,ab_warmup,works_raw,need_horizon_on,works_no_eta,works_no_coord,pool_new_n,pool_overlap_n,trucks_held_n,pool_overdue_n,pool_mode,due_buckets_n,self_cover_n,workpool_age_s,wake_src,t2_works,t2_slots,t2_assign_n,
@@ -6258,7 +6334,8 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
             // "틱은 도는데 비어 있다"를 3분 안에 잡는 빠른 경보다. 조용한 시간대(작업 0)에는
             // 조건이 성립하지 않아 오경보가 없다.
             // ★mig 0164: 종전 "3틱 연속"은 틱이 분당 1회일 때의 3분이었다. 자유 착지로 틱이 잦아져
-            //   **3틱 이상 + 3분 이상**을 함께 요구한다(한 번만 울린다 — zero_streak 이 처음 넘는 순간).
+            //   **3틱 이상 + 3분 이상**을 함께 요구한다(둘 다 처음 채워진 틱에 한 번만 울린다. 트럭이나
+            //   작업이 없어 중간에 건너뛴 틱에서도 상태를 끊는다).
             if !vehicles.is_empty() && !driving.is_empty() && assign.is_empty() {
                 zero_streak += 1;
                 let since = *zero_since.get_or_insert_with(Instant::now);
@@ -6317,6 +6394,8 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
             if tick % 30 == 0 {
                 crate::db::prune(&pool, "stage2_match_shadow", "DELETE FROM stage2_match_shadow WHERE ts < now() - interval '21 days'").await;
                 crate::db::prune(&pool, "stage2_solver_shadow", "DELETE FROM stage2_solver_shadow WHERE ts < now() - interval '21 days'").await;
+                // 2026-10-08 사용자 결정: 매칭 틱이 분당 ~5회가 되어(mig 0164) 보존 정책이 없던 이 표도 21일로 맞춘다.
+                crate::db::prune(&pool, "stage2_pool_shadow", "DELETE FROM stage2_pool_shadow WHERE ts < now() - interval '21 days'").await;
             }
         }
     });
@@ -7250,7 +7329,9 @@ mod workpool_freshness_tests {
 
 #[cfg(test)]
 mod wake_on_landing_tests {
-    use super::{combine_wake, free_advanced, should_wake, WakeSrc, WakeStep, PREV_WINDOW_S, WAKE_MAX_WAIT_MS, WORKPOOL_MAX_AGE_S};
+    use super::{advance_free_seen, combine_wake, edge_allowed_by_hold, free_advanced, release_held, should_wake, WakeSrc, WakeStep,
+                HOLD_RELEASE_MARGIN_MS, PREV_WINDOW_S, WAKE_MAX_WAIT_MS, WORKPOOL_MAX_AGE_S};
+    use std::collections::HashMap;
     use chrono::{DateTime, TimeZone, Utc};
     use std::time::Duration;
 
@@ -7403,6 +7484,49 @@ mod wake_on_landing_tests {
         assert_eq!(WakeSrc::Landing.as_str(), "landing");
         assert_eq!(WakeSrc::Fallback.as_str(), "fallback");
         assert_eq!(WakeSrc::Free.as_str(), "free");
+    }
+
+    /// 기준선 전진 규칙(리뷰 지적 — 이 규칙이 대기 루프 안에 숨어 있어 테스트가 없었다).
+    #[test]
+    fn 자유_기준선은_본_값으로만_전진한다() {
+        // 깨어나면 본 원천은 전진, 못 본 원천(30분 동안 행 없음)은 **기준선 유지** — 지우면 다음 첫 자유가
+        // 기준선만 잡고 깨우지 못한다.
+        let mut seen = [Some(시각(10)), Some(시각(10))];
+        advance_free_seen(&mut seen, [Some(시각(12)), None], true);
+        assert_eq!(seen, [Some(시각(12)), Some(시각(10))]);
+        // 안 깨어나면 기준선이 있는 원천은 그대로(다음 폴에서 깨워야 하므로).
+        let mut seen = [Some(시각(10)), None];
+        advance_free_seen(&mut seen, [Some(시각(12)), Some(시각(11))], false);
+        assert_eq!(seen, [Some(시각(10)), Some(시각(11))], "기준선 없던 원천만 첫 값으로 채운다");
+        // 그 직후 같은 값이면 깨우지 않고, 더 새 값이면 깨운다.
+        assert!(!free_advanced(seen[1], Some(시각(11))));
+        assert!(free_advanced(seen[1], Some(시각(12))));
+    }
+
+    /// 내보낸 짝 고정 — 고정된 트럭은 자기 상자만, 고정된 상자는 자기 트럭만.
+    #[test]
+    fn 고정된_짝은_서로만_본다() {
+        assert!(edge_allowed_by_hold(Some("C1"), Some("C1"), true), "자기 상자는 허용");
+        assert!(!edge_allowed_by_hold(Some("C1"), Some("C2"), false), "다른 상자는 막는다 — 두 번째 지시");
+        assert!(!edge_allowed_by_hold(Some("C1"), None, false));
+        assert!(!edge_allowed_by_hold(None, Some("C1"), true), "남이 고정한 상자는 막는다 — 같은 상자 두 트럭");
+        assert!(edge_allowed_by_hold(None, Some("C2"), false));
+        assert!(edge_allowed_by_hold(None, None, false));
+    }
+
+    /// 고정 해제 — 짝을 보낸 시각보다 **뒤에 찍힌** 작업목록이 와야 푼다(여유 포함). 목록 시각을 모르면 안 푼다.
+    #[test]
+    fn 보낸_뒤에_찍힌_목록이_와야_고정을_푼다() {
+        let mut h: HashMap<String, (String, i64)> = HashMap::new();
+        h.insert("TT1".into(), ("C1".into(), 100_000));
+        release_held(&mut h, None);
+        assert_eq!(h.len(), 1, "목록 시각을 모르면 유지");
+        release_held(&mut h, Some(100_000 + HOLD_RELEASE_MARGIN_MS));
+        assert_eq!(h.len(), 1, "여유 안쪽(보낸 시각과 거의 같은 목록)이면 유지");
+        release_held(&mut h, Some(90_000));
+        assert_eq!(h.len(), 1, "보내기 전에 찍힌 목록이면 유지");
+        release_held(&mut h, Some(100_000 + HOLD_RELEASE_MARGIN_MS + 1));
+        assert!(h.is_empty(), "보낸 뒤에 찍힌 목록이면 푼다");
     }
 
     /// mig 0164: 자유 사건 원천이 **새 행을 착지시켰을 때만** 참이다. 뒤바꿈(직전↔이번)은 거짓이 된다.

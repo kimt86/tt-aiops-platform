@@ -1495,7 +1495,8 @@ pub async fn stage2_shadow(State(pool): State<PgPool>) -> Result<Json<Stage2Shad
             -- 다른 모집단이라 섞으면 종전 지표(30분 요약)의 의미가 바뀐다.
             AND m.match_tier IS DISTINCT FROM 2
             AND m.ts IN (SELECT ts FROM stage2_solver_shadow
-                          WHERE ts > now() - interval '30 minutes' AND pool_mode = 3)",
+                          WHERE ts > now() - interval '30 minutes' AND pool_mode = 3
+                            AND wake_src IS DISTINCT FROM 'free') -- 자유 착지 틱 제외(mig 0164): 같은 목록으로 분당 ~4번 더 돌며 직전 짝을 되풀이해 행 단위 비율·건수를 바꾼다",
     )
     .fetch_one(&pool)
     .await?;
@@ -1533,6 +1534,7 @@ pub async fn stage2_shadow(State(pool): State<PgPool>) -> Result<Json<Stage2Shad
                 sum(greedy_miss)::bigint AS greedy_miss,
                 sum(optimal_miss)::bigint AS optimal_miss
            FROM stage2_solver_shadow WHERE ts > now() - interval '30 minutes' AND pool_mode = 3
+            AND wake_src IS DISTINCT FROM 'free' -- 위 요약과 같은 틱 모집단(mig 0164)
             AND match_ver IS NOT DISTINCT FROM (SELECT match_ver FROM stage2_solver_shadow ORDER BY ts DESC LIMIT 1)",
             // ↑ 매칭 규칙 판(mig 0163)이 바뀌면 기준선(greedy) 정의도 바뀐다 — 창 안에서 최신 판만 본다.
     )
@@ -1638,7 +1640,7 @@ pub async fn health_dispatch(State(pool): State<PgPool>) -> Result<Json<HealthDi
     .fetch_one(&pool)
     .await?;
     // 임계 180초 = 하트비트(150초) + 틱 본체 여유. 2026-08-12 이전에는 매칭이 고정 60초 주기라
-    // 120초(2회 결손)가 맞았으나, 지금은 **작업목록 착지마다** 돌고 착지가 없으면 150초 하트비트가
+    // 120초(2회 결손)가 맞았으나, 지금은 **작업목록 착지마다**(mig 0164~ 자유 사건 착지에도) 돌고 착지가 없으면 150초 하트비트가
     // 받는다. 120초로 두면 하트비트가 뜰 때마다 정상인데 "죽었다"고 표시된다(리뷰 지적).
     // 진짜 총정지는 stage2_match_shadow DEADMAN(30분)이 별도로 잡는다.
     let up = last_tick_age_s.map(|a| a < 180).unwrap_or(false);
@@ -1657,7 +1659,9 @@ pub async fn health_dispatch(State(pool): State<PgPool>) -> Result<Json<HealthDi
             -- 2계층(미리 배정·mig 0161) 제외 — 요약 지표는 종전 모집단(마감 도래 발행)으로 유지.
             AND match_tier IS DISTINCT FROM 2
             AND ts IN (SELECT ts FROM stage2_solver_shadow
-                        WHERE ts > now() - interval '30 minutes' AND pool_mode = 3)",
+                        WHERE ts > now() - interval '30 minutes' AND pool_mode = 3
+                          AND wake_src IS DISTINCT FROM 'free') -- 자유 착지 틱 제외(mig 0164): 같은 목록으로 분당 ~4번 더 돌며 직전 짝을 되풀이해 행 단위 비율·건수를 바꾼다
+            --   (리뷰 실측: 착지 틱 바뀜 2.71% vs 자유 틱 1.27%).",
     )
     .fetch_one(&pool)
     .await?;
@@ -1665,6 +1669,7 @@ pub async fn health_dispatch(State(pool): State<PgPool>) -> Result<Json<HealthDi
     let savings_pct: Option<f64> = sqlx::query_scalar(
         "SELECT (100.0*sum(greedy_cost_s - optimal_cost_s)/nullif(sum(greedy_cost_s),0))::float8
            FROM stage2_solver_shadow WHERE ts > now() - interval '30 minutes' AND pool_mode = 3
+            AND wake_src IS DISTINCT FROM 'free' -- 위 요약과 같은 틱 모집단(mig 0164)
             AND match_ver IS NOT DISTINCT FROM (SELECT match_ver FROM stage2_solver_shadow ORDER BY ts DESC LIMIT 1)", // 판(mig 0163) 섞임 방지
     )
     .fetch_one(&pool)
@@ -1682,7 +1687,8 @@ pub async fn health_dispatch(State(pool): State<PgPool>) -> Result<Json<HealthDi
             WHERE ts > now() - interval '1 hour' AND arrival_s IS NOT NULL
               AND match_tier IS DISTINCT FROM 2 -- 옆의 p50/p90 과 같은 모집단(mig 0161)
               AND ts IN (SELECT ts FROM stage2_solver_shadow
-                          WHERE ts > now() - interval '1 hour' AND pool_mode = 3)
+                          WHERE ts > now() - interval '1 hour' AND pool_mode = 3
+                            AND wake_src IS DISTINCT FROM 'free')
             GROUP BY 1) z ORDER BY ord",
     )
     .fetch_all(&pool)
@@ -1696,7 +1702,8 @@ pub async fn health_dispatch(State(pool): State<PgPool>) -> Result<Json<HealthDi
            FROM stage2_match_shadow WHERE ts > now() - interval '24 hours'
             AND match_tier IS DISTINCT FROM 2 -- 경계(mig 0161)에서 matches 3배 점프를 막는다
             AND ts IN (SELECT ts FROM stage2_solver_shadow
-                        WHERE ts > now() - interval '24 hours' AND pool_mode = 3)
+                        WHERE ts > now() - interval '24 hours' AND pool_mode = 3
+                          AND wake_src IS DISTINCT FROM 'free') -- 경계(mig 0164)에서 matches 5배 점프를 막는다
           GROUP BY 1 ORDER BY 1",
     )
     .fetch_all(&pool)

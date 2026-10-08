@@ -60,7 +60,7 @@ export default function HealthPage({ lang }: { lang: Lang }) {
       label: t("권고 신선도", "Freshness"),
       val: d?.last_tick_age_s != null ? String(d.last_tick_age_s) : "—",
       unit: "s",
-      note: t("정상 ≤180s · 작업목록 착지마다", "OK ≤180s · on each work-list landing"),
+      note: t("정상 ≤180s · 작업목록·빈 트럭 기록이 들어올 때마다", "OK ≤180s · on each work-list or free-truck landing"),
       tone: d?.up ? "good" : "warn",
     },
     {
@@ -74,7 +74,7 @@ export default function HealthPage({ lang }: { lang: Lang }) {
       label: t("안정성 (재배정율)", "Stability (thrash)"),
       val: pct(d?.thrash_pct),
       unit: "%",
-      note: t("낮을수록 안정", "lower = stable"),
+      note: t("낮을수록 안정 · 새 작업목록이 온 계산만 셈", "lower = stable · work-list-landing ticks only"),
       tone: (d?.thrash_pct ?? 0) < 12 ? "good" : "warn",
     },
     {
@@ -102,7 +102,7 @@ export default function HealthPage({ lang }: { lang: Lang }) {
           <div className="hp-eng-title">{t("AI 배차 엔진 — 헬스 모니터", "AI Dispatch Engine — Health Monitor")}</div>
           <div className="hp-eng-sub">
             {t("그림자 모드 (권고만 기록·검증, 실제 배차 무간섭)", "Shadow mode — recommendations logged, live dispatch untouched")}
-            {" · "}{t("작업목록 착지마다", "on each work-list landing")}
+            {" · "}{t("작업목록·빈 트럭 기록이 들어올 때마다", "on each work-list or free-truck landing")}
             {d?.last_tick_age_s != null && ` · ${t("마지막 권고", "last")} ${d.last_tick_age_s}s ${t("전", "ago")}`}
             {err && <span className="hp-eng-sub" style={{ color: "#ef4444" }}> · {t("연결 오류", "offline")}</span>}
           </div>

@@ -11,8 +11,10 @@ MemoryMax=2G
 MemorySwapMax=0
 Type=oneshot
 # 멈춘 실행이 끝나지 않으면 타이머가 다음 회차를 건너뛰고 실패 경보도 안 뜬다 — 넘기면 실패로 끊어 OnFailure 가
-# 울리게 한다(2026-10-08·tt-tos-avail 선례). 실측 소요 p99 15.5·max 30.4초(08월 max 84초).
-TimeoutStartSec=180
+# 울리게 한다(2026-10-08·tt-tos-avail 선례). ⚠이 유닛은 느린 Oracle 에서 **실제로 3분을 넘긴다**(etl_run_log 60일:
+# POOL_FETCH 단계만 120초 초과 9회·최장 197초 — 그 뒤 작업목록·ETW 가 더 돈다). 180초로 끊으면 느린 구간에 목록이
+# 아예 안 들어와 신선도 게이트(300초)가 닫혀 매칭이 선다 — '느림'을 '정지'로 만든다(리뷰 지적). 그래서 600초.
+TimeoutStartSec=600
 EnvironmentFile=%h/projects/tt-aiops-platform/.env
 ExecStart=%h/projects/tt-aiops-platform/target/release/extractor workpool --target oracle-prod
 Nice=15

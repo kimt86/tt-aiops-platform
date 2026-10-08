@@ -104,7 +104,8 @@ journalctl --user -u tt-shift-t1.service -n 50
 - Widen intervals (`OnUnitActiveSec`, or the `OnCalendar` step for the second-staggered units)
   to reduce Oracle hits; `daemon-reload` after editing. Firing seconds are deliberately spread
   (:05/20/35/50 qc + handover (15 s, together on purpose — one matcher wake) / :15 stowplan / :25 rtg /
-  :35 vessel / :40 tos-avail / :55 workpool) — keep a new timer off those slots.
+  :35 vessel (every 5 min — shares :35 with qc + handover, 3 short queries at once, accepted 2026-10-08) /
+  :40 tos-avail / :55 workpool) — keep a new timer off those slots.
 - The scenario collectors serialize their Oracle access with `flock(1)` among themselves. The
   critical extractors are deliberately **outside** that lock — several fire every 60 s and must not
   queue behind a scenario query.
