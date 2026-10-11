@@ -356,19 +356,26 @@ async fn src_util(pool: &PgPool, _target: &str, date: NaiveDate, sh: Shift, star
     // TIME-BASED utilization from the API's work-pool assignment samples (no Oracle). Mean of
     // assigned/on-duty over this shift's 60s samples. (TOS session util is no longer used.)
     run_logged(pool, "K_UTIL_SHIFT", date, |_| async move {
-        let (value, n): (Option<f64>, i64) = sqlx::query_as(
-            "SELECT round(avg(100.0*assigned/nullif(on_duty,0)),1)::float8, count(*)::int8
-               FROM util_tt_sample WHERE business_date=$1 AND shift=$2",
-        )
-        .bind(date)
-        .bind(sh.label())
-        .fetch_one(pool)
-        .await
-        .unwrap_or((None, 0));
+        let (value, n) = k_util_from_samples(pool, date, sh).await?;
         // weight None: not combined across shifts (today K_UTIL is recomputed from samples directly)
         upsert_shift(pool, date, sh, "K_UTIL", "%", value, Some(n), None, start, end).await?;
         Ok(n as u64)
     }).await.map(|_| ())
+}
+
+/// Shift K_UTIL (mean assigned/on-duty %) and its sample count. A failed query is an error:
+/// until 2026-10-12 it was swallowed into (NULL, 0), which overwrote the shift's K_UTIL with
+/// NULL and still logged the run OK.
+async fn k_util_from_samples(pool: &PgPool, date: NaiveDate, sh: Shift) -> Result<(Option<f64>, i64)> {
+    sqlx::query_as(
+        "SELECT round(avg(100.0*assigned/nullif(on_duty,0)),1)::float8, count(*)::int8
+           FROM util_tt_sample WHERE business_date=$1 AND shift=$2",
+    )
+    .bind(date)
+    .bind(sh.label())
+    .fetch_one(pool)
+    .await
+    .context("K_UTIL samples query")
 }
 
 /// One MCH_OPERATION (c07) shift fetch → K_MPH headline + per-vessel panel rows.
@@ -534,4 +541,21 @@ async fn src_craneq(pool: &PgPool, target: &str, date: NaiveDate, sh: Shift, sta
         }
         Ok(n as u64)
     }).await.map(|_| ())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn k_util_query_failure_is_an_error() {
+        // Nothing listens on port 1: every query fails. The old `.unwrap_or((None, 0))` turned
+        // this into Ok((None, 0)) → K_UTIL overwritten with NULL and the run logged OK.
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .acquire_timeout(std::time::Duration::from_secs(2))
+            .connect_lazy("postgres://x@127.0.0.1:1/x")
+            .unwrap();
+        let date = NaiveDate::from_ymd_opt(2026, 10, 12).unwrap();
+        assert!(k_util_from_samples(&pool, date, Shift::Day).await.is_err());
+    }
 }

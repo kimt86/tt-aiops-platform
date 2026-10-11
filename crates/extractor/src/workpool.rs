@@ -351,12 +351,21 @@ async fn src_etw(pool: &PgPool, date: chrono::NaiveDate) -> Result<()> {
                     continue;
                 }
             };
+            // A 200 whose body has no usable container list is a failure, not "0 containers":
+            // a reshaped gateway response would otherwise land nothing and still log OK.
+            let cntrs = match etw_cntrs(&snap) {
+                Ok(c) => c,
+                Err(why) => {
+                    tracing::warn!(%vessel, %voyage, %why, "etw snapshot unusable");
+                    failed_ct += 1;
+                    first_err.get_or_insert(format!("{vessel}/{voyage}: {why}"));
+                    continue;
+                }
+            };
             fetched_ct += 1;
             let fetched = parse_ts(snap.get("fetched_at_utc").and_then(|v| v.as_str()));
             let expires = parse_ts(snap.get("expires_at_utc").and_then(|v| v.as_str()));
-            for c in snap.get("cntr_list").and_then(|v| v.as_array()).into_iter().flatten() {
-                let cntr = c.get("cntr_no").and_then(|v| v.as_str()).unwrap_or("");
-                if cntr.is_empty() { continue; }
+            for (cntr, c) in cntrs {
                 let disld = c.get("dis_ld").and_then(|v| v.as_str());
                 let qc = parse_ts(c.get("qc_etw_utc").and_then(|v| v.as_str()));
                 let vsl = parse_ts(c.get("vessel_etw_utc").and_then(|v| v.as_str()));
@@ -387,7 +396,11 @@ async fn src_etw(pool: &PgPool, date: chrono::NaiveDate) -> Result<()> {
         // with tos_etw_cntr at 0 rows. Now: zero snapshots out of a non-zero number of real
         // failures is a FAILED run. A partial failure stays OK (logged above) — one flaky voyage
         // should not mark the whole source down. Only this step fails; the workpool tick goes on.
-        etw_outcome(fetched_ct, failed_ct, first_err.as_deref())?;
+        // 2026-10-12: a 404 on every voyage with no stored snapshot still current is FAILED too —
+        // 404 is "voyage unknown" one voyage at a time, but on all of them it is a gateway that
+        // lost its data or moved behind the same port.
+        etw_outcome(EtwTally { fetched: fetched_ct, skipped: skipped_ct, not_found: not_found_ct, failed: failed_ct },
+                    first_err.as_deref())?;
         Ok(n)
     }).await.map(|_| ())
 }
@@ -417,12 +430,55 @@ fn classify_etw_fetch(exit_ok: bool, stdout: &[u8]) -> EtwFetch<'_> {
     }
 }
 
-/// Whole-step verdict: FAILED only when there were real failures and not one snapshot landed.
-fn etw_outcome(fetched: u32, failed: u32, first_err: Option<&str>) -> Result<()> {
-    if failed > 0 && fetched == 0 {
+/// Container rows of one snapshot as (cntr_no, row). Err = the body is not a usable snapshot:
+/// no `cntr_list` array, or entries present but not one carries a `cntr_no`. An empty list is a
+/// real answer (voyage with nothing left) and stays Ok.
+fn etw_cntrs(snap: &serde_json::Value) -> std::result::Result<Vec<(&str, &serde_json::Value)>, String> {
+    let list = snap
+        .get("cntr_list")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| "snapshot has no cntr_list array".to_string())?;
+    let rows: Vec<_> = list
+        .iter()
+        .filter_map(|c| c.get("cntr_no").and_then(|v| v.as_str()).filter(|s| !s.is_empty()).map(|n| (n, c)))
+        .collect();
+    if rows.is_empty() && !list.is_empty() {
+        return Err(format!("cntr_list has {} entries, none with cntr_no", list.len()));
+    }
+    Ok(rows)
+}
+
+/// Per-tick counts of what happened to each voyage in the pool.
+#[derive(Debug, Clone, Copy)]
+struct EtwTally {
+    /// usable snapshot landed
+    fetched: u32,
+    /// stored snapshot still unexpired — not asked
+    skipped: u32,
+    /// gateway answered 404
+    not_found: u32,
+    /// no snapshot for any other reason (unreachable, 5xx, bad JSON, unusable body)
+    failed: u32,
+}
+
+/// Whole-step verdict. FAILED when nothing landed and either (a) there were real failures, or
+/// (b) every voyage asked got a 404 and none had a current stored snapshot to fall back on.
+/// Partial outcomes stay OK (logged).
+fn etw_outcome(t: EtwTally, first_err: Option<&str>) -> Result<()> {
+    if t.fetched > 0 {
+        return Ok(());
+    }
+    if t.failed > 0 {
         anyhow::bail!(
-            "ETW gateway: all {failed} snapshot fetches failed, none succeeded (first: {})",
+            "ETW gateway: all {} snapshot fetches failed, none succeeded (first: {})",
+            t.failed,
             first_err.unwrap_or("?")
+        );
+    }
+    if t.not_found > 0 && t.skipped == 0 {
+        anyhow::bail!(
+            "ETW gateway: all {} voyages answered 404 and none has a current snapshot",
+            t.not_found
         );
     }
     Ok(())
@@ -658,12 +714,35 @@ mod tests {
         assert_eq!(classify_etw_fetch(true, b"{\n\"a\":1\n}\n200"), EtwFetch::Ok(b"{\n\"a\":1\n}"));
     }
 
+    fn tally(fetched: u32, skipped: u32, not_found: u32, failed: u32) -> EtwTally {
+        EtwTally { fetched, skipped, not_found, failed }
+    }
+
     #[test]
     fn etw_outcome_fails_only_when_nothing_landed() {
-        assert!(etw_outcome(0, 12, Some("x")).is_err()); // every fetch failed → FAILED
-        assert!(etw_outcome(3, 2, Some("x")).is_ok()); // partial → still OK (logged)
-        assert!(etw_outcome(0, 0, None).is_ok()); // all skipped (unexpired) or all 404 → OK
-        assert!(etw_outcome(5, 0, None).is_ok());
+        assert!(etw_outcome(tally(0, 0, 0, 12), Some("x")).is_err()); // every fetch failed → FAILED
+        assert!(etw_outcome(tally(3, 0, 0, 2), Some("x")).is_ok()); // partial → still OK (logged)
+        assert!(etw_outcome(tally(0, 17, 0, 0), None).is_ok()); // all unexpired → OK
+        assert!(etw_outcome(tally(0, 0, 0, 0), None).is_ok()); // empty pool → OK
+        assert!(etw_outcome(tally(5, 0, 0, 0), None).is_ok());
+    }
+
+    #[test]
+    fn etw_all_404_without_current_snapshot_fails() {
+        // every voyage asked answered 404 and nothing stored is current → gateway lost its data
+        assert!(etw_outcome(tally(0, 0, 6, 0), None).is_err());
+        // some 404s are normal while other voyages still have a current snapshot (journal 10-11~12: 891/1,577 ticks)
+        assert!(etw_outcome(tally(0, 12, 6, 0), None).is_ok());
+        assert!(etw_outcome(tally(2, 0, 6, 0), None).is_ok());
+    }
+
+    #[test]
+    fn etw_snapshot_without_cntr_list_is_unusable() {
+        let ok: serde_json::Value = serde_json::json!({"cntr_list": [{"cntr_no": "ABCU1"}, {"cntr_no": ""}, {"x": 1}]});
+        assert_eq!(etw_cntrs(&ok).unwrap().iter().map(|r| r.0).collect::<Vec<_>>(), vec!["ABCU1"]);
+        assert!(etw_cntrs(&serde_json::json!({"cntr_list": []})).unwrap().is_empty()); // nothing left → real answer
+        assert!(etw_cntrs(&serde_json::json!({"containers": [{"cntr_no": "ABCU1"}]})).is_err()); // renamed key
+        assert!(etw_cntrs(&serde_json::json!({"cntr_list": [{"container_no": "ABCU1"}]})).is_err()); // renamed field
     }
 
     #[test]

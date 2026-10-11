@@ -30,24 +30,11 @@ pub async fn tick_weather(pool: &PgPool) -> Result<()> {
             .context("curl open-meteo")?;
         anyhow::ensure!(out.status.success(), "open-meteo fetch failed (curl status)");
         let v: serde_json::Value = serde_json::from_slice(&out.stdout).context("parse open-meteo json")?;
-        let h = v.get("hourly").context("open-meteo: no hourly block")?;
-        let times = h.get("time").and_then(|x| x.as_array()).context("open-meteo: no time array")?;
-        let col = |k: &str| h.get(k).and_then(|x| x.as_array()).cloned().unwrap_or_default();
-        let (precip, wind, vis, code) = (
-            col("precipitation"),
-            col("wind_speed_10m"),
-            col("visibility"),
-            col("weather_code"),
-        );
+        let rows = hourly_rows(&v)?;
 
         let mut tx = pool.begin().await?;
         let mut n = 0u64;
-        for (i, t) in times.iter().enumerate() {
-            let Some(ts_str) = t.as_str() else { continue };
-            // Open-Meteo GMT time "YYYY-MM-DDTHH:MM" → UTC instant.
-            let Ok(ndt) = chrono::NaiveDateTime::parse_from_str(ts_str, "%Y-%m-%dT%H:%M") else { continue };
-            let ts = ndt.and_utc();
-            let at = |a: &Vec<serde_json::Value>| a.get(i).and_then(|x| x.as_f64());
+        for r in &rows {
             sqlx::query(
                 "INSERT INTO weather_hourly (ts, precip_mm, wind_kmh, visibility_m, weather_code)
                  VALUES ($1,$2,$3,$4,$5)
@@ -56,11 +43,11 @@ pub async fn tick_weather(pool: &PgPool) -> Result<()> {
                    visibility_m = EXCLUDED.visibility_m, weather_code = EXCLUDED.weather_code,
                    captured_at = now()",
             )
-            .bind(ts)
-            .bind(at(&precip))
-            .bind(at(&wind))
-            .bind(at(&vis))
-            .bind(at(&code).map(|x| x as i32))
+            .bind(r.ts)
+            .bind(r.precip)
+            .bind(r.wind)
+            .bind(r.vis)
+            .bind(r.code)
             .execute(&mut *tx)
             .await?;
             n += 1;
@@ -93,16 +80,10 @@ pub async fn tick_weather_live(pool: &PgPool) -> Result<()> {
             .context("curl tomorrow.io")?;
         anyhow::ensure!(out.status.success(), "tomorrow.io fetch failed (curl status / key / quota)");
         let v: serde_json::Value = serde_json::from_slice(&out.stdout).context("parse tomorrow.io json")?;
-        let intervals = v
-            .pointer("/data/timelines/0/intervals")
-            .and_then(|x| x.as_array())
-            .context("tomorrow.io: no intervals (check key/quota)")?;
+        let rows = minute_rows(&v)?;
         let mut tx = pool.begin().await?;
         let mut n = 0u64;
-        for it in intervals {
-            let Some(ts_str) = it.get("startTime").and_then(|x| x.as_str()) else { continue };
-            let Ok(ts) = chrono::DateTime::parse_from_rfc3339(ts_str) else { continue };
-            let val = |k: &str| it.pointer("/values").and_then(|vv| vv.get(k)).and_then(|x| x.as_f64());
+        for r in &rows {
             sqlx::query(
                 "INSERT INTO weather_1min (ts, precip_mm_hr, visibility_km, wind_ms, weather_code)
                  VALUES ($1,$2,$3,$4,$5)
@@ -110,11 +91,11 @@ pub async fn tick_weather_live(pool: &PgPool) -> Result<()> {
                    precip_mm_hr = EXCLUDED.precip_mm_hr, visibility_km = EXCLUDED.visibility_km,
                    wind_ms = EXCLUDED.wind_ms, weather_code = EXCLUDED.weather_code, captured_at = now()",
             )
-            .bind(ts.with_timezone(&chrono::Utc))
-            .bind(val("precipitationIntensity"))
-            .bind(val("visibility"))
-            .bind(val("windSpeed"))
-            .bind(val("weatherCode").map(|x| x as i32))
+            .bind(r.ts)
+            .bind(r.precip)
+            .bind(r.vis)
+            .bind(r.wind)
+            .bind(r.code)
             .execute(&mut *tx)
             .await?;
             n += 1;
@@ -124,4 +105,117 @@ pub async fn tick_weather_live(pool: &PgPool) -> Result<()> {
     })
     .await?;
     Ok(())
+}
+
+/// One weather sample, units as the source table stores them.
+#[derive(Debug)]
+struct WeatherRow {
+    ts: chrono::DateTime<chrono::Utc>,
+    precip: Option<f64>,
+    wind: Option<f64>,
+    vis: Option<f64>,
+    code: Option<i32>,
+}
+
+/// Every entry was skipped (time field no longer parses) → error, not "0 rows OK". Until
+/// 2026-10-12 a changed time format landed nothing and still logged OK.
+fn ensure_some_parsed(src: &str, entries: usize, parsed: usize) -> Result<()> {
+    anyhow::ensure!(
+        entries == 0 || parsed > 0,
+        "{src}: none of {entries} time entries parsed (format changed?)"
+    );
+    Ok(())
+}
+
+/// Open-Meteo hourly block → rows. Time is GMT "YYYY-MM-DDTHH:MM".
+fn hourly_rows(v: &serde_json::Value) -> Result<Vec<WeatherRow>> {
+    let h = v.get("hourly").context("open-meteo: no hourly block")?;
+    let times = h.get("time").and_then(|x| x.as_array()).context("open-meteo: no time array")?;
+    let col = |k: &str| h.get(k).and_then(|x| x.as_array()).cloned().unwrap_or_default();
+    let (precip, wind, vis, code) = (
+        col("precipitation"),
+        col("wind_speed_10m"),
+        col("visibility"),
+        col("weather_code"),
+    );
+    let mut rows = Vec::new();
+    for (i, t) in times.iter().enumerate() {
+        let Some(ts_str) = t.as_str() else { continue };
+        let Ok(ndt) = chrono::NaiveDateTime::parse_from_str(ts_str, "%Y-%m-%dT%H:%M") else { continue };
+        let at = |a: &Vec<serde_json::Value>| a.get(i).and_then(|x| x.as_f64());
+        rows.push(WeatherRow {
+            ts: ndt.and_utc(),
+            precip: at(&precip),
+            wind: at(&wind),
+            vis: at(&vis),
+            code: at(&code).map(|x| x as i32),
+        });
+    }
+    ensure_some_parsed("open-meteo", times.len(), rows.len())?;
+    Ok(rows)
+}
+
+/// Tomorrow.io timeline intervals → rows. Time is RFC 3339.
+fn minute_rows(v: &serde_json::Value) -> Result<Vec<WeatherRow>> {
+    let intervals = v
+        .pointer("/data/timelines/0/intervals")
+        .and_then(|x| x.as_array())
+        .context("tomorrow.io: no intervals (check key/quota)")?;
+    let mut rows = Vec::new();
+    for it in intervals {
+        let Some(ts_str) = it.get("startTime").and_then(|x| x.as_str()) else { continue };
+        let Ok(ts) = chrono::DateTime::parse_from_rfc3339(ts_str) else { continue };
+        let val = |k: &str| it.pointer("/values").and_then(|vv| vv.get(k)).and_then(|x| x.as_f64());
+        rows.push(WeatherRow {
+            ts: ts.with_timezone(&chrono::Utc),
+            precip: val("precipitationIntensity"),
+            wind: val("windSpeed"),
+            vis: val("visibility"),
+            code: val("weatherCode").map(|x| x as i32),
+        });
+    }
+    ensure_some_parsed("tomorrow.io", intervals.len(), rows.len())?;
+    Ok(rows)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn hourly_parses_current_format() {
+        let v = json!({"hourly": {"time": ["2026-10-12T05:00", "2026-10-12T06:00"],
+                                  "precipitation": [0.1, 0.0], "wind_speed_10m": [9.0, 8.0],
+                                  "visibility": [24000.0, 24000.0], "weather_code": [61.0, 3.0]}});
+        let rows = hourly_rows(&v).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].code, Some(61));
+        assert_eq!(rows[1].ts.to_rfc3339(), "2026-10-12T06:00:00+00:00");
+    }
+
+    #[test]
+    fn hourly_changed_time_format_fails() {
+        // e.g. seconds + zone appended — every entry would be skipped
+        let v = json!({"hourly": {"time": ["2026-10-12T05:00:00Z", "2026-10-12T06:00:00Z"]}});
+        assert!(hourly_rows(&v).is_err());
+        // one bad entry among good ones is tolerated
+        let v = json!({"hourly": {"time": ["2026-10-12T05:00", "garbage"]}});
+        assert_eq!(hourly_rows(&v).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn minute_changed_time_format_fails() {
+        let good = json!({"data": {"timelines": [{"intervals": [
+            {"startTime": "2026-10-12T05:01:00Z", "values": {"windSpeed": 3.2, "weatherCode": 1000.0}}]}]}});
+        let rows = minute_rows(&good).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].wind, Some(3.2));
+        let bad = json!({"data": {"timelines": [{"intervals": [
+            {"startTime": "2026-10-12 05:01", "values": {}}, {"time": "2026-10-12T05:02:00Z"}]}]}});
+        assert!(minute_rows(&bad).is_err());
+        // an empty window is not a format change
+        let empty = json!({"data": {"timelines": [{"intervals": []}]}});
+        assert!(minute_rows(&empty).unwrap().is_empty());
+    }
 }
