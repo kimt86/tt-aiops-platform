@@ -7,6 +7,11 @@
 --   rtg_move_log LD)이 다음 자유보다 먼저 있고, 두 끝의 좌표가 다 잡힌 것.
 -- 좌표: QC 끝 = learn_topos_point(크레인, 퍼짐 ~15m) · 양하 내림 = 인계 목적지(블록-베이, 없으면 블록) ·
 --   적하 픽업 = 그 시각 직전 600초 안 마지막 트럭 GPS(정지하면 단말이 침묵하므로 마지막 픽스 ≈ 정지 위치)(야드 장비 위치 코드가 로컬에 없다). truck_pos_hist 는 2일 보관.
+-- (2026-10-12 추가 — 크레인 쪽 손해용, analyze.py 는 앞 9열만 읽는다)
+--   10열 = 크레인 앞 여유(초): 다음 작업의 상자를 안벽 크레인이 다룬 시각 − 그 트럭이 크레인 앞에 도착한 시각.
+--          양하 = QC 가 실어준 시각(p) − 빈 차 도착(tt_cycle_v2.empty_arrived_at) ·
+--          적하 = QC 가 내린 시각(그 작업의 다음 자유) − 짐 싣고 도착(tt_cycle_v2.laden_arrived_at).
+--   11열 = 도착 시각 출처(arr_src_*) — cur_loc 는 ~200초 일찍 찍혀 여유를 부풀린다(KC cycle-decomposition).
 \set ON_ERROR_STOP on
 BEGIN;
 SET LOCAL statement_timeout = '300s';
@@ -17,7 +22,8 @@ WITH raw AS (
   SELECT ytno, comp_ts, 'DS', topos FROM tos_handover_label
    WHERE jobtype = 'DS' AND ytno LIKE 'TT%' AND comp_ts >= :from AND comp_ts < :to
 ), ev AS (
-  SELECT *, lead(f) OVER (PARTITION BY ytno ORDER BY f) AS next_f FROM raw
+  SELECT *, lead(f) OVER (PARTITION BY ytno ORDER BY f) AS next_f,
+         lead(fjt) OVER (PARTITION BY ytno ORDER BY f) AS next_fjt FROM raw
 ), fr AS (
   SELECT * FROM ev WHERE next_f IS NULL OR next_f > f + interval '180 seconds'
 ), pk AS (
@@ -27,7 +33,7 @@ WITH raw AS (
   SELECT trk_id, comp_ts, 'LD', NULL FROM rtg_move_log
    WHERE jobtype = 'LD' AND trk_id LIKE 'TT%' AND comp_ts >= :from AND comp_ts < (:to)::timestamptz + interval '30 minutes'
 ), pair AS (
-  SELECT fr.ytno, fr.f, fr.fjt, fr.floc, n.p, n.pjt, n.ploc
+  SELECT fr.ytno, fr.f, fr.fjt, fr.floc, n.p, n.pjt, n.ploc, fr.next_f, fr.next_fjt
     FROM fr
     JOIN LATERAL (SELECT p, pjt, ploc FROM pk
                    WHERE pk.ytno = fr.ytno AND pk.p > fr.f AND pk.p < fr.f + interval '30 minutes'
@@ -36,7 +42,9 @@ WITH raw AS (
 )
 SELECT pr.ytno, extract(epoch FROM pr.f)::bigint, pr.fjt, extract(epoch FROM pr.p)::bigint, pr.pjt,
        coalesce(fa.lat, fb.lat), coalesce(fa.lon, fb.lon),
-       coalesce(pa.lat, g.lat), coalesce(pa.lon, g.lon)
+       coalesce(pa.lat, g.lat), coalesce(pa.lon, g.lon),
+       extract(epoch FROM coalesce(pr.p - cd.empty_arrived_at, pr.next_f - cl.laden_arrived_at))::int,
+       coalesce(cd.arr_src_pickup, cl.arr_src_drop)
   FROM pair pr
   LEFT JOIN learn_topos_point fa ON fa.topos = pr.floc
   LEFT JOIN learn_topos_point fb ON pr.fjt = 'DS' AND fb.topos = left(pr.floc, 3)
@@ -44,5 +52,17 @@ SELECT pr.ytno, extract(epoch FROM pr.f)::bigint, pr.fjt, extract(epoch FROM pr.
   LEFT JOIN LATERAL (SELECT lat, lon FROM truck_pos_hist h
                       WHERE pr.pjt = 'LD' AND h.ytno = pr.ytno
                         AND h.ts <= pr.p AND h.ts > pr.p - interval '600 seconds'
-                      ORDER BY h.ts DESC LIMIT 1) g ON true;
+                      ORDER BY h.ts DESC LIMIT 1) g ON true
+  -- 양하: QC 가 실어준 사이클(인도 = p 뒤)의 빈 차 도착
+  LEFT JOIN LATERAL (SELECT c.empty_arrived_at, c.arr_src_pickup FROM tt_cycle_v2 c
+                      WHERE pr.pjt = 'DS' AND c.ytno = pr.ytno AND c.jobtype = 'DS'
+                        AND c.dropped_at > pr.p AND c.dropped_at < pr.p + interval '1 hour'
+                        AND c.empty_arrived_at <= pr.p AND c.empty_arrived_at > pr.p - interval '30 minutes'
+                      ORDER BY c.dropped_at LIMIT 1) cd ON true
+  -- 적하: 그 작업을 QC 가 내린 시각(next_f, 적하 자유) 직전의 짐 싣고 도착
+  LEFT JOIN LATERAL (SELECT c.laden_arrived_at, c.arr_src_drop FROM tt_cycle_v2 c
+                      WHERE pr.pjt = 'LD' AND pr.next_fjt = 'LD' AND c.ytno = pr.ytno AND c.jobtype = 'LD'
+                        AND c.dropped_at > pr.next_f - interval '10 minutes' AND c.dropped_at < pr.next_f + interval '30 minutes'
+                        AND c.laden_arrived_at >= pr.p AND c.laden_arrived_at <= pr.next_f
+                      ORDER BY abs(extract(epoch FROM c.dropped_at - pr.next_f)) LIMIT 1) cl ON true;
 ROLLBACK;
