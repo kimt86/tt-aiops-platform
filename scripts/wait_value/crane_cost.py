@@ -19,6 +19,7 @@
   정밀 출처만 — 같은 식, 도착 출처가 arr_dtime(피드가 준 도착 시각)인 작업만
 한계: 크레인 손해가 다음 상자로 번지는 효과(연쇄)·트럭이 일찍 닿아 크레인이 덜 기다리는 이득은 안 셌다.
 사용: python3 crane_cost.py pairs.tsv [경계 epoch(반창 나눔)]
+부분(유형·반창)은 전체로 한 번 푼 짝짓기에서 집계만 나눈다.
 """
 from __future__ import annotations
 
@@ -75,16 +76,18 @@ def floor_h(rows):
     return h
 
 
-def report(rows, title, h):
-    n = len(rows)
-    with_slack = [i for i, r in enumerate(rows) if r["slack"] is not None]
+def report(rows, sel, title, h, arrs):
+    """`arrs[W]` = 전체 작업으로 한 번 푼 도착 시각. 부분(유형·반창)은 **집계만** 나눈다 — 부분집합으로 짝짓기를
+    다시 풀면 칸 안의 트럭이 'TOS 가 실제로 그 유형을 준 트럭'으로 좁혀져 다른 질문이 된다(2026-10-12 리뷰 지적)."""
+    n = len(sel)
+    with_slack = [i for i in sel if rows[i]["slack"] is not None]
     precise = [i for i in with_slack if rows[i]["src"] == "arr_dtime"]
     print(f"\n== {title} — 작업 {n:,}개 · 여유 아는 작업 {len(with_slack):,} ({100 * len(with_slack) / max(n, 1):.0f}%)"
           f" · 정밀 출처 {len(precise):,} · h DS {h['DS']:.0f}s / LD {h['LD']:.0f}s")
     print(f"{'W(초)':>6} {'Δ평균 s':>8} {'늦어진 작업 %':>12} {'늦을 때 Δ중앙 s':>15} "
           f"{'상한 s/작업':>11} {'여유 반영 s/작업':>15} {'정밀만 s/작업':>13} {'손해 생긴 작업 %':>15}"
-          f" │ {'6초 대비 증분: 상한':>18} {'여유 반영':>9} {'정밀만':>7}")
-    ref = arrivals(rows, 0)
+          f" │ {'6초 대비 증분: 상한':>18} {'여유 반영':>9} {'정밀만':>7} │ {'트럭 순이득 s/작업':>16} {'순(1:1)':>8}")
+    ref = arrs[0]
 
     def loss(d, i):
         s_eff = max(0.0, rows[i]["slack"] - h[rows[i]["pjt"]])
@@ -92,10 +95,10 @@ def report(rows, title, h):
 
     base = None
     for W in WINDOWS:
-        arr = arrivals(rows, W)
-        d = [arr[i] - ref[i] for i in range(n)]
-        late = [x for x in d if x > 0]
-        upper = sum(max(0.0, x) for x in d) / n
+        arr = arrs[W]
+        d = {i: arr[i] - ref[i] for i in sel}
+        late = [x for x in d.values() if x > 0]
+        upper = sum(max(0.0, x) for x in d.values()) / n
         adj = [loss(d, i) for i in with_slack]
         pre = [loss(d, i) for i in precise]
         m_adj = statistics.mean(adj) if adj else float("nan")
@@ -105,22 +108,27 @@ def report(rows, title, h):
         if W == 6:
             base = (upper, m_adj, m_pre)
         elif base:
-            inc = f" │ {upper - base[0]:>18.1f} {m_adj - base[1]:>9.1f} {m_pre - base[2]:>7.1f}"
-        print(f"{W:>6} {statistics.mean(d):>8.1f} {100 * len(late) / n:>12.1f} "
+            # 트럭 순이득 = 6초 칸 도착 − W초 칸 도착(대기 + 빈 차 주행). 작업별로 나눠도 합은 analyze.py 의 '순'과 같다.
+            truck = statistics.mean(arrs[6][i] - arr[i] for i in sel)
+            inc = (f" │ {upper - base[0]:>18.1f} {m_adj - base[1]:>9.1f} {m_pre - base[2]:>7.1f}"
+                   f" │ {truck:>16.1f} {truck - (m_adj - base[1]):>8.1f}")
+        print(f"{W:>6} {statistics.mean(d.values()):>8.1f} {100 * len(late) / n:>12.1f} "
               f"{(statistics.median(late) if late else 0):>15.0f} {upper:>11.1f} "
               f"{m_adj:>15.1f} {m_pre:>13.1f} {100 * hit:>15.1f}{inc}")
 
 
 def main():
     rows = load(sys.argv[1])
-    h = floor_h(rows)  # h 는 전체 창에서 한 번 정해 반창에도 같은 값을 쓴다
-    report(rows, "전체", h)
-    report([r for r in rows if r["pjt"] == "DS"], "다음 작업이 양하(QC 가 실어줌 · 위치 = 크레인 좌표)", h)
-    report([r for r in rows if r["pjt"] == "LD"], "다음 작업이 적하(야드 픽업 위치 = GPS)", h)
+    h = floor_h(rows)  # h 는 전체 창에서 한 번 정해 부분 집계에도 같은 값을 쓴다
+    arrs = {W: arrivals(rows, W) for W in (0, *WINDOWS)}
+    every = range(len(rows))
+    report(rows, every, "전체", h, arrs)
+    report(rows, [i for i in every if rows[i]["pjt"] == "DS"], "그중 다음 작업이 양하(QC 가 실어줌)", h, arrs)
+    report(rows, [i for i in every if rows[i]["pjt"] == "LD"], "그중 다음 작업이 적하(QC 가 내림)", h, arrs)
     if len(sys.argv) > 2:
         cut = int(sys.argv[2])
-        report([r for r in rows if r["f"] < cut], "앞 반창", h)
-        report([r for r in rows if r["f"] >= cut], "뒤 반창", h)
+        report(rows, [i for i in every if rows[i]["f"] < cut], "앞 반창", h, arrs)
+        report(rows, [i for i in every if rows[i]["f"] >= cut], "뒤 반창", h, arrs)
 
 
 if __name__ == "__main__":
