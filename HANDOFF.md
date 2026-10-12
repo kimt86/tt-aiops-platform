@@ -46,7 +46,7 @@
 - **2 수집 원천** → 1f1a96f. 테스트 132→138 전부 통과·돌연변이 5건 전부 잡힘. 날씨 2종은 새 바이너리(별도 target)로
   1회 실행해 OK·48/11행 확인. **K_UTIL_SHIFT·ETW 는 Oracle 을 같이 부르는 유닛 안이라 배포 뒤 확인 필요**
   (`etl_run_log` 에서 K_UTIL_SHIFT·ETW 가 OK 로 계속 찍히는지). 운영 `target/release/extractor` 는 손대지 않음(10-08 판).
-- **3 송신부 설계** → `docs/cycles/2026-10-12-sender-design.md`(957bed8).
+- **3 송신부 설계** → `docs/cycles/2026-10-12-sender-design.md`(957bed8 + 리뷰 2회 보완: 잠금 연결 위에서 적기·잠금 뒤 전부 복원(시간으로 안 자름·1시간 안전 상한)·보낸 시각=송신 끝·트럭당 최근 행 우선·'풀에 없음'으로는 안 풂).
 
 ### 범위 밖 발견 (고치지 않음)
 
@@ -63,12 +63,11 @@
 
 ---
 
-## UNKNOWNS (→ /build 에서 정할 것)
+## UNKNOWNS — BUILD 에서 정한 것
 
-- **ETW 가 지금도 전부 404 인가** — 그렇다면 고치는 순간 경보가 계속 울린다. 먼저 최근 `etl_run_log`·`tos_etw_cntr` 행 수로 확인하고,
-  울릴 상황이면 경보 수준을 사용자에게 묻는다.
-- **트럭의 크레인 앞 도착 시각 출처** — GPS 는 정지 시 침묵. KC `kc/data/tos-db-reference.html` 먼저 읽고 정한다.
-- **`etl_run_log` 실패 상태값 체계**(fail/warn 구분) — 코드 읽고 확인.
+- ETW 는 지금 정상(전부 404 아님) → 새 실패 규칙이 곧바로 울리지 않는다.
+- 크레인 앞 도착 시각 = `tt_cycle_v2.empty_arrived_at`(양하)·`laden_arrived_at`(적하) — KC `cycle-decomposition` 의 GPS 도착 사다리.
+- `etl_run_log.status` 는 RUNNING/OK/PARTIAL/FAILED(CHECK) — 실패는 `run_logged` 가 FAILED 로 적는다.
 
 ## ⚠ 재측정 전에 확인할 것
 
@@ -94,7 +93,6 @@
 ## 사용자가 답해야 하는 것
 
 - **계획 가치 300초 · 스왑은 같은 작업유형끼리만** — 출발값 그대로 둘지.
-- **수집 원천 구멍**(K_UTIL_SHIFT·ETW 404·날씨 형식)을 다음 사이클에 고칠지.
 - **매칭 기록 표 보관**: `stage2_match_shadow` 21일이 ~13GB 가 된다 — 그대로 둘지, 줄일지.
 - **TOS팀에 물을 것**: 스왑을 맞교환/한 방향 옮기기 어느 형태로 받는지 · tos-avail 추출(⑬) 사전 공유(문서의 조회량이 10-08 바뀜) · AUTO_YT_MIN/MAX.
 - 'Event : USR_LOGIN_INFO' 풀림 등재 여부 · ETW 실패 경보 · 옛 중계 서버 내리는 시점.
