@@ -36,6 +36,10 @@ SELECT count(*) AS "스왑", count(*) FILTER (WHERE gain_s < 180) AS "이득 미
        count(*) FILTER (WHERE a_dist_m < 500 OR b_dist_m < 500) AS "500m 안",
        count(*) FILTER (WHERE ytno_a = ytno_b) AS "자기 자신"
   FROM stage2_swap_shadow WHERE ts >= :from::timestamptz;
+\echo '   (보조) 작업유형이 다른 짝 — 분모: 스왑 추천 행. 2026-10-12 05:04:04Z(mig 0166) 전에는 0이 정상(같은 유형만), 뒤로는 허용. b_jobtype NULL = 그 전 판.'
+SELECT coalesce(jobtype || '↔' || b_jobtype, jobtype || '↔(같은 유형 판)') AS "A↔B 유형", count(*) AS "스왑",
+       round(avg(gain_s)) AS "평균 이득(초)"
+  FROM stage2_swap_shadow WHERE ts >= :from::timestamptz GROUP BY 1 ORDER BY 1;
 
 \echo '⑥ 한 배차에 스왑 2회 이상 — 분모: 스왑에 든 (트럭, 스왑) 쌍. 같은 트럭의 연속 두 스왑 사이에 자유(내림)가 없으면 위반. 0이어야 한다.'
 WITH s AS (

@@ -4361,8 +4361,8 @@ fn swap_makes_late(new_arr_ms: i64, old_arr_ms: i64, need_ms: i64) -> bool {
 }
 
 /// 스왑 고르기 (mig 0163): 이미 배차되고 픽업 전인 트럭들끼리 행선지를 맞바꾸는 쌍.
-/// `own[i]` = 트럭 i 가 자기 작업까지 빈 차 주행(초), `cross(i, j)` = 트럭 i 가 트럭 j 의 작업까지(같은
-/// 작업유형일 때만 Some). 이득 = own[i]+own[j] − cross(i,j) − cross(j,i) ≥ `min_gain` 인 쌍을 이득 큰
+/// `own[i]` = 트럭 i 가 자기 작업까지 빈 차 주행(초), `cross(i, j)` = 트럭 i 가 트럭 j 의 작업까지(마감
+/// 보호 등으로 안 되는 방향이면 None — 작업유형은 안 가린다, mig 0166). 이득 = own[i]+own[j] − cross(i,j) − cross(j,i) ≥ `min_gain` 인 쌍을 이득 큰
 /// 순으로, 한 트럭은 한 번만 고른다. 반환 = (i, j, i→j 주행, j→i 주행, 이득).
 fn pick_swaps(own: &[i64], cross: impl Fn(usize, usize) -> Option<i64>, min_gain: i64) -> Vec<(usize, usize, i64, i64, i64)> {
     let n = own.len();
@@ -5734,7 +5734,10 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
             // ── 스왑 단계 (mig 0163·2026-10-06 사용자 확정) ─────────────────────────────────────────
             // 이미 배차되고 픽업 전인 짝들끼리만 행선지를 맞바꾼다 — 새 작업·새 빈 트럭은 끼지 않는다(TOS 도
             // 기 패칭 결과 안에서만 스왑). 억제: 이득 ≥ SWAP_MIN_GAIN_S · 둘 다 목적지 500m 밖(후보 수집에서
-            // 걸렀다) · 한 트럭은 자유 사이 1회(동결, 후보 수집에서 걸렀다) · 같은 작업유형끼리만.
+            // 걸렀다) · 한 트럭은 자유 사이 1회(동결, 후보 수집에서 걸렀다).
+            // ★작업유형은 안 가린다(2026-10-12 사용자 결정·mig 0166) — 종전 '같은 유형끼리만'은 측정 없이 둔 출발값이었다.
+            //   양하 트럭이 적하 블록 곁을, 적하 트럭이 양하 크레인 곁을 지날 때 둘 다 가까워지는 짝을 그 규칙이 못 봤다.
+            //   주행 곡선은 **가는 작업의 유형**으로 고른다(적하 = 야드 블록행·양하 = 크레인행 빈 차 주행).
             // 작업이 트럭을 고르는 구조라 순서는 이미 정해졌고, 여기서는 빈 차 주행만 본다(긴급도 항 없음).
             // 후보 풀 유무와 무관하게 돈다 — 그래서 아래 `continue` 들보다 앞에 둔다.
             // ★마감 보호(2026-10-06 사용자 결정): 바꾼 트럭이 그 작업의 크레인 필요 시각보다 늦게 닿고, 원래 트럭보다도
@@ -5755,9 +5758,8 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                 let own: Vec<i64> = own_pp.iter().map(|x| x.0).collect();
                 let cross = |i: usize, j: usize| -> Option<i64> {
                     let (a, b) = (&swap_cands[i], &swap_cands[j]);
-                    if a.jobtype != b.jobtype { return None; }
                     let need = b.contno.as_deref().and_then(|c| need_by_cont.get(c).copied())?;
-                    let (p50, p90, _) = cost(a.lat, a.lon, b.dlat, b.dlon, a.jobtype == "LD");
+                    let (p50, p90, _) = cost(a.lat, a.lon, b.dlat, b.dlon, b.jobtype == "LD");
                     if swap_makes_late(arr_ms(p90, &b.jobtype), arr_ms(own_pp[j].1, &b.jobtype), need) { return None; }
                     Some(p50)
                 };
@@ -5769,14 +5771,14 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                     let r = sqlx::query(
                         "INSERT INTO stage2_swap_shadow
                            (ts,tick,ytno_a,ytno_b,jobtype,a_qc,a_queuename,a_contno,b_qc,b_queuename,b_contno,
-                            a_before_s,b_before_s,a_after_s,b_after_s,gain_s,a_dist_m,b_dist_m)
-                         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
+                            a_before_s,b_before_s,a_after_s,b_after_s,gain_s,a_dist_m,b_dist_m,b_jobtype)
+                         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
                          ON CONFLICT (ts, ytno_a) DO NOTHING",
                     )
                     .bind(sts).bind(tick as i64).bind(&a.ytno).bind(&b.ytno).bind(&a.jobtype)
                     .bind(&a.qc).bind(&a.queuename).bind(&a.contno).bind(&b.qc).bind(&b.queuename).bind(&b.contno)
                     .bind(own[i] as i32).bind(own[j] as i32).bind(ij as i32).bind(ji as i32).bind(gain as i32)
-                    .bind(a.dist_m as f32).bind(b.dist_m as f32)
+                    .bind(a.dist_m as f32).bind(b.dist_m as f32).bind(&b.jobtype)
                     .execute(&pool).await;
                     match r {
                         Ok(_) => { swap_n += 1; swap_gain_total += gain; }
@@ -5786,7 +5788,7 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                 // ⚠조용히 삼키면 동결이 안 걸린다(다음 틱이 같은 스왑을 또 낸다) — 경보를 낸다(리뷰 SHOULD_FIX 5).
                 //   스왑 0건은 정상값이라 DEADMAN 으로는 못 잡는다. 실배차 연결 때는 기록이 전송보다 먼저여야 한다.
                 if let Some(e) = sw_err {
-                    tracing::warn!(error = %e, "stage2_swap_shadow 기록 실패 — 동결이 안 걸려 같은 스왑이 반복될 수 있다. 마이그레이션 0163 확인");
+                    tracing::warn!(error = %e, "stage2_swap_shadow 기록 실패 — 동결이 안 걸려 같은 스왑이 반복될 수 있다. 마이그레이션 0163·0166 확인");
                     crate::db::alert(&pool, "stage2_swap", "insert_failed", "warn",
                         "스왑 추천 기록이 실패했다 — 동결이 안 걸려 같은 스왑이 반복될 수 있다",
                         Some(&e)).await;
