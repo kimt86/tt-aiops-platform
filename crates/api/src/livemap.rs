@@ -4972,17 +4972,47 @@ const SENT_MODE: &str = "shadow";
 /// 풀기가 증거로만 이뤄지므로 정상이면 열린 행은 다음 작업목록(~1분) 안에 닫힌다 — 한 행도 없어야 한다.
 const RESTORE_MAX_AGE_MS: i64 = 3_600_000;
 
-/// TOS 신호가 **보낸 뒤에** 그 트럭이 바빠졌다고 보여 주나 (mig 0167·설계 '바빠짐과 풀에 없음을 가른다').
+/// TOS 신호가 그 트럭이 **보낸 뒤 바빠졌다고** 보여 주나 (mig 0167·설계 '바빠짐과 풀에 없음을 가른다').
 /// 단지 이번 틱 후보 풀에 없다는 것(위치 보충 실패·장치 목록 비어 있음 등 자료 결손으로도 생긴다)은 근거가 아니다.
-/// - assign(보낼 때 빈 트럭): 보낸 뒤의 픽업 · 배차(작업목록 배차 시각) · 배차 목록 등재 중 하나.
-/// - swap(보낼 때 이미 배차된 트럭): 보낸 뒤의 픽업만 — 배차 목록 등재·배차 시각은 맞바꾸기 전부터 계속 찍히므로 근거가 못 된다.
+/// - **지금 싣고 있다**(마지막 픽업 > 마지막 자유 — 후보 풀의 픽업 가드와 같은 판정): 두 종류 모두 바쁨.
+///   ★픽업이 일어난 시각은 보내기 전이어도 된다(1차 리뷰 BLOCKING) — 기록은 15초 주기로 늦게 도착하므로, 보낼 때 빈
+///   트럭으로 보였다면 그 픽업은 **보낸 뒤에 안 사실**이다. 이걸 빼면 이미 싣고 있는 트럭의 고정이 다음 작업목록까지 남아
+///   그 상자가 모든 트럭에서 막혔다(배포 후 갈 트럭 없는 급한 슬롯 184 중 165).
+/// - assign(보낼 때 빈 트럭): 그 밖에 보낸 뒤의 픽업 · 배차(작업목록 배차 시각) · 배차 목록 등재.
+/// - swap(보낼 때 이미 배차된 트럭): 그 밖에 보낸 뒤의 픽업만 — 배차 목록 등재·배차 시각은 맞바꾸기 전부터 계속 찍히므로 근거가 못 된다.
 fn truck_busy_after(sig: Option<&TosSig>, kind: HoldKind, sent_ms: i64) -> bool {
     let Some(sig) = sig else { return false };
     let after = |t: Option<DateTime<Utc>>| t.is_some_and(|t| t.timestamp_millis() > sent_ms);
+    let loaded = match (sig.picked, sig.free) {
+        (Some(p), Some(f)) => p > f,
+        (Some(_), None) => true,
+        _ => false,
+    };
     match kind {
-        HoldKind::Assign => after(sig.picked) || after(sig.dis) || after(sig.listed_at),
-        HoldKind::Swap => after(sig.picked),
+        HoldKind::Assign => loaded || after(sig.picked) || after(sig.dis) || after(sig.listed_at),
+        HoldKind::Swap => loaded || after(sig.picked),
     }
+}
+
+/// 열린 고정이 이보다 오래되면 경보한다(풀지는 않는다 — 시간으로는 풀지 않는다). 정상이면 다음 작업목록(~1분)에 풀린다
+/// (배포 후 실측 p50 59초·최대 62초). 목록이 비어 시각을 모르거나 목록 시각이 안 나아가면 고정이 남는다(1차 리뷰).
+const HOLD_ALERT_AGE_MS: i64 = 600_000;
+
+/// 적기 결과를 고정에 반영한다(mig 0167). 적기가 실패했으면 **아무것도 고정하지 않는다**(연계 후엔 '안 보냄') — 그대로 Err.
+/// 성공이면 각 트럭을 새 지시로 고정하고, 그 트럭의 옛 고정은 대체된다 → 반환 = 닫을 (msg_id, 'superseded').
+fn apply_written<E>(
+    held: &mut HashMap<String, Hold>,
+    rows: Vec<SentRow>,
+    written: Result<(Vec<String>, i64), E>,
+) -> Result<Vec<(String, &'static str)>, E> {
+    let (ids, sent_ms) = written?;
+    let mut superseded = Vec::new();
+    for (r, id) in rows.into_iter().zip(ids) {
+        if let Some(old) = held.insert(r.ytno, Hold { contno: r.contno, sent_ms, msg_id: id, kind: r.kind }) {
+            superseded.push((old.msg_id, "superseded"));
+        }
+    }
+    Ok(superseded)
 }
 
 /// 고정 해제 — **증거로만** 푼다(mig 0167). 시간만 흘러서는 풀지 않는다(종전 3분 만료 폐기 — 목록이 3~5분 늦으면
@@ -5123,6 +5153,8 @@ async fn close_sent(pool: &PgPool, closes: &[(String, &'static str)]) {
 }
 
 /// 기동 복원 입력을 읽는다 — 이 모드의 열린 행 **전부**(시간으로 자르지 않는다). 보낸 시각 = 송신 끝(모르면 적은 시각).
+/// ⚠연계 때 바꿀 자리(1차 리뷰): 'live' 에서 `sent_at` NULL 은 '보냈는지 모름'이라 설계대로 **적은 시각 + 송신 제한시간**을
+///   써야 한다(재시도로 늦게 나간 지시보다 먼저 찍힌 목록으로 풀리지 않게). 그림자에선 보내는 게 없어 적은 시각이 맞다.
 async fn load_open_sent(pool: &PgPool) -> Result<Vec<OpenSent>, sqlx::Error> {
     let rows = sqlx::query_as::<_, (String, String, String, String, i64)>(
         "SELECT msg_id::text, kind, ytno, contno, (extract(epoch FROM coalesce(sent_at, written_at)) * 1000)::int8
@@ -5301,6 +5333,17 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                 stale_streak = 0;
             }
             if !hold_sent {
+                // 킬스위치 — 열린 행을 'cancelled' 로 한 번 닫는다(1차 리뷰: 안 닫으면 다시 켤 때 1시간 초과 경보가
+                // '고정이 쌓였다'고 원인을 잘못 짚는다).
+                if !restored {
+                    let r = sqlx::query("UPDATE dispatch_sent SET released_at = clock_timestamp(), release_why = 'cancelled'
+                                          WHERE mode = $1 AND released_at IS NULL")
+                        .bind(SENT_MODE).execute(&pool).await;
+                    match r {
+                        Ok(r) => { tracing::info!(closed = r.rows_affected(), "MATCH_HOLD_SENT=0 — 열린 보낸 지시를 cancelled 로 닫았다"); restored = true; }
+                        Err(e) => tracing::warn!(error = %e, "MATCH_HOLD_SENT=0 — 열린 보낸 지시 닫기 실패(다음 틱에 다시)"),
+                    }
+                }
                 held.clear();
             } else if !restored {
                 // 기동 복원 — 첫 지시를 내기 전에. 읽기가 실패하면 이 틱을 통째로 건너뛴다(설계: 고정을 모르는 채로
@@ -5586,6 +5629,9 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
             .ok()
             .map(|rows| rows.into_iter().collect());
             #[allow(clippy::type_complexity)]
+            // 고정 중인 트럭(보낸 지시가 아직 안 풀림)은 스왑 후보가 못 된다(1차 리뷰 SHOULD_FIX) — 아래 블록은 `held` 를
+            // 다른 뜻(GPS 침묵 후보)으로 다시 쓰므로 여기서 이름을 떼어 둔다. 이번 틱에 풀릴 고정도 막는다(다음 틱이면 된다).
+            let hold_trucks: HashSet<String> = held.keys().cloned().collect();
             let vehicles_built: (Vec<(String, f64, f64, i64, &'static str)>, Vec<HeldCandidateOut>, Vec<PoolRow>, Vec<(String, i64, &'static str, &'static str, Option<String>)>, Vec<SwapCand>, HashMap<String, (f64, f64)>) = {
                 let map = lm.devices.read().await;
                 let plc = lm.plc.read().await;
@@ -5662,6 +5708,7 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                             };
                             let fresh = dev.filter(|p| (now - p.last_seen_ms) / 1000 <= STALE_AFTER_S);
                             let frozen = swap_frozen.as_ref().map_or(true, |fz| swap_is_frozen(fz.get(id).copied(), sig.free));
+                            let frozen = frozen || hold_trucks.contains(id);
                             if let (Some(p), Some(d), false) = (fresh, dest, frozen) {
                                 let dist = dist_m((p.lat, p.lon), d);
                                 if swap_far_enough(dist) {
@@ -5990,14 +6037,9 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                     if rows.is_empty() {
                         picks
                     } else {
-                        match write_sent(&pool, &rows, tick, list_as_of_ms).await {
-                            Ok((ids, sent_ms)) => {
-                                let mut superseded: Vec<(String, &'static str)> = Vec::new();
-                                for (r, id) in rows.into_iter().zip(ids) {
-                                    if let Some(old) = held.insert(r.ytno, Hold { contno: r.contno, sent_ms, msg_id: id, kind: HoldKind::Swap }) {
-                                        superseded.push((old.msg_id, "superseded"));
-                                    }
-                                }
+                        let written = write_sent(&pool, &rows, tick, list_as_of_ms).await;
+                        match apply_written(&mut held, rows, written) {
+                            Ok(superseded) => {
                                 close_sent(&pool, &superseded).await;
                                 picks
                             }
@@ -6185,6 +6227,16 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                     |yt, h| truck_busy_after(tos_sig.get(yt), h.kind, h.sent_ms),
                 );
                 close_sent(&pool, &closes).await;
+                if tick % 10 == 0 {
+                    let now_ms = Utc::now().timestamp_millis();
+                    let old_n = held.values().filter(|h| now_ms - h.sent_ms > HOLD_ALERT_AGE_MS).count();
+                    if old_n > 0 {
+                        tracing::warn!(old_n, "10분 넘게 안 풀린 고정 — 작업목록 시각이 안 나아가는지 확인");
+                        crate::db::alert(&pool, "dispatch_sent", "hold_stuck", "warn",
+                            "10분 넘게 안 풀린 보낸 지시 고정이 있다(정상은 ~1분) — 그 상자가 다른 트럭에서 막혀 있다",
+                            Some(&format!("{old_n}건"))).await;
+                    }
+                }
             }
             let held_boxes: HashSet<String> = held.values().map(|h| h.contno.clone()).collect();
             let n_soon_ok = veh_info.iter().filter(|x| !x.0 && x.1.is_some()).count() as i64;
@@ -6562,14 +6614,12 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                                    qc: Some(w.qc.clone()), peer: None })
                 }).collect();
                 if !new_rows.is_empty() {
-                    match write_sent(&pool, &new_rows, tick, list_as_of_ms).await {
-                        Ok((ids, sent_ms)) => {
-                            for (r, id) in new_rows.into_iter().zip(ids) {
-                                held.insert(r.ytno, Hold { contno: r.contno, sent_ms, msg_id: id, kind: HoldKind::Assign });
-                            }
-                        }
+                    let n = new_rows.len();
+                    let written = write_sent(&pool, &new_rows, tick, list_as_of_ms).await;
+                    match apply_written(&mut held, new_rows, written) {
+                        Ok(superseded) => close_sent(&pool, &superseded).await, // 걸러서 넣으므로 정상이면 비어 있다
                         Err(e) => {
-                            tracing::warn!(error = %e, n = new_rows.len(), "dispatch_sent 기록 실패 — 이번 틱 짝은 고정하지 않는다(연계 후엔 안 보냄)");
+                            tracing::warn!(error = %e, n, "dispatch_sent 기록 실패 — 이번 틱 짝은 고정하지 않는다(연계 후엔 안 보냄)");
                             crate::db::alert(&pool, "dispatch_sent", "write_failed", "warn",
                                 "보낸 지시 기록 실패 — 그 틱 지시는 고정되지 않았다(연계 후엔 안 보낸다)", Some(&e.to_string())).await;
                         }
@@ -7620,7 +7670,7 @@ mod workpool_freshness_tests {
 #[cfg(test)]
 mod wake_on_landing_tests {
     use super::{advance_free_seen, combine_wake, edge_allowed_by_hold, free_advanced, release_held, restore_holds, should_wake,
-                truck_busy_after, Hold, HoldKind, OpenSent, TosSig, WakeSrc, WakeStep, HOLD_RELEASE_MARGIN_MS, PREV_WINDOW_S,
+                truck_busy_after, apply_written, Hold, HoldKind, OpenSent, SentRow, TosSig, WakeSrc, WakeStep, HOLD_RELEASE_MARGIN_MS, PREV_WINDOW_S,
                 RESTORE_MAX_AGE_MS, WAKE_MAX_WAIT_MS, WORKPOOL_MAX_AGE_S};
     use std::collections::HashMap;
     use chrono::{DateTime, TimeZone, Utc};
@@ -7859,17 +7909,41 @@ mod wake_on_landing_tests {
         TosSig { free: t(Some(50_000)), dis: t(dis), jobtype: None, free_jt: None, topos: None, listed_at: t(listed), picked: t(picked) }
     }
 
-    /// '바빠짐'은 **보낸 뒤의** TOS 신호만 센다. 스왑 트럭은 원래 배차 중이라 픽업만 센다.
+    /// '바빠짐'은 **보낸 뒤에 안** TOS 신호만 센다. 스왑 트럭은 원래 배차 중이라 배차·등재는 안 센다.
     #[test]
     fn 바빠짐은_보낸_뒤의_TOS_신호다() {
         let sent = 100_000;
         assert!(!truck_busy_after(None, HoldKind::Assign, sent), "신호가 없으면(자료 결손) 바쁘다고 보지 않는다");
-        assert!(!truck_busy_after(Some(&신호(Some(90_000), Some(90_000), Some(90_000))), HoldKind::Assign, sent), "보내기 전 신호는 근거가 아니다");
+        // 보낼 때 알던 모습 그대로(마지막 자유 50_000 뒤 픽업 없음, 배차·등재는 자유 전) — 근거가 아니다
+        assert!(!truck_busy_after(Some(&신호(Some(40_000), Some(45_000), Some(45_000))), HoldKind::Assign, sent), "보내기 전 신호는 근거가 아니다");
+        // ★1차 리뷰 BLOCKING: 픽업은 보내기 전(90_000)에 일어났지만 자유(50_000) 뒤 — 늦게 도착한 기록이라 보낸 뒤에 안 사실이다
+        assert!(truck_busy_after(Some(&신호(Some(90_000), None, None)), HoldKind::Assign, sent), "늦게 도착한 픽업 = 지금 싣고 있다");
+        assert!(truck_busy_after(Some(&신호(Some(90_000), None, None)), HoldKind::Swap, sent), "스왑 트럭도 싣고 있으면 바쁨");
         assert!(truck_busy_after(Some(&신호(Some(100_001), None, None)), HoldKind::Assign, sent), "보낸 뒤 픽업");
         assert!(truck_busy_after(Some(&신호(None, Some(100_001), None)), HoldKind::Assign, sent), "보낸 뒤 배차");
         assert!(truck_busy_after(Some(&신호(None, None, Some(100_001))), HoldKind::Assign, sent), "보낸 뒤 배차 목록 등재");
         assert!(!truck_busy_after(Some(&신호(None, Some(100_001), Some(100_001))), HoldKind::Swap, sent), "스왑 트럭의 배차·등재는 원래 있던 것");
         assert!(truck_busy_after(Some(&신호(Some(100_001), None, None)), HoldKind::Swap, sent), "스왑 트럭은 픽업이면 바쁨");
+    }
+
+    fn 행(yt: &str, c: &str, kind: HoldKind) -> SentRow {
+        SentRow { kind, ytno: yt.into(), contno: c.into(), jobtype: None, qc: None, peer: None }
+    }
+
+    /// 적기가 실패하면 아무것도 고정하지 않는다(연계 후엔 '안 보냄'). 성공하면 고정하고, 그 트럭의 옛 고정은 superseded.
+    #[test]
+    fn 적기_실패면_고정하지_않고_성공하면_옛_고정을_대체한다() {
+        let mut h: HashMap<String, Hold> = HashMap::new();
+        h.insert("TT1".into(), 고정("C1", 100_000, HoldKind::Assign));
+        let r = apply_written(&mut h, vec![행("TT1", "C9", HoldKind::Swap), 행("TT2", "C1", HoldKind::Swap)], Err::<(Vec<String>, i64), _>("db"));
+        assert!(r.is_err());
+        assert_eq!(h.len(), 1, "실패면 그대로");
+        assert_eq!(h["TT1"].contno, "C1");
+        let r = apply_written::<()>(&mut h, vec![행("TT1", "C9", HoldKind::Swap), 행("TT2", "C1", HoldKind::Swap)],
+                                    Ok((vec!["s1".into(), "s2".into()], 200_000))).unwrap();
+        assert_eq!(r, vec![("m-C1".to_string(), "superseded")], "TT1 의 옛 assign 고정은 스왑이 대체");
+        assert_eq!(h["TT1"], Hold { contno: "C9".into(), sent_ms: 200_000, msg_id: "s1".into(), kind: HoldKind::Swap });
+        assert_eq!(h["TT2"].msg_id, "s2");
     }
 
     fn 열린(id: &str, yt: &str, c: &str, sent_ms: i64) -> OpenSent {
