@@ -5628,10 +5628,10 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
             .inspect_err(|e| tracing::warn!(error = %e, "스왑 동결 질의 실패 — 이번 틱 스왑을 거른다. 마이그레이션 0163 적용 여부 확인"))
             .ok()
             .map(|rows| rows.into_iter().collect());
-            #[allow(clippy::type_complexity)]
             // 고정 중인 트럭(보낸 지시가 아직 안 풀림)은 스왑 후보가 못 된다(1차 리뷰 SHOULD_FIX) — 아래 블록은 `held` 를
             // 다른 뜻(GPS 침묵 후보)으로 다시 쓰므로 여기서 이름을 떼어 둔다. 이번 틱에 풀릴 고정도 막는다(다음 틱이면 된다).
             let hold_trucks: HashSet<String> = held.keys().cloned().collect();
+            #[allow(clippy::type_complexity)]
             let vehicles_built: (Vec<(String, f64, f64, i64, &'static str)>, Vec<HeldCandidateOut>, Vec<PoolRow>, Vec<(String, i64, &'static str, &'static str, Option<String>)>, Vec<SwapCand>, HashMap<String, (f64, f64)>) = {
                 let map = lm.devices.read().await;
                 let plc = lm.plc.read().await;
