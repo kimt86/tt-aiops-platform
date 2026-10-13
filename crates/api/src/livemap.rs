@@ -4668,8 +4668,10 @@ const POS_MAX_AGE_S: i64 = 10800;
 /// · 9 = 재지향 갈래 제거 + **배차됨·픽업 전 트럭은 풀 밖**(mig 0163·2026-10-06). "새 작업은 스왑에 안
 /// 낀다"(사용자 확인)라 재지향은 없어지고, 그 트럭들은 스왑 단계의 후보가 된다. v8 에선 픽업 지점 500m
 /// 안이면 곧-빔 갈래로 새어 들어왔다(이제 막 일을 시작할 트럭이지 곧 빌 트럭이 아니다).
+/// · 10 = 배차 목록 등재를 **지금 목록 + 최근 LISTED_RECENT_S 의 지난 목록**으로 본다(2026-10-13). 적하 트럭이 목록에서 빠진 뒤
+/// 픽업 기록이 오기 전까지 빈 트럭으로 새던 틈을 막는다 — 10-13 1계층 짝의 19%(9h 25,369 중 4,791)가 TOS 가 ~12분 전 배차한 트럭.
 /// ⚠`POOL_FREE_HORIZON_S` 를 환경변수로 바꾸면 이 값은 안 바뀐다 — 레버를 쓸 거면 판도 같이 올릴 것.
-const POOL_VER: i16 = 9;
+const POOL_VER: i16 = 10;
 
 /// 트럭 한 대가 **빈 채 대기 중**인가 — TOS 신호 네 개(자유·픽업·배차·배차목록 등재)만 보는 순수 판정.
 ///
@@ -4686,10 +4688,20 @@ const POOL_VER: i16 = 9;
 fn is_free_tos(sig: &TosSig) -> bool {
     let Some(f) = sig.free else { return false };
     if sig.picked.is_some_and(|p| p > f) { return false; }
-    if sig.dis.is_some_and(|d| d > f) { return false; }
-    if sig.listed_at.is_some_and(|a| a >= f) { return false; }
-    true
+    !dispatched_since_free(sig, f)
 }
+
+/// 마지막 자유 `f` 뒤에 TOS 배차가 붙었나 — 작업목록 배차 시각이 자유보다 뒤이거나, 자유 이후 스냅샷의 배차 목록에 실렸다.
+/// 후보 풀(`is_free_tos`)과 고정 풀기(`truck_busy_after`)가 **같은 판정**을 쓰게 한 곳에 둔다.
+fn dispatched_since_free(sig: &TosSig, f: DateTime<Utc>) -> bool {
+    sig.dis.is_some_and(|d| d > f) || sig.listed_at.is_some_and(|a| a >= f)
+}
+
+/// 배차 목록에 마지막으로 실린 시각을 이 초만큼 지난 목록까지 본다(pool_ver 10·2026-10-13). 적하 작업은 야드 크레인 픽업
+/// 기록이 도착하기 전에 목록에서 빠지므로, 지금 목록만 보면 그 틈에 일하는 트럭이 빈 트럭으로 샌다.
+/// 실측(10-11~13 이틀·분모 = 픽업 기록 한 건): 목록에서 빠짐 → 픽업 기록 도착 적하 중앙 91·p90 211·p99 331초,
+/// 양하 중앙 40·p90 56·p99 715초. 길게 두면 TOS 가 작업을 거둬 간(기록 없이 목록에서만 빠진) 진짜 빈 트럭이 그만큼 풀에서 빠진다.
+const LISTED_RECENT_S: i64 = 600;
 
 /// 트럭 한 대에 대한 TOS 쪽 신호 (후보 풀 판정용).
 struct TosSig {
@@ -4978,7 +4990,9 @@ const RESTORE_MAX_AGE_MS: i64 = 3_600_000;
 ///   ★픽업이 일어난 시각은 보내기 전이어도 된다(1차 리뷰 BLOCKING) — 기록은 15초 주기로 늦게 도착하므로, 보낼 때 빈
 ///   트럭으로 보였다면 그 픽업은 **보낸 뒤에 안 사실**이다. 이걸 빼면 이미 싣고 있는 트럭의 고정이 다음 작업목록까지 남아
 ///   그 상자가 모든 트럭에서 막혔다(배포 후 갈 트럭 없는 급한 슬롯 184 중 165).
-/// - assign(보낼 때 빈 트럭): 그 밖에 보낸 뒤의 픽업 · 배차(작업목록 배차 시각) · 배차 목록 등재.
+/// - assign(보낼 때 빈 트럭): 그 밖에 **마지막 자유 뒤의 배차**(작업목록 배차 시각·배차 목록 등재 — 후보 풀과 같은 판정) ·
+///   보낸 뒤의 픽업 · 배차 · 등재. ★배차도 픽업과 같은 논리다(2026-10-13): 보낼 때 빈 트럭으로 보였다면 자유 뒤 배차는
+///   **보낸 뒤에 안 사실**이다 — 보내기 직전에 찍혔지만 보낸 뒤 도착한 목록, 목록에서 잠깐 빠졌던 적하 트럭(LISTED_RECENT_S).
 /// - swap(보낼 때 이미 배차된 트럭): 그 밖에 보낸 뒤의 픽업만 — 배차 목록 등재·배차 시각은 맞바꾸기 전부터 계속 찍히므로 근거가 못 된다.
 fn truck_busy_after(sig: Option<&TosSig>, kind: HoldKind, sent_ms: i64) -> bool {
     let Some(sig) = sig else { return false };
@@ -4989,7 +5003,11 @@ fn truck_busy_after(sig: Option<&TosSig>, kind: HoldKind, sent_ms: i64) -> bool 
         _ => false,
     };
     match kind {
-        HoldKind::Assign => loaded || after(sig.picked) || after(sig.dis) || after(sig.listed_at),
+        HoldKind::Assign => {
+            loaded
+                || sig.free.is_some_and(|f| dispatched_since_free(sig, f))
+                || after(sig.picked) || after(sig.dis) || after(sig.listed_at)
+        }
         HoldKind::Swap => loaded || after(sig.picked),
     }
 }
@@ -5540,8 +5558,21 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                        --   추출기는 Oracle 조회 **전에** as_of 를 찍어 now-as_of ≈ age+20s 이므로, age 280~300s 구간에서
                        --   틱은 돌면서 listed_at 이 전부 NULL 이 되고 Q 배차 트럭이 다시 빈 트럭으로 샌다(f2af6a2 회귀).
                        --   판정은 창이 아니라 아래 listed_at >= free 비교가 한다 — 창은 넉넉히 준다.
-                       SELECT ytno, max(as_of_ts) asof FROM live_assigned_tt
-                        WHERE as_of_ts > now() - interval '30 minutes' AND ytno IS NOT NULL GROUP BY 1
+                       -- ★지난 목록도 본다(pool_ver 10·2026-10-13). live_assigned_tt 는 추출 틱마다 통째로 지우고 다시 써서
+                       --   (extractor workpool.rs) 위 30분 창은 **지금 목록 하나**만 담았다. 적하 작업은 야드 크레인 픽업 기록이
+                       --   도착하기 전에 목록에서 빠진다(목록에서 빠짐 → 픽업 기록 도착 중앙 91초·p99 331초, 이틀 실측) — 그
+                       --   사이 그 트럭은 어떤 신호로도 바빠 보이지 않아 빈 트럭으로 샜다(10-13 1계층 짝의 19%가 TOS 가 ~12분 전
+                       --   배차한 트럭). 그래서 이력(assigned_tt_hist — 이 루프가 매 틱 지금 목록을 옮겨 적는 표)의 최근
+                       --   $1초도 합친다. 자유 뒤에 한 번이라도 실렸으면 픽업·다음 자유 기록이 올 때까지 일하는 트럭이다.
+                       --   창을 무한히 두지 않는 이유: TOS 가 작업을 거둬 가 목록에서 빠진 트럭은 기록이 안 남아, 창이 길면
+                       --   진짜 빈 트럭이 그만큼 풀에서 빠진다.
+                       SELECT ytno, max(asof) asof FROM (
+                         SELECT ytno, as_of_ts asof FROM live_assigned_tt
+                          WHERE as_of_ts > now() - interval '30 minutes' AND ytno IS NOT NULL
+                         UNION ALL
+                         SELECT ytno, as_of_ts FROM assigned_tt_hist
+                          WHERE as_of_ts > now() - make_interval(secs => $1)
+                       ) u GROUP BY 1
                      ), picked AS (
                        -- 크레인이 이 트럭에 상자를 실어준 마지막 시각(픽업). 자유보다 뒤면 지금 싣고 있다.
                        -- ⚠적하 작업은 야드 픽업 직후 A/Q 에서 사라져(싣고 가는 동안 작업목록·배차목록에 없다)
@@ -5565,6 +5596,7 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                      SELECT i.ytno, f.f, d.d, coalesce(d.jobtype, pk.pjt), f.jt, d.topos, a.asof, pk.p
                        FROM ids i LEFT JOIN freed f USING (ytno) LEFT JOIN disp d USING (ytno) LEFT JOIN asg a USING (ytno) LEFT JOIN picked pk USING (ytno)",
                 )
+                .bind(LISTED_RECENT_S as f64)
                 .fetch_all(&pool).await;
             // ★실패를 '풀 축소'가 아니라 '풀 오염'으로 끝내지 않는다(2026-08-19 리뷰). 이 질의가 비면 아래 2)번의
             //   "TOS 에 기록이 없다 = 배차된 적 없다" 근거가 통째로 거짓이 되어, 배차돼 staging 중인 트럭까지 빈 차로
@@ -5843,7 +5875,7 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                     let n_free = rows.iter().filter(|r| r.reason == "free_tos").count();
                     let n_inf = rows.iter().filter(|r| r.reason.starts_with("inflight")).count();
                     let n_gps = rows.iter().filter(|r| r.reason == "gps_free").count();
-                    tracing::info!(total = v.len(), free_tos = n_free, inflight = n_inf, gps_free = n_gps, swap_cands = swap_cands.len(), ds_anchor = n_ds_anchor, horizon_s = pool_h_s, "후보 풀 (pool_ver 9)");
+                    tracing::info!(total = v.len(), free_tos = n_free, inflight = n_inf, gps_free = n_gps, swap_cands = swap_cands.len(), ds_anchor = n_ds_anchor, horizon_s = pool_h_s, pool_ver = POOL_VER, "후보 풀");
                 }
                 (v, held, rows, need_pos, swap_cands, drop_pos)
             };
@@ -7670,7 +7702,7 @@ mod workpool_freshness_tests {
 #[cfg(test)]
 mod wake_on_landing_tests {
     use super::{advance_free_seen, combine_wake, edge_allowed_by_hold, free_advanced, release_held, restore_holds, should_wake,
-                truck_busy_after, apply_written, Hold, HoldKind, OpenSent, SentRow, TosSig, WakeSrc, WakeStep, HOLD_RELEASE_MARGIN_MS, PREV_WINDOW_S,
+                truck_busy_after, is_free_tos, apply_written, Hold, HoldKind, OpenSent, SentRow, TosSig, WakeSrc, WakeStep, HOLD_RELEASE_MARGIN_MS, PREV_WINDOW_S,
                 RESTORE_MAX_AGE_MS, WAKE_MAX_WAIT_MS, WORKPOOL_MAX_AGE_S};
     use std::collections::HashMap;
     use chrono::{DateTime, TimeZone, Utc};
@@ -7924,6 +7956,33 @@ mod wake_on_landing_tests {
         assert!(truck_busy_after(Some(&신호(None, None, Some(100_001))), HoldKind::Assign, sent), "보낸 뒤 배차 목록 등재");
         assert!(!truck_busy_after(Some(&신호(None, Some(100_001), Some(100_001))), HoldKind::Swap, sent), "스왑 트럭의 배차·등재는 원래 있던 것");
         assert!(truck_busy_after(Some(&신호(Some(100_001), None, None)), HoldKind::Swap, sent), "스왑 트럭은 픽업이면 바쁨");
+    }
+
+    /// ★늦게 도착한 배차(2026-10-13): 배차가 보내기 **전**에 일어났어도 마지막 자유(50_000) 뒤면 보낸 뒤에 안 사실이다 —
+    /// 보낼 때 빈 트럭으로 보였으니까. 픽업(1차 리뷰 BLOCKING)과 같은 논리. 스왑 트럭엔 적용하지 않는다.
+    #[test]
+    fn 자유_뒤_배차는_보내기_전이어도_바쁨이다() {
+        let sent = 100_000;
+        assert!(truck_busy_after(Some(&신호(None, Some(90_000), None)), HoldKind::Assign, sent), "자유 뒤·보내기 전 배차 시각");
+        assert!(truck_busy_after(Some(&신호(None, None, Some(90_000))), HoldKind::Assign, sent), "자유 뒤·보내기 전 스냅샷의 목록 등재");
+        assert!(truck_busy_after(Some(&신호(None, None, Some(50_000))), HoldKind::Assign, sent), "자유와 같은 스냅샷 등재 = 후보 풀도 일하는 트럭으로 본다");
+        assert!(!truck_busy_after(Some(&신호(None, Some(50_000), None)), HoldKind::Assign, sent), "자유와 같은 초의 배차는 그 자유를 낳은 배차");
+        assert!(!truck_busy_after(Some(&신호(None, Some(49_999), Some(49_999))), HoldKind::Assign, sent), "자유 전 배차·등재는 끝난 트립");
+        assert!(!truck_busy_after(Some(&신호(None, Some(90_000), Some(90_000))), HoldKind::Swap, sent), "스왑 트럭의 배차·등재는 원래 있던 것");
+        // 자유 사건이 없는 트럭(GPS 로만 빈 트럭)은 '자유 뒤'를 못 따지므로 보낸 뒤 신호만 센다
+        let mut s = 신호(None, Some(90_000), Some(90_000));
+        s.free = None;
+        assert!(!truck_busy_after(Some(&s), HoldKind::Assign, sent), "자유 모름 + 보내기 전 배차 = 근거 아님");
+    }
+
+    /// 후보 풀과 고정 풀기는 '자유 뒤 배차'를 같은 판정으로 본다 — 풀이 일하는 트럭으로 빼는 신호 모습이면 고정도 풀린다.
+    #[test]
+    fn 풀에서_빠지는_배차_신호면_고정도_풀린다() {
+        let sent = 100_000;
+        for (dis, listed) in [(Some(60_000), None), (None, Some(60_000)), (None, Some(50_000)), (Some(50_000), None), (Some(40_000), Some(40_000))] {
+            let s = 신호(None, dis, listed);
+            assert_eq!(truck_busy_after(Some(&s), HoldKind::Assign, sent), !is_free_tos(&s), "dis={dis:?} listed={listed:?}");
+        }
     }
 
     fn 행(yt: &str, c: &str, kind: HoldKind) -> SentRow {
