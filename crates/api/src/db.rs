@@ -66,6 +66,10 @@ const DEADMAN: &[(&str, &str, i64)] = &[
     ("tos_handover_label", "comp_ts", 30), // 60s collector; 494-922 rows/h, max natural gap 20min over 48h (measured 2026-08-10). comp_ts indexed
     ("live_workqueue", "as_of_ts", 10),    // full refresh every 60s pool tick → 10 misses
     ("live_stow_plan", "as_of_ts", 180),   // delta touches changed rows only, but hourly recon restamps every row → 3 recon misses
+    // TOS 배차 가능 목록 수집(tt-tos-avail·mig 0162) — 2026-10-13 pool_ver 11 부터 후보 풀이 이것을 읽는다(livemap.rs `avail`).
+    // 멈추면 그 신호는 TOS_AVAIL_MAX_AGE_S(180초) 뒤 조용히 꺼지고, TOS 가 풀어 준 트럭이 최대 LISTED_RECENT_S 동안 빈 트럭에서
+    // 빠지는 10판 손해가 소리 없이 돌아온다(2차 리뷰). 매 틱 1행·이틀 최대 간격 61초(실측) → 10분 = 9회 결손. as_of_ts 는 PK.
+    ("tos_avail_check", "as_of_ts", 10),
 ];
 
 /// Retention checks: the prune ran without error but did not actually delete anything. A prune
