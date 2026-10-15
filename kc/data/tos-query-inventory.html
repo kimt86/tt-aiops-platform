@@ -1,0 +1,487 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TOS 조회 목록 — TT AIOps 지식센터</title>
+  <meta name="description" content="지금 이 순간 우리 시스템이 TOS Oracle 에서 어떤 표를, 어떤 질의로, 몇 초마다 읽고 있는지 — 실제로 켜져 있는 타이머와 하루치 실행 기록으로 맞춰 본 목록.">
+  <link rel="stylesheet" href="/kc/assets/kc.css">
+  <script defer src="/kc/assets/kc.js"></script>
+</head>
+<body>
+<main class="kc-article" data-page="data/tos-query-inventory">
+  <h1>TOS 조회 목록 — 어떤 표를, 어떤 질의로, 몇 초마다</h1>
+  <p class="kc-lede">우리 시스템이 <strong>지금</strong> TOS Oracle 에서 읽어 오는 것을 빠짐없이 적은 목록입니다. 설계 문서를 옮겨 적은 게 아니라, ① 이 서버에 <strong>실제로 켜져 있는 타이머</strong>, ② 그 타이머가 부르는 <strong>코드와 SQL</strong>, ③ <strong>지난 24시간 실행 기록</strong> 세 가지를 맞대서 만들었습니다.</p>
+  <div class="kc-meta"><span class="kc-badge kind">데이터 · 조회 목록</span><span class="kc-badge living">실측 2026-10-14 14:31 MYT 기준</span></div>
+
+  <h2>0. 한눈에</h2>
+  <div class="kc-cal tip"><span class="h">요약</span>
+    <ul>
+      <li>상시로 도는 조회는 <strong>9가지</strong>, 하루 한 번 도는 것이 <strong>2가지</strong>, 요청한 날에만 도는 것이 <strong>1묶음</strong>입니다.</li>
+      <li>하루 <strong>16,944번</strong> 조회합니다. 시간당 706번, 평균 5.1초에 한 번꼴입니다.</li>
+      <li>가장 잦은 것은 <strong>15초마다</strong> 도는 두 가지입니다(안벽 크레인 작업 기록, 트럭 작업 완료 기록). 이 둘이 하루 횟수의 68%를 차지합니다.</li>
+      <li>전부 <strong>읽기만</strong> 합니다. TOS 에 쓰는 조회는 하나도 없습니다.</li>
+      <li>한 번 조회에 걸리는 시간은 대부분 0.3~0.6초입니다. 작업 목록(③)이 3.4초, 적부계획 전체 대조(⑨)가 8.6초, 하루 사이클 지표(⑩)가 12.6초로 가장 깁니다(중앙값).</li>
+    </ul>
+  </div>
+
+  <h2>1. 전체 목록</h2>
+  <p>시각은 모두 터미널 현지 시각(MYT)입니다. "발화 시각"은 매번 같은 초에 시작하도록 고정한 경우 그 초를 적었습니다. "하루 횟수·소요·행 수"는 <a href="#method">§5</a>의 실행 기록에서 잰 값입니다.</p>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th>#</th><th>무엇을 가져오나</th><th>읽는 TOS 표</th><th>주기 · 발화 시각</th><th>하루 횟수</th><th>1회 소요<br>중앙 / 상위10%</th><th>1회 평균 받은 행 †</th><th>담는 곳(우리 DB)</th></tr></thead>
+    <tbody>
+      <tr><td>①</td><td>안벽 크레인(QC) 작업 기록 — 크레인이 상자를 내리거나 실은 순간</td><td><code>MCH_OPERATION</code> (+ <code>CDY_MACHINE</code> 으로 QC 만 고름)</td><td><strong>15초</strong> · 매분 05·20·35·50초</td><td>5,751</td><td>0.38 / 0.48초</td><td>37</td><td><code>qc_move_log</code></td></tr>
+      <tr><td>②</td><td>트럭 작업 완료 기록 — 트럭이 일을 마치고 자유로워진 순간</td><td><code>JOB_ORDER_HISTORY</code></td><td><strong>15초</strong> · 매분 05·20·35·50초</td><td>5,751</td><td>0.30 / 0.40초</td><td>7</td><td><code>tos_handover_label</code></td></tr>
+      <tr><td>③</td><td>남은 작업 목록 + 크레인별 작업 순서표 (한 번에 묶어서 읽음)</td><td><code>JOB_QUEUE_SCHEDULE</code> + <code>JOB_ORDER_LIST</code></td><td><strong>60초</strong> · 매분 55초</td><td>1,438</td><td>3.43 / 5.25초</td><td>2,945</td><td><code>live_workqueue</code> · <code>live_workpool</code> · <code>live_candidate</code> · <code>live_assigned_tt</code></td></tr>
+      <tr><td>④</td><td>야드 크레인(RTG·ES·RS) 작업 기록</td><td><code>MCH_OPERATION</code></td><td><strong>60초</strong> · 매분 25초</td><td>1,438</td><td>0.50 / 0.66초</td><td>109</td><td><code>rtg_move_log</code></td></tr>
+      <tr><td>⑤</td><td>TOS 가 "배차할 수 있다"고 보는 트럭 목록 (로그인·정지·배차 상태)</td><td><code>CDY_MACHINE</code> · <code>MCH_WORKTIME</code> · <code>JOB_ORDER_LIST</code> · <code>MCH_EQ_WORKSTOP</code> · <code>CDY_MACHINE_JOBSTOP</code> · <code>JOB_ORDER_HISTORY</code></td><td><strong>60초</strong> · 매분 40초</td><td>1,438</td><td>1.78 / 3.05초</td><td>34 *</td><td><code>tos_avail_interval</code> · <code>tos_avail_check</code></td></tr>
+      <tr><td>⑥</td><td>적부계획의 상자별 작업 순번 — 바뀐 것만</td><td><code>VSP_SHIP</code></td><td><strong>2분</strong> · 짝수 분 15초</td><td>719</td><td>0.42 / 0.92초</td><td>220</td><td><code>live_stow_plan</code></td></tr>
+      <tr><td>⑦</td><td>선박 일정 (접안·출항 예정, 작업 완료 예정, 물량)</td><td><code>VSB_VOYAGE</code></td><td><strong>5분</strong> · 0·5·10…분 35초</td><td>288</td><td>0.63 / 0.93초</td><td>246</td><td><code>live_vessel_schedule</code></td></tr>
+      <tr><td>⑧</td><td>항차별 계획 물량 (실시간 화면의 진행 막대용)</td><td><code>VSS_STATISTICS</code></td><td><strong>15분</strong> · 직전 실행 15분 뒤</td><td>95</td><td>0.38 / 0.85초</td><td>33</td><td><code>raw_voyage_plan</code></td></tr>
+      <tr><td>⑨</td><td>적부계획 전체 대조 — ⑥이 놓친 차이를 찾아 고침</td><td><code>VSP_SHIP</code></td><td><strong>1시간</strong> · 직전 실행 1시간 뒤</td><td>24</td><td>8.57 / 10.83초</td><td>14,187</td><td><code>live_stow_plan</code></td></tr>
+      <tr><td>⑩</td><td>하루 사이클 지표 (어제 하루)</td><td><code>JOB_ORDER_HISTORY</code></td><td><strong>하루 1번</strong> · 00:30 (최대 2분 늦게)</td><td>1</td><td>12.56초</td><td>10</td><td><code>raw_k_cycle</code></td></tr>
+      <tr><td>⑪</td><td>크레인 이름 점검 — 새 크레인이 생겼는데 지표에서 빠지지 않나</td><td><code>CDY_MACHINE</code></td><td><strong>하루 1번</strong> · ⑩ 바로 뒤</td><td>1</td><td>기록 없음 **</td><td>약 78</td><td>저장 안 함(어긋나면 경보만)</td></tr>
+      <tr><td>⑫</td><td>시뮬레이션용 하루치 자료 (게이트 출입, 선박 제원, 적부 명세)</td><td><code>CYC_HISTORY</code> · <code>CDV_VESSEL</code> · <code>VSB_VOYAGE</code> · <code>ETV_BAPLIE_CONT</code> · <code>ETV_MOVINS_STOWAGE</code></td><td><strong>요청한 날에만</strong> · 5분마다 요청이 있나 확인(확인은 우리 DB 만 봄)</td><td>평소 0 (최근 요청 10-12 1건)</td><td>—</td><td>—</td><td><code>scenario.*</code></td></tr>
+    </tbody>
+  </table></div>
+  <p class="kc-small">† 실행 기록에 남은 행 수의 하루 평균으로, TOS 에서 받은 행 수입니다(①②④는 겹쳐 다시 읽은 행 포함). 두 가지 예외: * ⑤는 받은 행이 아니라 이번에 기록한 상태 변화 수입니다. 받는 행은 한 번에 약 2천 행입니다(기존 문서 실측). ** ⑪은 실행 기록에 남기지 않아 소요를 재지 못했습니다. 78행짜리 작은 표를 한 번 읽습니다.</p>
+
+  <h3>하루 횟수 합계</h3>
+  <p>①~⑩의 실행 기록 16,943번 + ⑪ 1번 = <strong>16,944번</strong>입니다. ⑫는 요청한 날에만 생기므로 합계에서 뺐습니다. 하루치를 요청하면 그날 수십 번이 더해집니다.</p>
+
+  <h2>2. 한 줄씩 — 어떻게 범위를 좁히나</h2>
+  <p>TOS 를 무겁게 하지 않으려고 모든 조회는 읽는 범위를 좁힙니다. 방법은 크게 세 가지입니다.</p>
+  <ul>
+    <li><strong>"지난번 이후만" 읽기</strong> (①②④⑥) — 마지막으로 읽은 지점을 우리 DB 에 적어 두고, 다음엔 그 뒤만 읽습니다. ①④는 혹시 늦게 보이는 행을 놓치지 않으려고 120초를 겹쳐 다시 읽습니다(중복은 우리 쪽에서 버립니다).</li>
+    <li><strong>"지금 살아 있는 것만" 읽기</strong> (③⑤⑦) — 끝나지 않은 작업, 최근 며칠 안에 만든 작업지시, 앞뒤 며칠 안에 출항하는 배만 읽습니다.</li>
+    <li><strong>"정해진 날·배만" 읽기</strong> (⑧⑨⑩⑫) — 최근 3일, 작업 중인 항차 목록, 어제 하루처럼 대상을 못박고 읽습니다.</li>
+  </ul>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th>#</th><th>범위를 좁히는 조건</th><th>한 번에 받는 최대 행</th></tr></thead>
+    <tbody>
+      <tr><td>①</td><td>작업 순번(완료 순서)이 지난번 지점 −120초 이후 ~ 지금 · QC 장비만 · 완료 시각이 있는 행만</td><td>5,000</td></tr>
+      <tr><td>②</td><td>기록 시각이 지난번 지점 이후 ~ 지금 · 완료(C) 기록만 · 양하·적하만</td><td>3,000</td></tr>
+      <tr><td>③</td><td>순서표: 지워지지 않았고 하루 안에 바뀌었으며 아직 안 끝났거나 6시간 안에 끝난 것<br>작업 목록: 완료일이 비었고 상태가 A·B·Q 이며 이틀 안에 만든 것</td><td>제한 없음(평소 약 3천 행)</td></tr>
+      <tr><td>④</td><td>①과 같은 방식 · 장비 이름이 RTG·ES·RS 로 시작하는 것만</td><td>5,000</td></tr>
+      <tr><td>⑤</td><td>트럭·장비 목록(작은 표) 통째 · 트럭이 붙은 작업지시 · 끝나지 않은 장비 정지 · 기록 시각이 직전 수집 −120초 이후인 변경 기록</td><td>제한 없음(평소 약 2천 행)</td></tr>
+      <tr><td>⑥</td><td>계획된(P) 행 · 양하/적하 · 지금 작업 중인 항차 목록 안 · 마지막으로 본 변경 시각 이후. 새로 작업을 시작한 항차는 같은 조회 안에서 통째로 한 번 읽음</td><td>제한 없음(평소 약 220행)</td></tr>
+      <tr><td>⑦</td><td>취소되지 않은 항차 · 출항 예정일이 이틀 전 ~ 열흘 뒤</td><td>제한 없음(평소 약 250행)</td></tr>
+      <tr><td>⑧</td><td>최근 3일 안에 갱신된 항차 · 계획 물량이 있는 것</td><td>120</td></tr>
+      <tr><td>⑨</td><td>⑥과 같은 항차 목록 · 계획된(P) 행 · 아직 안 끝난 것 (변경 시각 조건 없이 전부)</td><td>제한 없음(평소 약 1만 4천 행)</td></tr>
+      <tr><td>⑩</td><td>기록 날짜가 어제 하루</td><td>15 (지표 요약 행)</td></tr>
+      <tr><td>⑪</td><td>장비 종류가 QC 인 것</td><td>제한 없음(약 78행)</td></tr>
+      <tr><td>⑫</td><td>요청한 하루의 상자 번호 목록 / 그날 작업한 항차 하나씩</td><td>적부 명세는 항차당 20,000</td></tr>
+    </tbody>
+  </table></div>
+
+  <h2>3. 동시에 몇 개가 도나</h2>
+  <ul>
+    <li>각 수집은 서로 다른 프로그램(타이머)으로 돕니다. 한 프로그램 안에서는 Oracle 조회가 <strong>한 번에 하나</strong>씩만 나갑니다.</li>
+    <li>①과 ②는 <strong>같은 초(05·20·35·50초)에 함께 시작</strong>합니다. 실행 기록에서도 두 시작 시각이 같은 초로 찍혀 있습니다. 그래서 15초마다 최소 두 개가 동시에 나갑니다.</li>
+    <li>5분마다 35초에는 ⑦도 같은 초에 시작해 <strong>세 개</strong>가 겹칩니다.</li>
+    <li>나머지 ③④⑤⑥은 25·40·55·15초로 시작 초를 나눠 두었습니다.</li>
+  </ul>
+
+  <h2>4. 헷갈리기 쉬운 것 — 지금은 Oracle 을 안 쓰는 것</h2>
+  <div class="kc-cal note"><span class="h">이름만 보면 Oracle 을 읽을 것 같지만 지금 설정에서는 읽지 않습니다</span>
+    <ul>
+      <li><strong>교대 실시간 지표</strong>(3분·15분마다 — 시간당 무브 수, 크레인 대기, 사이클, 빈 차 주행 등): 모두 <strong>우리 DB 의 사본</strong>(①②④가 채운 표)으로 계산합니다. 15분 주기 묶음 중 Oracle 에 닿는 것은 ⑧ 하나뿐입니다.</li>
+      <li><strong>야간 지표 9개</strong>: 8개는 우리 사본으로 계산하고, Oracle 을 읽는 것은 ⑩ 하나와 점검 ⑪뿐입니다.</li>
+      <li><strong>ETW(크레인 작업 예정 시각)</strong>: 1분마다 받지만 Oracle 이 아니라 별도 게이트웨이(HTTP)에서 받습니다.</li>
+      <li><strong>트럭 GPS · 날씨</strong>: Oracle 과 무관합니다.</li>
+      <li><strong>API 서버</strong>(화면·배차 계산): 설계상 Oracle 에 붙는 수단이 아예 없습니다. 모든 Oracle 조회는 추출기 한 곳에서만 나갑니다.</li>
+      <li><strong>⑤를 검증하는 2초 간격 실측 도구</strong>(<code>scripts/tos_avail_truth/run.sh</code>): 사람이 손으로 돌릴 때만 돌며, 상시로는 돌지 않습니다.</li>
+    </ul>
+  </div>
+  <p>위의 교대·야간 지표는 스위치를 바꾸면 예전처럼 Oracle 을 읽게 할 수 있습니다(<a href="#ops">§7</a>). 그렇게 바꾸면 이 표의 숫자도 달라집니다.</p>
+
+  <h2 id="method">5. 이 숫자를 어떻게 쟀나</h2>
+  <ul>
+    <li><strong>주기</strong>: 이 서버에 설치된 타이머 설정(복사본, 저장소의 <code>deploy/systemd</code> 와 내용이 같음을 확인)을 읽었습니다. 타이머는 서버 시계(한국 시각)로 적혀 있어 MYT 로 바꿔 적었습니다. 예: 야간 01:30 KST = 00:30 MYT. 실행 기록의 야간 시작도 00:31 MYT 였습니다.</li>
+    <li><strong>하루 횟수·소요·행</strong>: 우리 DB 의 실행 기록 표(<code>etl_run_log</code>)에서 <strong>2026-10-13 14:33 ~ 10-14 14:31 MYT 24시간</strong> 동안의 실행을 셌습니다. 분모는 "그 24시간 동안 시작한 실행 한 번"입니다. 실패는 24시간 동안 0건이었습니다.</li>
+    <li><strong>1회 소요는 Oracle 만의 시간이 아닙니다.</strong> 우리 쪽에서 잰 한 번 실행의 전체 시간(중계 서버 접속 + Oracle 조회 + 우리 DB 에 담기)입니다. 그래서 Oracle 이 실제로 일한 시간은 이보다 짧습니다. Oracle 쪽 시간은 따로 재지 않았습니다.</li>
+    <li>위 소요를 하루치 모두 더하면 15,118초(하루의 17.5%)입니다. 이것은 "우리 조회가 하나라도 진행 중이던 시간"의 <strong>상한</strong>이지, Oracle 사용량이 아닙니다.</li>
+    <li>⑫의 시나리오 수집기는 별도 저장소(<code>~/projects/tt-scengen</code>)의 코드를 읽어 확인했습니다. 5분마다 깨어나지만 요청된 날이 없으면 우리 DB 만 보고 끝납니다.</li>
+  </ul>
+
+  <h2>6. SQL 원문</h2>
+  <p>실제로 나가는 질의를 그대로 옮겼습니다(설명 주석만 뺐습니다). <code>{…}</code>, <code>{{…}}</code>, <code>__VOYAGES__</code> 처럼 생긴 자리는 실행할 때 코드가 채우는 값입니다. 예를 들어 "지난번 지점", "지금 시각", "작업 중인 항차 목록"이 들어갑니다.</p>
+
+  <h3>① 안벽 크레인 작업 기록 — 15초</h3>
+  <pre><code>SELECT
+       MCH_OPER_MACHNO AS machno, SUBSTR(MCH_OPER_CONTNO,1,11) AS contno,
+       MCH_OPER_SEQNO AS seqno, MCH_OPER_JOBTYPE AS jobtype, TRK_ID AS trk_id,
+       ST_DT AS st_dt, MCH_OPER_COMPDATE||MCH_OPER_COMPTIME AS comp_dt,
+       MCH_OPER_STATUS AS status, MCH_OPER_QUEUENAME AS queuename,
+       MCH_OPER_VESSEL AS vessel, MCH_OPER_VOYAGE AS voyage,
+       MCH_OPER_ISO AS iso
+  FROM TOSADM.MCH_OPERATION
+ WHERE MCH_OPER_SEQNO &gt;= '{seek_from}'
+   AND MCH_OPER_SEQNO &lt;= '{until}'
+   AND MCH_OPER_MACHNO IN (SELECT CDY_MCHN_CODE FROM TOSADM.CDY_MACHINE
+                            WHERE CDY_MCHN_TYPE = 'QC')
+   AND LENGTH(MCH_OPER_COMPTIME) &gt;= 6
+ ORDER BY MCH_OPER_SEQNO
+ FETCH FIRST 5000 ROWS ONLY</code></pre>
+
+  <h3>② 트럭 작업 완료 기록 — 15초</h3>
+  <pre><code>SELECT JOB_HIST_YTNO AS ytno, JOB_HIST_ARMGC AS armgc, JOB_HIST_JOBTYPE AS jobtype,
+       JOB_HIST_CONTNO AS contno, JOB_HIST_POINT AS point, JOB_HIST_SEQNO AS seqno,
+       JOB_HIST_DATE||JOB_HIST_TIME AS evt, JOB_HIST_ACTV_DT AS actv_dt,
+       YT_DIS_DT AS dis_dt, SUBSTR(JOB_HIST_YT_TOPOS,1,40) AS topos,
+       JOB_HIST_VESSEL AS vessel, JOB_HIST_VOYAGE AS voyage,
+       LNDN_TRV_RNG AS trv_rng, UN_LNDN_TRV_RNG AS un_trv_rng
+  FROM TOSADM.JOB_ORDER_HISTORY
+ WHERE JOB_HIST_DATE||JOB_HIST_TIME &gt;= '{wm}'
+   AND JOB_HIST_DATE||JOB_HIST_TIME &lt;= '{until}'
+   AND JOB_HIST_JOBSTATUS = 'C'
+   AND JOB_HIST_JOBTYPE IN ('DS','LD')
+ ORDER BY JOB_HIST_DATE||JOB_HIST_TIME
+ FETCH FIRST 3000 ROWS ONLY</code></pre>
+
+  <h3>③ 남은 작업 목록 + 크레인 작업 순서표 — 60초</h3>
+  <p>두 표를 <code>UNION ALL</code> 로 묶어 한 번에 읽습니다. 앞쪽(<code>'WQ'</code>)이 순서표, 뒤쪽(<code>'WP'</code>)이 작업 목록입니다. 열 모양을 맞추려고 넣은 <code>CAST(NULL …)</code> 칸이 많습니다.</p>
+  <pre><code>SELECT
+  'WQ' AS src,
+  s.JOB_QUE_QUEUENAME AS queuename,
+  s.JOB_QUE_VESSEL    AS vessel,
+  s.JOB_QUE_VOYAGE    AS voyage,
+  s.JOB_QUE_CRANENO   AS qc,
+  s.JOB_QUE_DISLOAD   AS disload,
+  s.JOB_QUE_SEQ       AS seq,
+  s.JOB_QUE_TOTALQTY  AS total_qty,
+  s.JOB_QUE_COMPQTY   AS comp_qty,
+  s.JOB_QUE_PLANQTY   AS plan_qty,
+  CAST(NULL AS VARCHAR2(8))  AS jobtype,
+  CAST(NULL AS VARCHAR2(8))  AS jobstatus,
+  CAST(NULL AS VARCHAR2(8))  AS yt_status,
+  CAST(NULL AS VARCHAR2(16)) AS ytno,
+  CAST(NULL AS VARCHAR2(16)) AS armgc,
+  CAST(NULL AS VARCHAR2(20)) AS etw_dt,
+  CAST(NULL AS VARCHAR2(20)) AS actv_dt,
+  CAST(NULL AS VARCHAR2(14)) AS upd_dt,
+  CAST(NULL AS VARCHAR2(14)) AS cre_dt,
+  CAST(NULL AS VARCHAR2(14)) AS yt_dis_dt,
+  CAST(NULL AS VARCHAR2(11)) AS contno,
+  CAST(NULL AS VARCHAR2(20)) AS msnseq,
+  CAST(NULL AS VARCHAR2(40)) AS seqno,
+  CAST(NULL AS VARCHAR2(20)) AS yt_topos,
+  CAST(NULL AS VARCHAR2(20)) AS from_pos,
+  CAST(NULL AS VARCHAR2(20)) AS to_pos,
+  CAST(NULL AS VARCHAR2(8))  AS twintandem,
+  CAST(NULL AS VARCHAR2(40)) AS twinkey
+FROM TOSADM.JOB_QUEUE_SCHEDULE s
+WHERE NVL(s.DELT_FLG, 'N') &lt;&gt; 'Y'
+  AND s.JOB_QUE_CRANENO IS NOT NULL
+  AND s.UPD_DT &gt;= TRUNC(SYSDATE) - 1
+  AND ( NVL(s.JOB_QUE_TOTALQTY, 0) &gt; NVL(s.JOB_QUE_COMPQTY, 0)
+        OR s.UPD_DT &gt;= SYSDATE - 0.25 )
+UNION ALL
+SELECT
+  'WP' AS src,
+  l.JOB_ODR_QUEUENAME  AS queuename,
+  l.JOB_ODR_VESSEL     AS vessel,
+  l.JOB_ODR_VOYAGE     AS voyage,
+  CAST(NULL AS VARCHAR2(16)) AS qc,
+  CAST(NULL AS VARCHAR2(8))  AS disload,
+  CAST(NULL AS NUMBER) AS seq,
+  CAST(NULL AS NUMBER) AS total_qty,
+  CAST(NULL AS NUMBER) AS comp_qty,
+  CAST(NULL AS NUMBER) AS plan_qty,
+  l.JOB_ODR_JOBTYPE    AS jobtype,
+  l.JOB_ODR_JOBSTATUS  AS jobstatus,
+  l.JOB_ODR_YT_STATUS  AS yt_status,
+  l.JOB_ODR_YTNO       AS ytno,
+  l.JOB_ODR_ARMGC      AS armgc,
+  l.JOB_ODR_ETW_DT     AS etw_dt,
+  l.JOB_ODR_ACTV_DT    AS actv_dt,
+  TO_CHAR(l.UPD_DT, 'YYYYMMDDHH24MISS') AS upd_dt,
+  TO_CHAR(l.CRE_DT, 'YYYYMMDDHH24MISS') AS cre_dt,
+  l.YT_DIS_DT         AS yt_dis_dt,
+  SUBSTR(l.JOB_ODR_CONTNO, 1, 11) AS contno,
+  l.JOB_ODR_MSNSEQ     AS msnseq,
+  l.JOB_ODR_SEQNO      AS seqno,
+  l.JOB_ODR_YT_TOPOS   AS yt_topos,
+  l.CRNT_PSN_IDX_NO1   AS from_pos,
+  l.YT_TO_PSN_IDX_NO1  AS to_pos,
+  l.JOB_ODR_TWINTANDEM AS twintandem,
+  l.JOB_ODR_TWINKEY    AS twinkey
+FROM TOSADM.JOB_ORDER_LIST l
+WHERE l.JOB_ODR_COMPDATE IS NULL
+  AND l.JOB_ODR_JOBSTATUS IN ('A', 'B', 'Q')
+  AND l.CRE_DT &gt;= TRUNC(SYSDATE) - 2
+ORDER BY src, queuename, etw_dt</code></pre>
+
+  <h3>④ 야드 크레인 작업 기록 — 60초</h3>
+  <pre><code>SELECT
+       MCH_OPER_MACHNO AS machno, SUBSTR(MCH_OPER_CONTNO,1,11) AS contno,
+       MCH_OPER_SEQNO AS seqno, MCH_OPER_JOBTYPE AS jobtype, TRK_ID AS trk_id,
+       ST_DT AS st_dt, MCH_OPER_COMPDATE||MCH_OPER_COMPTIME AS comp_dt,
+       MCH_OPER_STATUS AS status, MCH_OPER_QUEUENAME AS queuename,
+       MCH_OPER_VESSEL AS vessel, MCH_OPER_VOYAGE AS voyage,
+       CRNT_PSN_IDX_NO1 AS pos1, CRNT_PSN_IDX_NO2 AS pos2,
+       CRNT_PSN_IDX_NO3 AS pos3, CRNT_PSN_IDX_NO4 AS pos4,
+       MCH_OPER_ISO AS iso
+  FROM TOSADM.MCH_OPERATION
+ WHERE MCH_OPER_SEQNO &gt;= '{seek_from}'
+   AND MCH_OPER_SEQNO &lt;= '{until}'
+   AND REGEXP_LIKE(MCH_OPER_MACHNO, '^(RTG|ES|RS)')
+   AND LENGTH(MCH_OPER_COMPTIME) &gt;= 6
+ ORDER BY MCH_OPER_SEQNO
+ FETCH FIRST 5000 ROWS ONLY</code></pre>
+
+  <h3>⑤ TOS 배차 가능 트럭 목록 — 60초</h3>
+  <p>한 문장 안에 다섯 조각이 있습니다. <code>T</code> = Oracle 의 지금 시각, <code>M</code> = 트럭·장비 목록과 로그인 상태, <code>B</code> = 트럭이 붙은 작업지시, <code>W</code> = 지금 정지 중인 장비, <code>H</code> = 직전 수집 이후의 변경 기록. 우리 쪽에서 이걸 커밋 순서대로 다시 재생해 "언제부터 언제까지 배차 가능했나"를 복원합니다.</p>
+  <pre><code>SELECT 'T' AS k, TO_CHAR(SYSTIMESTAMP,'YYYYMMDDHH24MISSFF3') AS a, NULL AS b, NULL AS c, NULL AS d,
+       NULL AS e, NULL AS f, NULL AS g, NULL AS h, NULL AS i, NULL AS j
+  FROM dual
+UNION ALL
+SELECT 'M', m.CDY_MCHN_CODE, m.CDY_MCHN_TYPE, m.CDY_MCHN_ONOFF, m.CDY_MCHN_YTPOOLNAME,
+       m.CDY_MCHN_LASTDATE||m.CDY_MCHN_LASTTIME,
+       (SELECT TO_CHAR(MAX(w.LGOUT_DT),'YYYYMMDDHH24MISS') FROM TOSADM.MCH_WORKTIME w
+         WHERE w.MCH_WORK_MACHNO = m.CDY_MCHN_CODE AND w.LGOUT_DT &gt;= SYSDATE - 1/24),
+       NULL, NULL, NULL, NULL
+  FROM TOSADM.CDY_MACHINE m
+ WHERE m.CDY_MCHN_TYPE IN ('SC','YT','AT')
+UNION ALL
+SELECT 'B', JOB_ODR_CONTNO, TO_CHAR(JOB_ODR_POINT), JOB_ODR_SEQNO, JOB_ODR_YTNO,
+       NVL(JOB_ODR_YT_STATUS,'X'), NULL, NULL, NULL, NULL, NULL
+  FROM TOSADM.JOB_ORDER_LIST
+ WHERE JOB_ODR_YTNO IS NOT NULL AND NVL(JOB_ODR_YT_STATUS,'X') IN ('A','B','F','R','X','Q')
+UNION ALL
+SELECT 'W', o.MCH_STOP_MACHNO, o.MCH_STOP_CODE, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL
+  FROM (SELECT a.MCH_STOP_MACHNO, a.MCH_STOP_CODE, a.MCH_STOP_DATE, a.MCH_STOP_SEQ,
+               MAX(a.MCH_STOP_DATE) OVER (PARTITION BY a.MCH_STOP_MACHNO) AS mxd,
+               MAX(a.MCH_STOP_SEQ)  OVER (PARTITION BY a.MCH_STOP_MACHNO) AS mxs
+          FROM TOSADM.MCH_EQ_WORKSTOP a
+         WHERE a.MCH_STOP_ENDTIME IS NULL) o,
+       TOSADM.CDY_MACHINE m, TOSADM.CDY_MACHINE_JOBSTOP b
+ WHERE (o.MCH_STOP_DATE || o.MCH_STOP_SEQ) = (o.mxd || o.mxs)
+   AND o.MCH_STOP_MACHNO = m.CDY_MCHN_CODE
+   AND m.CDY_MCHN_TYPE IN ('SC','YT','AT')
+   AND o.MCH_STOP_CODE = b.CDY_MSTP_CODE AND b.MCHN_TP = m.CDY_MCHN_TYPE
+UNION ALL
+SELECT 'H', JOB_HIST_DATE||JOB_HIST_TIME, JOB_HIST_TYPE, JOB_HIST_CONTNO, TO_CHAR(JOB_HIST_POINT),
+       JOB_HIST_SEQNO, JOB_HIST_YTNO, NVL(JOB_HIST_YT_STATUS,'X'), JOB_HIST_JOBTYPE,
+       SUBSTR(JOB_HIST_PROGRAM,1,60), TO_CHAR(ORA_ROWSCN)
+  FROM TOSADM.JOB_ORDER_HISTORY
+ WHERE JOB_HIST_DATE||JOB_HIST_TIME &gt;= '{hist_from}'</code></pre>
+
+  <h3>⑥ 적부계획 순번 — 바뀐 것만, 2분</h3>
+  <p>평소에는 아래 질의 하나입니다.</p>
+  <pre><code>SELECT
+  v.VSP_SHP_VESSEL     AS vessel,
+  v.VSP_SHP_VOYAGE     AS voyage,
+  v.VSP_SHP_QUEUENAME  AS queuename,
+  v.VSP_SHP_DISLOAD    AS disload,
+  v.VSP_SHP_CONTNO     AS contno,
+  v.VSP_SHP_PLANSEQ    AS planseq,
+  v.VSP_SHP_COMPDATE   AS compdate,
+  TO_CHAR(v.UPD_DT,'YYYYMMDDHH24MISS') AS upd
+FROM TOSADM.VSP_SHIP v
+WHERE v.VSP_SHP_DISLOAD IN ('D', 'L')
+  AND v.VSP_SHP_PLANST    = 'P'
+  AND v.UPD_DT           &gt;= TO_DATE('{wm}','YYYYMMDDHH24MISS')
+  AND (v.VSP_SHP_VESSEL, v.VSP_SHP_VOYAGE) IN (__VOYAGES__)</code></pre>
+  <p>막 작업을 시작해서 우리 사본에 한 줄도 없는 항차가 있으면, 같은 조회 뒤에 아래를 <code>UNION ALL</code> 로 붙여 그 항차를 통째로 읽습니다(조회 횟수는 늘지 않습니다).</p>
+  <pre><code>SELECT
+  v.VSP_SHP_VESSEL     AS vessel,
+  v.VSP_SHP_VOYAGE     AS voyage,
+  v.VSP_SHP_QUEUENAME  AS queuename,
+  v.VSP_SHP_DISLOAD    AS disload,
+  v.VSP_SHP_CONTNO     AS contno,
+  v.VSP_SHP_PLANSEQ    AS planseq,
+  v.VSP_SHP_COMPDATE   AS compdate,
+  TO_CHAR(v.UPD_DT,'YYYYMMDDHH24MISS') AS upd
+FROM TOSADM.VSP_SHIP v
+WHERE v.VSP_SHP_DISLOAD IN ('D', 'L')
+  AND v.VSP_SHP_PLANST    = 'P'
+  AND v.VSP_SHP_COMPDATE IS NULL
+  AND (v.VSP_SHP_VESSEL, v.VSP_SHP_VOYAGE) IN (__SEED_VOYAGES__)</code></pre>
+
+  <h3>⑦ 선박 일정 — 5분</h3>
+  <pre><code>SELECT
+  VSB_VOY_VESSEL  AS vessel,
+  VSB_VOY_VOYAGE  AS voyage,
+  VSB_VOY_STATUS  AS status,
+  VSB_VOY_BERTHNO AS berthno,
+  VSB_VOY_ESTBER_DATE || VSB_VOY_ESTBER_TIME AS estber,
+  VSB_VOY_ESTWKC_DATE || VSB_VOY_ESTWKC_TIME AS estwkc,
+  VSB_VOY_ESTDEP_DATE || VSB_VOY_ESTDEP_TIME AS estdep,
+  VSB_VOY_CUTOFF_DATE || VSB_VOY_CUTOFF_TIME AS cutoff,
+  VSB_VOY_ACTBER_DATE || VSB_VOY_ACTBER_TIME AS actber,
+  VSB_VOY_ACTDEP_DATE || VSB_VOY_ACTDEP_TIME AS actdep,
+  TO_NUMBER(VSB_VOY_DISVAN DEFAULT NULL ON CONVERSION ERROR)  AS disvan,
+  TO_NUMBER(VSB_VOY_LOADVAN DEFAULT NULL ON CONVERSION ERROR) AS loadvan
+FROM TOSADM.VSB_VOYAGE
+WHERE NVL(VSB_VOY_CANCEL, 'N') = 'N'
+  AND VSB_VOY_ESTDEP_DATE &gt;= TO_CHAR(SYSDATE - 2, 'YYYYMMDD')
+  AND VSB_VOY_ESTDEP_DATE &lt;= TO_CHAR(SYSDATE + 10, 'YYYYMMDD')</code></pre>
+
+  <h3>⑧ 항차별 계획 물량 — 15분</h3>
+  <pre><code>SELECT
+       VSS_STT_VESSEL AS vessel,
+       VSS_STT_VOYAGE AS voyage,
+       MAX(TO_NUMBER(VSS_STT_VAN DEFAULT NULL ON CONVERSION ERROR)) AS planned_moves
+  FROM TOSADM.VSS_STATISTICS
+ WHERE VSS_STT_UP_DT &gt;= '{{START_TS}}'
+   AND VSS_STT_VAN IS NOT NULL
+ GROUP BY VSS_STT_VESSEL, VSS_STT_VOYAGE
+ ORDER BY MAX(VSS_STT_UP_DT) DESC
+ FETCH FIRST 120 ROWS ONLY</code></pre>
+
+  <h3>⑨ 적부계획 전체 대조 — 1시간</h3>
+  <pre><code>SELECT
+  v.VSP_SHP_VESSEL     AS vessel,
+  v.VSP_SHP_VOYAGE     AS voyage,
+  v.VSP_SHP_QUEUENAME  AS queuename,
+  v.VSP_SHP_DISLOAD    AS disload,
+  v.VSP_SHP_CONTNO     AS contno,
+  v.VSP_SHP_PLANSEQ    AS planseq
+FROM TOSADM.VSP_SHIP v
+WHERE v.VSP_SHP_DISLOAD IN ('D', 'L')
+  AND v.VSP_SHP_PLANST    = 'P'
+  AND v.VSP_SHP_COMPDATE IS NULL
+  AND (v.VSP_SHP_VESSEL, v.VSP_SHP_VOYAGE) IN (__VOYAGES__)</code></pre>
+
+  <h3>⑩ 하루 사이클 지표 — 하루 1번</h3>
+  <p><code>{{DAY_STR}}</code> 자리에 어제 날짜가 들어갑니다. 야간 실행에서는 <code>{{TIME_PREDICATE}}</code> 가 비어 하루 전체를 봅니다.</p>
+  <pre><code>WITH job_events AS (
+  SELECT JOB_HIST_JOBTYPE,
+         JOB_HIST_CONTNO, JOB_HIST_POINT, JOB_HIST_SEQNO,
+         COUNT(*) AS transitions,
+         MIN(JOB_HIST_DATE||JOB_HIST_TIME)   AS first_evt,
+         MAX(JOB_HIST_DATE||JOB_HIST_TIME)   AS last_evt
+    FROM TOSADM.JOB_ORDER_HISTORY
+   WHERE JOB_HIST_DATE = '{{DAY_STR}}'
+   {{TIME_PREDICATE}}
+   GROUP BY JOB_HIST_JOBTYPE, JOB_HIST_CONTNO, JOB_HIST_POINT, JOB_HIST_SEQNO
+),
+cycles AS (
+  SELECT JOB_HIST_JOBTYPE,
+         transitions,
+         (TO_DATE(SUBSTR(last_evt,1,14),'YYYYMMDDHH24MISS')
+        - TO_DATE(SUBSTR(first_evt,1,14),'YYYYMMDDHH24MISS')) * 86400 AS cycle_sec
+    FROM job_events
+   WHERE transitions &gt; 1
+),
+stats AS (
+  SELECT JOB_HIST_JOBTYPE,
+         COUNT(*)                AS jobs,
+         AVG(cycle_sec)          AS avg_cyc,
+         STDDEV(cycle_sec)       AS std_cyc,
+         MEDIAN(cycle_sec)       AS med_cyc,
+         AVG(cycle_sec) + 2 * STDDEV(cycle_sec) AS thr,
+         PERCENTILE_CONT(0.25) WITHIN GROUP (ORDER BY cycle_sec) AS p25,
+         PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY cycle_sec) AS p75,
+         PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY cycle_sec) AS p95,
+         AVG(transitions)        AS avg_trans
+    FROM cycles
+   GROUP BY JOB_HIST_JOBTYPE
+)
+SELECT
+       s.JOB_HIST_JOBTYPE                    AS jobtype,
+       s.jobs,
+       ROUND(s.avg_cyc, 1)                   AS avg_sec,
+       ROUND(s.med_cyc, 1)                   AS med_sec,
+       ROUND(s.std_cyc, 1)                   AS std_sec,
+       ROUND(s.p25, 1)                       AS p25_sec,
+       ROUND(s.p75, 1)                       AS p75_sec,
+       ROUND(s.p95, 1)                       AS p95_sec,
+       ROUND(s.thr, 1)                       AS outlier_threshold_sec,
+       (SELECT COUNT(*) FROM cycles c
+         WHERE c.JOB_HIST_JOBTYPE = s.JOB_HIST_JOBTYPE
+           AND c.cycle_sec &gt; s.thr)          AS outlier_n,
+       ROUND(s.avg_trans, 2)                 AS avg_transitions
+  FROM stats s
+ ORDER BY s.jobs DESC
+ FETCH FIRST 15 ROWS ONLY</code></pre>
+
+  <h3>⑪ 크레인 이름 점검 — 하루 1번</h3>
+  <pre><code>SELECT CDY_MCHN_CODE AS code FROM TOSADM.CDY_MACHINE WHERE CDY_MCHN_TYPE = 'QC'</code></pre>
+
+  <h3>⑫ 시뮬레이션용 하루치 자료 — 요청한 날에만</h3>
+  <p>게이트 출입 기록(상자 번호 목록을 나눠 여러 번):</p>
+  <pre><code>SELECT CYC_HIST_CONTNO AS contno, CYC_HIST_POINT AS visit,
+       CYC_HIST_SITUATION AS sit, CYC_HIST_DATE||CYC_HIST_TIME AS evt,
+       CYC_HIST_MACHINEID AS machine, CYC_HIST_REGONO AS truck,
+       CYC_HIST_USERID AS clerk,
+       HIS_PSN_IDX_NO1 AS b, HIS_PSN_IDX_NO2 AS y,
+       HIS_PSN_IDX_NO3 AS rr, HIS_PSN_IDX_NO4 AS tt
+  FROM TOSADM.CYC_HISTORY
+ WHERE CYC_HIST_CONTNO IN ({in_list})
+   AND CYC_HIST_SITUATION IN ('GIY','QYG','GOY')
+   AND CYC_HIST_DATE &gt;= '{from_date}'</code></pre>
+  <p>그날 작업한 항차마다 세 번 — 선박 제원과 일정, 양하 명세, 적하 명세:</p>
+  <pre><code>SELECT v.CDV_VSL_NAME AS name, v.CDV_VSL_LENGTH AS loa, v.CDV_VSL_WIDTH AS beam,
+       v.CDV_VSL_DRAFT AS draft, v.CDV_VSL_MAXTEU AS maxteu, v.CDV_VSL_TOTALBAY AS bays,
+       s.VSB_VOY_BERTHNO AS berthno, s.VSB_VOY_BERTHSIDE AS berthside,
+       TO_CHAR(s.VSB_VOY_STARTPOS) AS startpos,
+       s.VSB_VOY_ACTBER_DATE||s.VSB_VOY_ACTBER_TIME AS actber,
+       s.VSB_VOY_ACTDEP_DATE||s.VSB_VOY_ACTDEP_TIME AS actdep,
+       s.VSB_VOY_ESTDEP_DATE||s.VSB_VOY_ESTDEP_TIME AS estdep,
+       s.VSB_VOY_CUTOFF_DATE||s.VSB_VOY_CUTOFF_TIME AS cutoff,
+       s.VSB_VOY_DISVAN AS disvan, s.VSB_VOY_LOADVAN AS loadvan
+  FROM TOSADM.CDV_VESSEL v
+  LEFT JOIN TOSADM.VSB_VOYAGE s
+    ON s.VSB_VOY_VESSEL = v.CDV_VSL_CODE AND s.VSB_VOY_VOYAGE = '{voyage}'
+ WHERE v.CDV_VSL_CODE = '{vessel}'
+ FETCH FIRST 1 ROWS ONLY</code></pre>
+  <pre><code>SELECT ETV_CBAP_CONTNO AS contno, ETV_CBAP_CONTISO AS iso, ETV_CBAP_FULLEMPT AS fe,
+       ETV_CBAP_CONTTYPE AS ctype, ETV_CBAP_CONTSTWG AS stwg,
+       COALESCE(NULLIF(TRIM(MEAS_WGT),''), NULLIF(TRIM(ETV_CBAP_GROSWGHT),'')) AS gross,
+       ETV_CBAP_TMPRCONT AS temp, ETV_CBAP_DNGRIMDG AS imdg, ETV_CBAP_DNGRUNNO AS unno,
+       ETV_CBAP_DCHGPORT AS pod, ETV_CBAP_ORGNPORT AS pol, ETV_CBAP_CONTOPER AS oper,
+       ETV_CBAP_OVERHIGH AS ohgt, ETV_CBAP_NEXTVESSEL AS outv, ETV_CBAP_NEXTVOYAGE AS outvoy
+  FROM TOSADM.ETV_BAPLIE_CONT
+ WHERE ETV_CBAP_VESSEL='{vessel}' AND ETV_CBAP_VOYAGE='{voyage}'
+ FETCH FIRST 20000 ROWS ONLY</code></pre>
+  <pre><code>SELECT ETV_CMOV_CONTNO AS contno, ETV_CMOV_CONTISO AS iso, ETV_CMOV_FULLEMPT AS fe,
+       ETV_CMOV_CONTTYPE AS ctype, ETV_CMOV_CONTSTWG AS stwg,
+       COALESCE(NULLIF(TRIM(MVNS_ORG_WGT),''), NULLIF(TRIM(ETV_CMOV_GROSWGHT),'')) AS gross,
+       ETV_CMOV_TMPRCONT AS temp, ETV_CMOV_DNGRIMDG AS imdg, ETV_CMOV_DNGRUNNO AS unno,
+       ETV_CMOV_DCHGPORT AS pod, ETV_CMOV_LOADPORT AS pol, ETV_CMOV_OPERATOR AS oper,
+       ETV_CMOV_OVERHIGH AS ohgt
+  FROM TOSADM.ETV_MOVINS_STOWAGE
+ WHERE ETV_CMOV_VESSEL='{vessel}' AND ETV_CMOV_VOYAGE='{voyage}'
+ FETCH FIRST 20000 ROWS ONLY</code></pre>
+
+  <h2 id="ops">7. 운영자 메모</h2>
+  <div class="kc-tablewrap"><table>
+    <thead><tr><th>#</th><th>타이머(유닛)</th><th>추출기 명령</th><th>실행 기록 이름</th></tr></thead>
+    <tbody>
+      <tr><td>①</td><td><code>tt-qc-moves</code></td><td><code>extractor qc-moves</code></td><td><code>QC_MOVE</code></td></tr>
+      <tr><td>②</td><td><code>tt-handover</code></td><td><code>extractor handover</code></td><td><code>HANDOVER_LABEL</code></td></tr>
+      <tr><td>③</td><td><code>tt-workpool</code></td><td><code>extractor workpool</code></td><td><code>POOL_FETCH</code> (Oracle 조회 시간) · <code>WORKQUEUE</code>·<code>WORKPOOL</code> (우리 DB 담기만)</td></tr>
+      <tr><td>④</td><td><code>tt-rtg-moves</code></td><td><code>extractor rtg-moves</code></td><td><code>RTG_MOVE</code></td></tr>
+      <tr><td>⑤</td><td><code>tt-tos-avail</code></td><td><code>extractor tos-avail</code></td><td><code>TOS_AVAIL</code></td></tr>
+      <tr><td>⑥</td><td><code>tt-stowplan</code></td><td><code>extractor stowplan</code></td><td><code>STOWPLAN_DELTA</code></td></tr>
+      <tr><td>⑦</td><td><code>tt-vessel-schedule</code></td><td><code>extractor vessel-schedule</code></td><td><code>VESSEL_SCHEDULE</code></td></tr>
+      <tr><td>⑧</td><td><code>tt-shift-t2</code></td><td><code>extractor tick --shift --tier t2</code></td><td><code>VOYAGE_PLAN</code></td></tr>
+      <tr><td>⑨</td><td><code>tt-stowplan-recon</code></td><td><code>extractor stowplan --reconcile</code></td><td><code>STOWPLAN_RECON</code></td></tr>
+      <tr><td>⑩⑪</td><td><code>tt-nightly</code></td><td><code>extractor run --kpi all</code></td><td><code>K_CYCLE</code> (⑪은 기록 없음)</td></tr>
+      <tr><td>⑫</td><td><code>tt-scenario-day</code></td><td><code>scengen day tick</code> (tt-scengen 저장소)</td><td><code>scenario.collection_day</code></td></tr>
+    </tbody>
+  </table></div>
+  <ul>
+    <li><strong>통로</strong>: 모든 조회는 저장소의 <code>tools/oracle-toolbox/scripts/remote-toolbox-sql</code> 를 거쳐 중계 서버 → 조회 도구 → Oracle 로 갑니다. 중계 서버 SSH 연결은 <code>tt-oracle-relay</code> 가 하나 열어 두고 함께 씁니다(그 유닛이 죽어도 조회는 직접 접속으로 계속됩니다). 한 번 조회의 제한 시간은 90초입니다. 조회 도구는 주석·힌트·쓰기 단어가 들어간 SQL 을 거부합니다.</li>
+    <li><strong>Oracle 로 되돌리는 스위치</strong>(켜면 Oracle 조회가 늘어남): <code>KPI_T1_SRC=oracle</code>(교대 지표), <code>KPI_NIGHTLY_SRC=oracle</code>(야간 지표 8개). 지금 <code>.env</code> 는 <code>KPI_NIGHTLY_SRC=local</code> 이고 <code>KPI_T1_SRC</code> 는 비어 있어 둘 다 로컬입니다.</li>
+    <li><strong>그 밖의 스위치</strong>: <code>WORKPOOL_FETCH=split</code> 이면 ③이 두 번으로 나뉩니다(지금은 한 번). <code>STOWPLAN_MODE=snapshot</code> 이면 ⑥이 매번 전체를 읽습니다(지금은 <code>delta</code>).</li>
+    <li><strong>멈추기</strong>: <code>systemctl --user stop &lt;유닛&gt;.timer</code> 로 하나씩 바로 멈출 수 있습니다.</li>
+  </ul>
+
+  <h2>8. 기존 문서와의 관계</h2>
+  <p><a href="/kc/data/tos-extraction.html">TOS 데이터 추출 전수</a>는 TOS 팀과 공유·승인을 받으려고 만든 자세한 설명서입니다(부하 산정, 컬럼별 의미 포함). 이 문서는 <strong>지금 실제로 도는 것</strong>만 짧게 맞춰 본 목록입니다. 두 문서가 다르면 이 문서의 측정 시점을 확인하세요. 2026-10-14 에 맞대 보니 다음이 달랐습니다.</p>
+  <ul>
+    <li>기존 문서는 시나리오 수집의 상자 크기 조회(<code>CYY_CONTAINER</code>)와 게이트 조회(<code>CYC_HISTORY</code>)를 <strong>5분마다 상시</strong>로 적고 있습니다. 지금은 상시로 돌지 않고, 게이트 조회만 하루치 요청 때 돕니다(⑫). 상자 크기 조회는 타이머가 없습니다.</li>
+    <li>기존 문서의 하루 총량은 17,590회, 이 문서는 16,944회입니다. 차이의 대부분은 위 두 상시 조회(기존 문서 기준 하루 약 572회)입니다.</li>
+    <li>기존 문서의 1회 소요(①② 약 2초)보다 지금 측정이 짧습니다(0.3~0.4초). 이 문서의 소요는 우리 쪽에서 잰 전체 시간입니다.</li>
+  </ul>
+
+  <div class="kc-cal danger"><span class="h">유지보수 규칙</span><p>조회를 더하거나 빼거나 주기를 바꾸면 §1 표·§6 SQL·§7 메모를 함께 고치고, 위 배지의 측정 날짜를 새로 적습니다. TOS 팀 공유용 <a href="/kc/data/tos-extraction.html">추출 전수</a>도 같이 고칩니다.</p></div>
+
+  <hr>
+  <p><a href="/kc/data/tos-extraction.html">TOS 데이터 추출 전수 (TOS 팀 공유용 상세)</a> · <a href="/kc/data/extractor.html">추출기 아키텍처</a> · <a href="/kc/data/tos-db-reference.html">TOS DB 레퍼런스</a></p>
+</main>
+</body>
+</html>
