@@ -1,11 +1,32 @@
 # HANDOFF — 다음 사이클
 
-마지막 갱신 2026-10-14 MYT. 지난 사이클 = **이미 일을 받은 트럭을 빈 트럭으로 보지 않는다(pool_ver 11·그림자)**
-(리뷰 2회 FIX FIRST → SHIP · main 2aaf04b · origin 반영). **운영 API = d91ff3b 빌드**(10-14 01:28:56Z = 09:28:56 MYT · main 과 동작 동일) ·
-운영 extractor = 10-12 10:48:23 MYT 판.
+마지막 갱신 2026-10-15 MYT. 지난 사이클 = **매칭 2판: 계층 없앰·헝가리안(match_ver 2·그림자)** — 사용자 지시 10-15
+(리뷰 2회 FIX FIRST → SHIP · main 커밋 = 이 HANDOFF 를 담은 커밋). **운영 API = 그 커밋과 동작이 같은 작업 트리 빌드**(10-15 00:13:41Z = 08:13:41 MYT 재시작 · 화면 08:13:52 빌드) ·
+mig 0170 적용 · 운영 extractor = 10-12 10:48:23 MYT 판.
 
 > 상시 사실·기준선·함정은 `~/.claude/notes/tt-aiops-platform.md`(150줄 상한 — 149줄). 설계 근거는 메모리 `project_job_driven_dispatch_direction`.
-> 송신부 설계 전문 = `docs/cycles/2026-10-12-sender-design.md`. KC = `kc/dispatch/stage2-design.html` '이미 일을 받은 트럭을 빈 트럭으로 보던 틈'.
+> 송신부 설계 전문 = `docs/cycles/2026-10-12-sender-design.md`. KC = `kc/dispatch/stage2-design.html` '2026-10-15 개편'.
+
+---
+
+## 2026-10-15 — 매칭 2판 (match_ver 2 · mig 0170)
+
+- **사용자 결정**: 계층 없앰 — 후보 작업 = 데드라인이 지금 + 여유 안(기본 300초, tt-api 환경변수 `POOL_MARGIN_S`·재시작) ·
+  후보 트럭 = 지금 빈 + 곧 빌 · 헝가리안 최적 매칭 · 지시는 지금 빈 트럭 짝만 · 스왑 '목적지 500m' 조건 삭제.
+  비용 = 남은 시간 + 빈 차 주행(사용자 정의). 곧 빌 트럭 남은 시간 = **실측 보정값**(사용자 선택: 신뢰도 표에서 그 갈래의 50%가
+  실제로 빈 시점 · 모르면 후보 아님) — 예측 '0초' 트럭이 1분 안에 실제로 빈 것 5~7%·절반이 ~10분(10-15 표)이라.
+- 구조: `allocate_due`(마감 순·후보 트럭 수까지) → `deadline_cover`(마감 순 덮개·Kuhn) → `assign_slots`/`hungarian`. 2계층·함께 풀기·
+  priority_cover·joint_assign·optimal_assign 삭제(Mcmf 는 fair_compare 가 씀). `prev`(들락날락) 는 보낸 짝만(예약 제외).
+- `match_tier` 재정의(match_ver 2): 1 = 지금 빈 트럭(지시) · 2 = 곧 빌 트럭 예약(지시 안 냄) — `IS DISTINCT FROM 2` 읽는 쪽 그대로.
+  solver 새 컬럼 `pool_margin_s`·`soon_assign_n`·`soon_unknown_n`. 우선 덮개·함께 풀기·2계층 계기는 NULL 정지. 보드 칩 '미리' → '예약'.
+- 배포 직후 5틱(08:14~08:15 MYT): 후보 작업 96~103 전부 덮음 · 도달 불가 0 · 예약 0~11/틱 · 남은 시간 몰라 뺀 곧 빌 트럭 1~3 · assign 188 · swap 6.
+- 점검: `scripts/soon_reserve_check.sql`(곧 빌 트럭에 먼저 잡힌 상자 → 첫 지시까지) — **아직 안 잼**. 4개 스크립트 `match_ver IN (1,2)`.
+- 테스트 133(livemap 72→59 · 2계층 테스트 32개 삭제·헝가리안/덮개/남은 시간 등 추가). ⚠CLAUDE.md 의 '132개' 표기는 안 고쳤다.
+
+### 남은 것 (이번 사이클)
+- 반나절 뒤 재측정: 예약된 상자의 지시 지연(soon_reserve_check) · 보낸 짝의 TOS 선배차(sent_to_dispatched, 창 끝 +2h) · 1판 대비 지시량.
+- 리뷰 CONSIDER(막지 않음): 계단 분위수가 거칠다(600→900) · 생산 0 경보가 assign.is_empty() 그대로(예약만 나와도 안 울림) ·
+  n>1 묶음의 뒤 슬롯이 다음 묶음 첫 슬롯보다 먼저 덮임(상자 단위면 무영향).
 
 ---
 

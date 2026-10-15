@@ -4000,27 +4000,41 @@ fn clean_driver(s: &str) -> String {
 const SWITCH_PENALTY_S: i64 = 180;
 /// 매칭 규칙 판(stage2_match_shadow·stage2_solver_shadow.match_ver, mig 0163). 1 = 작업 기준 배차:
 /// 1계층 = 내보내는 짝(지금 빈 트럭만) · 2계층 = 내보내지 않는 계획 · 두 층 함께 풀기 · 재지향 없음.
-const MATCH_VER: i16 = 1;
+/// 2 = 계층 없앰(2026-10-15 사용자 결정·mig 0170): 후보 작업 = 데드라인이 지금 + 여유(`pool_margin_s`) 안에 든
+/// 것만 · 후보 트럭 = 지금 빈 트럭 + 곧 빌 트럭(남은 시간을 아는 것) · 마감 순 덮개 → 헝가리안 최적 매칭(비용 = 비기까지
+/// 남은 시간(곧 빌 트럭은 실측 보정값) + 빈 차 주행) ·
+/// 배차 지시는 지금 빈 트럭과 짝지어진 작업만. `match_tier` 는 이 판에서 1 = 지금 빈 트럭(보냄)·2 = 곧 빌 트럭(안 보냄).
+const MATCH_VER: i16 = 2;
 /// 스왑 억제 ① — 두 트럭의 빈 차 주행 합이 이만큼 이상 줄 때만 맞바꾼다(2026-10-06 사용자 확정).
 /// 현장은 스왑이 잦으면 기사 클레임이 온다. 값은 종전 전환 벌점(SWITCH_PENALTY_S)과 같은 180초에서 출발.
 const SWAP_MIN_GAIN_S: i64 = 180;
-/// 2계층 계획 하나의 값어치(초). 함께 풀기에서 계획은 "주행 < 이 값"일 때만 성립하고, 1계층이 계획을
-/// 위해 감수하는 추가 주행은 (이 값 − 계획 주행)을 넘지 못한다 — 급한 작업이 '약간' 먼 트럭을 받는
-/// 한계가 이 값이다. 출발값 5분(사용자 미결정) — 함께 풀기 계기(seq_* vs joint_*)로 조정한다.
-/// 종전 2계층은 주행 1,800초까지 덮개 최대였는데, 이제 계획은 내보내지 않으므로 먼 계획은 의미가 없다.
-const PLAN_VALUE_S: i64 = 300;
-/// 함께 풀기에서 1계층 덮개를 사전 순으로 앞세우는 가중. 모든 간선 비용 합보다 커야 한다
-/// (간선 < 1,800+1,200초 × 트럭 수백 ≈ 10⁶).
-const T1_COVER_BONUS: i64 = 100_000_000;
 /// 곧 빌 트럭 신뢰도 표(learn_soon_free_reliability)의 시점(초) — 컬럼 f60..f1800 과 같은 순서.
 const SOON_FREE_POINTS: [i64; 9] = [60, 120, 180, 300, 450, 600, 900, 1200, 1800];
-/// 2계층 후보 자격: 그 작업의 배차 마감 전에 실제로 비었을 비율이 이 값 이상(2026-10-06 출발값).
-const SOON_FREE_MIN_P: f32 = 0.8;
-/// 신뢰도 갈래의 최소 표본. 이보다 적으면 그 갈래 트럭은 자격이 없다(모르면 안 쓴다).
+/// 곧 빌 트럭의 **남은 시간 = 그 갈래 트럭이 실제로 비었던 비율이 처음 이 값 이상이 되는 시점**(match_ver 2·2026-10-15
+/// 사용자 결정 '실측 보정값'). 예측값을 그대로 쓰면 '0초' 예측 트럭(실제로 1분 안에 빈 것 5~7%, 절반이 비기까지 ~10분 —
+/// 10-15 07:52 MYT 표)이 지금 빈 트럭을 이겨 작업을 붙잡는다. 0.5 = 중앙값(기대 남은 시간). match_ver 1 의 자격 문턱은 0.8 이었다.
+const SOON_FREE_REMAIN_P: f32 = 0.5;
+/// 신뢰도 갈래의 최소 표본. 이보다 적으면 그 갈래 트럭은 후보가 아니다(모르면 안 쓴다).
 const SOON_FREE_MIN_N: i32 = 30;
-/// 설계③ 풀 여유 — 마감이 (지금 + 이 값) 안에 든 슬롯을 풀에 담는다. 보드 깔때기의
-/// '마감 도래' 계수도 이 값을 써야 화면과 매처가 같은 숫자를 본다.
-pub(crate) const POOL_MARGIN_S: i64 = 300;
+/// 데드라인 여유 기본값(초). 실제로 쓰는 값은 `pool_margin_s()`.
+const POOL_MARGIN_DEFAULT_S: i64 = 300;
+/// 데드라인 여유(초) — 데드라인이 (지금 + 이 값) 안에 든 작업만 후보로 삼는다. 보드 깔때기의 '마감 도래'
+/// 계수도 이 값을 써야 화면과 매처가 같은 숫자를 본다. 2026-10-15 사용자: "+5분은 실험적으로 변경 가능" →
+/// 환경변수 `POOL_MARGIN_S`(0~3600 정수, 그 밖이면 기본 300). 프로세스 시작 때 한 번 읽으므로 바꾸려면 재시작.
+/// 틱마다 쓴 값을 stage2_solver_shadow.pool_margin_s 에 남긴다(mig 0170) — 실험 구간은 그 값으로 가른다.
+pub(crate) fn pool_margin_s() -> i64 {
+    static V: std::sync::OnceLock<i64> = std::sync::OnceLock::new();
+    *V.get_or_init(|| match std::env::var("POOL_MARGIN_S") {
+        Err(_) => POOL_MARGIN_DEFAULT_S,
+        Ok(s) => match s.trim().parse::<i64>() {
+            Ok(v) if (0..=3600).contains(&v) => v,
+            _ => {
+                tracing::warn!(value = %s, "POOL_MARGIN_S 가 0~3600 정수가 아니다 — 기본 300초를 쓴다");
+                POOL_MARGIN_DEFAULT_S
+            }
+        },
+    })
+}
 // committed window (anti-thrash, TOS prefetch "early-decide, stable-execute"): once a truck's prior
 // recommendation is on the verge of dispatch (its work-ETA within this window), switching it away
 // costs COMMIT_LOCK_S — a near-lock so GPS jitter can't flip an about-to-go truck off its work.
@@ -4089,14 +4103,6 @@ impl Mcmf {
         self.to.push(u); self.cap.push(0); self.cost.push(-cost); self.head[v].push(e + 1);
     }
     fn run(&mut self, s: usize, t: usize) -> (i64, i64) {
-        self.run_inner(s, t, false)
-    }
-    /// 최소비용 흐름(양 무관): 최단 증가경로 비용이 0 이상이 되면 멈춘다. 연속 최단경로의 경로 비용은
-    /// 단조 비감소라 그 지점이 전역 최소비용이다. 음수 비용(보너스)을 쓰는 함께 풀기용 (mig 0163).
-    fn run_profitable(&mut self, s: usize, t: usize) -> (i64, i64) {
-        self.run_inner(s, t, true)
-    }
-    fn run_inner(&mut self, s: usize, t: usize, profitable_only: bool) -> (i64, i64) {
         let n = self.head.len();
         let (mut total_cost, mut total_flow) = (0i64, 0i64);
         loop {
@@ -4125,7 +4131,7 @@ impl Mcmf {
                     }
                 }
             }
-            if dist[t] == i64::MAX || (profitable_only && dist[t] >= 0) {
+            if dist[t] == i64::MAX {
                 break;
             }
             let mut f = i64::MAX;
@@ -4149,174 +4155,147 @@ impl Mcmf {
     }
 }
 
-/// Optimal min-cost assignment (PURE efficiency), three layers: source → truck (cap 1) → bucket
-/// (cost = empty-travel edge) → sink (cap = the bucket's Stage-1-capped demand). The per-crane cap is
-/// already baked into the bucket demand by Stage 1, so no QC layer is needed here. Returns the chosen
-/// (truck, bucket-pos) pairs.
-fn optimal_assign(
-    n_trucks: usize,
-    bucket_caps: &[i64],
-    edges: &[(usize, usize, i64)],
-) -> Vec<(usize, usize)> {
-    let b = bucket_caps.len();
-    if n_trucks == 0 || b == 0 {
+/// 금지 짝(간선 없음 — 고정·거리 상한)의 비용. 실제 비용 합(트럭 수백 × 수천 초 ≈ 10⁶)보다 훨씬 커서,
+/// 최소비용 해는 먼저 금지 짝 수를 최소로(= 이을 수 있는 짝 수를 최대로) 만들고 그 안에서 비용 합을 최소로 한다.
+const FORBIDDEN_COST: i64 = 1_000_000_000;
+
+/// 헝가리안(쿤-먼크레스) 최소비용 배정. `a` = n×m 비용 행렬(n ≤ m). 반환 = 행마다 고른 열(모든 행이 받는다).
+/// 퍼텐셜 갱신 O(n²·m) — 트럭 수백 × 슬롯 수백에서 수십 ms.
+fn hungarian(a: &[Vec<i64>]) -> Vec<usize> {
+    let n = a.len();
+    if n == 0 {
         return Vec::new();
     }
-    let trucks0 = 1usize;
-    let buckets0 = 1 + n_trucks;
-    let t = 1 + n_trucks + b;
-    let mut g = Mcmf::new(t + 1);
-    for i in 0..n_trucks {
-        g.add(0, trucks0 + i, 1, 0);
-    }
-    for &(u, v, c) in edges {
-        g.add(trucks0 + u, buckets0 + v, 1, c);
-    }
-    for (j, &cap) in bucket_caps.iter().enumerate() {
-        if cap > 0 {
-            g.add(buckets0 + j, t, cap, 0);
-        }
-    }
-    g.run(0, t);
-    extract_assignment(&g, n_trucks, trucks0, buckets0, t)
-}
-
-/// 흐름이 실린 트럭→묶음 간선(잔여 용량 0)을 배정으로 읽는다.
-fn extract_assignment(g: &Mcmf, n_trucks: usize, trucks0: usize, buckets0: usize, t: usize) -> Vec<(usize, usize)> {
-    let mut assign = Vec::new();
-    for truck in 0..n_trucks {
-        for &e in &g.head[trucks0 + truck] {
-            let v = g.to[e];
-            if v >= buckets0 && v < t && g.cap[e] == 0 {
-                assign.push((truck, v - buckets0));
+    let m = a[0].len();
+    assert!(n <= m, "hungarian: 행({n})이 열({m})보다 많다 — 호출부가 전치해야 한다");
+    const INF: i64 = i64::MAX / 4;
+    let mut u = vec![0i64; n + 1];
+    let mut v = vec![0i64; m + 1];
+    let mut p = vec![0usize; m + 1]; // p[j] = 열 j 를 받은 행(1부터) · 0 = 비었음
+    let mut way = vec![0usize; m + 1];
+    for i in 1..=n {
+        p[0] = i;
+        let mut j0 = 0usize;
+        let mut minv = vec![INF; m + 1];
+        let mut used = vec![false; m + 1];
+        loop {
+            used[j0] = true;
+            let i0 = p[j0];
+            let mut delta = INF;
+            let mut j1 = 0usize;
+            for j in 1..=m {
+                if !used[j] {
+                    let cur = a[i0 - 1][j - 1] - u[i0] - v[j];
+                    if cur < minv[j] {
+                        minv[j] = cur;
+                        way[j] = j0;
+                    }
+                    if minv[j] < delta {
+                        delta = minv[j];
+                        j1 = j;
+                    }
+                }
             }
-        }
-    }
-    assign
-}
-
-/// 함께 풀기 (mig 0163·2026-10-06 사용자 결정): 1·2계층을 한 흐름으로 푼다.
-/// `sink[b] = (용량, 보너스)` — 1계층 묶음은 (우선 덮개 수, T1_COVER_BONUS), 2계층은 (캡, PLAN_VALUE_S).
-/// 목적 = Σ간선비용 − Σ보너스 최소. 보너스가 1계층 덮개를 사전 순으로 앞세우므로, 1계층이 받을 수
-/// 있는 슬롯은 전부 받고(덮개 = 1계층만 풀 때와 같음), 그 안에서 2계층 계획과 합친 빈 차 주행이 최소가
-/// 된다. 2계층 계획은 주행 < PLAN_VALUE_S 일 때만 성립한다(보너스보다 비싸면 흐름이 안 실린다).
-fn joint_assign(n_trucks: usize, sink: &[(i64, i64)], edges: &[(usize, usize, i64)]) -> Vec<(usize, usize)> {
-    let b = sink.len();
-    if n_trucks == 0 || b == 0 {
-        return Vec::new();
-    }
-    let trucks0 = 1usize;
-    let buckets0 = 1 + n_trucks;
-    let t = 1 + n_trucks + b;
-    let mut g = Mcmf::new(t + 1);
-    for i in 0..n_trucks {
-        g.add(0, trucks0 + i, 1, 0);
-    }
-    for &(u, v, c) in edges {
-        if v < b && sink[v].0 > 0 {
-            g.add(trucks0 + u, buckets0 + v, 1, c);
-        }
-    }
-    for (j, &(cap, bonus)) in sink.iter().enumerate() {
-        if cap > 0 {
-            g.add(buckets0 + j, t, cap, -bonus);
-        }
-    }
-    g.run_profitable(0, t);
-    extract_assignment(&g, n_trucks, trucks0, buckets0, t)
-}
-
-/// 묶음별 인접 트럭 목록(간선에서). 범위 밖 인덱스는 버린다.
-fn bucket_adjacency(n_trucks: usize, n_buckets: usize, edges: &[(usize, usize, i64)]) -> Vec<Vec<usize>> {
-    let mut adj: Vec<Vec<usize>> = vec![Vec::new(); n_buckets];
-    for &(t, b, _) in edges {
-        if b < n_buckets && t < n_trucks {
-            adj[b].push(t);
-        }
-    }
-    adj
-}
-
-/// 슬롯 하나에 트럭을 붙이는 증가경로 탐색(Kuhn). 이미 붙은 슬롯은 다른 트럭으로 옮겨질 수는 있어도
-/// 떨어지지 않는다 — 그래서 슬롯을 우선순위 순으로 넣으면 앞 슬롯의 덮개가 뒤 슬롯 때문에 깨지지 않는다.
-fn kuhn_try(s: usize, slot_bucket: &[usize], adj: &[Vec<usize>], truck_slot: &mut [Option<usize>], seen: &mut [bool]) -> bool {
-    for &t in &adj[slot_bucket[s]] {
-        if seen[t] {
-            continue;
-        }
-        seen[t] = true;
-        let free = match truck_slot[t] {
-            None => true,
-            Some(other) => kuhn_try(other, slot_bucket, adj, truck_slot, seen),
-        };
-        if free {
-            truck_slot[t] = Some(s);
-            return true;
-        }
-    }
-    false
-}
-
-/// 묶음별 요구 슬롯 수 `need` 를 전부 동시에 덮을 수 있는가.
-fn coverable(n_trucks: usize, need: &[i64], adj: &[Vec<usize>]) -> bool {
-    let slot_bucket: Vec<usize> = need.iter().enumerate()
-        .flat_map(|(b, &c)| std::iter::repeat(b).take(c.max(0) as usize)).collect();
-    let mut truck_slot: Vec<Option<usize>> = vec![None; n_trucks];
-    (0..slot_bucket.len()).all(|s| {
-        let mut seen = vec![false; n_trucks];
-        kuhn_try(s, &slot_bucket, adj, &mut truck_slot, &mut seen)
-    })
-}
-
-/// 1계층 우선 덮개 (mig 0163): 묶음을 **인덱스 순 = 마감 이른 순**으로 보고, 앞 묶음의 슬롯을 먼저
-/// 덮을 수 있는 만큼 덮는다(행렬 매로이드의 탐욕 = 사전 순 최대 덮개). 반환 = 묶음별 덮인 슬롯 수.
-/// 이 덮개의 합은 1계층만의 최대 매칭 크기와 같다(Kuhn 은 모든 슬롯을 시도한다).
-/// ⚠간선 비용은 보지 않는다 — 누가 받을지(순서)는 마감이, 어느 트럭인지(비용)는 joint_assign 이 정한다.
-fn priority_cover(n_trucks: usize, caps: &[i64], edges: &[(usize, usize, i64)]) -> Vec<i64> {
-    let adj = bucket_adjacency(n_trucks, caps.len(), edges);
-    let slot_bucket: Vec<usize> = caps.iter().enumerate()
-        .flat_map(|(b, &c)| std::iter::repeat(b).take(c.max(0) as usize)).collect();
-    let mut truck_slot: Vec<Option<usize>> = vec![None; n_trucks];
-    let mut cover = vec![0i64; caps.len()];
-    for s in 0..slot_bucket.len() {
-        let mut seen = vec![false; n_trucks];
-        if kuhn_try(s, &slot_bucket, &adj, &mut truck_slot, &mut seen) {
-            cover[slot_bucket[s]] += 1;
-        }
-    }
-    cover
-}
-
-/// 마감 순서 위반 수 (계기·mig 0163 `t1_skip_n`): 덜 덮인 앞 묶음 b 마다, 뒤 묶음 b2 의 슬롯 하나를
-/// 내주면 b 를 하나 더 덮을 수 있었던 경우가 있으면 1로 센다. priority_cover 가 옳으면 항상 0이다.
-fn priority_skips(n_trucks: usize, caps: &[i64], cover: &[i64], edges: &[(usize, usize, i64)]) -> i32 {
-    let adj = bucket_adjacency(n_trucks, caps.len(), edges);
-    let mut skips = 0;
-    for b in 0..caps.len() {
-        if cover[b] >= caps[b] || adj[b].is_empty() {
-            continue;
-        }
-        let mut found = false;
-        for b2 in (b + 1)..caps.len() {
-            if cover[b2] == 0 {
-                continue;
+            for j in 0..=m {
+                if used[j] {
+                    u[p[j]] += delta;
+                    v[j] -= delta;
+                } else {
+                    minv[j] -= delta;
+                }
             }
-            let mut need = cover.to_vec();
-            need[b2] -= 1;
-            need[b] += 1;
-            if coverable(n_trucks, &need, &adj) {
-                found = true;
+            j0 = j1;
+            if p[j0] == 0 {
                 break;
             }
         }
-        if found {
-            skips += 1;
+        loop {
+            let j1 = way[j0];
+            p[j0] = p[j1];
+            j0 = j1;
+            if j0 == 0 {
+                break;
+            }
         }
     }
-    skips
+    let mut ans = vec![0usize; n];
+    for j in 1..=m {
+        if p[j] != 0 {
+            ans[p[j] - 1] = j - 1;
+        }
+    }
+    ans
 }
 
-/// 신뢰도 표의 예측 남은 시간 구간 — 마이그레이션 0163 의 `pred_b` CASE 와 같은 경계여야 한다.
+/// 트럭 ↔ 작업 슬롯 최적 매칭 (match_ver 2 · 2026-10-15 사용자 결정: 헝가리안). `slot_wpos[s]` = 슬롯 s 가
+/// 속한 작업 묶음, `edges` = (트럭, 묶음, 비용). 트럭·슬롯 중 적은 쪽을 행으로 놓아 풀고, 간선이 없는 짝은
+/// 버린다. 결과 = 이을 수 있는 짝 수가 최대이고 그 안에서 비용 합이 최소인 (트럭, 묶음) 짝.
+fn assign_slots(n_trucks: usize, slot_wpos: &[usize], edges: &[(usize, usize, i64)]) -> Vec<(usize, usize)> {
+    let n_slots = slot_wpos.len();
+    if n_trucks == 0 || n_slots == 0 {
+        return Vec::new();
+    }
+    let mut cost: HashMap<(usize, usize), i64> = HashMap::new();
+    for &(t, w, c) in edges {
+        if t < n_trucks {
+            let e = cost.entry((t, w)).or_insert(c);
+            *e = (*e).min(c);
+        }
+    }
+    let c_of = |t: usize, s: usize| cost.get(&(t, slot_wpos[s])).copied().unwrap_or(FORBIDDEN_COST);
+    let pairs: Vec<(usize, usize)> = if n_trucks <= n_slots {
+        let a: Vec<Vec<i64>> = (0..n_trucks).map(|t| (0..n_slots).map(|s| c_of(t, s)).collect()).collect();
+        hungarian(&a).into_iter().enumerate().collect()
+    } else {
+        let a: Vec<Vec<i64>> = (0..n_slots).map(|s| (0..n_trucks).map(|t| c_of(t, s)).collect()).collect();
+        hungarian(&a).into_iter().enumerate().map(|(s, t)| (t, s)).collect()
+    };
+    pairs.into_iter()
+        .filter(|&(t, s)| c_of(t, s) < FORBIDDEN_COST)
+        .map(|(t, s)| (t, slot_wpos[s]))
+        .collect()
+}
+
+/// 마감 순 덮개 (match_ver 2 · 리뷰 SHOULD_FIX 3): 슬롯을 **주어진 순서 = 마감 이른 순**으로 보며, 증가경로(Kuhn)로 트럭을
+/// 붙일 수 있으면 덮는다. 이미 덮인 슬롯은 다른 트럭으로 옮겨질 수는 있어도 떨어지지 않으므로, 앞 슬롯의 덮개가 뒤 슬롯
+/// 때문에 깨지지 않는다(행렬 매로이드의 탐욕 = 사전 순 최대 덮개). 덮인 슬롯 수 = 전체 최대 매칭 크기.
+/// 간선 비용은 보지 않는다 — **누가 받나는 마감이, 어느 트럭인가는 헝가리안이** 정한다. 이게 없으면 간선 없는 트럭까지 센
+/// 후보 트럭 수만큼 슬롯을 고른 뒤, 짝이 모자랄 때 헝가리안이 마감 이른 슬롯을 비용 때문에 버릴 수 있다.
+fn deadline_cover(n_trucks: usize, slot_wpos: &[usize], edges: &[(usize, usize, i64)]) -> Vec<bool> {
+    let n_w = slot_wpos.iter().copied().max().map_or(0, |m| m + 1);
+    let mut adj: Vec<Vec<usize>> = vec![Vec::new(); n_w];
+    for &(t, w, _) in edges {
+        if t < n_trucks && w < n_w && !adj[w].contains(&t) {
+            adj[w].push(t);
+        }
+    }
+    fn try_slot(s: usize, slot_wpos: &[usize], adj: &[Vec<usize>], truck_slot: &mut [Option<usize>], seen: &mut [bool]) -> bool {
+        for &t in &adj[slot_wpos[s]] {
+            if seen[t] {
+                continue;
+            }
+            seen[t] = true;
+            let free = match truck_slot[t] {
+                None => true,
+                Some(other) => try_slot(other, slot_wpos, adj, truck_slot, seen),
+            };
+            if free {
+                truck_slot[t] = Some(s);
+                return true;
+            }
+        }
+        false
+    }
+    let mut truck_slot: Vec<Option<usize>> = vec![None; n_trucks];
+    let mut covered = vec![false; slot_wpos.len()];
+    for s in 0..slot_wpos.len() {
+        let mut seen = vec![false; n_trucks];
+        covered[s] = try_slot(s, slot_wpos, &adj, &mut truck_slot, &mut seen);
+    }
+    covered
+}
+
+/// 신뢰도 표의 예측 구간(pred_b) — mig 0163 의 CASE 와 같아야 한다(테스트가 고정).
 fn soon_free_pred_bucket(free_in_s: i64) -> i32 {
     match free_in_s {
         s if s <= 0 => 0,
@@ -4327,30 +4306,37 @@ fn soon_free_pred_bucket(free_in_s: i64) -> i32 {
     }
 }
 
-/// 실제로 비었을 비율이 처음 `p` 이상이 되는 시점(초). 끝까지 못 미치면 None(자격 없음).
+/// 실제로 비었을 비율이 처음 `p` 이상이 되는 시점(초). 끝까지 못 미치면 None(모름 → 후보 아님).
 /// 계단 함수 그대로 쓴다(보간하지 않는다 — 보수적).
 fn soon_free_quantile(fracs: &[f32; 9], p: f32) -> Option<i64> {
     SOON_FREE_POINTS.iter().zip(fracs.iter()).find(|(_, &f)| f >= p).map(|(&s, _)| s)
 }
 
-/// 간선 자격 (mig 0163) — 1계층(내보내는 짝)은 지금 빈 트럭만. TOS 는 일하는 트럭에 예약을 안 받는다.
-/// 2계층(계획)은 지금 빈 트럭, 또는 곧 빌 트럭 중 자격 시각 q80 이 그 묶음 첫 미도래 슬롯의 배차 마감 안인 것.
-fn edge_eligible(tier: u8, free: bool, q80: Option<i64>, first_ms: Option<i64>, now_ms: i64) -> bool {
-    if tier == 1 {
-        return free;
+/// 후보 작업 고르기 (match_ver 2): 데드라인이 지금 + 여유 안에 든 슬롯을 **데드라인 이른 순으로, 후보 트럭 수까지**.
+/// 작업이 트럭보다 많을 때 어느 작업이 트럭을 받을지는 데드라인이 정한다 — 긴급도는 여기서만 정하고 매칭 비용에는
+/// 넣지 않는다(설계 규율). 담을 게 트럭보다 적으면 트럭을 남긴다. 반환 = (works 인덱스, 배정 슬롯 수).
+fn allocate_due(due: &mut [(usize, i64, i64)], truck_n: i64) -> Vec<(usize, i64)> {
+    due.sort_by_key(|&(_, _, d)| d);
+    let mut kept = Vec::new();
+    let mut acc = 0i64;
+    for &(oi, slots, _) in due.iter() {
+        if acc >= truck_n {
+            break;
+        }
+        let alloc = slots.min(truck_n - acc);
+        if alloc <= 0 {
+            continue;
+        }
+        acc += alloc;
+        kept.push((oi, alloc));
     }
-    free || matches!((q80, first_ms), (Some(q), Some(f)) if now_ms + q * 1000 <= f)
+    kept
 }
 
 /// 스왑 동결 (mig 0163) — 마지막 스왑 추천이 마지막 자유보다 뒤면 그 배차 동안은 다시 스왑하지 않는다.
 /// 자유 기록이 없으면(3시간 창 밖) 스왑 이력이 있는 한 동결.
 fn swap_is_frozen(last_swap: Option<DateTime<Utc>>, last_free: Option<DateTime<Utc>>) -> bool {
     last_swap.is_some_and(|s| last_free.is_none_or(|f| s > f))
-}
-
-/// 스왑 후보의 거리 조건 — 목적지(픽업 지점)에서 SWAP_MIN_M 이상 떨어져 있어야 한다.
-fn swap_far_enough(dist_m: f64) -> bool {
-    dist_m >= SWAP_MIN_M
 }
 
 /// 스왑 마감 보호 (2026-10-06 사용자 결정): 새 트럭의 도착이 그 작업의 필요 시각보다 뒤이고
@@ -4388,36 +4374,6 @@ fn pick_swaps(own: &[i64], cross: impl Fn(usize, usize) -> Option<i64>, min_gain
         out.push(c);
     }
     out
-}
-
-/// 발행 2계층 배분 (2026-08-25 사용자 확정 · mig 0161).
-/// 1계층 = 마감 도래 슬롯(현행 발행), 2계층 = 마감 미도래 발행 지시. 각 층 안에서는 마감 이른
-/// 순으로 채우되, **1계층을 다 채운 뒤에만** 잔여 트럭이 2계층으로 간다 — 2계층의 마감이 아무리
-/// 일러도 층 순서를 넘지 못한다. 합계 ≤ truck_n ("작업>트럭 금지"는 층을 합쳐 성립).
-/// 1계층 몫은 2계층 유무와 무관하다(종전 동작 보존). 반환 = (works 인덱스, 배정 슬롯 수, 계층).
-///
-/// ★mig 0163: 상한이 층마다 다르다. 1계층(내보내는 짝)은 **지금 빈 트럭 수**(`truck_n1`)까지,
-/// 두 층 합은 **지금 빈 트럭 + 자격 있는 곧 빌 트럭 수**(`truck_n_total`)까지. 곧 빌 트럭은 급한
-/// 작업을 못 받으므로(TOS 는 일하는 트럭에 예약을 안 받는다) 그 수만큼 급한 작업을 고르면 안 된다.
-fn allocate_two_tier(
-    due: &mut Vec<(usize, i64, i64)>,    // (works 인덱스, 마감 도래 슬롯 수, 첫 슬롯 마감 ms)
-    future: &mut Vec<(usize, i64, i64)>, // (works 인덱스, 마감 미도래 슬롯 수, 첫 미도래 슬롯 마감 ms)
-    truck_n1: i64,
-    truck_n_total: i64,
-) -> Vec<(usize, i64, u8)> {
-    due.sort_by_key(|&(_, _, d)| d);
-    future.sort_by_key(|&(_, _, d)| d);
-    let mut kept: Vec<(usize, i64, u8)> = Vec::new();
-    let mut acc = 0i64;
-    for (tier, list, cap) in [(1u8, &*due, truck_n1.min(truck_n_total)), (2u8, &*future, truck_n_total)] {
-        for &(oi, slots, _) in list {
-            if acc >= cap { break }
-            let alloc = slots.min(cap - acc); // 남은 트럭 수로 절단
-            acc += alloc;
-            kept.push((oi, alloc, tier));
-        }
-    }
-    kept
 }
 
 /// Every 60s, recommend vehicle→work matches and log them (SHADOW; never drives live dispatch).
@@ -4587,11 +4543,11 @@ pub fn spawn_selfcal_refresh(lm: Arc<LiveMap>, pool: PgPool) {
             let _ = sqlx::query("REFRESH MATERIALIZED VIEW CONCURRENTLY learn_free_in_bias").execute(&pool).await;
             let _ = sqlx::query("REFRESH MATERIALIZED VIEW CONCURRENTLY learn_soon_idle_gate").execute(&pool).await;
             let _ = sqlx::query("REFRESH MATERIALIZED VIEW CONCURRENTLY learn_free_in_stationary").execute(&pool).await;
-            // 곧 빌 트럭 신뢰도 (mig 0163) — 매처의 2계층 자격이 여기서 나온다. 갱신이 조용히 멈추면 표가
-            // 얼어 자격이 옛 판정에 묶이므로(learn_dispatch_lead 동결 전례) 실패를 남긴다. 실측 2.4초.
+            // 곧 빌 트럭 신뢰도 (mig 0163) — 매처가 곧 빌 트럭의 남은 시간(실측 보정값, match_ver 2·mig 0170)을 여기서 읽는다.
+            // 갱신이 조용히 멈추면 표가 얼어 옛 값에 묶이므로(learn_dispatch_lead 동결 전례) 실패를 남긴다. 실측 2.4초.
             if let Err(e) = sqlx::query("REFRESH MATERIALIZED VIEW CONCURRENTLY learn_soon_free_reliability").execute(&pool).await {
-                tracing::warn!(error = %e, "learn_soon_free_reliability 갱신 실패 — 2계층 곧 빌 트럭 자격이 옛 표에 묶인다 (mig 0163)");
-                // 2시간 넘게 못 갱신하면 매처가 곧 빌 트럭을 통째로 안 쓴다(계획이 지금 빈 트럭만으로 조용히 퇴화) —
+                tracing::warn!(error = %e, "learn_soon_free_reliability 갱신 실패 — 곧 빌 트럭의 남은 시간(실측 보정값)이 옛 표에 묶이고, 2시간 넘게 멈추면 곧 빌 트럭이 후보에서 통째로 빠진다 (mig 0163·0170)");
+                // 2시간 넘게 못 갱신하면 매처가 곧 빌 트럭을 통째로 안 쓴다(매칭이 지금 빈 트럭만으로 조용히 퇴화) —
                 // 그래서 소리를 낸다(2차 리뷰 SHOULD_FIX 2). alert 는 upsert 라 15분마다 반복돼도 넘치지 않는다.
                 crate::db::alert(&pool, "stage2_pool", "reliability_refresh", "warn",
                     "곧 빌 트럭 신뢰도 표 갱신 실패 — 2시간 지속되면 계획에서 곧 빌 트럭이 빠진다",
@@ -5402,34 +5358,29 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
             let now = Utc::now().timestamp_millis();
             // previous-tick recommendation per vehicle (ytno → work bucket key) for anti-thrash.
             // ts-based (restart-safe), latest per vehicle within PREV_WINDOW_S.
-            // ★2계층(미리 배정·mig 0161) 행은 **1계층 간선이 보는 prev 에 넣지 않는다** — 예고가
-            //   트럭에 SWITCH/COMMIT 벌점을 얹으면 급한 일이 가까운 트럭을 못 집어 "1계층이 항상
-            //   우선"이 깨진다(1차 리뷰 실측: 섞인 상태에서 1계층 switched 0.05%→4.5%). 경계 이전
-            //   행은 match_tier NULL 이라 포함 — 즉 1계층 prev 는 종전과 입력이 같다(동작 보존).
-            //   2계층 간선은 계층 불문 최신(prev_any)을 봐 예고 자체의 들락날락을 막는다 — 기존
-            //   규칙의 재사용이지 새 상수가 아니다.
-            let (prev, prev_any): (HashMap<String, (String, String, String)>, HashMap<String, (String, String, String)>) = {
-                let rows = sqlx::query_as::<_, (String, String, String, String, Option<i16>)>(
+            // 트럭별 가장 최근의 **보낸 짝**(match_tier 가 2 가 아닌 행)만 본다. match_ver 2(2026-10-15)에서 match_tier=2 는
+            //   곧 빌 트럭의 예약(지시 안 냄)이다 — 예약은 바꿔도 현장 비용이 없고, 넣으면 그 트럭이 비는 순간 예약했던 작업이
+            //   (TOS 가 가져가는 등) 사라져 있어도 모든 간선에 SWITCH/COMMIT 벌점이 붙어 막 빈 트럭이 최대 PREV_WINDOW_S 동안
+            //   밀린다(리뷰 SHOULD_FIX 1 — match_ver 1 이 2계층을 뺀 것과 같은 이유). 경계 이전 행은 match_tier NULL 이라 포함.
+            let prev: HashMap<String, (String, String, String)> = {
+                let rows = sqlx::query_as::<_, (String, String, String, String)>(
                     &format!(
-                        "SELECT ytno, coalesce(qc,''), coalesce(vessel,''), coalesce(queuename,''), match_tier
+                        "SELECT ytno, coalesce(qc,''), coalesce(vessel,''), coalesce(queuename,'')
                            FROM stage2_match_shadow WHERE ts > now() - interval '{PREV_WINDOW_S} seconds'
+                            AND match_tier IS DISTINCT FROM 2
                           ORDER BY ytno, ts DESC"
                     ),
                 )
                 .fetch_all(&pool).await
-                // ⚠조용히 삼키면 안 되는 실패(2차 리뷰): match_tier 가 없으면(0161 미적용 복원 등)
-                //   이 질의가 매 틱 실패해 prev 가 영구히 비고 anti-thrash 가 무음으로 죽는다 —
-                //   INSERT 쪽(아래 5630대 주석)과 같은 실패 유형이라 같은 규칙으로 소리를 낸다.
-                .inspect_err(|e| tracing::warn!(error = %e, "prev(들락날락 방지) 질의 실패 — anti-thrash 무효. 마이그레이션 0161 적용 여부 확인"))
+                // ⚠조용히 삼키면 안 되는 실패(2차 리뷰): 이 질의가 매 틱 실패하면 prev 가 영구히 비고
+                //   anti-thrash 가 무음으로 죽는다 — INSERT 쪽과 같은 실패 유형이라 같은 규칙으로 소리를 낸다.
+                .inspect_err(|e| tracing::warn!(error = %e, "prev(들락날락 방지) 질의 실패 — anti-thrash 무효"))
                 .unwrap_or_default();
                 let mut p1 = HashMap::new();
-                let mut pa = HashMap::new();
-                for (yt, q, v, qn, tier) in rows { // ytno 별 ts 내림차순 — 먼저 본 행이 최신
-                    let key = (q, v, qn);
-                    if tier != Some(2) { p1.entry(yt.clone()).or_insert_with(|| key.clone()); }
-                    pa.entry(yt).or_insert(key);
+                for (yt, q, v, qn) in rows { // ytno 별 ts 내림차순 — 먼저 본 행이 최신
+                    p1.entry(yt).or_insert((q, v, qn));
                 }
-                (p1, pa)
+                p1
             };
             // 자기 추천 이력 (mig 0142→0158): 최근 180초 안에 추천한 상자 키. 게이지
             // 전용 — 풀에서 빼지 않는다(2026-08-25 사용자 결정: 로직은 TOS 가 우리 추천을
@@ -5710,7 +5661,7 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                 let mut held: Vec<HeldCandidateOut> = Vec::new();
                 let mut rows: Vec<PoolRow> = Vec::new();
                 let mut n_ds_anchor: usize = 0;
-                // 스왑 후보(mig 0163) — 배차됨·픽업 전·신선 GPS·목적지 500m 밖·미동결
+                // 스왑 후보(mig 0163) — 배차됨·픽업 전·신선 GPS·미동결 (목적지 500m 조건은 2026-10-15 제거)
                 let mut swap_cands: Vec<SwapCand> = Vec::new();
                 // 곧 빌 트럭이 **짐을 내릴 자리**(2026-10-06 사용자 결정·리뷰 SHOULD_FIX 2) — 계획 비용은 트럭이 지금
                 // 있는 자리가 아니라 비는 자리에서 센다(적하 = 안벽 크레인, 양하 = 야드 블록). 모르면 지금 자리로 대신한다.
@@ -5753,8 +5704,8 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                         };
                         if !loaded {
                             // 스왑 후보 — 신선 GPS 가 있어야 한다(낡은 위치로 행선지를 바꾸면 안 된다).
-                            // 목적지(픽업 지점) 500m 안이면 제외: 거의 다 온 트럭을 돌리는 게 현장 불만이
-                            // 가장 큰 경우다(표시용 스왑 임계 SWAP_MIN_M 과 같은 값).
+                            // 종전의 '목적지 500m 안이면 제외'는 2026-10-15 사용자 결정으로 뺐다 — 스왑은 이득
+                            // ≥ SWAP_MIN_GAIN_S 인 쌍만 서므로 거의 다 온 트럭은 스스로 이득이 작다. 거리는 기록만 한다.
                             let dest = if r_jt.as_str() == "LD" {
                                 r_topos.as_deref().and_then(|t| {
                                     centroids.get(t).or_else(|| centroids.get(block_prefix(t))).map(|c| (c.lat, c.lon))
@@ -5767,12 +5718,10 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                             let frozen = frozen || hold_trucks.contains(id);
                             if let (Some(p), Some(d), false) = (fresh, dest, frozen) {
                                 let dist = dist_m((p.lat, p.lon), d);
-                                if swap_far_enough(dist) {
-                                    swap_cands.push(SwapCand {
-                                        ytno: id.clone(), jobtype: r_jt.clone(), qc: r_qc.clone(), queuename: r_queue.clone(),
-                                        contno: r_cont.clone(), lat: p.lat, lon: p.lon, dlat: d.0, dlon: d.1, dist_m: dist,
-                                    });
-                                }
+                                swap_cands.push(SwapCand {
+                                    ytno: id.clone(), jobtype: r_jt.clone(), qc: r_qc.clone(), queuename: r_queue.clone(),
+                                    contno: r_cont.clone(), lat: p.lat, lon: p.lon, dlat: d.0, dlon: d.1, dist_m: dist,
+                                });
                             }
                             continue; // 후보 풀 밖 — 곧 빌 트럭이 아니다
                         }
@@ -6043,8 +5992,8 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
             };
             // ── 스왑 단계 (mig 0163·2026-10-06 사용자 확정) ─────────────────────────────────────────
             // 이미 배차되고 픽업 전인 짝들끼리만 행선지를 맞바꾼다 — 새 작업·새 빈 트럭은 끼지 않는다(TOS 도
-            // 기 패칭 결과 안에서만 스왑). 억제: 이득 ≥ SWAP_MIN_GAIN_S · 둘 다 목적지 500m 밖(후보 수집에서
-            // 걸렀다) · 한 트럭은 자유 사이 1회(동결, 후보 수집에서 걸렀다).
+            // 기 패칭 결과 안에서만 스왑). 억제: 이득 ≥ SWAP_MIN_GAIN_S · 한 트럭은 자유 사이 1회(동결, 후보 수집에서
+            // 걸렀다). 종전의 '둘 다 목적지 500m 밖'은 2026-10-15 사용자 결정으로 뺐다(이득 문턱이 그 몫을 한다).
             // ★작업유형은 안 가린다(2026-10-12 사용자 결정·mig 0166) — 종전 '같은 유형끼리만'은 측정 없이 둔 출발값이었다.
             //   양하 트럭이 적하 블록 곁을, 적하 트럭이 양하 크레인 곁을 지날 때 둘 다 가까워지는 짝을 그 규칙이 못 봤다.
             //   주행 곡선은 **가는 작업의 유형**으로 고른다(적하 = 야드 블록행·양하 = 크레인행 빈 차 주행).
@@ -6230,21 +6179,20 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
             //     슬롯 j 마감 = 베이시작 + j×무브시간 − 준비시간 = (묶음 마감) + j×무브시간
             // 크레인은 베이 안을 차례로 처리하므로(실측 88% 계획순서·물량기준 위반 6%) 이 근사가 선다.
             //
-            // ⚠ 여유(POOL_MARGIN_S)는 잠정값이다. "우리가 우리 예측을 못 믿는 만큼"이 정의인데,
+            // ⚠ 여유(pool_margin_s, 기본 300초)는 잠정값이다. "우리가 우리 예측을 못 믿는 만큼"이 정의인데,
             //   작업도달 예측의 퍼짐이 IQR ~1,400초라 그 절반도 안 되는 보수적 값에서 출발한다.
-            //   1단계에서 마감이 지난 슬롯(pool_overdue_n)이 계속 나오면 늘려야 한다.
-            //   (상수는 모듈 상단 pub(crate) — 보드 깔때기가 같은 잣대로 '마감 도래'를 센다.)
-            // ── 트럭 갈래 (mig 0163·2026-10-06) ──────────────────────────────────────────────────
-            // TOS 는 우리 짝을 즉시 적용하고, 일하는 트럭에는 다음 작업 예약을 받지 않는다(사용자 확인).
-            //   지금 빈 트럭 = free_tos·free_gps → 1계층(내보내는 짝)과 2계층(계획) 모두의 후보.
-            //   곧 빌 트럭   = 그 밖의 풀 트럭    → 2계층(계획)에만, 그것도 자격이 있을 때만.
-            // 자격 시각 = 신뢰도 표(learn_soon_free_reliability)에서 "실제로 짐을 내린 비율"이 처음 0.8 이상이
-            // 되는 초. 예측값을 그대로 믿지 않는다 — 예측이 '지금쯤 비었어야 함(0초)'인 트럭은 실제로 1분 안에
-            // 비는 비율이 4~8%였다(2026-10-01 실측). 표가 비거나 갈래 표본이 모자라면 자격 없음(모르면 안 쓴다).
+            //   2026-10-15 사용자: 실험으로 바꿀 수 있게 — 환경변수 POOL_MARGIN_S(재시작 필요).
+            // ── 후보 트럭 (match_ver 2 · 2026-10-15 사용자 결정) ────────────────────────────────────
+            //   지금 빈 트럭(free_tos·free_gps) + 곧 빌 트럭(그 밖의 풀 트럭) **모두** 후보다. 계층은 없다.
+            //   곧 빌 트럭과 짝지어진 작업은 이번 틱에 지시를 내지 않는다(TOS 는 일하는 트럭에 다음 작업 예약을
+            //   받지 않는다) — 그 작업은 다음 틱에 다시 풀린다. 비용 = 비기까지 남은 시간 + 빈 차 주행(아래).
+            // 남은 시간 = **실측 보정값**(사용자 결정 '실측 보정값'): 신뢰도 표에서 그 갈래(사유·작업유형·예측 구간) 트럭이 실제로
+            //   비었던 비율이 처음 SOON_FREE_REMAIN_P(0.5) 이상이 되는 초. 예측값을 그대로 믿지 않는다 — '0초' 예측 트럭은 실제로
+            //   1분 안에 5~7% 만 비었다. 표가 비거나(갱신 2시간 정지 포함) 갈래 표본이 모자라면 그 트럭은 후보가 아니다(모르면 안 쓴다).
             let reliability: HashMap<(String, String, i32), [f32; 9]> =
                 sqlx::query_as::<_, (String, String, i32, f32, f32, f32, f32, f32, f32, f32, f32, f32)>(
                     // ⚠비율 컬럼은 real/bigint 나눗셈이라 실제 타입이 float8 이다 — f32 로 받으려면 여기서 float4 로 캐스트한다
-                    //   (안 하면 디코딩이 매 틱 실패해 곧 빌 트럭이 계획에서 통째로 빠진다 — 10-06 첫 배포에서 실제로 그랬다).
+                    //   (안 하면 디코딩이 매 틱 실패해 곧 빌 트럭이 통째로 빠진다 — 10-06 첫 배포에서 실제로 그랬다).
                     "SELECT reason, jobtype, pred_b, f60::float4, f120::float4, f180::float4, f300::float4, f450::float4,
                             f600::float4, f900::float4, f1200::float4, f1800::float4
                        FROM learn_soon_free_reliability WHERE n >= $1
@@ -6252,14 +6200,14 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                 )
                 .bind(SOON_FREE_MIN_N)
                 .fetch_all(&pool).await
-                .inspect_err(|e| tracing::warn!(error = %e, "곧 빌 트럭 신뢰도 표 조회 실패 — 이번 틱은 곧 빌 트럭을 계획에 안 쓴다. 마이그레이션 0163 확인"))
+                .inspect_err(|e| tracing::warn!(error = %e, "곧 빌 트럭 신뢰도 표 조회 실패 — 이번 틱은 곧 빌 트럭을 후보에 안 쓴다. 마이그레이션 0163 확인"))
                 .unwrap_or_default()
                 .into_iter()
                 .map(|(r, jt, b, a, bb, c, d, e, f, g, h, i)| ((r, jt, b), [a, bb, c, d, e, f, g, h, i]))
                 .collect();
             let pool_class: HashMap<&str, (&str, Option<&str>, i64)> = pool_rows.iter()
                 .map(|r| (r.ytno.as_str(), (r.reason, r.jobtype.as_deref(), r.free_in_s))).collect();
-            // vehicles 와 같은 순서: (지금 빈가, 자격 시각 초(지금 빈 트럭 = 0), 트럭의 지금/방금 작업유형)
+            // vehicles 와 같은 순서: (지금 빈가, 비용에 쓸 남은 시간 초(지금 빈 트럭 = 0 · 모르면 None = 후보 아님), 트럭의 지금/방금 작업유형)
             let veh_info: Vec<(bool, Option<i64>, Option<String>)> = vehicles.iter().map(|v| {
                 let free = matches!(v.4, "free_tos" | "free_gps");
                 let cls = pool_class.get(v.0.as_str()).copied();
@@ -6267,10 +6215,10 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                 if free {
                     return (true, Some(0), jt);
                 }
-                let q = cls.and_then(|(reason, cjt, base)| {
+                let remain = cls.and_then(|(reason, cjt, base)| {
                     cjt.and_then(|cjt| reliability.get(&(reason.to_string(), cjt.to_string(), soon_free_pred_bucket(base))))
-                }).and_then(|f| soon_free_quantile(f, SOON_FREE_MIN_P));
-                (false, q, jt)
+                }).and_then(|f| soon_free_quantile(f, SOON_FREE_REMAIN_P));
+                (false, remain, jt)
             }).collect();
             let n_free = veh_info.iter().filter(|x| x.0).count() as i64;
             if hold_sent {
@@ -6295,16 +6243,14 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                 }
             }
             let held_boxes: HashSet<String> = held.values().map(|h| h.contno.clone()).collect();
-            let n_soon_ok = veh_info.iter().filter(|x| !x.0 && x.1.is_some()).count() as i64;
+            let n_soon = veh_info.iter().filter(|x| !x.0 && x.1.is_some()).count() as i64;
+            // 남은 시간을 몰라(신뢰도 표에 갈래 없음·표 조회 실패·갱신 2시간 정지) 후보에서 뺀 곧 빌 트럭 — 틱마다 solver 표에 남긴다(mig 0170).
+            let n_soon_unknown = veh_info.iter().filter(|x| !x.0 && x.1.is_none()).count() as i32;
             let mut self_cover_n: i32 = 0; // 자기 추천 이력 적중 수 (mig 0142)
-            // 2계층 묶음의 첫 미도래 슬롯 마감(ms) — 곧 빌 트럭 자격 판정용 (mig 0163)
-            let mut fut_first_ms: HashMap<usize, i64> = HashMap::new();
+            let pool_margin = pool_margin_s();
             let (pool_new, pool_overdue_n, trucks_held_n, due_buckets_n) = {
                 // (works 인덱스, 이 틱에 마감이 도래한 슬롯 수, 가장 이른 슬롯의 마감 ms)
                 let mut due: Vec<(usize, i64, i64)> = Vec::new();
-                // 2계층 후보(mig 0161): 같은 지시의 마감 **미도래** 슬롯 — (works 인덱스, 슬롯 수,
-                // 첫 미도래 슬롯의 마감 ms). 마감이 아직 안 왔을 뿐 발행된 지시다.
-                let mut future: Vec<(usize, i64, i64)> = Vec::new();
                 let mut overdue: i32 = 0;
                 for (oi, &(wi, _, _, _)) in works.iter().enumerate() {
                     let w = &work[wi];
@@ -6341,40 +6287,25 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                     let Some(dd) = w.dispatch_deadline_ts else { continue };
                     let move_s = if w.jobtype == "LD" { LD_MOVE_S } else { DS_MOVE_S };
                     let base = dd.timestamp_millis();
-                    let cutoff = now + POOL_MARGIN_S * 1000;
+                    let cutoff = now + pool_margin * 1000;
                     let mut slots = 0i64;
                     for j in 0..w.n.max(0) as i64 {
                         let slot = base + j * move_s * 1000;
                         if slot <= cutoff { slots += 1; if slot < now { overdue += 1; } } else { break }
                     }
                     if slots > 0 { due.push((oi, slots, base)); }
-                    // 마감 미도래 잔여 슬롯 = 2계층 후보(mig 0161).
-                    let rem = w.n.max(0) as i64 - slots;
-                    if rem > 0 {
-                        let first = base + slots * move_s * 1000;
-                        future.push((oi, rem, first));
-                        fut_first_ms.insert(oi, first);
-                    }
                 }
-                // ★층마다 트럭 상한이 다르다(mig 0163). 1계층(내보내는 짝)은 지금 빈 트럭 수까지 — 곧 빌
-                // 트럭은 급한 작업을 받을 수 없으니(TOS 가 일하는 트럭에 예약을 안 받는다) 그만큼 급한 작업을
-                // 고르면 "고르고 못 보내는" 작업이 생긴다. 두 층 합은 지금 빈 트럭 + 자격 있는 곧 빌 트럭까지.
-                // 풀 크기가 발행량을 밀어올리는 문제(전례: 풀 63→253 때 +55%)도 이렇게 1계층에선 사라진다.
-                let truck_n = n_free + n_soon_ok;
-                // 발행 2계층(mig 0161·2026-08-25 사용자 확정): 1계층 = 마감 도래 슬롯 → 남는 트럭을
-                // 2계층 = 마감 미도래 지시에, 마감 이른 순. mig 0163 부터 2계층은 내보내지 않는 계획이다.
-                let kept_new = allocate_two_tier(&mut due, &mut future, n_free, truck_n);
-                let acc: i64 = kept_new.iter().map(|&(_, a, _)| a).sum();
+                // 후보 작업 = 데드라인 도래 슬롯, 데드라인 이른 순으로 후보 트럭(지금 빈 + 곧 빌) 수까지(match_ver 2).
+                // 데드라인이 아직 안 온 작업은 후보가 아니다 — 종전 2계층(계획)은 없앴다(2026-10-15 사용자 결정).
+                let truck_n = n_free + n_soon;
+                let kept_new = allocate_due(&mut due, truck_n);
+                let acc: i64 = kept_new.iter().map(|&(_, a)| a).sum();
                 if tick % 3 == 0 {
                     let due_slots_total: i64 = due.iter().map(|&(_, s, _)| s).sum();
-                    let kept_slots: i64 = kept_new.iter().filter(|t| t.2 == 1).map(|&(_, alloc, _)| alloc).sum();
-                    let t2_slots: i64 = kept_new.iter().filter(|t| t.2 == 2).map(|&(_, alloc, _)| alloc).sum();
                     tracing::info!(truck_n, acc, held = (truck_n - acc).max(0),
-                        due_buckets = due.len(), due_slots_total,
-                        kept_buckets = kept_new.iter().filter(|t| t.2 == 1).count(), kept_slots,
-                        t2_buckets = kept_new.iter().filter(|t| t.2 == 2).count(), t2_slots,
-                        n_free, n_soon_ok,
-                        "설계③ 트럭 배분 (1계층=마감 도래·내보냄 · 2계층=미도래·계획)");
+                        due_buckets = due.len(), due_slots_total, kept_buckets = kept_new.len(),
+                        n_free, n_soon, pool_margin,
+                        "설계③ 후보 작업 (데드라인 도래 · 후보 트럭 수까지)");
                 }
                 if tick % 5 == 0 {
                     let with_dd = works.iter().filter(|&&(wi, _, _, _)| work[wi].dispatch_deadline_ts.is_some()).count();
@@ -6390,9 +6321,8 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                 }
                 (kept_new, overdue, (truck_n - acc).max(0) as i32, due.len() as i32)
             };
-            // ⚠stage2_pool_shadow 는 **1계층(마감 도래 풀)만** 담는다 — 그 표의 시계열 정의를 지키기
-            // 위해서다(mig 0161). 2계층 발행은 stage2_match_shadow.match_tier=2 로 본다.
-            let pool_new_set: std::collections::HashSet<usize> = pool_new.iter().filter(|t| t.2 == 1).map(|&(oi, _, _)| oi).collect();
+            // stage2_pool_shadow 는 데드라인 도래 풀(후보 작업)을 담는다 — match_ver 2 에서는 후보 작업 전부다.
+            let pool_new_set: std::collections::HashSet<usize> = pool_new.iter().map(|&(oi, _)| oi).collect();
             // (qc,vessel,queuename) → work-ETA ms, for the committed-window check on prior recommendations
             let eta_by_key: HashMap<(String, String, String), i64> = work.iter()
                 .filter_map(|w| w.work_eta_ts.map(|e| ((w.qc.clone(), w.vessel.clone(), w.queuename.clone()), e.timestamp_millis())))
@@ -6403,13 +6333,10 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
             // 2(출항 역산×학습 걸음, 같은 날 ~30분 라이브)·1(전방 예측 마감, 08-06~10)과
             // 모집단이 다르므로 집계는 반드시 이 값으로 가른다.
             let pool_mode: i16 = 3;
-            let driving: Vec<(usize, i64, u8)> = pool_new;
-            // 2계층 게이지 (mig 0161) — NULL(경계 이전)과 구분되도록 항상 채운다.
-            let t2_works_n: i32 = driving.iter().filter(|t| t.2 == 2).count() as i32;
-            let t2_slots_n: i64 = driving.iter().filter(|t| t.2 == 2).map(|t| t.1).sum();
-            // STAGE 2 — PURE EFFICIENCY MATCHING. The work pool + per-crane demand caps are already
-            // fixed by Stage 1; here each edge cost is just the truck's empty travel (+ anti-thrash
-            // switch penalty). No urgency/starve/load-balance terms and no QC layer — those are Stage-1.
+            let driving: Vec<(usize, i64)> = pool_new;
+            // STAGE 2 — PURE EFFICIENCY MATCHING. The work pool is already fixed by Stage 1 (deadline order);
+            // here each edge cost is the truck's time-to-free + empty travel (+ anti-thrash switch penalty).
+            // No urgency/starve/load-balance terms and no QC layer — those are Stage-1.
             let mut caps: Vec<i64> = Vec::with_capacity(driving.len()); // per-bucket demand (Stage-1 capped)
             let mut deadlines: Vec<i64> = Vec::with_capacity(driving.len()); // feasibility deadline ms per wpos
             // 출항 축 로깅용(정렬 후 wpos 인덱스로 재배열). 기존 deadlines[]와 '별개 축'이다 —
@@ -6417,18 +6344,15 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
             // 진짜 물리는 지표인데, 출항 마감 p50 17041s로 바꾸면 전 구간 88% 평평한 상수가 된다).
             let mut dep_slack_w: Vec<Option<i64>> = Vec::with_capacity(driving.len());
             let mut dep_tier_w: Vec<u8> = Vec::with_capacity(driving.len());
-            let mut tier_w: Vec<u8> = Vec::with_capacity(driving.len()); // 발행 계층 (mig 0161) — dep_tier(출항 여유)와 딴 축
             let mut edges: Vec<(usize, usize, i64)> = Vec::new(); // (truck, work-pos, cost)
             let mut matrix: Vec<Vec<(i64, i64, &'static str, bool)>> = Vec::with_capacity(driving.len()); // [wpos][vi]=(arr,p90,tier,switched)
-            let mut trav: Vec<Vec<i64>> = Vec::with_capacity(driving.len()); // [wpos][vi] = 순수 빈 차 주행 p50(초) — 계기용
-            for &(oi, cap_j, w_tier) in &driving {
+            for &(oi, cap_j) in &driving {
                 let (wi, wlat, wlon, eta_ms) = works[oi];
                 let w = &work[wi];
                 // 무브시간은 마감 계산에서 빠졌다(mig 0122: spread 항 폐기). 상자별 시각은
                 // workpool 쪽에서 이미 매겨 넘어온다.
                 // cap_j = 구동 풀이 배정한 트럭 몫.
                 caps.push(cap_j);
-                tier_w.push(w_tier);
                 // 마감 = 크레인이 이 컨테이너를 다루는 시각. **더하는 항 없음**(mig 0122).
                 //
                 // 옛 식은 `max(eta, now) + (크레인당 트럭 상한 ÷ 2) × 무브시간` 이었다. 설계는
@@ -6452,16 +6376,16 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                 // load) is PRODUCTIVE work, not waste — penalising it would push idle yard trucks into
                 // long empty drives to the quay (worse) and starve load work. So we minimise empty travel.
                 let mut row = Vec::with_capacity(vehicles.len());
-                let mut trow = Vec::with_capacity(vehicles.len());
-                // 2계층 곧 빌 트럭 자격의 기준 = 이 묶음의 첫 미도래 슬롯 배차 마감(mig 0163)
-                let first_ms = if w_tier == 2 { fut_first_ms.get(&oi).copied() } else { None };
                 for (vi, v) in vehicles.iter().enumerate() {
                     // 곧 빌 트럭은 내릴 자리에서 센다(지금 빈 트럭은 지금 자리) — 2026-10-06 사용자 결정.
                     let (sx, sy) = if veh_info[vi].0 { (v.1, v.2) } else { drop_pos.get(&v.0).copied().unwrap_or((v.1, v.2)) };
                     let (p50, p90, tier) = cost(sx, sy, wlat, wlon, w.jobtype == "LD");
-                    let arr = v.3 + p50; // empty travel to the pickup
-                    // 1계층 간선은 2계층 행을 뺀 prev(종전 입력 그대로), 2계층 간선은 계층 불문(mig 0161).
-                    let prevk = if w_tier == 2 { prev_any.get(&v.0) } else { prev.get(&v.0) };
+                    // 비용 = 비기까지 남은 시간(지금 빈 트럭 = 0, 곧 빌 트럭 = 실측 보정값) + 빈 차 주행 p50
+                    // (2026-10-15 사용자 정의: "그 차량이 작업 마칠 때까지 남은 시간 + 작업지까지의 주행 시간").
+                    // 남은 시간을 모르는 곧 빌 트럭(None)은 간선이 없다 — 후보가 아니다.
+                    let remain = veh_info[vi].1;
+                    let arr = remain.unwrap_or(v.3) + p50;
+                    let prevk = prev.get(&v.0);
                     let switched = prevk.map(|pk| pk != &this_key).unwrap_or(false);
                     // committed window: if this truck's PRIOR work is on the verge of dispatch, switching
                     // it away is near-locked (COMMIT_LOCK_S); otherwise the normal switch penalty.
@@ -6471,26 +6395,20 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                     } else {
                         0
                     };
-                    // ★간선 자격 (mig 0163):
-                    //   1계층(내보내는 짝) — 지금 빈 트럭만. TOS 는 일하는 트럭에 예약을 안 받는다.
-                    //   2계층(계획)       — 지금 빈 트럭, 또는 곧 빌 트럭 중 자격 시각(q80)이 이 묶음 배차 마감 안인 것.
-                    // 간선 비용 = 빈 차 주행(p50) + 들락날락 벌점. 곧 빌 트럭의 '비기까지 시간'은 비용에 안 넣는다:
-                    //   계획은 마감에 내보내므로 그 전에만 비면 기다림이 없다(자격이 그걸 보장한다).
-                    let (free, q80, _) = &veh_info[vi];
+                    // 간선 = 모든 후보 트럭(지금 빈 + 곧 빌)·모든 후보 작업(match_ver 2). 막는 것은 둘뿐:
+                    //   내보낸 짝 고정, 빈 차 주행 30분 이상(최적에 들 일이 없는 먼 꼬리).
                     // 내보낸 짝 고정: 고정된 트럭은 자기 상자만, 고정된 상자는 자기 트럭만.
                     let hold_ok = edge_allowed_by_hold(
                         held.get(&v.0).map(|h| h.contno.as_str()),
                         w.contno.as_deref(),
                         w.contno.as_ref().is_some_and(|c| held_boxes.contains(c)),
                     );
-                    if hold_ok && edge_eligible(w_tier, *free, *q80, first_ms, now) && p50 < 1800 {
-                        edges.push((vi, wpos, p50 + switch_pen)); // prune the far tail (never in the optimum)
+                    if hold_ok && remain.is_some() && p50 < 1800 {
+                        edges.push((vi, wpos, arr + switch_pen)); // prune the far tail (never in the optimum)
                     }
-                    row.push((arr, v.3 + p90, tier, switched));
-                    trow.push(p50);
+                    row.push((arr, remain.unwrap_or(v.3) + p90, tier, switched));
                 }
                 matrix.push(row);
-                trav.push(trow);
             }
             // 묶음별 허용 간선(비용 포함) — 탐욕 기준선이 최적 매칭과 같은 간선만 보게 한다.
             let mut edges_by_w: Vec<Vec<(usize, i64)>> = vec![Vec::new(); driving.len()];
@@ -6507,12 +6425,9 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                     continue;
                 }
                 let deadline = deadlines[wpos];
-                // 최적 매칭과 같은 허용 간선만(mig 0163 — 1계층은 지금 빈 트럭, 2계층은 자격 있는 트럭).
-                // 계획(2계층)은 최적 매칭처럼 주행 < PLAN_VALUE_S 일 때만 선다 — 같은 규칙이어야 절감률이
-                // '덜 배정해서' 생긴 차이를 '더 아꼈다'로 읽지 않는다(리뷰 SHOULD_FIX 1).
+                // 최적 매칭과 같은 허용 간선만 — 같은 규칙이어야 절감률을 '덜 배정해서'로 오독하지 않는다.
                 let mut cand: Vec<(usize, i64)> = edges_by_w[wpos].iter()
                     .filter(|(vi, _)| !used.contains(vi))
-                    .filter(|&&(_, c)| tier_w[wpos] == 1 || c < PLAN_VALUE_S)
                     .copied()
                     .collect();
                 cand.sort_by_key(|c| c.1);
@@ -6534,50 +6449,30 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                     greedy_n += 1;
                 }
             }
-            // STAGE 2 (mig 0163·2026-10-06 사용자 확정): 두 층을 **함께** 푼다 = 실제 추천.
-            //   ① 누가 받나(순서): 1계층 슬롯을 마감 이른 순으로 덮을 수 있는 만큼 덮는다(priority_cover).
-            //      driving 의 1계층 부분은 allocate_two_tier 가 마감 순으로 정렬해 둔 그 순서다.
-            //   ② 어느 트럭인가(비용): 그 덮개를 지키면서 1계층 + 2계층 계획의 빈 차 주행 합을 최소로
-            //      (joint_assign). 곧 빌 트럭이 다음 작업을 덮을 수 있으면, 지금 빈 트럭을 급한 작업에
-            //      아끼지 않고 쓴다 — 예측으로 넓힌 후보풀이 지금의 결정에 쓰이는 자리가 여기다.
-            // 종전(mig 0161)은 층을 순차로 풀었다 — 그 값은 아래 seq_* 계기로 나란히 남겨 효과를 잰다.
+            // STAGE 2 (match_ver 2 · 2026-10-15 사용자 결정): 후보 작업 슬롯 ↔ 후보 트럭(지금 빈 + 곧 빌)을 **헝가리안**으로
+            //   한 번에 푼다. 결과 = 이을 수 있는 짝 수가 최대이고 그 안에서 (남은 시간 + 빈 차 주행 + 들락날락 벌점) 합이
+            //   최소. 지시는 지금 빈 트럭과 짝지어진 작업만 낸다(아래 hold_sent) — 곧 빌 트럭과 짝지어진 작업은 그 트럭의
+            //   몫으로 남겨 두고 다음 틱에 다시 푼다.
             let n_v = vehicles.len();
-            let caps1: Vec<i64> = caps.iter().zip(&tier_w).map(|(&c, &t)| if t == 1 { c } else { 0 }).collect();
-            let edges1: Vec<(usize, usize, i64)> = edges.iter().filter(|&&(_, wp, _)| tier_w[wp] == 1).copied().collect();
-            let cover1 = priority_cover(n_v, &caps1, &edges1);
-            let t1_cov_alone: i64 = cover1.iter().sum();
-            let t1_skip_n = priority_skips(n_v, &caps1, &cover1, &edges1);
-            // 갈 수 있는 트럭이 아예 없던 급한 작업 슬롯 — 순서 위반이 아니라 도달 불가(DONE 의 '따로 센다').
+            // 슬롯 = driving 순서(= allocate_due 의 마감 이른 순) 그대로 펼친다. 먼저 마감 순 덮개로 '누가 받나'를 정하고,
+            // 덮인 슬롯만 헝가리안에 넣는다 — 덮인 슬롯은 전부 동시에 이을 수 있으므로 헝가리안이 하나도 버리지 않는다.
+            let slot_all: Vec<usize> = caps.iter().enumerate()
+                .flat_map(|(wp, &c)| std::iter::repeat(wp).take(c.max(0) as usize)).collect();
+            let covered = deadline_cover(n_v, &slot_all, &edges);
+            let slot_wpos: Vec<usize> = slot_all.iter().zip(&covered).filter(|(_, &c)| c).map(|(&w, _)| w).collect();
+            let assign: Vec<(usize, usize)> = assign_slots(n_v, &slot_wpos, &edges);
+            if assign.len() != slot_wpos.len() {
+                tracing::warn!(assign = assign.len(), covered = slot_wpos.len(),
+                    "헝가리안이 마감 순 덮개보다 덜 이었다 — 결함 (match_ver 2)");
+            }
+            // 갈 수 있는 트럭이 아예 없던 후보 작업 슬롯(고정·거리 상한) — mig 0163 의 같은 이름 계기를 이 판의 뜻으로 잇는다.
             let t1_unreach_n: i64 = {
-                let adj1 = bucket_adjacency(n_v, caps1.len(), &edges1);
-                caps1.iter().zip(&adj1).filter(|(_, a)| a.is_empty()).map(|(&c, _)| c.max(0)).sum()
+                let reach: HashSet<usize> = edges.iter().map(|&(_, wp, _)| wp).collect();
+                caps.iter().enumerate().filter(|(wp, _)| !reach.contains(wp)).map(|(_, &c)| c.max(0)).sum()
             };
-            // 자격 있는 곧 빌 트럭(n_soon_ok 와 같은 모집단) 중 내릴 자리를 아는 수 — 둘을 나란히 읽게(2차 리뷰).
+            // 곧 빌 트럭 중 내릴 자리를 아는 수(그 트럭의 주행은 내릴 자리에서 센다 — 모르면 지금 자리).
             let n_soon_drop: i32 = vehicles.iter().zip(&veh_info)
                 .filter(|(v, i)| !i.0 && i.1.is_some() && drop_pos.contains_key(&v.0)).count() as i32;
-            let sink: Vec<(i64, i64)> = (0..driving.len())
-                .map(|wp| if tier_w[wp] == 1 { (cover1[wp], T1_COVER_BONUS) } else { (caps[wp], PLAN_VALUE_S) })
-                .collect();
-            let assign: Vec<(usize, usize)> = joint_assign(n_v, &sink, &edges);
-            let t1_cov: i64 = assign.iter().filter(|&&(_, wp)| tier_w[wp] == 1).count() as i64;
-            if t1_cov != t1_cov_alone {
-                tracing::warn!(t1_cov, t1_cov_alone, "함께 풀기가 급한 작업을 1계층만 풀 때보다 덜 덮었다 — 결함 (mig 0163)");
-            }
-            let t2_assign_n: i32 = assign.iter().filter(|&&(_, wp)| tier_w[wp] == 2).count() as i32;
-            // 비교 계기 — 따로 풀었다면(1계층 최적 먼저, 2계층은 남은 트럭에 같은 계획 가치로)
-            let seq1 = optimal_assign(n_v, &cover1, &edges1);
-            let used1: std::collections::HashSet<usize> = seq1.iter().map(|&(vi, _)| vi).collect();
-            let sink2: Vec<(i64, i64)> = (0..driving.len())
-                .map(|wp| if tier_w[wp] == 2 { (caps[wp], PLAN_VALUE_S) } else { (0, 0) })
-                .collect();
-            let edges2: Vec<(usize, usize, i64)> = edges.iter()
-                .filter(|&&(vi, wp, _)| tier_w[wp] == 2 && !used1.contains(&vi)).copied().collect();
-            let seq2 = joint_assign(n_v, &sink2, &edges2);
-            let trav_sum = |a: &[(usize, usize)], tier: u8| -> i64 {
-                a.iter().filter(|&&(_, wp)| tier_w[wp] == tier).map(|&(vi, wp)| trav[wp][vi]).sum()
-            };
-            let (seq_t1_cost, seq_t2_cost, seq_t2_n) = (trav_sum(&seq1, 1), trav_sum(&seq2, 2), seq2.len() as i32);
-            let (joint_t1_cost, joint_t2_cost) = (trav_sum(&assign, 1), trav_sum(&assign, 2));
             let ts = Utc::now();
             let mut opt_cost: i64 = 0;
             let mut opt_miss: i32 = 0;
@@ -6640,9 +6535,12 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                 .bind(w.dd_lead_s.map(|v| v as i32))
                 .bind(w.contno.clone()) // mig 0142 — 상자 단위 집행·자기 추천 이력의 키
                 .bind(None::<String>) // mig 0160 재지향 표식 — mig 0163 에서 재지향을 없애 항상 NULL
-                .bind(tier_w[wpos] as i16) // mig 0161 — 발행 계층(0163~: 1=내보내는 짝·2=내보내지 않는 계획)
+                // match_tier — match_ver 2(mig 0170): 1 = 지금 빈 트럭(지시 냄) · 2 = 곧 빌 트럭(지시 안 냄).
+                //   읽는 쪽의 `match_tier IS DISTINCT FROM 2`(= 보낸 짝만)가 그대로 맞는 뜻이 되게 골랐다.
+                .bind(if veh_info[vi].0 { 1i16 } else { 2i16 })
                 .bind(MATCH_VER) // mig 0163
-                .bind(veh_info[vi].1.map(|q| q as i32)) // mig 0163 — 자격 시각(지금 빈 트럭 = 0)
+                // free_q80_s — match_ver 2(mig 0170): 비용에 쓴 남은 시간(실측 보정값·초, 지금 빈 트럭 0).
+                .bind(veh_info[vi].1.map(|q| q as i32))
                 .bind(veh_info[vi].2.clone()) // mig 0163 — 트럭의 지금/방금 작업유형(내림 채점용)
                 .execute(&pool).await;
                 if let Err(e) = ins {
@@ -6656,11 +6554,11 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                 tracing::warn!(error = %e, failed = ins_err_n, of = assign.len(),
                     "stage2_match_shadow insert failed — anti-thrash(prev)도 함께 죽는다. 0104/0161/0163 마이그레이션 적용 여부 확인");
             }
-            // 내보낸 짝(1계층)을 **먼저 표에 적고**(mig 0167) 고정 목록에 올린다. 이미 고정된 트럭은 새 지시가 아니다 —
+            // 내보낸 짝(지금 빈 트럭과의 짝 — match_ver 2)을 **먼저 표에 적고**(mig 0167) 고정 목록에 올린다. 이미 고정된 트럭은 새 지시가 아니다 —
             // TOS 가 받은 것은 첫 지시이고 같은 짝을 다시 내는 것은 새 지시가 아니다(고정된 트럭은 자기 상자 간선만 있다).
             // 적기가 실패하면 고정하지 않는다 — 연계 후엔 그 자리가 '안 보냄'이다(못 적은 지시는 복원할 수 없다).
             if hold_sent {
-                let new_rows: Vec<SentRow> = assign.iter().filter(|&&(_, wpos)| tier_w[wpos] == 1).filter_map(|&(vi, wpos)| {
+                let new_rows: Vec<SentRow> = assign.iter().filter(|&&(vi, _)| veh_info[vi].0).filter_map(|&(vi, wpos)| {
                     let (wi, _, _, _) = works[driving[wpos].0];
                     let w = &work[wi];
                     let yt = &vehicles[vi].0;
@@ -6689,9 +6587,9 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
             let solver_ins = sqlx::query(
                 "INSERT INTO stage2_solver_shadow (ts,tick,n_trucks,n_works,greedy_n,greedy_cost_s,optimal_n,optimal_cost_s,gap_pct,greedy_miss,optimal_miss,dep_tier_on,dep_tier0_n,dep_urgent_slots,dep_null_n,dep_demoted_n,ab_block,ab_warmup,works_raw,need_horizon_on,works_no_eta,works_no_coord,pool_new_n,pool_overlap_n,trucks_held_n,pool_overdue_n,pool_mode,due_buckets_n,self_cover_n,workpool_age_s,wake_src,t2_works,t2_slots,t2_assign_n,
                      match_ver,n_free,n_soon_ok,t1_cov_alone,t1_cov,t1_skip_n,seq_t1_cost_s,seq_t2_cost_s,seq_t2_n,joint_t1_cost_s,joint_t2_cost_s,joint_t2_n,swap_cand_n,swap_n,swap_gain_s,
-                     t1_unreach_n,n_soon_drop)
+                     t1_unreach_n,n_soon_drop,pool_margin_s,soon_assign_n,soon_unknown_n)
                  VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,
-                         $35,$36,$37,$38,$39,$40,$41,$42,$43,$44,$45,$46,$47,$48,$49,$50,$51) ON CONFLICT (ts) DO NOTHING",
+                         $35,$36,$37,$38,$39,$40,$41,$42,$43,$44,$45,$46,$47,$48,$49,$50,$51,$52,$53,$54) ON CONFLICT (ts) DO NOTHING",
             )
             .bind(ts).bind(tick as i64).bind(vehicles.len() as i32).bind(driving.len() as i32)
             .bind(greedy_n).bind(greedy_cost).bind(assign.len() as i32).bind(opt_cost).bind(gap_pct as f32)
@@ -6699,9 +6597,9 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
             // 2026-08-06 레거시 풀 제거(mig 0133) — 아래 5개는 레거시 레버 전용이라 원천이
             // 사라졌다. NULL 로 멈춘다(과거 구간만 값이 있다). dep_tier0_n/dep_null_n은 게이지라 유지.
             .bind(None::<bool>)                                                           // dep_tier_on
-            .bind(driving.iter().filter(|&&(oi, _, _)| dep_tier[oi] == 0).count() as i32)  // dep_tier0_n (게이지 유지)
+            .bind(driving.iter().filter(|&&(oi, _)| dep_tier[oi] == 0).count() as i32)  // dep_tier0_n (게이지 유지)
             .bind(None::<i32>)                                                            // dep_urgent_slots
-            .bind(driving.iter().filter(|&&(oi, _, _)| dep_slack[oi].is_none()).count() as i32) // dep_null_n (게이지 유지)
+            .bind(driving.iter().filter(|&&(oi, _)| dep_slack[oi].is_none()).count() as i32) // dep_null_n (게이지 유지)
             .bind(None::<i32>)                                                             // dep_demoted_n
             .bind(None::<i64>).bind(None::<bool>).bind(None::<i32>)                        // ab_block, ab_warmup, works_raw
             .bind(None::<bool>)                                                            // need_horizon_on
@@ -6713,17 +6611,21 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
             .bind(self_cover_n)                                                            // mig 0142
             .bind(workpool_age_s)                                                          // mig 0150
             .bind(wake_src.as_str())                                                       // mig 0153
-            .bind(t2_works_n)                                                              // mig 0161 — 2계층 게이지
-            .bind(t2_slots_n.clamp(0, 2_000_000_000) as i32)
-            .bind(t2_assign_n)
+            // mig 0161 2계층 게이지 — match_ver 2 에서 계층을 없애 원천이 사라졌다. NULL 로 멈춘다.
+            .bind(None::<i32>).bind(None::<i32>).bind(None::<i32>)                         // t2_works, t2_slots, t2_assign_n
             // mig 0163 — 작업 기준 배차 계기
             .bind(MATCH_VER)
-            .bind(n_free as i32).bind(n_soon_ok as i32)
-            .bind(t1_cov_alone as i32).bind(t1_cov as i32).bind(t1_skip_n)
-            .bind(seq_t1_cost).bind(seq_t2_cost).bind(seq_t2_n)
-            .bind(joint_t1_cost).bind(joint_t2_cost).bind(t2_assign_n)
+            .bind(n_free as i32)
+            .bind(n_soon as i32)                                                           // n_soon_ok — match_ver 2: 남은 시간을 아는(신뢰도 표에 갈래가 있는) 곧 빌 트럭
+            // 우선 덮개·함께 풀기·순차 비교 계기(mig 0163) — 원천이 사라져 NULL 로 멈춘다.
+            .bind(None::<i32>).bind(None::<i32>).bind(None::<i32>)                         // t1_cov_alone, t1_cov, t1_skip_n
+            .bind(None::<i64>).bind(None::<i64>).bind(None::<i32>)                         // seq_t1_cost_s, seq_t2_cost_s, seq_t2_n
+            .bind(None::<i64>).bind(None::<i64>).bind(None::<i32>)                         // joint_t1_cost_s, joint_t2_cost_s, joint_t2_n
             .bind(swap_cand_n).bind(swap_n).bind(swap_gain_total)
             .bind(t1_unreach_n as i32).bind(n_soon_drop)
+            .bind(pool_margin as i32)                                                      // mig 0170 — 이 틱이 쓴 데드라인 여유
+            .bind(assign.iter().filter(|&&(vi, _)| !veh_info[vi].0).count() as i32)        // mig 0170 — 곧 빌 트럭이 받은 짝(지시 안 냄)
+            .bind(n_soon_unknown)                                                          // mig 0170 — 남은 시간을 몰라 후보에서 뺀 곧 빌 트럭
             .execute(&pool).await;
             // 생산 0 경보 (mig 0142): 트럭도 작업도 있는데 추천이 계속 0이면 매칭이 죽은
             // 것이다. 총정지는 stage2_match_shadow DEADMAN(30분)이 백스톱으로 잡지만, 이건
@@ -6748,17 +6650,15 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
             // mig 0121 → 0133 — 구동 풀(설계③)에 든 묶음의 상세. 레거시 풀이 사라져 in_current_pool/
             // rank_current는 NULL(비교 대상 없음).
             {
-                // 1계층만 순위를 매긴다(mig 0161) — 양층에 걸친 묶음은 driving 에 두 번 나와,
-                // 거르지 않으면 2계층 순위가 1계층 순위를 덮어쓴다(1차 리뷰 지적).
+                // 순위 = 데드라인 순(allocate_due 가 정렬해 둔 driving 순서).
                 let rank_new: HashMap<usize, i32> = driving.iter().enumerate()
-                    .filter(|&(_, t)| t.2 == 1)
-                    .map(|(r, &(oi, _, _))| (oi, r as i32)).collect();
+                    .map(|(r, &(oi, _))| (oi, r as i32)).collect();
                 for &oi in &pool_new_set {
                     let w = &work[works[oi].0];
                     let dd = w.dispatch_deadline_ts;
                     let due = dd.map(|d| {
                         let move_s = if w.jobtype == "LD" { LD_MOVE_S } else { DS_MOVE_S };
-                        let cutoff = now + POOL_MARGIN_S * 1000;
+                        let cutoff = now + pool_margin * 1000;
                         (0..w.n.max(0) as i64)
                             .take_while(|j| d.timestamp_millis() + j * move_s * 1000 <= cutoff)
                             .count() as i32
@@ -6785,7 +6685,7 @@ pub fn spawn_stage2_shadow(lm: Arc<LiveMap>, pool: PgPool) {
                 //   (crates/api/src/db.rs) — 경보가 안 뜨니 사람이 읽는 건 이 줄뿐이다.
                 //   그래서 **최근 마이그레이션 번호를 여기 같이 적는다**(0104 = 표 신설,
                 //   0150 = workpool_age_s, 0153 = wake_src, 0161 = t2_*).
-                tracing::warn!(error = %e, "stage2_solver_shadow insert failed — 마이그레이션 0104/0150/0153/0161/0163 적용 여부 확인");
+                tracing::warn!(error = %e, "stage2_solver_shadow insert failed — 마이그레이션 0104/0150/0153/0161/0163/0170 적용 여부 확인");
             }
             if tick % 30 == 0 {
                 crate::db::prune(&pool, "stage2_match_shadow", "DELETE FROM stage2_match_shadow WHERE ts < now() - interval '21 days'").await;
@@ -7575,107 +7475,7 @@ pub fn spawn_fair_compare(lm: Arc<LiveMap>, pool: PgPool) {
     });
 }
 
-/// 배정 알고리즘(2단계 비용행렬 매칭)의 회귀 테스트.
-///
-/// 이 함수는 "어느 트럭을 어느 작업에 보낼지"를 실제로 정하는 곳인데 테스트가 0건이었다.
-/// 그림자인 동안에는 틀려도 기록만 지저분해지지만, 실배차로 올리면 **틀린 배정이 그대로
-/// 현장 지시**가 된다. 고칠 때 실수를 잡아줄 안전망으로 최소한을 고정한다.
-///
-/// 비용 단위는 초(트럭이 자유로워지는 시각 + 공차 주행). 값 자체가 아니라 **성질**을 고정한다 —
-/// 상수를 바꾸면 깨지는 테스트는 상수를 바꿀 때마다 무의미하게 깨지기 때문이다.
-#[cfg(test)]
-mod optimal_assign_tests {
-    use super::optimal_assign;
-
-    /// 배정 결과의 총비용. 간선 목록에서 되짚어 잰다.
-    fn cost_of(assign: &[(usize, usize)], edges: &[(usize, usize, i64)]) -> i64 {
-        assign
-            .iter()
-            .map(|&(t, b)| {
-                edges
-                    .iter()
-                    .find(|&&(u, v, _)| u == t && v == b)
-                    .map(|&(_, _, c)| c)
-                    .expect("배정된 쌍에 대응하는 간선이 없다")
-            })
-            .sum()
-    }
-
-    /// ★핵심 — 눈앞의 최선(탐욕)이 전체 최선이 아닌 고전 사례를 고정한다.
-    ///
-    /// 트럭0 은 작업0 이 가깝고(10), 트럭1 은 작업0 밖에 갈 수 없다(20).
-    /// 탐욕이 트럭0 에게 작업0 을 주면 트럭1 은 갈 곳이 없어 작업1 이 빈다.
-    /// 최적은 트럭0 을 작업1(30) 로 보내고 트럭1 에게 작업0(20) 을 줘 **둘 다** 채운다.
-    /// 이 성질이 깨지면 매칭이 탐욕으로 퇴화한 것이다.
-    #[test]
-    fn 탐욕이_지는_사례에서_둘_다_채운다() {
-        let edges = [(0, 0, 10), (0, 1, 30), (1, 0, 20)];
-        let assign = optimal_assign(2, &[1, 1], &edges);
-        assert_eq!(assign.len(), 2, "두 작업을 모두 채워야 한다: {assign:?}");
-        assert!(assign.contains(&(1, 0)), "트럭1 은 작업0 밖에 못 간다: {assign:?}");
-        assert!(assign.contains(&(0, 1)), "트럭0 이 양보해야 둘 다 찬다: {assign:?}");
-        assert_eq!(cost_of(&assign, &edges), 50);
-    }
-
-    /// 선택지가 겹치지 않으면 각자 가장 싼 곳으로 간다(기본 동작).
-    ///
-    /// ⚠ 간선을 **비싼 것부터** 넣는다. 싼 것부터 넣으면 비용을 통째로 무시하는 구현도
-    /// 간선 순서 운으로 통과한다 — 실제로 돌연변이 시험에서 그렇게 살아남았다(2026-08-11).
-    /// 이 순서라면 비용을 안 보는 구현은 반드시 170 을 내놓는다.
-    #[test]
-    fn 같은_수를_배정하더라도_더_싼_쪽을_고른다() {
-        let edges = [(0, 1, 90), (0, 0, 10), (1, 0, 80), (1, 1, 20)];
-        let assign = optimal_assign(2, &[1, 1], &edges);
-        assert_eq!(assign.len(), 2);
-        assert_eq!(
-            cost_of(&assign, &edges),
-            30,
-            "10+20=30 이어야 한다. 170 이면 비용을 안 보고 간선 순서대로 집은 것이다: {assign:?}"
-        );
-    }
-
-    /// 트럭이 모자라면 **가장 싼 조합**을 고른다 — 비용을 무시하면 여기서 갈린다.
-    /// 트럭 1대가 갈 수 있는 두 작업의 비용 차가 크고, 비싼 쪽 간선을 먼저 넣었다.
-    #[test]
-    fn 트럭이_모자라면_가장_싼_작업을_고른다() {
-        let edges = [(0, 0, 900), (0, 1, 10)];
-        let assign = optimal_assign(1, &[1, 1], &edges);
-        assert_eq!(assign, vec![(0, 1)], "싼 작업1(10)을 두고 작업0(900)을 골랐다: {assign:?}");
-    }
-
-    /// 작업 묶음의 수요(cap)를 넘겨 보내지 않는다. 넘기면 크레인 한 대에 트럭이 몰린다.
-    #[test]
-    fn 묶음_수요를_초과해_보내지_않는다() {
-        let edges = [(0, 0, 10), (1, 0, 11), (2, 0, 12)];
-        let assign = optimal_assign(3, &[2], &edges);
-        assert_eq!(assign.len(), 2, "수요가 2인데 {}대를 보냈다", assign.len());
-        // 남길 트럭은 가장 비싼 트럭2 여야 한다
-        assert!(!assign.iter().any(|&(t, _)| t == 2), "더 싼 트럭을 두고 비싼 트럭을 보냈다: {assign:?}");
-    }
-
-    /// 갈 수 있는 작업이 없는 트럭은 배정되지 않는다(억지로 내보내지 않는다).
-    #[test]
-    fn 간선이_없는_트럭은_남는다() {
-        let assign = optimal_assign(2, &[1], &[(0, 0, 10)]);
-        assert_eq!(assign, vec![(0, 0)]);
-    }
-
-    /// 빈 입력에서 죽지 않는다 — 한산한 시간대에 실제로 들어오는 값이다.
-    #[test]
-    fn 빈_입력은_빈_결과다() {
-        assert!(optimal_assign(0, &[1, 2], &[]).is_empty());
-        assert!(optimal_assign(3, &[], &[]).is_empty());
-        assert!(optimal_assign(3, &[0, 0], &[(0, 0, 5)]).is_empty(), "수요 0 인 묶음에 보내면 안 된다");
-    }
-
-    /// 한 트럭이 두 작업에 동시에 배정되지 않는다(cap 1 층이 살아 있는지).
-    #[test]
-    fn 한_트럭은_한_작업만_받는다() {
-        let assign = optimal_assign(1, &[5, 5], &[(0, 0, 10), (0, 1, 11)]);
-        assert_eq!(assign.len(), 1, "트럭 하나가 두 곳에 갔다: {assign:?}");
-    }
-}
-
+// (배정 알고리즘의 회귀 테스트는 job_driven_tests — 헝가리안·마감 순 덮개·후보 작업 고르기 — 로 옮겼다. match_ver 2.)
 #[cfg(test)]
 mod workpool_freshness_tests {
     use super::{workpool_stale_reason, WORKPOOL_MAX_AGE_S};
@@ -8228,180 +8028,178 @@ mod pool_tests {
         }
     }
 
-    // ── 발행 2계층 배분 (mig 0161) ─────────────────────────────────────────────────────────
-
-    #[test]
-    fn two_tier_due_wins_even_when_future_deadline_earlier() {
-        // 2계층 마감이 아무리 일러도 1계층이 먼저다 — 호출부가 due/future 인자를 뒤바꾸면 잡힌다.
-        let mut due = vec![(0usize, 2i64, 1_000i64)];
-        let mut fut = vec![(1usize, 2i64, 1i64)];
-        let k = super::allocate_two_tier(&mut due, &mut fut, 3, 3);
-        assert_eq!(k, vec![(0, 2, 1), (1, 1, 2)]);
-    }
-
-    #[test]
-    fn two_tier_truncates_across_tiers() {
-        // "작업>트럭 금지"는 층을 합쳐 성립: 트럭이 1계층에서 소진되면 2계층은 0.
-        let mut due = vec![(0usize, 5i64, 10i64)];
-        let mut fut = vec![(1usize, 5i64, 20i64)];
-        assert_eq!(super::allocate_two_tier(&mut due, &mut fut, 5, 5), vec![(0, 5, 1)]);
-        let mut due = vec![(0usize, 5i64, 10i64)];
-        let mut fut = vec![(1usize, 5i64, 20i64)];
-        assert_eq!(super::allocate_two_tier(&mut due, &mut fut, 0, 0), vec![]);
-    }
-
-    #[test]
-    fn two_tier_orders_within_tier_by_deadline() {
-        // 층 안에서는 마감 이른 순으로 절단 — 정렬을 빼먹으면 7번이 3슬롯을 가져가 잡힌다.
-        let mut due: Vec<(usize, i64, i64)> = vec![];
-        let mut fut = vec![(7usize, 3i64, 300i64), (3usize, 3i64, 100i64)];
-        assert_eq!(super::allocate_two_tier(&mut due, &mut fut, 4, 4), vec![(3, 3, 2), (7, 1, 2)]);
-    }
-
-    #[test]
-    fn two_tier_tier1_share_unaffected_by_future() {
-        // 1계층 몫은 2계층 유무와 무관 — 종전 동작 보존의 핵심 불변식.
-        let mut due_a = vec![(0usize, 3i64, 10i64), (1usize, 4i64, 20i64)];
-        let mut fut_a: Vec<(usize, i64, i64)> = vec![];
-        let base = super::allocate_two_tier(&mut due_a, &mut fut_a, 5, 5);
-        let mut due_b = vec![(0usize, 3i64, 10i64), (1usize, 4i64, 20i64)];
-        let mut fut_b = vec![(2usize, 9i64, 1i64)];
-        let with2 = super::allocate_two_tier(&mut due_b, &mut fut_b, 5, 5);
-        assert_eq!(base, with2.iter().filter(|t| t.2 == 1).copied().collect::<Vec<_>>());
-        assert_eq!(with2.iter().map(|t| t.1).sum::<i64>(), 5, "합계는 여전히 트럭 수까지");
-    }
 }
 
-/// 작업 기준 배차 (mig 0163·2026-10-06 사용자 확정) — 층별 트럭 상한·우선 덮개·함께 풀기·스왑·곧 빌 트럭 자격.
-/// 값이 아니라 **성질**을 고정한다(상수를 바꿀 때마다 무의미하게 깨지지 않게).
+/// 작업 기준 배차 — match_ver 2(2026-10-15 사용자 결정): 계층 없음 · 후보 작업은 데드라인 도래분만 · 헝가리안 최적 매칭 ·
+/// 스왑. 값이 아니라 **성질**을 고정한다(상수를 바꿀 때마다 무의미하게 깨지지 않게).
 #[cfg(test)]
 mod job_driven_tests {
     use super::*;
     use chrono::TimeZone;
 
-    // ── 층별 트럭 상한 ─────────────────────────────────────────────────────────────────────
-
-    #[test]
-    fn 급한_작업은_지금_빈_트럭_수까지만_고른다() {
-        // 지금 빈 트럭 2대 + 곧 빌 트럭 3대. 급한 작업 4개 중 2개만 고르고, 나머지 트럭은 계획으로 간다.
-        // 호출부가 두 상한을 뒤바꾸면(5, 2) 급한 작업 4개를 고르고 계획이 0이 되어 잡힌다.
-        let mut due = vec![(0usize, 4i64, 10i64)];
-        let mut fut = vec![(1usize, 9i64, 50i64)];
-        let k = allocate_two_tier(&mut due, &mut fut, 2, 5);
-        assert_eq!(k, vec![(0, 2, 1), (1, 3, 2)]);
-    }
-
-    #[test]
-    fn 빈_트럭이_없으면_급한_작업은_하나도_안_고른다() {
-        let mut due = vec![(0usize, 3i64, 10i64)];
-        let mut fut = vec![(1usize, 3i64, 50i64)];
-        let k = allocate_two_tier(&mut due, &mut fut, 0, 3);
-        assert_eq!(k, vec![(1, 3, 2)], "곧 빌 트럭만 있으면 계획만 선다");
-    }
-
-    // ── 1계층 우선 덮개 ───────────────────────────────────────────────────────────────────
-
-    #[test]
-    fn 트럭이_하나면_마감_이른_작업이_받는다() {
-        // 트럭 0 은 두 작업 다 갈 수 있다. 비용은 뒤 작업이 훨씬 싸도(10 vs 1000) 앞 작업이 받는다 —
-        // 순서는 마감이 정하고 비용은 '어느 트럭인가'만 정한다.
-        let edges = vec![(0usize, 0usize, 1000i64), (0, 1, 10)];
-        assert_eq!(priority_cover(1, &[1, 1], &edges), vec![1, 0]);
-    }
-
-    #[test]
-    fn 덮개는_가능하면_둘_다_채운다() {
-        // 트럭0 은 둘 다, 트럭1 은 앞 작업만. 앞 작업에 트럭0 을 먼저 줬더라도 증가경로로 옮겨 둘 다 채운다.
-        let edges = vec![(0usize, 0usize, 1i64), (0, 1, 1), (1, 0, 1)];
-        assert_eq!(priority_cover(2, &[1, 1], &edges), vec![1, 1]);
-    }
-
-    #[test]
-    fn 순서_위반_계기는_옳은_덮개에서_0이고_틀린_덮개에서_잡는다() {
-        let edges = vec![(0usize, 0usize, 1000i64), (0, 1, 10)];
-        let caps = [1, 1];
-        let good = priority_cover(1, &caps, &edges);
-        assert_eq!(priority_skips(1, &caps, &good, &edges), 0);
-        // 비용만 보고 뒤 작업을 덮은 경우 — 앞 작업이 트럭을 못 받았는데 뒤 것을 내주면 받을 수 있었다.
-        assert_eq!(priority_skips(1, &caps, &[0, 1], &edges), 1);
-    }
-
-    #[test]
-    fn 도달할_트럭이_없는_앞_작업은_위반이_아니다() {
-        // 앞 작업에 간선이 없으면 못 받는 게 당연하다 — 위반으로 세지 않는다.
-        let edges = vec![(0usize, 1usize, 10i64)];
-        let caps = [1, 1];
-        let cov = priority_cover(1, &caps, &edges);
-        assert_eq!(cov, vec![0, 1]);
-        assert_eq!(priority_skips(1, &caps, &cov, &edges), 0);
-    }
-
-    // ── 함께 풀기 ─────────────────────────────────────────────────────────────────────────
-
-    /// 사용자에게 설명한 예(2026-10-06): 급한 작업 J(묶음0)·10분 뒤 작업 L(묶음1).
-    /// 트럭 X(0): J 120 · L 120 / 트럭 Z(1): J 180 · L 600 / 곧 빌 트럭 Y(2): L 60 만.
-    fn example(with_y: bool) -> Vec<(usize, usize)> {
-        let mut edges = vec![(0usize, 0usize, 120i64), (0, 1, 120), (1, 0, 180), (1, 1, 600)];
-        if with_y {
-            edges.push((2, 1, 60));
+    /// 작은 문제의 정답 — 모든 단사 배정을 다 따져 (이은 짝 수 최대, 그 안에서 비용 최소)를 찾는다.
+    fn brute(n_trucks: usize, slot_wpos: &[usize], edges: &[(usize, usize, i64)]) -> (usize, i64) {
+        let c = |t: usize, s: usize| edges.iter().filter(|e| e.0 == t && e.1 == slot_wpos[s]).map(|e| e.2).min();
+        fn go(s: usize, n_slots: usize, used: &mut Vec<bool>, c: &dyn Fn(usize, usize) -> Option<i64>, best: &mut (usize, i64), cur: (usize, i64)) {
+            if s == n_slots {
+                if cur.0 > best.0 || (cur.0 == best.0 && cur.1 < best.1) { *best = cur; }
+                return;
+            }
+            go(s + 1, n_slots, used, c, best, cur); // 이 슬롯은 비운다
+            for t in 0..used.len() {
+                if !used[t] {
+                    if let Some(x) = c(t, s) {
+                        used[t] = true;
+                        go(s + 1, n_slots, used, c, best, (cur.0 + 1, cur.1 + x));
+                        used[t] = false;
+                    }
+                }
+            }
         }
-        let cover = priority_cover(3, &[1, 0], &edges.iter().filter(|e| e.1 == 0).copied().collect::<Vec<_>>());
-        let sink = vec![(cover[0], T1_COVER_BONUS), (1, PLAN_VALUE_S)];
-        let mut a = joint_assign(3, &sink, &edges);
+        let mut best = (0usize, i64::MAX);
+        go(0, slot_wpos.len(), &mut vec![false; n_trucks], &c, &mut best, (0, 0));
+        if best.0 == 0 { (0, 0) } else { best }
+    }
+
+    fn score(assign: &[(usize, usize)], slot_wpos: &[usize], edges: &[(usize, usize, i64)]) -> (usize, i64) {
+        let _ = slot_wpos;
+        let cost: i64 = assign.iter()
+            .map(|&(t, w)| edges.iter().filter(|e| e.0 == t && e.1 == w).map(|e| e.2).min().unwrap())
+            .sum();
+        (assign.len(), cost)
+    }
+
+    // ── 헝가리안 ───────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn 헝가리안은_탐욕이_지는_사례를_이긴다() {
+        // 탐욕(작업0 에 가장 싼 트럭0)이면 작업1 은 트럭1(100) → 101. 최적은 0→1(2)·1→0(3) = 5.
+        let edges = vec![(0usize, 0usize, 1i64), (0, 1, 2), (1, 0, 3), (1, 1, 100)];
+        let mut a = assign_slots(2, &[0, 1], &edges);
         a.sort();
-        a
+        assert_eq!(a, vec![(0, 1), (1, 0)]);
     }
 
     #[test]
-    fn 곧_빌_트럭이_다음_작업을_덮으면_지금_빈_트럭을_급한_작업에_아끼지_않는다() {
-        assert_eq!(example(true), vec![(0, 0), (2, 1)], "J←X(120), L←Y(60)");
+    fn 이을_수_있는_짝_수가_먼저고_비용은_그_다음이다() {
+        // 트럭0 만 작업1 에 갈 수 있다. 비용만 보면 트럭0→작업0(1) 이지만 그러면 작업1 이 빈다.
+        let edges = vec![(0usize, 0usize, 1i64), (0, 1, 900), (1, 0, 800)];
+        let mut a = assign_slots(2, &[0, 1], &edges);
+        a.sort();
+        assert_eq!(a, vec![(0, 1), (1, 0)], "두 작업 다 덮는다(짝 수 최대)");
     }
 
     #[test]
-    fn 곧_빌_트럭이_없으면_급한_작업이_약간_먼_트럭을_받고_가까운_트럭을_계획에_양보한다() {
-        // J←Z(180) + L←X(120−300) = 0  <  J←X(120) + L 없음 = 120.
-        assert_eq!(example(false), vec![(0, 1), (1, 0)]);
+    fn 트럭이_남거나_작업이_남아도_맞게_푼다() {
+        // 트럭 3 · 슬롯 1(전치 경로) / 트럭 1 · 슬롯 3(정방향).
+        let e1 = vec![(0usize, 0usize, 50i64), (1, 0, 10), (2, 0, 30)];
+        assert_eq!(assign_slots(3, &[0], &e1), vec![(1, 0)]);
+        let e2 = vec![(0usize, 0usize, 50i64), (0, 1, 10), (0, 2, 30)];
+        assert_eq!(assign_slots(1, &[0, 1, 2], &e2), vec![(0, 1)]);
     }
 
     #[test]
-    fn 급한_작업의_덮개는_계획보다_항상_먼저다() {
-        // 트럭 하나. 급한 작업은 1700초로 멀고, 계획은 10초로 가깝다 — 그래도 급한 작업이 받는다.
-        let edges = vec![(0usize, 0usize, 1700i64), (0, 1, 10)];
-        let sink = vec![(1, T1_COVER_BONUS), (1, PLAN_VALUE_S)];
-        assert_eq!(joint_assign(1, &sink, &edges), vec![(0, 0)]);
+    fn 간선이_없는_짝은_내지_않는다() {
+        assert!(assign_slots(2, &[0], &[]).is_empty());
+        assert!(assign_slots(0, &[0], &[(0, 0, 1)]).is_empty());
+        assert!(assign_slots(2, &[], &[(0, 0, 1)]).is_empty());
+        // 트럭1 은 간선이 없다 — 전치 경로에서 금지 짝이 새어 나오면 안 된다.
+        assert_eq!(assign_slots(2, &[0], &[(0, 0, 7)]), vec![(0, 0)]);
     }
 
     #[test]
-    fn 계획은_주행이_계획_가치보다_비싸면_서지_않는다() {
-        let edges = vec![(0usize, 0usize, PLAN_VALUE_S + 100)];
-        assert!(joint_assign(1, &[(1, PLAN_VALUE_S)], &edges).is_empty());
-        let edges = vec![(0usize, 0usize, PLAN_VALUE_S - 100)];
-        assert_eq!(joint_assign(1, &[(1, PLAN_VALUE_S)], &edges), vec![(0, 0)]);
+    fn 한_묶음의_여러_슬롯은_트럭을_하나씩_받는다() {
+        // 묶음0 슬롯 2개 · 트럭 3. 가장 싼 두 트럭이 받는다.
+        let edges = vec![(0usize, 0usize, 30i64), (1, 0, 10), (2, 0, 20)];
+        let mut a = assign_slots(3, &[0, 0], &edges);
+        a.sort();
+        assert_eq!(a, vec![(1, 0), (2, 0)]);
     }
 
     #[test]
-    fn 함께_풀어도_급한_작업_덮개는_1계층만_풀_때와_같다() {
-        // 트럭 3, 급한 작업 2(묶음 0·1), 계획 2(묶음 2·3). 계획이 아무리 싸도 급한 덮개 수는 그대로.
-        let edges = vec![
-            (0usize, 0usize, 900i64), (0, 2, 1), (1, 1, 900), (1, 3, 1), (2, 2, 5), (2, 3, 5),
-        ];
-        let e1: Vec<_> = edges.iter().filter(|e| e.1 < 2).copied().collect();
-        let cover = priority_cover(3, &[1, 1, 0, 0], &e1);
-        let alone: i64 = cover.iter().sum();
-        let sink = vec![(cover[0], T1_COVER_BONUS), (cover[1], T1_COVER_BONUS), (1, PLAN_VALUE_S), (1, PLAN_VALUE_S)];
-        let a = joint_assign(3, &sink, &edges);
-        let joint = a.iter().filter(|&&(_, b)| b < 2).count() as i64;
-        assert_eq!((alone, joint), (2, 2));
+    fn 헝가리안은_전수_탐색과_같은_답을_낸다() {
+        // 결정적 의사난수로 작은 문제 300개 — 짝 수와 비용 합이 전수 탐색과 같아야 한다.
+        let mut st = 0x9E37_79B9_7F4A_7C15u64;
+        for _ in 0..300 {
+            let n_t = (xorshift(&mut st) % 5) as usize;
+            let n_w = 1 + (xorshift(&mut st) % 3) as usize;
+            let slot_wpos: Vec<usize> = (0..(xorshift(&mut st) % 5) as usize).map(|_| (xorshift(&mut st) % n_w as u64) as usize).collect();
+            let mut edges = Vec::new();
+            for t in 0..n_t {
+                for w in 0..n_w {
+                    if xorshift(&mut st) % 3 != 0 {
+                        edges.push((t, w, (xorshift(&mut st) % 2000) as i64));
+                    }
+                }
+            }
+            let a = assign_slots(n_t, &slot_wpos, &edges);
+            let mut trucks: Vec<usize> = a.iter().map(|x| x.0).collect();
+            trucks.sort();
+            trucks.dedup();
+            assert_eq!(trucks.len(), a.len(), "한 트럭은 한 작업만");
+            for w in 0..n_w {
+                let got = a.iter().filter(|x| x.1 == w).count();
+                let cap = slot_wpos.iter().filter(|&&x| x == w).count();
+                assert!(got <= cap, "묶음 수요를 넘겨 보내면 안 된다");
+            }
+            assert_eq!(score(&a, &slot_wpos, &edges), brute(n_t, &slot_wpos, &edges),
+                       "trucks={n_t} slots={slot_wpos:?} edges={edges:?}");
+        }
     }
 
-    // ── 곧 빌 트럭 자격 ────────────────────────────────────────────────────────────────────
+    // ── 마감 순 덮개 (리뷰 SHOULD_FIX 3) ────────────────────────────────────────────────────
 
     #[test]
-    fn 자격_시각은_비율이_처음_문턱을_넘는_시점이다() {
-        let f = [0.05, 0.1, 0.2, 0.3, 0.5, 0.79, 0.8, 0.9, 0.95];
-        assert_eq!(soon_free_quantile(&f, 0.8), Some(900));
-        let never = [0.0, 0.0, 0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.79];
-        assert_eq!(soon_free_quantile(&never, 0.8), None, "끝까지 못 미치면 자격 없음");
+    fn 짝이_모자라면_마감_이른_슬롯이_트럭을_받는다() {
+        // 트럭 하나가 두 슬롯 다 갈 수 있다. 비용은 뒤 슬롯이 훨씬 싸도(10 vs 1000) 앞 슬롯(마감 이른)이 받는다.
+        let edges = vec![(0usize, 0usize, 1000i64), (0, 1, 10)];
+        let slots = [0usize, 1];
+        assert_eq!(deadline_cover(1, &slots, &edges), vec![true, false]);
+        let kept: Vec<usize> = slots.iter().zip(deadline_cover(1, &slots, &edges)).filter(|(_, c)| *c).map(|(&w, _)| w).collect();
+        assert_eq!(assign_slots(1, &kept, &edges), vec![(0, 0)]);
+        // 덮개 없이 헝가리안만 돌리면 비용 때문에 뒤 슬롯을 고른다 — 이 덮개가 필요한 이유.
+        assert_eq!(assign_slots(1, &slots, &edges), vec![(0, 1)]);
+    }
+
+    #[test]
+    fn 덮개는_증가경로로_둘_다_채운다() {
+        // 트럭0 은 둘 다, 트럭1 은 앞 슬롯만. 앞 슬롯에 트럭0 을 먼저 줬더라도 옮겨서 둘 다 채운다.
+        let edges = vec![(0usize, 0usize, 1i64), (0, 1, 1), (1, 0, 1)];
+        assert_eq!(deadline_cover(2, &[0, 1], &edges), vec![true, true]);
+    }
+
+    #[test]
+    fn 덮인_슬롯은_헝가리안이_전부_잇는다() {
+        let mut st = 0x2545_F491_4F6C_DD1Du64;
+        for _ in 0..300 {
+            let n_t = (xorshift(&mut st) % 5) as usize;
+            let n_w = 1 + (xorshift(&mut st) % 4) as usize;
+            let slots: Vec<usize> = (0..(xorshift(&mut st) % 6) as usize).map(|_| (xorshift(&mut st) % n_w as u64) as usize).collect();
+            let mut edges = Vec::new();
+            for t in 0..n_t {
+                for w in 0..n_w {
+                    if xorshift(&mut st) % 2 == 0 {
+                        edges.push((t, w, (xorshift(&mut st) % 2000) as i64));
+                    }
+                }
+            }
+            let cov = deadline_cover(n_t, &slots, &edges);
+            let kept: Vec<usize> = slots.iter().zip(&cov).filter(|(_, &c)| c).map(|(&w, _)| w).collect();
+            let a = assign_slots(n_t, &kept, &edges);
+            assert_eq!(a.len(), kept.len(), "덮인 슬롯은 하나도 버리지 않는다");
+            assert_eq!(kept.len(), brute(n_t, &slots, &edges).0, "덮개 크기 = 최대 매칭 크기");
+        }
+    }
+
+    // ── 곧 빌 트럭의 남은 시간(실측 보정값) ────────────────────────────────────────────────
+
+    #[test]
+    fn 남은_시간은_실제로_빈_비율이_처음_문턱을_넘는_시점이다() {
+        // 10-15 07:52 MYT 표의 '양하·TOS 기록 예측 0초' 갈래 모양: 1분 7% … 10분 47% · 15분 60%.
+        let f = [0.07, 0.13, 0.18, 0.28, 0.38, 0.47, 0.60, 0.70, 0.80];
+        assert_eq!(soon_free_quantile(&f, SOON_FREE_REMAIN_P), Some(900), "예측 0초여도 비용에는 15분");
+        let never = [0.0, 0.0, 0.0, 0.1, 0.2, 0.3, 0.4, 0.45, 0.49];
+        assert_eq!(soon_free_quantile(&never, SOON_FREE_REMAIN_P), None, "끝까지 못 미치면 모름 → 후보 아님");
     }
 
     #[test]
@@ -8415,6 +8213,26 @@ mod job_driven_tests {
         assert!(mig.contains("WHEN p.free_in_s <= 900 THEN 900 ELSE 3600 END AS pred_b"));
         for s in SOON_FREE_POINTS {
             assert!(mig.contains(&format!("AS f{s},")) || mig.contains(&format!("AS f{s}\n")), "f{s} 컬럼");
+        }
+    }
+
+    // ── 후보 작업 고르기 ────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn 후보_작업은_데드라인_이른_순으로_트럭_수까지만() {
+        let mut due = vec![(0usize, 2i64, 300i64), (1, 1, 100), (2, 3, 200)];
+        assert_eq!(allocate_due(&mut due, 4), vec![(1, 1), (2, 3)]);
+        let mut due = vec![(0usize, 2i64, 300i64), (1, 1, 100)];
+        assert_eq!(allocate_due(&mut due, 10), vec![(1, 1), (0, 2)], "트럭이 남으면 남긴다");
+        let mut due = vec![(0usize, 2i64, 300i64)];
+        assert!(allocate_due(&mut due, 0).is_empty());
+    }
+
+    #[test]
+    fn 데드라인_여유는_기본_300초다() {
+        // 환경변수를 바꿔 실험한다(재시작). 테스트 프로세스에는 설정하지 않으므로 기본값이어야 한다.
+        if std::env::var("POOL_MARGIN_S").is_err() {
+            assert_eq!(pool_margin_s(), POOL_MARGIN_DEFAULT_S);
         }
     }
 
@@ -8436,6 +8254,14 @@ mod job_driven_tests {
     }
 
     #[test]
+    fn 목적지_가까운_트럭도_이득이_크면_스왑한다() {
+        // 2026-10-15: 500m 조건을 뺐다. 거의 다 온 트럭(자기 목적지 30초)은 이득이 작아 스스로 걸러진다.
+        let own = [30i64, 900];
+        assert!(pick_swaps(&own, |_, _| Some(400), SWAP_MIN_GAIN_S).is_empty(), "이득 130 < 문턱");
+        assert_eq!(pick_swaps(&own, |_, _| Some(20), SWAP_MIN_GAIN_S).len(), 1, "이득 890");
+    }
+
+    #[test]
     fn 한_트럭은_한_틱에_한_번만_스왑한다() {
         // 0↔1 이득 900, 0↔2 이득 800 — 0 은 하나에만 들어간다.
         let own = [500i64, 500, 500];
@@ -8451,26 +8277,6 @@ mod job_driven_tests {
         assert_eq!((p[0].0, p[0].1), (0, 1));
     }
 
-    // ── 리뷰 반영: 핵심 불변식 (2026-10-06) ─────────────────────────────────────────────────
-
-    #[test]
-    fn 급한_작업에는_지금_빈_트럭만_간선을_얻는다() {
-        let now = 1_000_000i64;
-        // 곧 빌 트럭은 자격 시각이 아무리 빨라도(0초) 1계층 간선이 없다.
-        assert!(!edge_eligible(1, false, Some(0), Some(now + 10_000_000), now));
-        assert!(edge_eligible(1, true, Some(0), None, now));
-    }
-
-    #[test]
-    fn 계획에는_자격_시각이_마감_안인_곧_빌_트럭만_들어간다() {
-        let now = 1_000_000i64;
-        let first = now + 600_000; // 10분 뒤 배차 마감
-        assert!(edge_eligible(2, false, Some(600), Some(first), now), "정확히 마감에 비면 자격");
-        assert!(!edge_eligible(2, false, Some(601), Some(first), now), "마감 뒤에 비면 자격 없음");
-        assert!(!edge_eligible(2, false, None, Some(first), now), "표에 없는 갈래는 자격 없음");
-        assert!(edge_eligible(2, true, None, None, now), "지금 빈 트럭은 계획에도 들어간다");
-    }
-
     #[test]
     fn 스왑은_자유_사이에_한_번만() {
         let t = |s: i64| Utc.timestamp_opt(1_780_000_000 + s, 0).unwrap();
@@ -8478,12 +8284,6 @@ mod job_driven_tests {
         assert!(swap_is_frozen(Some(t(10)), Some(t(0))), "자유 뒤에 스왑했으면 동결");
         assert!(!swap_is_frozen(Some(t(0)), Some(t(10))), "그 뒤 다시 비었으면 풀림");
         assert!(swap_is_frozen(Some(t(0)), None), "자유 기록이 없으면 동결(닫는 쪽)");
-    }
-
-    #[test]
-    fn 목적지_500m_안의_트럭은_스왑하지_않는다() {
-        assert!(!swap_far_enough(SWAP_MIN_M - 1.0));
-        assert!(swap_far_enough(SWAP_MIN_M));
     }
 
     #[test]
@@ -8496,9 +8296,9 @@ mod job_driven_tests {
     }
 
     #[test]
-    fn 작업유형이_다르면_스왑하지_않는다() {
+    fn 한_방향이라도_막히면_쌍은_무산된다() {
         let own = [900i64, 900];
-        let p = pick_swaps(&own, |_, _| None, SWAP_MIN_GAIN_S);
+        let p = pick_swaps(&own, |i, _| if i == 0 { Some(10) } else { None }, SWAP_MIN_GAIN_S);
         assert!(p.is_empty());
     }
 }

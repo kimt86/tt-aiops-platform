@@ -16,7 +16,7 @@ BEGIN;
 SET LOCAL statement_timeout = '120s';
 WITH t AS (
   SELECT ts, wake_src, ts - workpool_age_s * interval '1 second' AS landed
-    FROM stage2_solver_shadow WHERE ts >= :from AND ts < :to AND match_ver = 1 AND workpool_age_s IS NOT NULL
+    FROM stage2_solver_shadow WHERE ts >= :from AND ts < :to AND match_ver IN (1, 2) AND workpool_age_s IS NOT NULL
 ), b AS (
   SELECT ts, wake_src, landed,
          CASE WHEN lag(landed) OVER (ORDER BY ts) IS NULL
@@ -27,7 +27,7 @@ WITH t AS (
 ), r AS (
   SELECT m.ytno, m.contno, g.gen
     FROM stage2_match_shadow m JOIN g ON g.ts = m.ts
-   WHERE m.match_tier = 1 AND m.match_ver = 1 AND g.gen IS NOT NULL
+   WHERE m.match_tier = 1 AND m.match_ver IN (1, 2) AND g.gen IS NOT NULL
 )
 SELECT (SELECT count(*) FROM (SELECT DISTINCT ytno, gen FROM r) a)                                    AS "(트럭,세대)",
        (SELECT count(*) FROM (SELECT ytno, gen FROM r GROUP BY 1,2 HAVING count(DISTINCT contno) > 1) a) AS "트럭에 상자 2개+",

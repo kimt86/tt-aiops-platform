@@ -217,12 +217,14 @@ export default function BoardPage({ lang }: { lang: Lang }) {
                           </span>
                         ) : null}
                         {r.match_tier === 2 ? (
+                          /* 2026-10-15(매칭 2판): 2 = 곧 빌 트럭과의 짝 — 지시를 내지 않고, 그 트럭이 비면 다음 계산에서 보낸다.
+                             (1판의 2 = '마감 전 작업에 미리 배정'은 없어졌다. 보드는 마지막 계산만 보이므로 두 뜻이 섞이지 않는다.) */
                           <span
-                            className="pill good"
+                            className="pill warn"
                             style={{ marginLeft: 6 }}
-                            title={ko ? "마감이 아직 안 온 작업 — 남는 트럭에 미리 배정한 추천" : "deadline not yet due — pre-assigned to a spare truck"}
+                            title={ko ? "곧 빌 트럭에 예약 — 지금은 지시를 내지 않고, 그 트럭이 비면 보낸다" : "reserved for a soon-free truck — not sent yet; sent once the truck frees up"}
                           >
-                            {ko ? "미리" : "EARLY"}
+                            {ko ? "예약" : "RESERVED"}
                           </span>
                         ) : null}
                       </td>

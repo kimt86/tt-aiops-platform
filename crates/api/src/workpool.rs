@@ -2218,7 +2218,7 @@ struct BoardPoolStat {
 }
 /// 배차 깔때기 — "추천이 왜 이 수뿐인가"의 답을 단계별 계수로. 발행/미배차/도래는
 /// 상자(트럭 몫) 단위, planned_backlog_cont 만 컨테이너 단위(계획 카운터 − 발행분).
-/// '마감 도래'는 매처와 같은 잣대(livemap::POOL_MARGIN_S)로 센 라이브 값이다.
+/// '마감 도래'는 매처와 같은 잣대(livemap::pool_margin_s)로 센 라이브 값이다.
 #[derive(Serialize)]
 struct BoardFunnel {
     planned_backlog_cont: i64,
@@ -2282,11 +2282,11 @@ pub async fn dispatch_board(State(pool): State<PgPool>) -> Result<Json<DispatchB
     .await?;
     // 깔때기 — 매처 틱과 무관하게 지금 시점 라이브로 센다(같은 산식·같은 여유 상수).
     // 발행 상자는 stage2_work_candidates 의 상자 경로(contno 有), 마감 도래는 미배차 중
-    // dispatch_deadline_ts ≤ now + POOL_MARGIN_S. 잔여 계획은 컨테이너 단위라 따로 표기.
+    // dispatch_deadline_ts ≤ now + pool_margin_s(). 잔여 계획은 컨테이너 단위라 따로 표기.
     let funnel = match stage2_work_candidates(pool.clone()).await {
         Ok((wpo, cand)) => {
             let now = Utc::now();
-            let margin = chrono::Duration::seconds(crate::livemap::POOL_MARGIN_S);
+            let margin = chrono::Duration::seconds(crate::livemap::pool_margin_s());
             let (mut issued, mut unassigned, mut due_now, mut overdue_now) = (0i32, 0i32, 0i32, 0i32);
             let mut issued_cont: i64 = 0;
             for w in &cand {

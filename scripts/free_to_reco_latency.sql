@@ -52,7 +52,7 @@ SELECT e.ytno, e.jt, e.f, e.c,
                         AND (e.next_f IS NULL OR s.ts < e.next_f)) p ON true
   LEFT JOIN LATERAL (SELECT min(ts) AS ts FROM stage2_match_shadow m
                       WHERE m.ts >= e.f AND m.ts < e.f + interval '15 minutes'
-                        AND m.ytno = e.ytno AND m.match_tier = 1 AND m.match_ver = 1
+                        AND m.ytno = e.ytno AND m.match_tier = 1 AND m.match_ver IN (1, 2)
                         AND (e.next_f IS NULL OR m.ts < e.next_f)) r ON true
   LEFT JOIN LATERAL (SELECT min(exit_ts) AS exit_ts FROM tos_avail_interval a
                       WHERE a.ytno = e.ytno AND a.enter_ts >= e.f - interval '60 seconds'

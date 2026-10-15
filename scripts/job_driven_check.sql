@@ -1,4 +1,5 @@
 -- 작업 기준 배차(mig 0163·match_ver=1) 완료 기준 점검 — HANDOFF.md DONE CRITERIA 의 숫자를 낸다.
+-- ⚠ 2026-10-15 매칭 2판(mig 0170, 계층 없앰)부터 ①②④⑦⑧은 1판 전용 계기라 0행이 정상이다. 2판 점검은 scripts/soon_reserve_check.sql.
 --
 -- 쓰는 법:  psql -v from="'2026-10-06 15:00+08'" -f scripts/job_driven_check.sql
 --   from = 배포 경계(또는 그 뒤 아무 시각). 판별은 match_ver=1 로 하므로 경계를 조금 앞으로 잡아도 섞이지 않는다.

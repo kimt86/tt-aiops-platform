@@ -43,7 +43,7 @@ WITH d AS (
   SELECT late.*, (SELECT min(t.ts - t.workpool_age_s * interval '1 second')
                     FROM stage2_solver_shadow t
                    WHERE t.ts >= late.late_as_of AND t.ts < late.late_as_of + interval '10 minutes'
-                     AND t.match_ver = 1 AND t.workpool_age_s IS NOT NULL
+                     AND t.match_ver IN (1, 2) AND t.workpool_age_s IS NOT NULL
                      AND t.ts - t.workpool_age_s * interval '1 second' >= late.late_as_of - interval '1 second') AS landed
     FROM late
 )
